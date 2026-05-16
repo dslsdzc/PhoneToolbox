@@ -2,27 +2,30 @@
 #include "core/adb_embedded.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QFileInfo>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_mainSplitter(nullptr)
     , m_rightSplitter(nullptr)
+    , m_stack(nullptr)
     , m_toolPanel(nullptr)
     , m_deviceInfoPanel(nullptr)
+    , m_flashPanel(nullptr)
+    , m_systemToolPanel(nullptr)
     , m_outputPanel(nullptr)
 {
     setupUI();
     setupConnections();
-    
-    // 初始化ADB和设备检测
+
     if (AdbEmbedded::instance().initialize()) {
         m_deviceDetector.startMonitoring();
-        m_outputPanel->appendOutput("✅ ADB 初始化成功");
+        m_outputPanel->appendOutput("ADB initialized");
     } else {
-        m_outputPanel->appendOutput("❌ 无法初始化嵌入式ADB工具", true);
+        m_outputPanel->appendOutput("Failed to initialize embedded ADB tools", true);
     }
-    
-    m_outputPanel->appendOutput("🚀 Phone Toolbox 已启动");
+
+    m_outputPanel->appendOutput("Phone Toolbox started");
 }
 
 MainWindow::~MainWindow()
@@ -32,70 +35,90 @@ MainWindow::~MainWindow()
 
 void MainWindow::setupUI()
 {
-    setWindowTitle("Phone Toolbox - 跨平台手机工具箱");
+    setWindowTitle("Phone Toolbox");
     setMinimumSize(1200, 800);
-    
-    // 创建中央部件
+    setAcceptDrops(true);
+
     QWidget *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
-    
-    // 主布局
+
     QHBoxLayout *mainLayout = new QHBoxLayout(centralWidget);
-    
-    // 创建主分割器（左右分割）
+
     m_mainSplitter = new QSplitter(Qt::Horizontal, this);
-    
-    // 创建右侧分割器（上下分割）
     m_rightSplitter = new QSplitter(Qt::Vertical, this);
-    
-    // 创建各个面板
+
     m_toolPanel = new ToolPanel(this);
     m_deviceInfoPanel = new DeviceInfoPanel(this);
+    m_flashPanel = new FlashPanel(this);
+    m_systemToolPanel = new SystemToolPanel(this);
     m_outputPanel = new OutputPanel(this);
-    
-    // 将右侧面板添加到右侧分割器
-    m_rightSplitter->addWidget(m_deviceInfoPanel);
+
+    // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools
+    m_stack = new QStackedWidget(this);
+    m_stack->addWidget(m_deviceInfoPanel);
+    m_stack->addWidget(m_flashPanel);
+    m_stack->addWidget(m_systemToolPanel);
+    m_stack->setCurrentIndex(0);
+
+    m_rightSplitter->addWidget(m_stack);
     m_rightSplitter->addWidget(m_outputPanel);
-    
-    // 设置右侧分割器的比例（设备信息:输出 = 1:2）
-    m_rightSplitter->setStretchFactor(0, 1);
-    m_rightSplitter->setStretchFactor(1, 2);
-    
-    // 将左侧和右侧添加到主分割器
+
+    m_rightSplitter->setStretchFactor(0, 2);
+    m_rightSplitter->setStretchFactor(1, 1);
+
     m_mainSplitter->addWidget(m_toolPanel);
     m_mainSplitter->addWidget(m_rightSplitter);
-    
-    // 设置主分割器的比例（工具:右侧 = 1:2）
+
     m_mainSplitter->setStretchFactor(0, 1);
     m_mainSplitter->setStretchFactor(1, 2);
-    
+
     mainLayout->addWidget(m_mainSplitter);
 }
 
 void MainWindow::setupConnections()
 {
-    // 设备检测信号
+    // device detection signals
     connect(&m_deviceDetector, &DeviceDetector::deviceConnected,
             this, &MainWindow::onDeviceConnected);
     connect(&m_deviceDetector, &DeviceDetector::deviceDisconnected,
             this, &MainWindow::onDeviceDisconnected);
     connect(&m_deviceDetector, &DeviceDetector::deviceModeChanged,
             this, &MainWindow::onDeviceModeChanged);
-    
-    // 工具面板信号
+
+    // tool panel signals
     connect(m_toolPanel, &ToolPanel::deviceSelectionChanged,
             this, &MainWindow::onDeviceSelectionChanged);
     connect(m_toolPanel, &ToolPanel::outputMessage,
             this, &MainWindow::onOutputMessage);
     connect(m_toolPanel, &ToolPanel::refreshRequested,
             this, &MainWindow::onRefreshRequested);
+    connect(m_toolPanel, &ToolPanel::toolSelected,
+            this, &MainWindow::onToolSelected);
+
+    // flash panel -> output
+    connect(m_flashPanel, &FlashPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
+
+    // flash panel back button -> switch to device info
+    connect(m_flashPanel, &FlashPanel::switchToDeviceInfo, this, [this]() {
+        m_stack->setCurrentIndex(0);
+    });
+
+    // system tool panel -> output
+    connect(m_systemToolPanel, &SystemToolPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
+
+    // system tool panel back button -> switch to device info
+    connect(m_systemToolPanel, &SystemToolPanel::switchToDeviceInfo, this, [this]() {
+        m_stack->setCurrentIndex(0);
+    });
 }
 
 void MainWindow::onDeviceConnected(const DeviceInfo &info)
 {
     m_currentDevices[info.serialNumber] = info;
     m_toolPanel->updateDeviceList(m_currentDevices);
-    
+
     QString modeStr;
     switch (info.mode) {
     case DeviceDetector::MODE_ADB: modeStr = "ADB"; break;
@@ -103,10 +126,10 @@ void MainWindow::onDeviceConnected(const DeviceInfo &info)
     case DeviceDetector::MODE_FASTBOOTD: modeStr = "Fastbootd"; break;
     case DeviceDetector::MODE_EDL_9008: modeStr = "EDL 9008"; break;
     case DeviceDetector::MODE_MTK_DA: modeStr = "MTK DA"; break;
-    default: modeStr = "未知"; break;
+    default: modeStr = "unknown"; break;
     }
-    
-    m_outputPanel->appendOutput(QString("🔗 设备已连接: %1 (%2) - %3")
+
+    m_outputPanel->appendOutput(QString("Device connected: %1 (%2) - %3")
                                .arg(info.serialNumber)
                                .arg(info.model)
                                .arg(modeStr));
@@ -115,9 +138,13 @@ void MainWindow::onDeviceConnected(const DeviceInfo &info)
 void MainWindow::onDeviceDisconnected(const QString &serial)
 {
     if (m_currentDevices.contains(serial)) {
-        m_outputPanel->appendOutput(QString("❌ 设备已断开: %1").arg(serial));
+        m_outputPanel->appendOutput(QString("Device disconnected: %1").arg(serial));
         m_currentDevices.remove(serial);
         m_toolPanel->updateDeviceList(m_currentDevices);
+
+        if (m_stack->currentIndex() == 1) {
+            m_flashPanel->clearDeviceInfo();
+        }
     }
 }
 
@@ -126,20 +153,19 @@ void MainWindow::onDeviceModeChanged(const QString &serial, DeviceDetector::Devi
     if (m_currentDevices.contains(serial)) {
         m_currentDevices[serial].mode = newMode;
         m_toolPanel->updateDeviceList(m_currentDevices);
-        
+
         QString modeStr;
         switch (newMode) {
         case DeviceDetector::MODE_ADB: modeStr = "ADB"; break;
         case DeviceDetector::MODE_FASTBOOT: modeStr = "Fastboot"; break;
         case DeviceDetector::MODE_FASTBOOTD: modeStr = "Fastbootd"; break;
-        default: modeStr = "未知"; break;
+        default: modeStr = "unknown"; break;
         }
-        
-        m_outputPanel->appendOutput(QString("🔄 设备模式改变: %1 -> %2").arg(serial).arg(modeStr));
-        
-        // 如果当前选中的设备模式改变，更新设备信息面板
+
+        m_outputPanel->appendOutput(QString("Device mode changed: %1 -> %2").arg(serial).arg(modeStr));
+
         if (m_toolPanel->getSelectedDevice() == serial) {
-            m_deviceInfoPanel->updateDeviceInfo(m_currentDevices[serial]);
+            updateCurrentDeviceInfo();
         }
     }
 }
@@ -147,11 +173,13 @@ void MainWindow::onDeviceModeChanged(const QString &serial, DeviceDetector::Devi
 void MainWindow::onDeviceSelectionChanged(const QString &deviceId)
 {
     if (deviceId.isEmpty() || !m_currentDevices.contains(deviceId)) {
-        // 清空设备信息面板
         m_deviceInfoPanel->clearDeviceInfo();
+        m_flashPanel->clearDeviceInfo();
+        m_systemToolPanel->clearDeviceInfo();
     } else {
-        // 更新设备信息面板
         m_deviceInfoPanel->updateDeviceInfo(m_currentDevices[deviceId]);
+        m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        m_systemToolPanel->setDeviceInfo(m_currentDevices[deviceId]);
     }
 }
 
@@ -162,6 +190,83 @@ void MainWindow::onOutputMessage(const QString &message, bool isError)
 
 void MainWindow::onRefreshRequested()
 {
-    m_outputPanel->appendOutput("🔄 手动刷新设备列表...");
+    m_outputPanel->appendOutput("Manual device refresh...");
     m_deviceDetector.startMonitoring();
+}
+
+void MainWindow::onToolSelected(int index)
+{
+    QString deviceId = m_toolPanel->getSelectedDevice();
+
+    if (index == 1) {
+        // switch to flash panel
+        if (!deviceId.isEmpty() && m_currentDevices.contains(deviceId)) {
+            m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        } else {
+            m_flashPanel->clearDeviceInfo();
+        }
+    } else if (index == 2) {
+        // switch to system tools
+        if (!deviceId.isEmpty() && m_currentDevices.contains(deviceId)) {
+            m_systemToolPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        } else {
+            m_systemToolPanel->clearDeviceInfo();
+        }
+    }
+    m_stack->setCurrentIndex(index);
+}
+
+static bool isRomFile(const QString &path)
+{
+    QString lower = path.toLower();
+    return lower.endsWith(".zip") || lower.endsWith(".tar") ||
+           lower.endsWith(".tar.md5") || lower.endsWith(".img") ||
+           lower.endsWith(".gz") || lower.endsWith(".br") ||
+           lower.endsWith(".sh") || lower.endsWith(".bat");
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        for (const QUrl &url : event->mimeData()->urls()) {
+            if (isRomFile(url.toLocalFile())) {
+                event->acceptProposedAction();
+                return;
+            }
+        }
+    }
+    event->ignore();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    if (!event->mimeData()->hasUrls()) return;
+
+    for (const QUrl &url : event->mimeData()->urls()) {
+        QString filePath = url.toLocalFile();
+        if (!filePath.isEmpty() && isRomFile(filePath)) {
+            // switch to flash panel and load the file
+            m_stack->setCurrentIndex(1);
+            m_flashPanel->updateFileInfo(filePath);
+            QString deviceId = m_toolPanel->getSelectedDevice();
+            if (!deviceId.isEmpty() && m_currentDevices.contains(deviceId)) {
+                m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
+            }
+            event->acceptProposedAction();
+            m_outputPanel->appendOutput(QString("已载入: %1").arg(QFileInfo(filePath).fileName()));
+            return;
+        }
+    }
+}
+
+void MainWindow::updateCurrentDeviceInfo()
+{
+    QString deviceId = m_toolPanel->getSelectedDevice();
+    if (deviceId.isEmpty() || !m_currentDevices.contains(deviceId)) {
+        m_deviceInfoPanel->clearDeviceInfo();
+        m_flashPanel->clearDeviceInfo();
+    } else {
+        m_deviceInfoPanel->updateDeviceInfo(m_currentDevices[deviceId]);
+        m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
+    }
 }

@@ -169,7 +169,6 @@ QString AdbEmbedded::executeCommand(const QString &command, int timeout)
     QStringList arguments = command.split(' ', Qt::SkipEmptyParts);
     process.setArguments(arguments);
 
-    qDebug() << "Executing ADB command:" << m_adbPath << arguments;
 
     process.start();
     

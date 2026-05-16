@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Phone Toolbox
+Name[zh_CN]=Phone Toolbox
+Comment=Cross-platform phone toolbox for Android device management
+Comment[zh_CN]=跨平台手机工具箱 - Android设备管理工具
+Exec=phonetoolbox
+Icon=phonetoolbox
+Categories=Utility;Development;
+Terminal=false
+StartupNotify=true

@@ -8,13 +8,13 @@ RestartTool::RestartTool(QObject *parent) : QObject(parent)
 
 QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::DeviceMode currentMode, RestartMode targetMode)
 {
-    emit outputMessage(QString("🔄 尝试重启设备 %1 到 %2 模式...")
+    emit outputMessage(QString("正在尝试重启设备 %1 到 %2 模式...")
                       .arg(deviceId)
                       .arg(getModeName(targetMode)));
     
     // 检查当前模式和目标模式的兼容性
     if (currentMode == DeviceDetector::MODE_FASTBOOTD && targetMode == MODE_FASTBOOT) {
-        emit outputMessage("ℹ️ 设备已在Fastbootd模式", false);
+        emit outputMessage("设备已在Fastbootd模式", false);
         return "Device already in Fastbootd mode";
     }
     
@@ -26,11 +26,11 @@ QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::Devi
     QString command = getRestartCommand(deviceId, currentMode, targetMode, hasRoot);
     
     if (command.isEmpty()) {
-        emit outputMessage("❌ 无法生成重启命令或模式不支持", true);
+        emit outputMessage("无法生成重启命令或模式不支持", true);
         return "Error: No command generated or mode not supported";
     }
     
-    emit outputMessage(QString("💻 执行命令: %1").arg(command));
+    emit outputMessage(QString("执行命令: %1").arg(command));
     
     QString result;
     if (currentMode == DeviceDetector::MODE_ADB) {
@@ -60,35 +60,35 @@ QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::Devi
         }
     }
     
-    emit outputMessage(QString("📋 命令结果: %1").arg(result));
+    emit outputMessage(QString("命令结果: %1").arg(result));
     
     if (result.contains("Error") || result.contains("error") || result.contains("failed")) {
-        emit outputMessage("❌ 重启命令执行失败", true);
+        emit outputMessage("重启命令执行失败", true);
         
         // 提供特定错误的建议
         if (result.contains("no permissions")) {
-            emit outputMessage("💡 建议: 检查USB调试授权或尝试重新插拔设备", false);
+            emit outputMessage("建议: 检查USB调试授权或尝试重新插拔设备", false);
         } else if (result.contains("device not found")) {
-            emit outputMessage("💡 建议: 设备可能已断开连接", false);
+            emit outputMessage("建议: 设备可能已断开连接", false);
         } else if (result.contains("command not found")) {
-            emit outputMessage("💡 建议: 该设备不支持此重启命令", false);
+            emit outputMessage("建议: 该设备不支持此重启命令", false);
         }
     } else {
-        emit outputMessage("✅ 重启命令已发送");
+        emit outputMessage("重启命令已发送");
         
         // 根据目标模式提供额外信息
         switch (targetMode) {
         case MODE_FASTBOOT:
-            emit outputMessage("💡 设备将重启到Fastbootd模式 (Android 10+ 用户空间Fastboot)");
+            emit outputMessage("设备将重启到Fastbootd模式 (Android 10+ 用户空间Fastboot)");
             break;
         case MODE_BOOTLOADER:
-            emit outputMessage("💡 设备将重启到Fastboot模式 (传统引导程序)");
+            emit outputMessage("设备将重启到Fastboot模式 (传统引导程序)");
             break;
         case MODE_RECOVERY:
-            emit outputMessage("💡 设备将重启到恢复模式");
+            emit outputMessage("设备将重启到恢复模式");
             break;
         case MODE_EDL:
-            emit outputMessage("⚠️ 设备将进入EDL模式，请谨慎操作");
+            emit outputMessage("设备将进入EDL模式，请谨慎操作");
             break;
         }
     }
@@ -103,10 +103,10 @@ bool RestartTool::checkRootPermission(const QString &deviceId)
         QString("-s %1 shell su -c \"echo root\"").arg(deviceId));
     
     if (result.contains("root")) {
-        emit outputMessage("✅ 设备具有Root权限");
+        emit outputMessage("设备具有Root权限");
         return true;
     } else {
-        emit outputMessage("⚠️ 设备没有Root权限，尝试普通重启");
+        emit outputMessage("设备没有Root权限，尝试普通重启");
         return false;
     }
 }
@@ -192,7 +192,7 @@ QString RestartTool::getRestartCommand(const QString &deviceId, DeviceDetector::
             command = "shutdown";
             break;
         case MODE_EDL:
-            emit outputMessage("❌ 传统Fastboot模式不支持直接重启到EDL", true);
+            emit outputMessage("传统Fastboot模式不支持直接重启到EDL", true);
             break;
         }
     } else if (currentMode == DeviceDetector::MODE_FASTBOOTD) {
@@ -210,13 +210,13 @@ QString RestartTool::getRestartCommand(const QString &deviceId, DeviceDetector::
             break;
         case MODE_FASTBOOT:
             // 已经在Fastbootd模式
-            emit outputMessage("ℹ️ 设备已在Fastbootd模式", false);
+            emit outputMessage("设备已在Fastbootd模式", false);
             break;
         case MODE_SHUTDOWN:
             command = "shutdown";
             break;
         case MODE_EDL:
-            emit outputMessage("❌ Fastbootd模式不支持直接重启到EDL", true);
+            emit outputMessage("Fastbootd模式不支持直接重启到EDL", true);
             break;
         }
     }

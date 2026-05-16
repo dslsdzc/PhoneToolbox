@@ -61,7 +61,7 @@ QString DeviceInfo::toString() const
     
     // ADB模式的原有toString逻辑
     return QString(
-        "📱 Device Info:\n"
+        "Device Info:\n"
         "   Serial: %1\n"
         "   Manufacturer: %2\n"
         "   Model: %3\n"
@@ -77,10 +77,10 @@ QString DeviceInfo::toString() const
 QString DeviceInfo::toFastbootString() const
 {
     QString modeStr = isFastbootdMode ? "Fastbootd" : "传统Fastboot";
-    QString lockStr = isBootloaderUnlocked ? "🔓 已解锁" : "🔒 已锁定";
+    QString lockStr = isBootloaderUnlocked ? "已解锁" : "已锁定";
     
     QString result;
-    result += "🚀 Fastboot设备信息:\n";
+    result += "Fastboot设备信息:\n";
     result += QString("   序列号: %1\n").arg(serialNumber);
     result += QString("   产品型号: %1\n").arg(productName);
     result += QString("   设备变体: %1\n").arg(variant);

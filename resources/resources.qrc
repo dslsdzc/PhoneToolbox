@@ -13,5 +13,8 @@
         <!-- macOS binaries -->
         <file alias="adb/macos/x64/adb">../third_party/adb_binaries/macos/adb</file>
         <file alias="adb/macos/x64/fastboot">../third_party/adb_binaries/macos/fastboot</file>
+
+        <!-- MTK Bridge (cross-platform, one binary per platform) -->
+        <file alias="mtk_bridge/linux/x64/mtk_bridge">../third_party/mtk_bridge/linux/x64/mtk_bridge</file>
     </qresource>
 </RCC>

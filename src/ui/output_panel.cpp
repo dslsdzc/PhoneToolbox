@@ -6,6 +6,7 @@
 #include <QMenu>
 #include <QContextMenuEvent>
 #include <QApplication>
+#include <QPalette>
 #include <QClipboard>
 #include <QLabel> 
 
@@ -66,11 +67,10 @@ void OutputPanel::setupUI()
     // 输出文本框 - 使用可复制的版本
     m_outputText = new CopyableTextEdit(this);
     m_outputText->setFont(QFont("Monospace", 9));
-    m_outputText->setStyleSheet("QTextEdit { "
-                               "background-color: #f8f8f8; "
-                               "border: 1px solid #e0e0e0; "
+    m_outputText->setStyleSheet("QTextEdit {"
+                               "border: 1px solid palette(mid);"
                                "}");
-    
+
     mainLayout->addLayout(headerLayout);
     mainLayout->addWidget(m_outputText);
     
@@ -89,9 +89,9 @@ void OutputPanel::appendOutput(const QString &message, bool isError)
     
     QTextCharFormat format;
     if (isError) {
-        format.setForeground(QColor(200, 0, 0)); // 红色错误信息
+        format.setForeground(QColor(255, 100, 100));
     } else {
-        format.setForeground(QColor(0, 0, 0)); // 黑色正常信息
+        format.setForeground(QApplication::palette().color(QPalette::Text));
     }
     
     // 移动到文档末尾

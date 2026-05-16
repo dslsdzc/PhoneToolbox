@@ -1,15 +1,17 @@
 #include "device_detector.h"
 #include "adb_embedded.h"
+#include "modes/edl_9008.h"
 #include <QProcess>
 #include <QStringList>
 #include <QDebug>
 #include <QTimer>
-#include <QThread> 
+#include <QThread>
 #include <QRegularExpression>
 
 DeviceDetector::DeviceDetector(QObject *parent)
     : QObject(parent)
     , m_monitorTimer(new QTimer(this))
+    , m_edlDetector(new EDL9008(this))
 {
     m_monitorTimer->setInterval(2000);
     connect(m_monitorTimer, SIGNAL(timeout()), this, SLOT(checkDevices()));
@@ -74,6 +76,9 @@ void DeviceDetector::detectConnectedDevices()
         }
     }
     
+    // 检测EDL设备
+    detectEDLDevices(newDevices);
+
     // 检测ADB设备
     QStringList adbDevices;
     if (detectADBDevices(adbDevices)) {
@@ -149,8 +154,9 @@ DeviceDetector::DeviceMode DeviceDetector::detectDeviceMode(const QString &devic
         }
     }
     
-    // 检测EDL模式 (需要USB检测)
-    if (detectEDLMode()) {
+    // 检测EDL模式 (USB枚举)
+    EDLDeviceInfo edlDummy;
+    if (m_edlDetector->detectDevice(edlDummy)) {
         return MODE_EDL_9008;
     }
     
@@ -179,10 +185,10 @@ DeviceInfo DeviceDetector::getDeviceInfo(const QString &deviceId, DeviceMode mod
         // 获取Android SDK版本
         QString sdkVersion = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.sdk");
         
-        // 检查Root状态
+        // 检查Root状态（通过su -c id验证实际权限）
         QString rootCheck = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell \"which su\"").arg(deviceId));
-        info.isRooted = !rootCheck.trimmed().isEmpty();
+            QString("-s %1 shell su -c id").arg(deviceId));
+        info.isRooted = rootCheck.contains("uid=0");
         
         // 获取网络信息
         info.imei = AdbEmbedded::instance().executeCommand(
@@ -202,7 +208,7 @@ DeviceInfo DeviceDetector::getDeviceInfo(const QString &deviceId, DeviceMode mod
         
         // 获取电池信息
         QString batteryLevel = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell dumpsys battery | grep level").arg(deviceId)).trimmed();
+            QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId)).trimmed();
         if (!batteryLevel.isEmpty()) {
             info.batteryHealth = batteryLevel.split(":").value(1).trimmed() + "%";
         }
@@ -492,13 +498,30 @@ QString DeviceDetector::executeFastbootCommand(const QString &command, const QSt
     return output + error;
 }
 
-bool DeviceDetector::detectEDLMode()
+bool DeviceDetector::detectEDLDevices(QMap<QString, DeviceInfo> &newDevices)
 {
-    // EDL模式检测需要通过USB设备枚举
-    // 这里使用libusb或QSerialPort来检测9008端口设备
-    // 简化实现，返回false
-    qDebug() << "EDL mode detection not implemented yet";
-    return false;
+    QList<EDLDeviceInfo> edlDevices = m_edlDetector->listDevices();
+    for (const EDLDeviceInfo &edlInfo : edlDevices) {
+        QString deviceId = QString("EDL_%1:%2@%3.%4")
+            .arg(edlInfo.vid, 4, 16, QChar('0'))
+            .arg(edlInfo.pid, 4, 16, QChar('0'))
+            .arg(edlInfo.busNumber)
+            .arg(edlInfo.deviceAddress);
+
+        DeviceInfo info;
+        info.serialNumber = deviceId;
+        info.mode = MODE_EDL_9008;
+        info.manufacturer = m_edlDetector->describeDevice(edlInfo);
+        info.model = "EDL 9008 Mode";
+
+        newDevices[deviceId] = info;
+
+        if (!m_currentDevices.contains(deviceId)) {
+            qDebug().noquote() << "EDL device connected:" << m_edlDetector->describeDevice(edlInfo);
+            emit deviceConnected(info);
+        }
+    }
+    return !edlDevices.isEmpty();
 }
 
 bool DeviceDetector::detectMTKDAMode()
@@ -516,16 +539,16 @@ QString DeviceDetector::formatDeviceInfoForDisplay(const DeviceInfo &info) const
 {
     QString displayText;
     
-    displayText += "🔗 设备已连接:\n";
+    displayText += "设备已连接:\n";
     
     DeviceMode deviceMode = static_cast<DeviceMode>(info.mode);
 
     if (info.mode == MODE_FASTBOOT || info.mode == MODE_FASTBOOTD) {
-        displayText += "🚀 Fastboot设备信息:\n";
+        displayText += "Fastboot设备信息:\n";
     } else if (info.mode == MODE_ADB) {
-        displayText += "📱 ADB设备信息:\n";
+        displayText += "ADB设备信息:\n";
     } else {
-        displayText += "❓ 未知设备信息:\n";
+        displayText += "未知设备信息:\n";
     }
     
     // 序列号
@@ -589,7 +612,7 @@ QString DeviceDetector::formatDeviceInfoForDisplay(const DeviceInfo &info) const
 
 QString DeviceDetector::getBootloaderStatusIcon(bool isUnlocked) const
 {
-    return isUnlocked ? "🔓" : "🔒";
+    return isUnlocked ? "已解锁" : "已锁定";
 }
 
 QString DeviceDetector::getModeDisplayName(DeviceMode mode) const

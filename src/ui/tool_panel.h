@@ -22,22 +22,25 @@ signals:
     void deviceSelectionChanged(const QString &deviceId);
     void outputMessage(const QString &message, bool isError = false);
     void refreshRequested();
+    void toolSelected(int index);
 
 private slots:
     void onDeviceListSelectionChanged();
     void onRestartButtonClicked();
     void onRefreshButtonClicked();
     void onRestartToolOutput(const QString &message, bool isError);
+    void onToolSelectionChanged();
 
 private:
     void setupUI();
     void setupConnections();
-    
+
     QListWidget *m_deviceList;
     QComboBox *m_restartModeCombo;
     QPushButton *m_restartButton;
     QPushButton *m_refreshButton;
-    
+    QListWidget *m_toolSelector;
+
     RestartTool *m_restartTool;
     QMap<QString, DeviceInfo> m_currentDevices;
     QString m_currentSelectedDevice;

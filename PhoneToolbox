@@ -1,0 +1,9 @@
+CMakeLists.txt
+README.md
+resources
+src
+third_party
+CLAUDE.md
+build
+phonetoolbox.desktop
+PKGBUILD

@@ -11,6 +11,7 @@ ToolPanel::ToolPanel(QWidget *parent)
     , m_restartModeCombo(nullptr)
     , m_restartButton(nullptr)
     , m_refreshButton(nullptr)
+    , m_toolSelector(nullptr)
     , m_restartTool(new RestartTool(this))
     , m_currentSelectedDevice("")
 {
@@ -22,60 +23,72 @@ void ToolPanel::setupUI()
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(5, 5, 5, 5);
-    
-    // 设备列表
-    QGroupBox *deviceGroup = new QGroupBox("设备列表", this);
+
+    // device list
+    QGroupBox *deviceGroup = new QGroupBox(QStringLiteral("设备列表"), this);
     QVBoxLayout *deviceLayout = new QVBoxLayout(deviceGroup);
     m_deviceList = new QListWidget(this);
     m_deviceList->setSelectionMode(QAbstractItemView::SingleSelection);
-    
-    // 设置设备列表样式
+
     m_deviceList->setStyleSheet("QListWidget { "
-                               "background-color: #f8f8f8; "
-                               "border: 1px solid #e0e0e0; "
                                "border-radius: 3px; "
                                "}"
                                "QListWidget::item:selected { "
-                               "background-color: #e0e0e0; "
+                               "background-color: palette(highlight); "
                                "}");
-    
+
     deviceLayout->addWidget(m_deviceList);
-    
-    // 重启工具
-    QGroupBox *restartGroup = new QGroupBox("重启工具", this);
+
+    // restart tool
+    QGroupBox *restartGroup = new QGroupBox(QStringLiteral("重启工具"), this);
     QFormLayout *restartLayout = new QFormLayout(restartGroup);
-    
+
     m_restartModeCombo = new QComboBox(this);
-    m_restartModeCombo->addItem("正常模式 (System)", RestartTool::MODE_SYSTEM);
-    m_restartModeCombo->addItem("恢复模式 (Recovery)", RestartTool::MODE_RECOVERY);
-    m_restartModeCombo->addItem("引导程序 (Fastboot)", RestartTool::MODE_BOOTLOADER);
-    m_restartModeCombo->addItem("Fastbootd 模式", RestartTool::MODE_FASTBOOT);
-    m_restartModeCombo->addItem("EDL 模式", RestartTool::MODE_EDL);
-    m_restartModeCombo->addItem("关机", RestartTool::MODE_SHUTDOWN);
-    
-    m_restartButton = new QPushButton("重启设备", this);
+    m_restartModeCombo->addItem(QStringLiteral("正常模式 (System)"), RestartTool::MODE_SYSTEM);
+    m_restartModeCombo->addItem(QStringLiteral("恢复模式 (Recovery)"), RestartTool::MODE_RECOVERY);
+    m_restartModeCombo->addItem(QStringLiteral("引导程序 (Fastboot)"), RestartTool::MODE_BOOTLOADER);
+    m_restartModeCombo->addItem("Fastbootd", RestartTool::MODE_FASTBOOT);
+    m_restartModeCombo->addItem("EDL", RestartTool::MODE_EDL);
+    m_restartModeCombo->addItem(QStringLiteral("关机"), RestartTool::MODE_SHUTDOWN);
+
+    m_restartButton = new QPushButton(QStringLiteral("重启设备"), this);
     m_restartButton->setEnabled(false);
-    
-    restartLayout->addRow("目标模式:", m_restartModeCombo);
+
+    restartLayout->addRow(QStringLiteral("目标模式:"), m_restartModeCombo);
     restartLayout->addRow(m_restartButton);
-    
-    // 添加模式说明
+
     QLabel *modeHelp = new QLabel(this);
-    modeHelp->setText("💡 Fastbootd: Android 10+ 用户空间Fastboot\n💡 Fastboot: 传统引导程序模式");
+    modeHelp->setText("Fastbootd: Android 10+ user space Fastboot\nFastboot: traditional bootloader mode");
     modeHelp->setWordWrap(true);
     modeHelp->setStyleSheet("color: #666; font-size: 10px;");
     restartLayout->addRow(modeHelp);
-    
-    // 工具按钮
+
+    // tool selector
+    QGroupBox *toolGroup = new QGroupBox(QStringLiteral("工具选择"), this);
+    QVBoxLayout *toolSelLayout = new QVBoxLayout(toolGroup);
+
+    m_toolSelector = new QListWidget(this);
+    m_toolSelector->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_toolSelector->setMaximumHeight(80);
+    m_toolSelector->addItem(QStringLiteral("设备信息"));
+    m_toolSelector->addItem(QStringLiteral("刷机工具"));
+    m_toolSelector->addItem(QStringLiteral("系统工具"));
+    m_toolSelector->item(0)->setSelected(true);
+
+    toolSelLayout->addWidget(m_toolSelector);
+    mainLayout->addWidget(toolGroup);
+
+    // bottom toolbar
     QHBoxLayout *toolLayout = new QHBoxLayout();
-    m_refreshButton = new QPushButton("刷新设备", this);
-    
+    m_refreshButton = new QPushButton(QStringLiteral("刷新设备"), this);
+
     toolLayout->addWidget(m_refreshButton);
     toolLayout->addStretch();
-    
-    // 组装面板
+
+    // assemble
     mainLayout->addWidget(deviceGroup);
     mainLayout->addWidget(restartGroup);
+    mainLayout->addWidget(toolGroup);
     mainLayout->addLayout(toolLayout);
     mainLayout->addStretch();
 }
@@ -90,17 +103,18 @@ void ToolPanel::setupConnections()
             this, &ToolPanel::onRefreshButtonClicked);
     connect(m_restartTool, &RestartTool::outputMessage,
             this, &ToolPanel::onRestartToolOutput);
+    connect(m_toolSelector, &QListWidget::itemSelectionChanged,
+            this, &ToolPanel::onToolSelectionChanged);
 }
 
 void ToolPanel::updateDeviceList(const QMap<QString, DeviceInfo> &devices)
 {
     m_currentDevices = devices;
     m_deviceList->clear();
-    
+
     for (const DeviceInfo &info : m_currentDevices) {
         QString displayText = QString("%1\n%2").arg(info.serialNumber).arg(info.model);
-        
-        // 添加模式信息
+
         QString modeInfo;
         switch (info.mode) {
         case DeviceDetector::MODE_ADB: modeInfo = " [ADB]"; break;
@@ -108,18 +122,17 @@ void ToolPanel::updateDeviceList(const QMap<QString, DeviceInfo> &devices)
         case DeviceDetector::MODE_FASTBOOTD: modeInfo = " [Fastbootd]"; break;
         case DeviceDetector::MODE_EDL_9008: modeInfo = " [EDL]"; break;
         case DeviceDetector::MODE_MTK_DA: modeInfo = " [MTK DA]"; break;
-        default: modeInfo = " [未知]"; break;
+        default: modeInfo = " [unknown]"; break;
         }
-        
+
         displayText += modeInfo;
-        
+
         QListWidgetItem *item = new QListWidgetItem(displayText, m_deviceList);
         item->setData(Qt::UserRole, info.serialNumber);
     }
-    
-    // 如果没有设备，显示提示
+
     if (m_currentDevices.isEmpty()) {
-        QListWidgetItem *item = new QListWidgetItem("无设备连接", m_deviceList);
+        QListWidgetItem *item = new QListWidgetItem(QStringLiteral("无设备连接"), m_deviceList);
         item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
         m_restartButton->setEnabled(false);
     }
@@ -133,27 +146,25 @@ QString ToolPanel::getSelectedDevice() const
 void ToolPanel::onDeviceListSelectionChanged()
 {
     QList<QListWidgetItem*> selectedItems = m_deviceList->selectedItems();
-    
+
     if (selectedItems.isEmpty()) {
         m_currentSelectedDevice = "";
         m_restartButton->setEnabled(false);
         emit deviceSelectionChanged("");
         return;
     }
-    
+
     QListWidgetItem *item = selectedItems.first();
-    
-    // 检查是否是"无设备连接"提示项
-    if (item->text() == "无设备连接") {
+
+    if (item->text().contains(QStringLiteral("无设备连接"))) {
         m_currentSelectedDevice = "";
         m_restartButton->setEnabled(false);
         emit deviceSelectionChanged("");
         return;
     }
-    
+
     m_currentSelectedDevice = item->data(Qt::UserRole).toString();
-    
-    // 确保选择的是真实设备
+
     if (m_currentDevices.contains(m_currentSelectedDevice)) {
         m_restartButton->setEnabled(true);
         emit deviceSelectionChanged(m_currentSelectedDevice);
@@ -166,18 +177,17 @@ void ToolPanel::onDeviceListSelectionChanged()
 void ToolPanel::onRestartButtonClicked()
 {
     if (m_currentSelectedDevice.isEmpty() || !m_currentDevices.contains(m_currentSelectedDevice)) {
-        emit outputMessage("❌ 请先选择一个设备", true);
+        emit outputMessage(QStringLiteral("请先选择一个设备"), true);
         return;
     }
-    
+
     const DeviceInfo &info = m_currentDevices[m_currentSelectedDevice];
     RestartTool::RestartMode targetMode = static_cast<RestartTool::RestartMode>(
         m_restartModeCombo->currentData().toInt());
-    
-    // 替换原来的调用
+
     m_restartTool->restartDevice(
-        m_currentSelectedDevice, 
-        static_cast<DeviceDetector::DeviceMode>(info.mode),  // 添加显式类型转换
+        m_currentSelectedDevice,
+        static_cast<DeviceDetector::DeviceMode>(info.mode),
         targetMode
     );
 }
@@ -190,4 +200,13 @@ void ToolPanel::onRefreshButtonClicked()
 void ToolPanel::onRestartToolOutput(const QString &message, bool isError)
 {
     emit outputMessage(message, isError);
+}
+
+void ToolPanel::onToolSelectionChanged()
+{
+    QList<QListWidgetItem*> selected = m_toolSelector->selectedItems();
+    if (selected.isEmpty()) return;
+
+    int index = m_toolSelector->row(selected.first());
+    emit toolSelected(index);
 }

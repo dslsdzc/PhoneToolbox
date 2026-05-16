@@ -7,6 +7,9 @@
 #include <QString>
 #include "device_info.h"
 
+class EDL9008;
+struct EDLDeviceInfo;
+
 class DeviceDetector : public QObject
 {
     Q_OBJECT
@@ -60,11 +63,13 @@ private:
     QString getFastbootVar(const QString &varName, const QString &deviceId);
     
     // 特定模式检测
-    bool detectEDLMode();
+    bool detectEDLDevices(QMap<QString, DeviceInfo> &newDevices);
     bool detectMTKDAMode();
     bool detectADBDevices(QStringList &devices);
-    
+
     QString formatValue(const QString &value) const;
+
+    EDL9008 *m_edlDetector;
 };
 
 #endif // DEVICE_DETECTOR_H
