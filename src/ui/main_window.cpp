@@ -13,6 +13,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_deviceInfoPanel(nullptr)
     , m_flashPanel(nullptr)
     , m_systemToolPanel(nullptr)
+    , m_vulnPanel(nullptr)
     , m_outputPanel(nullptr)
 {
     setupUI();
@@ -22,7 +23,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_deviceDetector.startMonitoring();
         m_outputPanel->appendOutput("ADB initialized");
     } else {
-        m_outputPanel->appendOutput("Failed to initialize embedded ADB tools", true);
+        m_outputPanel->appendOutput("Failed to initialize ADB tools", true);
     }
 
     m_outputPanel->appendOutput("Phone Toolbox started");
@@ -51,13 +52,15 @@ void MainWindow::setupUI()
     m_deviceInfoPanel = new DeviceInfoPanel(this);
     m_flashPanel = new FlashPanel(this);
     m_systemToolPanel = new SystemToolPanel(this);
+    m_vulnPanel = new VulnPanel(this);
     m_outputPanel = new OutputPanel(this);
 
-    // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools
+    // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools, index 3 = vuln panel
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_deviceInfoPanel);
     m_stack->addWidget(m_flashPanel);
     m_stack->addWidget(m_systemToolPanel);
+    m_stack->addWidget(m_vulnPanel);
     m_stack->setCurrentIndex(0);
 
     m_rightSplitter->addWidget(m_stack);
@@ -101,7 +104,7 @@ void MainWindow::setupConnections()
 
     // flash panel back button -> switch to device info
     connect(m_flashPanel, &FlashPanel::switchToDeviceInfo, this, [this]() {
-        m_stack->setCurrentIndex(0);
+        m_toolPanel->selectToolByIndex(0);
     });
 
     // system tool panel -> output
@@ -110,7 +113,16 @@ void MainWindow::setupConnections()
 
     // system tool panel back button -> switch to device info
     connect(m_systemToolPanel, &SystemToolPanel::switchToDeviceInfo, this, [this]() {
-        m_stack->setCurrentIndex(0);
+        m_toolPanel->selectToolByIndex(0);
+    });
+
+    // vuln panel -> output
+    connect(m_vulnPanel, &VulnPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
+
+    // vuln panel back button -> switch to device info
+    connect(m_vulnPanel, &VulnPanel::switchToDeviceInfo, this, [this]() {
+        m_toolPanel->selectToolByIndex(0);
     });
 }
 
@@ -144,6 +156,8 @@ void MainWindow::onDeviceDisconnected(const QString &serial)
 
         if (m_stack->currentIndex() == 1) {
             m_flashPanel->clearDeviceInfo();
+        } else if (m_stack->currentIndex() == 3) {
+            m_vulnPanel->clearDeviceInfo();
         }
     }
 }
@@ -180,6 +194,7 @@ void MainWindow::onDeviceSelectionChanged(const QString &deviceId)
         m_deviceInfoPanel->updateDeviceInfo(m_currentDevices[deviceId]);
         m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
         m_systemToolPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        m_vulnPanel->setDeviceInfo(m_currentDevices[deviceId]);
     }
 }
 
@@ -211,6 +226,13 @@ void MainWindow::onToolSelected(int index)
             m_systemToolPanel->setDeviceInfo(m_currentDevices[deviceId]);
         } else {
             m_systemToolPanel->clearDeviceInfo();
+        }
+    } else if (index == 3) {
+        // switch to vuln panel
+        if (!deviceId.isEmpty() && m_currentDevices.contains(deviceId)) {
+            m_vulnPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        } else {
+            m_vulnPanel->clearDeviceInfo();
         }
     }
     m_stack->setCurrentIndex(index);
@@ -265,8 +287,10 @@ void MainWindow::updateCurrentDeviceInfo()
     if (deviceId.isEmpty() || !m_currentDevices.contains(deviceId)) {
         m_deviceInfoPanel->clearDeviceInfo();
         m_flashPanel->clearDeviceInfo();
+        m_vulnPanel->clearDeviceInfo();
     } else {
         m_deviceInfoPanel->updateDeviceInfo(m_currentDevices[deviceId]);
         m_flashPanel->setDeviceInfo(m_currentDevices[deviceId]);
+        m_vulnPanel->setDeviceInfo(m_currentDevices[deviceId]);
     }
 }

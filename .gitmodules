@@ -1,0 +1,6 @@
+[submodule "edl"]
+	path = edl
+	url = https://github.com/bkerler/edl
+[submodule "mtkclient"]
+	path = mtkclient
+	url = https://github.com/bkerler/mtkclient

@@ -183,7 +183,13 @@ DeviceInfo DeviceDetector::getDeviceInfo(const QString &deviceId, DeviceMode mod
         info.buildNumber = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.display.id");
         
         // 获取Android SDK版本
-        QString sdkVersion = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.sdk");
+        info.sdkVersion = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.sdk");
+
+        // 获取安全补丁级别
+        info.securityPatch = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.security_patch");
+
+        // 获取构建指纹
+        info.buildFingerprint = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.fingerprint");
         
         // 检查Root状态（通过su -c id验证实际权限）
         QString rootCheck = AdbEmbedded::instance().executeCommand(

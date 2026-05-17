@@ -69,10 +69,11 @@ void ToolPanel::setupUI()
 
     m_toolSelector = new QListWidget(this);
     m_toolSelector->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_toolSelector->setMaximumHeight(80);
+    m_toolSelector->setMaximumHeight(100);
     m_toolSelector->addItem(QStringLiteral("设备信息"));
     m_toolSelector->addItem(QStringLiteral("刷机工具"));
     m_toolSelector->addItem(QStringLiteral("系统工具"));
+    m_toolSelector->addItem(QStringLiteral("漏洞扫描"));
     m_toolSelector->item(0)->setSelected(true);
 
     toolSelLayout->addWidget(m_toolSelector);
@@ -208,5 +209,15 @@ void ToolPanel::onToolSelectionChanged()
     if (selected.isEmpty()) return;
 
     int index = m_toolSelector->row(selected.first());
+    emit toolSelected(index);
+}
+
+void ToolPanel::selectToolByIndex(int index)
+{
+    if (index < 0 || index >= m_toolSelector->count())
+        return;
+    m_toolSelector->blockSignals(true);
+    m_toolSelector->item(index)->setSelected(true);
+    m_toolSelector->blockSignals(false);
     emit toolSelected(index);
 }

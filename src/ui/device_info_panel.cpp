@@ -160,6 +160,16 @@ QString DeviceInfoPanel::buildInfoHtml(const DeviceInfo &info)
         html += row("存储空间:", info.storageSize);
     }
 
+    // 安全补丁级别
+    if (!info.securityPatch.isEmpty()) {
+        html += row("安全补丁:", info.securityPatch);
+    }
+
+    // SDK版本
+    if (!info.sdkVersion.isEmpty()) {
+        html += row("SDK版本:", info.sdkVersion);
+    }
+
     html += "</table></body></html>";
     return html;
 }

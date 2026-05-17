@@ -15,6 +15,11 @@
 #include <QFrame>
 #include <QCheckBox>
 #include <QApplication>
+#include <QThread>
+#include <QRegularExpression>
+#include <QMap>
+#include <QDateTime>
+#include <QDir>
 
 FlashPanel::FlashPanel(QWidget *parent)
     : QWidget(parent)
@@ -1207,6 +1212,306 @@ void FlashPanel::onToolProgress(int percent)
     }
 }
 
+// ==================== 死砖修复辅助方法 ====================
+
+static int sortPriority(const QString &filePath)
+{
+    QString n = QFileInfo(filePath).completeBaseName().toLower();
+    if (n.contains("gpt") || n.contains("partition")) return 0;
+    if (n.contains("sbl") || n.contains("xbl") || n.contains("preloader")) return 1;
+    if (n.contains("abl") || n.contains("lk")) return 2;
+    if (n.contains("tz") || n.contains("hyp") || n.contains("keymaster")) return 3;
+    if (n.contains("boot") && !n.contains("vendor") && !n.contains("super")) return 4;
+    if (n.contains("vbmeta") || n.contains("dtbo") || n.contains("dpm")) return 5;
+    return 6;
+}
+
+static bool compareByPriority(const QString &a, const QString &b)
+{
+    return sortPriority(a) < sortPriority(b);
+}
+
+static bool checkImageSize(const QString &imagePath, quint64 partitionBytes)
+{
+    if (partitionBytes == 0) return true; // unknown size, skip check
+    QFileInfo fi(imagePath);
+    return fi.size() <= (qint64)partitionBytes;
+}
+
+static bool detectSparseImage(const QString &imagePath)
+{
+    QFile f(imagePath);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    char magic[4];
+    if (f.read(magic, 4) < 4) { f.close(); return false; }
+    f.close();
+    // Android sparse image magic: 0xED26FF3A (LE)
+    return (static_cast<unsigned char>(magic[0]) == 0x3A &&
+            static_cast<unsigned char>(magic[1]) == 0xFF &&
+            static_cast<unsigned char>(magic[2]) == 0x26 &&
+            static_cast<unsigned char>(magic[3]) == 0xED);
+}
+
+bool FlashPanel::ensureEDLConnected()
+{
+    if (m_flashTool->edlIsConnected()) return true;
+
+    emit outputMessage("EDL 连接已断开，尝试重连...", false);
+
+    if (m_programmerPath.isEmpty()) {
+        emit outputMessage("需要 Firehose Programmer 文件", false);
+        onEdlSelectProgrammer();
+        if (m_programmerPath.isEmpty()) {
+            emit outputMessage("未选择 Programmer，无法连接 EDL", true);
+            return false;
+        }
+    }
+
+    int attempts = 3;
+    for (int i = 0; i < attempts; i++) {
+        emit outputMessage(QString("连接 EDL... (尝试 %1/%2)").arg(i + 1).arg(attempts), false);
+        m_flashTool->edlConnect(m_programmerPath);
+        if (m_flashTool->edlIsConnected()) {
+            m_flashTool->edlListPartitions();
+            emit outputMessage("EDL 重连成功", false);
+            return true;
+        }
+        QThread::msleep(1500);
+    }
+
+    emit outputMessage("EDL 连接失败，请检查设备与 Programmer 是否匹配", true);
+    return false;
+}
+
+bool FlashPanel::ensureMTKConnected()
+{
+    if (m_flashTool->mtkIsConnected()) return true;
+
+    emit outputMessage("MTK 连接已断开，尝试重连...", false);
+
+    int attempts = 3;
+    for (int i = 0; i < attempts; i++) {
+        emit outputMessage(QString("连接 MTK... (尝试 %1/%2)").arg(i + 1).arg(attempts), false);
+        if (m_flashTool->mtkConnect()) {
+            m_flashTool->mtkListPartitions();
+            emit outputMessage("MTK 重连成功", false);
+            return true;
+        }
+        QThread::msleep(1500);
+    }
+
+    emit outputMessage("MTK 连接失败", true);
+    return false;
+}
+
+QString FlashPanel::validateFirmwareDirectory(const QString &dir)
+{
+    QDir firmwareDir(dir);
+    QStringList allFiles = firmwareDir.entryList({"*.img", "*.bin", "*.elf"},
+        QDir::Files, QDir::Name);
+
+    if (allFiles.isEmpty())
+        return "目录中没有镜像文件（.img / .bin / .elf）";
+
+    QStringList lowerFiles;
+    for (const auto &f : allFiles)
+        lowerFiles << f.toLower();
+
+    bool hasGpt = false, hasPreloader = false, hasSbl = false, hasAbl = false;
+    for (const auto &f : lowerFiles) {
+        if (f.contains("gpt") || f.contains("partition")) hasGpt = true;
+        if (f.contains("preloader")) hasPreloader = true;
+        if (f.contains("sbl") || f.contains("xbl")) hasSbl = true;
+        if (f.contains("abl") || f.contains("lk")) hasAbl = true;
+    }
+
+    if (!hasGpt)
+        return "未检测到 GPT 分区表文件（gpt.bin / partition.bin）\n救砖必须包含 GPT！";
+
+    if (!hasPreloader && !hasSbl && !hasAbl)
+        return "未检测到引导加载器镜像（preloader / sbl / xbl / abl / lk）\n请确认这是完整的线刷包";
+
+    // Platform & feature detection
+    if (hasPreloader)
+        emit outputMessage("◈ 检测到 MTK 平台（preloader）", false);
+    else if (hasSbl || hasAbl)
+        emit outputMessage("◈ 检测到 Qualcomm 平台（SBL/ABL）", false);
+
+    int slotCount = 0;
+    for (const auto &f : lowerFiles)
+        if (f.contains("_a") || f.contains("_b")) slotCount++;
+    if (slotCount > 3)
+        emit outputMessage(QString("◈ 检测到 A/B slot 文件 (%1 个)").arg(slotCount), false);
+
+    for (const auto &f : lowerFiles) {
+        if (f.contains("super")) {
+            emit outputMessage("◈ 检测到 super 镜像（动态分区）", false);
+            break;
+        }
+    }
+
+    emit outputMessage(QString("◈ 固件目录验证通过: %1 个镜像文件").arg(allFiles.size()), false);
+    return {};
+}
+
+QStringList FlashPanel::matchPartitionFiles(const QString &dir, const QList<EDLPartition> &parts)
+{
+    QDir firmwareDir(dir);
+    QStringList allFiles = firmwareDir.entryList({"*.img", "*.bin", "*.elf"},
+        QDir::Files, QDir::Name);
+
+    QMap<QString, QString> bestFile;   // partition name -> file path
+    QMap<QString, int> bestScore;
+
+    for (const auto &f : allFiles) {
+        QString base = QFileInfo(f).completeBaseName().toLower();
+        QString clean = base;
+        clean.remove(QRegularExpression("_(a|b)$"));
+        clean.remove(QRegularExpression("_(image)$"));
+        clean.remove(QRegularExpression("^(img_)"));
+
+        int topScore = 0;
+        QString topPart;
+        for (const auto &p : parts) {
+            QString pLower = p.name.toLower();
+            QString pClean = pLower;
+            pClean.remove(QRegularExpression("_(a|b)$"));
+
+            int score = 0;
+            if (clean == pLower) score = 100;
+            else if (clean == pClean) score = 80;
+            else if (clean.contains(pLower) || pLower.contains(clean)) score = 50;
+
+            if (score > topScore) {
+                topScore = score;
+                topPart = p.name;
+            }
+        }
+
+        if (topScore >= 50) {
+            QString fp = firmwareDir.filePath(f);
+            auto it = bestFile.constFind(topPart);
+            if (it == bestFile.constEnd() || topScore > bestScore.value(topPart, 0)) {
+                bestFile[topPart] = fp;
+                bestScore[topPart] = topScore;
+            }
+        }
+    }
+
+    QStringList matched;
+    QStringList partsList = bestFile.keys();
+    std::sort(partsList.begin(), partsList.end(),
+        [&](const QString &a, const QString &b) {
+            return sortPriority(bestFile[a]) < sortPriority(bestFile[b]);
+        });
+    for (const auto &p : partsList)
+        matched << bestFile[p];
+
+    emit outputMessage(QString("分区匹配: %1/%2 个文件已匹配").arg(matched.size()).arg(allFiles.size()), false);
+    return matched;
+}
+
+QStringList FlashPanel::matchPartitionFilesMtk(const QString &dir, const QList<MtkPartition> &parts)
+{
+    QList<EDLPartition> edlParts;
+    for (const auto &mp : parts) {
+        EDLPartition ep;
+        ep.name = mp.name;
+        ep.startSector = mp.offset;
+        ep.numSectors = mp.length;
+        ep.sectorSize = 1;
+        edlParts.append(ep);
+    }
+    return matchPartitionFiles(dir, edlParts);
+}
+
+bool FlashPanel::writePartitionWithRetry(const QString &partName,
+    std::function<bool()> writeFn, int maxRetries)
+{
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        if (attempt > 0) {
+            emit outputMessage(QString("  ⚡ 重试 (%1/%2)...").arg(attempt).arg(maxRetries), false);
+            if (!ensureEDLConnected() && !ensureMTKConnected()) {
+                emit outputMessage("  重连失败，无法重试", true);
+                return false;
+            }
+        }
+        if (writeFn()) {
+            emit outputMessage(QString("  ✓ %1 写入成功").arg(partName), false);
+            return true;
+        }
+        if (attempt < maxRetries)
+            QThread::msleep(500);
+    }
+    emit outputMessage(QString("  ✗ %1 写入失败（已重试 %2 次）").arg(partName).arg(maxRetries), true);
+    return false;
+}
+
+QStringList FlashPanel::backupCriticalPartitions(const QString &backupDir)
+{
+    QStringList critical = {"gpt", "boot", "vbmeta", "persist"};
+    QStringList backedUp;
+
+    QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    QString dir = backupDir + "/brick_backup_" + ts;
+    QDir().mkpath(dir);
+
+    emit outputMessage("备份关键分区...", false);
+
+    int total = critical.size();
+    for (int i = 0; i < total; i++) {
+        emit outputMessage(QString("  [%1/%2] 备份 %3...").arg(i + 1).arg(total).arg(critical[i]), false);
+        bool ok = false;
+        if (m_deviceInfo.mode == DeviceDetector::MODE_EDL_9008) {
+            auto parts = m_flashTool->edlListPartitions();
+            for (const auto &p : parts) {
+                QString pl = p.name.toLower();
+                if (pl == critical[i] || pl == critical[i] + "_a") {
+                    QString outPath = dir + "/" + p.name + "_backup.img";
+                    ok = m_flashTool->edlReadPartition(p, outPath);
+                    if (ok) backedUp << outPath;
+                    break;
+                }
+            }
+        } else if (m_deviceInfo.mode == DeviceDetector::MODE_MTK_DA) {
+            QString outPath = dir + "/" + critical[i] + "_backup.img";
+            ok = m_flashTool->mtkReadPartition(critical[i], outPath);
+            if (ok) backedUp << outPath;
+        }
+        if (!ok)
+            emit outputMessage(QString("  ⚠ 备份 %1 失败（分区可能不存在）").arg(critical[i]), true);
+    }
+
+    emit outputMessage(QString("备份完成: %1 个分区已保存").arg(backedUp.size()), false);
+    return backedUp;
+}
+
+void FlashPanel::saveProgressFile(const QString &dir, int completedIndex)
+{
+    QString safe = QFileInfo(dir).fileName();
+    safe.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+    QString path = QDir::tempPath() + "/brick_progress_" + safe + ".txt";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QByteArray::number(completedIndex));
+        f.close();
+    }
+}
+
+int FlashPanel::loadProgressFile(const QString &dir)
+{
+    QString safe = QFileInfo(dir).fileName();
+    safe.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+    QString path = QDir::tempPath() + "/brick_progress_" + safe + ".txt";
+    QFile f(path);
+    if (f.open(QIODevice::ReadOnly)) {
+        int idx = f.readAll().trimmed().toInt();
+        f.close();
+        return idx;
+    }
+    return -1;
+}
+
 void FlashPanel::onBrickRepairClicked()
 {
     int mode = m_deviceInfo.mode;
@@ -1223,32 +1528,11 @@ void FlashPanel::onBrickRepairClicked()
         return;
     }
 
-    // 确保已连接 Firehose / DA
-    if (edlMode && !m_flashTool->edlIsConnected()) {
-        if (m_programmerPath.isEmpty()) {
-            QMessageBox::information(this, "选择 Programmer",
-                "请先选择与设备 SoC 匹配的 Firehose Programmer ELF 文件。\n\n"
-                "Programmer 通常包含在官方线刷包中，文件名类似 prog_*.elf。");
-            onEdlSelectProgrammer();
-            if (m_programmerPath.isEmpty()) return;
-        }
-        QMessageBox::StandardButton ret = QMessageBox::question(this, "连接 EDL",
-            "是否加载 Programmer 并连接 EDL 设备？",
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-        if (ret == QMessageBox::Yes) onEdlConnect();
-        if (!m_flashTool->edlIsConnected()) {
-            QMessageBox::warning(this, "连接失败", "EDL 连接失败，请检查设备与 Programmer 是否匹配。");
-            return;
-        }
-    } else if (mtkMode && !m_flashTool->mtkIsConnected()) {
-        QMessageBox::StandardButton ret = QMessageBox::question(this, "连接 MTK",
-            "是否连接 MTK DA？",
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-        if (ret == QMessageBox::Yes) onMtkConnect();
-        if (!m_flashTool->mtkIsConnected()) return;
-    }
+    // Phase 1: 确保连接（带自动重试）
+    if (edlMode && !ensureEDLConnected()) return;
+    if (mtkMode && !ensureMTKConnected()) return;
 
-    // 选择救砖包目录
+    // Phase 2: 选择并验证固件目录
     QString dir = QFileDialog::getExistingDirectory(this, "选择救砖包目录",
         QString(), QFileDialog::ShowDirsOnly);
     if (dir.isEmpty()) {
@@ -1260,54 +1544,90 @@ void FlashPanel::onBrickRepairClicked()
         return;
     }
 
-    // 扫描目录中的镜像文件
-    QStringList searchNames = {
-        "gpt", "partition", "sbl", "sbl1", "xbl", "abl", "lk",
-        "preloader", "boot", "vbmeta", "dtbo", "dpm", "tz",
-        "hyp", "keymaster", "cmnlib", "devcfg", "storsec"
-    };
+    QString validationError = validateFirmwareDirectory(dir);
+    if (!validationError.isEmpty()) {
+        QMessageBox::StandardButton ignore = QMessageBox::warning(this,
+            "固件目录验证失败",
+            validationError + "\n\n是否仍要继续？",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ignore != QMessageBox::Yes) return;
+    }
+
+    // Phase 3: 可选备份
+    QMessageBox::StandardButton doBackup = QMessageBox::question(this,
+        "备份关键分区",
+        "是否在刷写前备份当前设备的关键分区（GPT / boot / vbmeta / persist）？\n"
+        "备份后若修复失败可用来恢复。",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (doBackup == QMessageBox::Yes) {
+        QString backupDir = QFileDialog::getExistingDirectory(this, "选择备份保存目录", dir);
+        if (!backupDir.isEmpty())
+            backupCriticalPartitions(backupDir);
+    }
+
+    // Phase 4: 扫描并匹配分区（带权重评分）
+    emit outputMessage("======== 死砖修复开始 ========", false);
+    emit outputMessage("正在扫描并匹配分区镜像...", false);
 
     QStringList foundFiles;
-    QDir firmwareDir(dir);
-    QStringList allFiles = firmwareDir.entryList({"*.img", "*.bin", "*.elf"},
-        QDir::Files, QDir::Name);
-    for (const auto &f : allFiles) {
-        QString base = QFileInfo(f).completeBaseName().toLower();
-        for (const auto &need : searchNames) {
-            if (base.contains(need)) {
-                foundFiles << firmwareDir.filePath(f);
-                break;
+    if (edlMode) {
+        auto parts = m_flashTool->edlListPartitions();
+        foundFiles = matchPartitionFiles(dir, parts);
+    } else {
+        auto parts = m_flashTool->mtkListPartitions();
+        foundFiles = matchPartitionFilesMtk(dir, parts);
+    }
+
+    // 匹配失败时回退到关键词搜索
+    if (foundFiles.isEmpty()) {
+        emit outputMessage("分区匹配失败，回退到关键词搜索...", false);
+        QStringList searchNames = {
+            "gpt", "partition", "sbl", "sbl1", "xbl", "abl", "lk",
+            "preloader", "boot", "vbmeta", "dtbo", "dpm", "tz",
+            "hyp", "keymaster", "cmnlib", "devcfg", "storsec"
+        };
+        QDir firmwareDir(dir);
+        QStringList allFiles = firmwareDir.entryList({"*.img", "*.bin", "*.elf"},
+            QDir::Files, QDir::Name);
+        for (const auto &f : allFiles) {
+            QString base = QFileInfo(f).completeBaseName().toLower();
+            for (const auto &need : searchNames) {
+                if (base.contains(need)) {
+                    foundFiles << firmwareDir.filePath(f);
+                    break;
+                }
             }
+        }
+
+        if (foundFiles.isEmpty()) {
+            QString singleFile = QFileDialog::getOpenFileName(this,
+                "选择镜像文件", dir,
+                "镜像 (*.img *.bin *.elf);;所有文件 (*)");
+            if (singleFile.isEmpty()) return;
+            foundFiles << singleFile;
         }
     }
 
-    if (foundFiles.isEmpty()) {
-        // 退一步：允许用户选单文件
-        QString singleFile = QFileDialog::getOpenFileName(this,
-            "选择镜像文件", dir,
-            "镜像 (*.img *.bin *.elf);;所有文件 (*)");
-        if (singleFile.isEmpty()) return;
-        foundFiles << singleFile;
+    // Phase 5: 排序
+    std::sort(foundFiles.begin(), foundFiles.end(), compareByPriority);
+
+    // Phase 6: 断点续传检查
+    int startIndex = loadProgressFile(dir);
+    if (startIndex > 0 && startIndex < foundFiles.size()) {
+        QMessageBox::StandardButton resume = QMessageBox::question(this,
+            "检测到上次进度",
+            QString("上次修复进度: %1/%2\n是否从中断处继续？")
+                .arg(startIndex).arg(foundFiles.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        if (resume != QMessageBox::Yes) startIndex = 0;
+    } else {
+        startIndex = 0;
     }
 
-    // 排序：GPT 优先，boot 相关次之，system/vendor最后
-    auto sortKey = [](const QString &f) {
-        QString n = QFileInfo(f).completeBaseName().toLower();
-        if (n.contains("gpt") || n.contains("partition")) return 0;
-        if (n.contains("sbl") || n.contains("xbl") || n.contains("preloader")) return 1;
-        if (n.contains("abl") || n.contains("lk")) return 2;
-        if (n.contains("tz") || n.contains("hyp") || n.contains("keymaster")) return 3;
-        if (n.contains("boot")) return 4;
-        if (n.contains("vbmeta") || n.contains("dtbo") || n.contains("dpm")) return 5;
-        return 6;
-    };
-    std::sort(foundFiles.begin(), foundFiles.end(),
-        [&](const QString &a, const QString &b) { return sortKey(a) < sortKey(b); });
-
-    // 显示将要写入的文件列表
+    // 显示文件列表并确认
     QString fileList;
-    for (const auto &f : foundFiles)
-        fileList += "  " + QFileInfo(f).fileName() + "\n";
+    for (int i = startIndex; i < foundFiles.size(); i++)
+        fileList += "  " + QFileInfo(foundFiles[i]).fileName() + "\n";
 
     QString modeStr = edlMode ? "EDL Firehose" : "MTK DA";
     QMessageBox::StandardButton confirm = QMessageBox::warning(this,
@@ -1315,54 +1635,101 @@ void FlashPanel::onBrickRepairClicked()
         QString("即将通过 %1 按序写入以下 %2 个文件：\n\n%3\n"
                 "⚠️ 写入错误的分区镜像将导致设备永久损坏！\n"
                 "请确保文件来源可靠（官方线刷包）。\n\n是否继续？")
-            .arg(modeStr).arg(foundFiles.size()).arg(fileList),
+            .arg(modeStr).arg(foundFiles.size() - startIndex).arg(fileList),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-
     if (confirm != QMessageBox::Yes) return;
 
-    // 执行修复
+    // Phase 7: 执行写入
     m_brickRepairBtn->setEnabled(false);
     m_progressBar->setVisible(true);
     m_progressBar->setValue(0);
-    emit outputMessage("======== 死砖修复开始 ========", false);
+
+    // 预收集分区大小用于校验
+    QMap<QString, quint64> partSizeMap;
+    if (edlMode) {
+        auto parts = m_flashTool->edlListPartitions();
+        for (const auto &p : parts)
+            partSizeMap[p.name.toLower()] = p.numSectors * p.sectorSize;
+    } else {
+        auto parts = m_flashTool->mtkListPartitions();
+        for (const auto &p : parts)
+            partSizeMap[p.name.toLower()] = p.length;
+    }
 
     int total = foundFiles.size();
     bool allOk = true;
 
-    for (int i = 0; i < total; i++) {
+    for (int i = startIndex; i < total; i++) {
         const auto &filePath = foundFiles[i];
+        QString fileName = QFileInfo(filePath).fileName();
         QString partBase = QFileInfo(filePath).completeBaseName();
-        emit outputMessage(QString("[%1/%2] 写入 %3...")
-            .arg(i + 1).arg(total).arg(QFileInfo(filePath).fileName()), false);
+
+        emit outputMessage(QString("[%1/%2] %3...").arg(i + 1).arg(total).arg(fileName), false);
         m_progressBar->setValue(i * 100 / total);
         QCoreApplication::processEvents();
 
-        bool ok = false;
-        if (edlMode) {
-            auto parts = m_flashTool->edlListPartitions();
-            for (const auto &p : parts) {
-                if (partBase.toLower().contains(p.name.toLower()) ||
-                    p.name.toLower().contains(partBase.toLower())) {
-                    ok = m_flashTool->edlWritePartition(p, filePath);
-                    break;
-                }
-            }
-            if (!ok) {
-                emit outputMessage(QString("EDL 未能匹配分区 %1").arg(partBase), true);
-                allOk = false;
-            }
-        } else if (mtkMode) {
-            ok = m_flashTool->mtkWritePartition(partBase, filePath);
-            if (!ok) {
-                emit outputMessage(QString("MTK 写入 %1 失败").arg(partBase), true);
-                allOk = false;
-            }
+        // 镜像大小校验
+        QString pLower = partBase.toLower();
+        pLower.remove(QRegularExpression("_(a|b)$"));
+        if (!checkImageSize(filePath, partSizeMap.value(pLower, 0))) {
+            emit outputMessage(QString("  ⚠ %1 镜像超出分区容量，跳过").arg(fileName), true);
+            allOk = false;
+            saveProgressFile(dir, i + 1);
+            continue;
         }
-        if (ok)
-            emit outputMessage(QString("  ✓ %1 写入成功").arg(QFileInfo(filePath).fileName()), false);
+
+        // 稀疏镜像检测
+        if (detectSparseImage(filePath))
+            emit outputMessage("  ℹ 稀疏镜像格式", false);
+
+        // 写入（带重试）
+        bool ok = writePartitionWithRetry(partBase, [&]() {
+            if (edlMode) {
+                auto parts = m_flashTool->edlListPartitions();
+                QString pLower2 = partBase.toLower();
+                // Try exact match first, then partial
+                for (const auto &p : parts) {
+                    QString pl = p.name.toLower();
+                    QString pClean = pl;
+                    pClean.remove(QRegularExpression("_(a|b)$"));
+                    if (pClean == pLower2 || pl == pLower2 ||
+                        pLower2.contains(pl) || pl.contains(pLower2)) {
+                        return m_flashTool->edlWritePartition(p, filePath);
+                    }
+                }
+                emit outputMessage(QString("  EDL 未能匹配分区 %1").arg(partBase), true);
+                return false;
+            } else {
+                return m_flashTool->mtkWritePartition(partBase, filePath);
+            }
+        });
+
+        if (ok) {
+            saveProgressFile(dir, i + 1);
+        } else {
+            allOk = false;
+            saveProgressFile(dir, i);
+            emit outputMessage(QString("  ✗ %1 写入失败").arg(fileName), true);
+            QMessageBox::critical(this, "写入失败",
+                QString("分区 %1 写入失败。\n\n"
+                    "可能的原因：\n"
+                    "  1. 镜像与分区不匹配（名称/大小）\n"
+                    "  2. EDL/MTK 连接已断开\n"
+                    "  3. 分区受保护或不存在\n\n"
+                    "修复问题后可再次点击「死砖修复」继续。")
+                .arg(fileName));
+            break;
+        }
     }
 
     m_progressBar->setValue(100);
+
+    // Phase 8: 清理
+    if (allOk) {
+        QString safe = QFileInfo(dir).fileName();
+        safe.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+        QFile::remove(QDir::tempPath() + "/brick_progress_" + safe + ".txt");
+    }
 
     if (allOk) {
         emit outputMessage("======== 死砖修复完成 ========", false);
@@ -1386,6 +1753,10 @@ void FlashPanel::onBrickRepairClicked()
     } else {
         emit outputMessage("======== 修复部分失败，请检查日志 ========", true);
         QMessageBox::warning(this, "修复未完成",
-            "部分分区写入失败，请查看输出日志获取详细信息。");
+            "部分分区写入失败。\n\n"
+            "已保存当前进度，下次点击「死砖修复」可选择继续。\n"
+            "请查看输出日志获取详细信息。");
     }
+
+    m_brickRepairBtn->setEnabled(true);
 }

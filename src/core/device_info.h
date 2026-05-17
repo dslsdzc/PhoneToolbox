@@ -48,6 +48,9 @@ public:
     // 系统信息
     bool isRooted;
     QString selinuxStatus;
+    QString securityPatch;      // ro.build.version.security_patch, e.g. "2025-05-01"
+    QString sdkVersion;         // ro.build.version.sdk, e.g. "34"
+    QString buildFingerprint;   // ro.build.fingerprint
     
     int mode;  // 使用int而不是enum，避免包含问题
     

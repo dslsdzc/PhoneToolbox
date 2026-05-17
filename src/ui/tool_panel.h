@@ -17,6 +17,7 @@ public:
     
     void updateDeviceList(const QMap<QString, DeviceInfo> &devices);
     QString getSelectedDevice() const;
+    void selectToolByIndex(int index);
 
 signals:
     void deviceSelectionChanged(const QString &deviceId);

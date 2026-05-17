@@ -6,13 +6,15 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QLineEdit>
-#include <QCheckBox>
-#include <QPainter>
-#include <QMap>
 #include <QScrollArea>
 #include <QFrame>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFileDialog>
+#include <QDateTime>
+#include <QImage>
+#include <QPainter>
+#include <QPainterPath>
 #include <QCoreApplication>
 
 static const char *kCategories[] = {
@@ -24,8 +26,12 @@ static const int kCategoryCount = 7;
 SystemToolPanel::SystemToolPanel(QWidget *parent)
     : QWidget(parent)
     , m_asyncProc(nullptr)
+    , m_monitorProc(nullptr)
 {
     setupUI();
+    m_perfTimer = new QTimer(this);
+    m_perfTimer->setInterval(500);
+    connect(m_perfTimer, &QTimer::timeout, this, &SystemToolPanel::onPerformancePoll);
 }
 
 // ==================== 辅助方法 ====================
@@ -72,38 +78,6 @@ void SystemToolPanel::logAndRefresh(const QString &label, const QString &result)
     appendOutput(label + ": " + result, result.contains("Error"));
 }
 
-QIcon SystemToolPanel::generateAppIcon(QListWidgetItem *item)
-{
-    if (!item) return QIcon();
-    QString name = item->data(Qt::UserRole + 2).toString();
-    if (name.isEmpty()) name = item->data(Qt::UserRole).toString();
-
-    static const QColor colors[] = {
-        QColor("#e57373"), QColor("#f06292"), QColor("#ba68c8"),
-        QColor("#9575cd"), QColor("#7986cb"), QColor("#64b5f6"),
-        QColor("#4fc3f7"), QColor("#4dd0e1"), QColor("#4db6ac"),
-        QColor("#81c784"), QColor("#aed581"), QColor("#ffd54f"),
-        QColor("#ffb74d"), QColor("#ff8a65"), QColor("#a1887f"),
-    };
-    static const int colorCount = sizeof(colors) / sizeof(colors[0]);
-
-    const int sz = 36;
-    QPixmap pix(sz, sz);
-    pix.fill(Qt::transparent);
-    QPainter p(&pix);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setBrush(colors[qHash(name) % colorCount]);
-    p.setPen(Qt::NoPen);
-    p.drawRoundedRect(0, 0, sz, sz, 6, 6);
-    p.setPen(Qt::white);
-    QFont f = p.font();
-    f.setPixelSize(20);
-    f.setBold(true);
-    p.setFont(f);
-    p.drawText(QRect(0, 0, sz, sz), Qt::AlignCenter, name.left(1).toUpper());
-    p.end();
-    return QIcon(pix);
-}
 
 // ==================== setupUI ====================
 
@@ -171,12 +145,13 @@ void SystemToolPanel::setDeviceInfo(const DeviceInfo &info)
     for (auto *page : m_pages) {
         auto btns = page->findChildren<QPushButton*>();
         for (auto *b : btns) {
-            if (b != m_backBtn) b->setEnabled(enabled);
+            if (b != m_backBtn && b != m_perfToggleBtn) b->setEnabled(enabled);
         }
         auto lists = page->findChildren<QListWidget*>();
         for (auto *l : lists) l->setEnabled(enabled);
     }
     m_backBtn->setEnabled(true);
+    if (m_perfToggleBtn) m_perfToggleBtn->setEnabled(enabled);
 
     // Auto-fill app list on first switch
     if (enabled && m_appList && m_appList->count() == 0)
@@ -200,6 +175,34 @@ void SystemToolPanel::clearDeviceInfo()
             s->setText("");
     }
     if (m_appList) m_appList->clear();
+    if (m_perfTimer) m_perfTimer->stop();
+    stopMonitorProcess();
+    if (m_perfToggleBtn) { m_perfToggleBtn->setChecked(false); m_perfToggleBtn->setText("▶ 开始监控"); }
+    for (auto *chart : m_cpuCharts) {
+        m_cpuGrid->removeWidget(chart);
+        chart->deleteLater();
+    }
+    m_cpuCharts.clear();
+    m_cpuCoreCount = 0;
+
+    // Re-add single placeholder chart
+    auto *placeholder = new LiveChartWidget(m_perfPage);
+    placeholder->setTitle("CPU 频率");
+    placeholder->setUnit("MHz");
+    placeholder->setColor(QColor("#f38ba8"));
+    placeholder->setYRange(0, 3000);
+    placeholder->setMaxPoints(120);
+    placeholder->setMinimumHeight(120);
+    m_cpuGrid->addWidget(placeholder, 0, 0, 1, 4);
+    m_cpuCharts.append(placeholder);
+    m_cpuFullHistory.clear();
+    m_gpuFullHistory.clear();
+    m_tempFullHistory.clear();
+    m_memFullHistory.clear();
+    if (m_saveChartBtn) m_saveChartBtn->setEnabled(false);
+    if (m_gpuChart) m_gpuChart->clearData();
+    if (m_tempChart) m_tempChart->clearData();
+    if (m_memChart) m_memChart->clearData();
 }
 
 // ==================== 页面构建 ====================
@@ -239,30 +242,89 @@ QWidget *SystemToolPanel::createPage(int cat)
     switch (cat) {
     // ========== 0: 性能调优 ==========
     case 0: {
-        addSection("CPU 调频");
-        addBtn("CPU Governor", "查看/设置 CPU 调度策略 (performance/schedutil/interactive)")->setObjectName("cpuGov");
-        addBtn("CPU 频率上限", "调低/调高最高频率以省电/提性能")->setObjectName("cpuFreqMax");
-        m_cpuStatus = addStatus();
+        m_perfPage = page;
 
-        addSection("GPU 调频");
-        addBtn("GPU Governor", "查看/设置 GPU 调度策略")->setObjectName("gpuGov");
-        m_gpuStatus = addStatus();
+        // CPU core grid — initially one placeholder chart, splits on device connect
+        m_cpuGrid = new QGridLayout();
+        m_cpuGrid->setSpacing(4);
+        auto *placeholder = new LiveChartWidget(page);
+        placeholder->setTitle("CPU 频率");
+        placeholder->setUnit("MHz");
+        placeholder->setColor(QColor("#f38ba8"));
+        placeholder->setYRange(0, 3000);
+        placeholder->setMaxPoints(120);
+        placeholder->setMinimumHeight(120);
+        m_cpuGrid->addWidget(placeholder, 0, 0, 1, 4);
+        m_cpuCharts.append(placeholder);
+        lay->addLayout(m_cpuGrid, 1);
 
-        addSection("温控策略");
-        addBtn("温控配置", "查看/解除温控降频限制 (thermal-engine.conf)")->setObjectName("thermal");
-        m_thermalStatus = addStatus();
+        // GPU, Temp, Mem — bottom row (3 columns)
+        QHBoxLayout *bottomRow = new QHBoxLayout();
+        bottomRow->setSpacing(6);
 
-        addSection("内存与 I/O");
-        addBtn("内存优化", "调整 swappiness 及 LMK 杀进程阈值")->setObjectName("memory");
-        addBtn("I/O 调度", "查看/更改存储设备 I/O 调度算法")->setObjectName("ioSched");
-        m_memoryStatus = addStatus();
-        m_ioStatus = addStatus();
+        auto createChart = [&](const QString &title, const QString &unit,
+                                const QColor &color, double minY, double maxY) -> LiveChartWidget* {
+            auto *chart = new LiveChartWidget(page);
+            chart->setTitle(title);
+            chart->setUnit(unit);
+            chart->setColor(color);
+            chart->setYRange(minY, maxY);
+            chart->setMaxPoints(120);
+            chart->setMinimumHeight(110);
+            bottomRow->addWidget(chart, 1);
+            return chart;
+        };
 
-        lay->addStretch();
+        m_gpuChart = createChart("GPU 频率", "MHz", QColor("#a6e3a1"), 0, 1000);
+        m_tempChart = createChart("温度", "°C", QColor("#fab387"), 0, 100);
+        m_memChart  = createChart("内存使用率", "%", QColor("#89b4fa"), 0, 100);
+        lay->addLayout(bottomRow);
 
+        // Control row
+        QHBoxLayout *ctrlRow = new QHBoxLayout();
+        m_perfToggleBtn = new QPushButton("▶ 开始监控", page);
+        m_perfToggleBtn->setEnabled(false);
+        m_perfToggleBtn->setCheckable(true);
+        m_perfToggleBtn->setMinimumHeight(28);
+        ctrlRow->addWidget(m_perfToggleBtn);
+
+        auto *cpuGovBtn = new QPushButton("CPU Governor", page);
+        cpuGovBtn->setObjectName("cpuGov");
+        cpuGovBtn->setEnabled(false);
+        cpuGovBtn->setToolTip("查看/设置 CPU 调度策略");
+        cpuGovBtn->setMinimumHeight(28);
+        ctrlRow->addWidget(cpuGovBtn);
+
+        auto *memBtn = new QPushButton("内存优化", page);
+        memBtn->setObjectName("memory");
+        memBtn->setEnabled(false);
+        memBtn->setToolTip("调整 swappiness");
+        memBtn->setMinimumHeight(28);
+        ctrlRow->addWidget(memBtn);
+
+        auto *ioBtn = new QPushButton("I/O 调度", page);
+        ioBtn->setObjectName("ioSched");
+        ioBtn->setEnabled(false);
+        ioBtn->setToolTip("更改 I/O 调度算法");
+        ioBtn->setMinimumHeight(28);
+        ctrlRow->addWidget(ioBtn);
+
+        ctrlRow->addStretch();
+        m_saveChartBtn = new QPushButton("保存截图", page);
+        m_saveChartBtn->setToolTip("保存完整监控历史截图");
+        m_saveChartBtn->setMinimumHeight(28);
+        m_saveChartBtn->setEnabled(false);
+        ctrlRow->addWidget(m_saveChartBtn);
+        lay->addLayout(ctrlRow);
+
+        // Status label
+        m_perfStatus = new QLabel("", page);
+        m_perfStatus->setStyleSheet("color:#6c7086;font-size:10px;");
+        lay->addWidget(m_perfStatus);
+
+        connect(m_perfToggleBtn, &QPushButton::clicked, this, &SystemToolPanel::onPerfTimerToggle);
+        connect(m_saveChartBtn, &QPushButton::clicked, this, &SystemToolPanel::onSaveChart);
         connect(page->findChild<QPushButton*>("cpuGov"), &QPushButton::clicked, this, &SystemToolPanel::onCpuGovernor);
-        connect(page->findChild<QPushButton*>("gpuGov"), &QPushButton::clicked, this, &SystemToolPanel::onGpuGovernor);
-        connect(page->findChild<QPushButton*>("thermal"), &QPushButton::clicked, this, &SystemToolPanel::onThermalControl);
         connect(page->findChild<QPushButton*>("memory"), &QPushButton::clicked, this, &SystemToolPanel::onMemoryOptimize);
         connect(page->findChild<QPushButton*>("ioSched"), &QPushButton::clicked, this, &SystemToolPanel::onIOScheduler);
         break;
@@ -344,9 +406,6 @@ QWidget *SystemToolPanel::createPage(int cat)
         lay->addWidget(m_searchBox);
 
         // Icon toggle
-        m_showIconsCheck = new QCheckBox("显示图标", page);
-        m_showIconsCheck->setEnabled(false);
-        lay->addWidget(m_showIconsCheck);
 
         QHBoxLayout *filterRow = new QHBoxLayout();
         auto *refreshBtn = new QPushButton("刷新列表", page);
@@ -401,15 +460,7 @@ QWidget *SystemToolPanel::createPage(int cat)
             }
         });
 
-        // Icon toggle
-        connect(m_showIconsCheck, &QCheckBox::toggled, this, [this](bool show) {
-            for (int i = 0; i < m_appList->count(); i++) {
-                auto *item = m_appList->item(i);
-                item->setIcon(show ? generateAppIcon(item) : QIcon());
-            }
-        });
-
-        connect(refreshBtn, &QPushButton::clicked, this, &SystemToolPanel::onAppRefreshList);
+connect(refreshBtn, &QPushButton::clicked, this, &SystemToolPanel::onAppRefreshList);
         connect(filterAllBtn, &QPushButton::clicked, this, [this](){ m_appFilter=0; onAppRefreshList(); });
         connect(filter3rdBtn, &QPushButton::clicked, this, [this](){ m_appFilter=1; onAppRefreshList(); });
         connect(filterSysBtn, &QPushButton::clicked, this, [this](){ m_appFilter=2; onAppRefreshList(); });
@@ -474,8 +525,347 @@ QWidget *SystemToolPanel::createPage(int cat)
 }
 
 // =====================================================================
-//  1. 性能调优
+// ==================== 持久 ADB Shell 监控进程 ====================
+
+void SystemToolPanel::startMonitorProcess()
+{
+    QString adb = AdbEmbedded::instance().getAdbPath();
+    if (adb.isEmpty() || m_deviceInfo.serialNumber.isEmpty()) {
+        appendOutput("无法启动监控: ADB 或设备未就绪", true);
+        return;
+    }
+    if (m_monitorProc) { m_monitorProc->kill(); m_monitorProc->deleteLater(); }
+    m_monitorProc = new QProcess(this);
+    m_monitorProc->setProgram(adb);
+    m_monitorProc->setArguments({"-s", m_deviceInfo.serialNumber, "shell"});
+    m_monitorProc->start();
+    if (!m_monitorProc->waitForStarted(5000)) {
+        appendOutput("监控进程启动失败", true);
+        m_monitorProc->deleteLater();
+        m_monitorProc = nullptr;
+        return;
+    }
+    // Flush initial shell banner/prompt
+    m_monitorProc->waitForReadyRead(300);
+    m_monitorProc->readAllStandardOutput();
+}
+
+void SystemToolPanel::stopMonitorProcess()
+{
+    if (m_monitorProc) {
+        m_monitorProc->kill();
+        m_monitorProc->deleteLater();
+        m_monitorProc = nullptr;
+    }
+}
+
+QString SystemToolPanel::monitorExec(const QString &cmd, int timeoutMs)
+{
+    if (!m_monitorProc || m_monitorProc->state() != QProcess::Running)
+        return "Error: monitor process not running";
+
+    // Discard stale output
+    m_monitorProc->readAllStandardOutput();
+
+    // Write command + end marker
+    QByteArray input = cmd.toUtf8();
+    if (!input.endsWith('\n')) input += '\n';
+    input += "echo __MON_END__\n";
+    m_monitorProc->write(input);
+
+    // Read until end marker or timeout
+    QString output;
+    auto deadline = QDateTime::currentDateTime().addMSecs(timeoutMs);
+    while (QDateTime::currentDateTime() < deadline) {
+        if (m_monitorProc->waitForReadyRead(qMin(200, deadline.msecsTo(QDateTime::currentDateTime())))) {
+            output += QString::fromUtf8(m_monitorProc->readAllStandardOutput());
+            if (output.contains("__MON_END__")) {
+                return output.section("__MON_END__", 0, 0).trimmed();
+            }
+        } else {
+            break;
+        }
+    }
+
+    appendOutput("监控进程响应超时，正在重启...", true);
+    stopMonitorProcess();
+    startMonitorProcess();
+    return "Error: timeout";
+}
+
+//  1. 性能调优 — 实时监控
 // =====================================================================
+
+void SystemToolPanel::onPerfTimerToggle()
+{
+    if (!m_perfTimer) return;
+    if (m_perfTimer->isActive()) {
+        m_perfTimer->stop();
+        m_perfToggleBtn->setText("▶ 开始监控");
+        if (m_perfStatus) m_perfStatus->setText("监控已暂停");
+        stopMonitorProcess();
+    } else {
+        startMonitorProcess();
+        if (!m_monitorProc) return;
+        m_perfTimer->start();
+        m_perfToggleBtn->setText("⏸ 暂停");
+        onPerformancePoll();
+        if (m_perfStatus) m_perfStatus->setText("监控运行中 (0.5s 间隔)");
+    }
+}
+
+void SystemToolPanel::onPerformancePoll()
+{
+    if (m_polling) return;
+    m_polling = true;
+
+    if (m_deviceInfo.serialNumber.isEmpty()) {
+        m_perfTimer->stop();
+        m_perfToggleBtn->setText("▶ 开始监控");
+        m_polling = false;
+        return;
+    }
+
+    // Detect core count and split into per-core charts on first poll
+    if (m_cpuCoreCount == 0) {
+        QString countResult = monitorExec(
+            "ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l", 5000);
+        if (!countResult.isEmpty() && !countResult.contains("Error"))
+            m_cpuCoreCount = countResult.trimmed().toInt();
+        if (m_cpuCoreCount <= 0 || m_cpuCoreCount > 64)
+            m_cpuCoreCount = 1;
+
+        if (m_cpuCoreCount > 1) {
+            // Replace placeholder chart with per-core charts
+            if (!m_cpuCharts.isEmpty()) {
+                m_cpuGrid->removeWidget(m_cpuCharts[0]);
+                m_cpuCharts[0]->deleteLater();
+                m_cpuCharts.clear();
+            }
+
+            static const QColor kCpuColors[] = {
+                QColor("#f38ba8"), QColor("#a6e3a1"), QColor("#fab387"),
+                QColor("#89b4fa"), QColor("#cba6f7"), QColor("#94e2d5"),
+                QColor("#f9e2af"), QColor("#74c7ec"), QColor("#eba0ac"),
+                QColor("#b4befe"), QColor("#89dceb"), QColor("#a6adc8"),
+            };
+            const int colorCount = sizeof(kCpuColors) / sizeof(kCpuColors[0]);
+            const int cols = 4;
+
+            m_cpuFullHistory.clear();
+            m_cpuFullHistory.resize(m_cpuCoreCount);
+            m_gpuFullHistory.clear();
+            m_tempFullHistory.clear();
+            m_memFullHistory.clear();
+
+            for (int i = 0; i < m_cpuCoreCount; i++) {
+                auto *chart = new LiveChartWidget(m_perfPage);
+                chart->setTitle(QString("CPU%1").arg(i));
+                chart->setUnit("MHz");
+                chart->setColor(kCpuColors[i % colorCount]);
+                chart->setYRange(0, 3000);
+                chart->setMaxPoints(120);
+                chart->setMinimumHeight(120);
+                m_cpuGrid->addWidget(chart, i / cols, i % cols);
+                m_cpuCharts.append(chart);
+            }
+        }
+
+        appendOutput(QString("检测到 %1 个 CPU 核心，已初始化监控").arg(m_cpuCoreCount), false);
+
+        // Try to force GPU clock on (Qualcomm) — no-op if path doesn't exist
+        monitorExec("echo 1 > /sys/class/kgsl/kgsl-3d0/force_clk_on 2>/dev/null; echo ok", 2000);
+
+        // Detect GPU type and max freq for proper Y range
+        QString gpuDetect = monitorExec(
+            "echo 'name:'; "
+            "cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null || "
+            "cat /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies 2>/dev/null | head -1 || "
+            "cat /sys/class/misc/mali0/device/gpu_type 2>/dev/null || "
+            "cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null | head -1 || "
+            "echo 'GPU'; "
+            "echo '---max:'; "
+            "cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq 2>/dev/null || "
+            "cat /sys/class/kgsl/kgsl-3d0/max_gpuclk 2>/dev/null || "
+            "cat /sys/class/misc/mali0/device/devfreq/max_freq 2>/dev/null || "
+            "cat /sys/kernel/gpu/gpu_max_freq 2>/dev/null || "
+            "cat /sys/class/devfreq/*gpu*/max_freq 2>/dev/null | head -1 || echo 0"
+        , 5000);
+        QStringList gpuParts = gpuDetect.split("---max:");
+        QString gpuName = gpuParts.value(0).remove("name:").trimmed();
+        double gpuMaxMHz = gpuParts.value(1).trimmed().toDouble() / 1000.0;
+        if (!gpuName.isEmpty() && m_gpuChart && !gpuName.contains("Error")) {
+            if (!gpuName.startsWith("GPU"))
+                m_gpuChart->setTitle(gpuName);
+            appendOutput(QString("检测到 GPU: %1").arg(gpuName), false);
+        }
+        if (gpuMaxMHz > 100 && m_gpuChart)
+            m_gpuChart->setYRange(0, gpuMaxMHz);
+
+        // Detect which GPU freq path works — cache the FULL path for subsequent polls
+        m_gpuFreqPath = monitorExec(
+            "r=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null) && echo \"/sys/class/kgsl/kgsl-3d0/gpuclk:$r\" && exit 0; "
+            "r=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/cur_freq 2>/dev/null) && echo \"/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq:$r\" && exit 0; "
+            "r=$(cat /sys/class/misc/mali0/device/devfreq/cur_freq 2>/dev/null) && echo \"/sys/class/misc/mali0/device/devfreq/cur_freq:$r\" && exit 0; "
+            "r=$(cat /sys/devices/platform/13000000.mali/devfreq/cur_freq 2>/dev/null) && echo \"/sys/devices/platform/13000000.mali/devfreq/cur_freq:$r\" && exit 0; "
+            "r=$(cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null) && echo \"/sys/kernel/gpu/gpu_freq_table:$r\" && exit 0; "
+            "r=$(cat /sys/devices/platform/*gpu*/devfreq/cur_freq 2>/dev/null) && echo \"/sys/devices/platform/*gpu*/devfreq/cur_freq:$r\" && exit 0; "
+            "r=$(cat /sys/class/devfreq/*gpu*/cur_freq 2>/dev/null) && echo \"/sys/class/devfreq/*gpu*/cur_freq:$r\" && exit 0; "
+            "r=$(cat /sys/class/devfreq/*/cur_freq 2>/dev/null | head -1) && echo \"/sys/class/devfreq/*/cur_freq:$r\" && exit 0; "
+            "r=$(awk -F'[: ]' '/freq=/{print $2; exit}' /proc/gpufreq/gpufreq_opp_dump 2>/dev/null) && echo \"/proc/gpufreq/gpufreq_opp_dump:$r\" && exit 0; "
+            "echo '/none:0'"
+        , 5000);
+        // m_gpuFreqPath is "fullpath:value" — keep just the path
+        {
+            int colon = m_gpuFreqPath.indexOf(':');
+            if (colon > 0) {
+                QString path = m_gpuFreqPath.left(colon);
+                if (path != "/none") {
+                    appendOutput(QString("GPU 路径已缓存: %1").arg(path), false);
+                    m_gpuFreqPath = path;
+                } else {
+                    m_gpuFreqPath.clear();
+                }
+            } else {
+                m_gpuFreqPath.clear();
+            }
+        }
+
+        // Enumerate thermal zones and pick the best match
+        QString zoneRaw = monitorExec(
+            "for z in /sys/class/thermal/thermal_zone*; do "
+            "idx=${z#/sys/class/thermal/thermal_zone}; "
+            "echo \"$idx:$(cat $z/type 2>/dev/null):$(cat $z/temp 2>/dev/null)\"; done"
+        , 5000);
+        int bestScore = -1, bestZone = -1;
+        QString bestName;
+        for (const auto &line : zoneRaw.split('\n', Qt::SkipEmptyParts)) {
+            QStringList parts = line.split(':');
+            if (parts.size() < 3) continue;
+            QString type = parts[1].toLower();
+            int score = 0;
+            if (type.contains("cpu") || type.contains("tsens") || type.contains("ap") || type.contains("soc"))
+                score = 10;
+            else if (type.contains("bat") || type.contains("bms") || type.contains("charger"))
+                score = 8;
+            else if (type.contains("board") || type.contains("skin") || type.contains("case") || type.contains("back") || type.contains("xo_therm"))
+                score = 5;
+            else if (type.contains("gpu") || type.contains("gpuss") || type.contains("kgsl"))
+                score = 3;
+            if (score > bestScore) { bestScore = score; bestZone = parts[0].toInt(); bestName = parts[1]; }
+        }
+        m_tempZoneIndex = bestZone;
+        if (m_tempChart) {
+            if (bestScore >= 0) {
+                m_tempChart->setTitle(bestName);
+                m_tempChart->setYRange(0, 100);
+                m_tempChart->show();
+                appendOutput(QString("温度传感器: %1 (zone%2)").arg(bestName).arg(bestZone), false);
+            } else {
+                m_tempChart->setTitle("温度 N/A");
+                m_tempChart->setVisible(false);
+                appendOutput("未检测到温度传感器，已隐藏温度图表", false);
+            }
+        }
+
+        // Init memory chart as multi-series (RAM + Swap)
+        if (m_memChart) {
+            m_memChart->clearSeries();
+            m_memChart->addSeries("内存", QColor("#89b4fa"));
+            m_memChart->addSeries("Swap", QColor("#cba6f7"));
+        }
+        m_swapFullHistory.clear();
+    }
+
+    // Build per-core freq read commands
+    QString cpuCmd;
+    for (int i = 0; i < m_cpuCoreCount; i++) {
+        cpuCmd += QString(
+            "f_cur=$(cat /sys/devices/system/cpu/cpu%1/cpufreq/cpuinfo_cur_freq 2>/dev/null || "
+            "cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_cur_freq 2>/dev/null || echo 0); "
+            "f_max=$(cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_max_freq 2>/dev/null || echo 0); "
+            "echo \"$f_cur $f_max\"; "
+        ).arg(i);
+    }
+
+    // Batch collect all metrics in one shell call
+    // Use cached GPU path if available, otherwise full fallback chain
+    QString gpuSection;
+    if (!m_gpuFreqPath.isEmpty()) {
+        gpuSection = QString("gpu_freq=$(cat %1 2>/dev/null || echo 0); echo \"$gpu_freq\"; ")
+            .arg(m_gpuFreqPath);
+    } else {
+        gpuSection =
+            "gpu_freq=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null || "
+            "cat /sys/class/kgsl/kgsl-3d0/devfreq/cur_freq 2>/dev/null || "
+            "cat /sys/class/misc/mali0/device/devfreq/cur_freq 2>/dev/null || "
+            "cat /sys/devices/platform/13000000.mali/devfreq/cur_freq 2>/dev/null || "
+            "cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null | head -1 || "
+            "cat /sys/devices/platform/*gpu*/devfreq/cur_freq 2>/dev/null | head -1 || "
+            "cat /sys/class/devfreq/*gpu*/cur_freq 2>/dev/null | head -1 || "
+            "cat /sys/class/devfreq/*/cur_freq 2>/dev/null | head -1 || "
+            "awk -F'[: ]' '/freq=/{print $2; exit}' /proc/gpufreq/gpufreq_opp_dump 2>/dev/null || echo 0); "
+            "echo \"$gpu_freq\"; ";
+    }
+    QString cmd = cpuCmd + "echo '---'; " + gpuSection
+        + "echo '---'; "
+        + (m_tempZoneIndex >= 0
+            ? QString("cat /sys/class/thermal/thermal_zone%1/temp 2>/dev/null || ").arg(m_tempZoneIndex)
+            : "")
+        + "echo 0; "
+        "echo '---'; "
+        "awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} /SwapTotal/{s=$2} /SwapFree/{f=$2} "
+        "END{printf \"%.1f %.1f\", (1-a/t)*100, (s>0?(1-f/s)*100:0)}' "
+        "/proc/meminfo 2>/dev/null || echo \"0 0\"; "
+        "echo '---'; "
+        "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ''";
+
+    QString raw = monitorExec(cmd, 5000);
+    if (raw.isEmpty() || raw.contains("Error")) { m_polling = false; return; }
+
+    QStringList parts = raw.split("---");
+    if (parts.size() < 5) { m_polling = false; return; }
+
+    // CPU freqs — each line is "cur_khz max_khz"
+    QString cpuSection = parts[0].trimmed();
+    QStringList freqLines = cpuSection.split('\n', Qt::SkipEmptyParts);
+    int count = qMin(freqLines.size(), m_cpuCoreCount);
+    for (int i = 0; i < count; i++) {
+        QStringList vals = freqLines[i].trimmed().split(' ', Qt::SkipEmptyParts);
+        double curMHz = vals.value(0).toDouble() / 1000.0;
+        double maxMHz = vals.value(1).toDouble() / 1000.0;
+        if (i < m_cpuCharts.size()) {
+            if (maxMHz > 0.0)
+                m_cpuCharts[i]->setYRange(0.0, maxMHz);
+            m_cpuCharts[i]->addValue(curMHz);
+        }
+        // Record full history
+        if (i < m_cpuFullHistory.size())
+            m_cpuFullHistory[i].append(curMHz);
+    }
+
+    // GPU, Temp, Mem (+Swap)
+    double gpuFreq = parts[1].trimmed().toDouble() / 1000.0;
+    double temp    = parts[2].trimmed().toDouble() / 1000.0;
+    QStringList memParts = parts[3].trimmed().split(' ', Qt::SkipEmptyParts);
+    double memPct  = memParts.value(0).toDouble();
+    double swapPct = memParts.value(1).toDouble();
+    QString gov    = parts[4].trimmed();
+
+    m_gpuChart->addValue(gpuFreq);
+    m_tempChart->addValue(temp);
+    m_memChart->addDataPoint(0, memPct);
+    m_memChart->addDataPoint(1, swapPct);
+    m_gpuFullHistory.append(gpuFreq);
+    m_tempFullHistory.append(temp);
+    m_memFullHistory.append(memPct);
+    m_swapFullHistory.append(swapPct);
+
+    if (m_perfStatus && !gov.isEmpty())
+        m_perfStatus->setText(QString("Governor: %1").arg(gov));
+
+    m_polling = false;
+}
 
 void SystemToolPanel::onCpuGovernor()
 {
@@ -486,7 +876,7 @@ void SystemToolPanel::onCpuGovernor()
     auto parts = r.split("---");
     QString cur = parts.value(0).trimmed();
     QString avail = parts.value(1).trimmed();
-    m_cpuStatus->setText(QString("当前: %1  可用: %2").arg(cur, avail));
+    if (m_perfStatus) m_perfStatus->setText(QString("当前: %1  可用: %2").arg(cur, avail));
 
     bool ok = false;
     QString gov = QInputDialog::getItem(this, "CPU Governor", "选择调度策略:",
@@ -495,7 +885,6 @@ void SystemToolPanel::onCpuGovernor()
     adbShell(QString("su -c 'echo %1 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; "
                       "for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; "
                       "do echo %1 > $c 2>/dev/null; done; echo DONE'").arg(gov));
-    m_cpuStatus->setText(QString("CPU: %1").arg(gov));
     appendOutput(QString("CPU governor 已设为 %1").arg(gov), false);
 }
 
@@ -504,11 +893,10 @@ void SystemToolPanel::onGpuGovernor()
     QString r = adbShell("cat /sys/class/kgsl/kgsl-3d0/devfreq/available_governors 2>/dev/null || "
                          "cat /sys/class/kgsl/kgsl-3d0/governor 2>/dev/null || echo 'N/A'");
     if (r.contains("N/A")) {
-        // Try alternative paths
         r = adbShell("cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null && echo '---' && "
                      "cat /proc/gpufreq/gpufreq_opp_dump 2>/dev/null || echo 'GPU 路径不可用'");
     }
-    m_gpuStatus->setText("GPU: " + r);
+    if (m_perfStatus) m_perfStatus->setText("GPU: " + r);
     appendOutput("GPU 信息: " + r, r.contains("Error"));
 }
 
@@ -518,10 +906,10 @@ void SystemToolPanel::onThermalControl()
                          "/system/etc/thermal-engine-* 2>/dev/null || echo NOT_FOUND'");
     if (r.contains("NOT_FOUND")) {
         appendOutput("未找到温控配置文件", true);
-        m_thermalStatus->setText("未找到温控配置");
+        if (m_perfStatus) m_perfStatus->setText("未找到温控配置");
         return;
     }
-    m_thermalStatus->setText("温控文件:\n" + r);
+    if (m_perfStatus) m_perfStatus->setText("温控文件:\n" + r);
 
     QMessageBox::StandardButton ret = QMessageBox::warning(this, "温控配置",
         QString("找到温控配置:\n%1\n\n"
@@ -543,7 +931,7 @@ void SystemToolPanel::onMemoryOptimize()
     QString r = adbShell("su -c 'echo -n \"swappiness: \"; cat /proc/sys/vm/swappiness; "
                          "echo -n \"vfs_cache: \"; cat /proc/sys/vm/vfs_cache_pressure; "
                          "echo -n \"dirty_ratio: \"; cat /proc/sys/vm/dirty_ratio'");
-    m_memoryStatus->setText(r);
+    if (m_perfStatus) m_perfStatus->setText(r);
 
     QStringList opts = {"普通 (swappiness=60)", "性能 (swappiness=100)", "省电 (swappiness=10)", "自定义"};
     bool ok = false;
@@ -558,7 +946,6 @@ void SystemToolPanel::onMemoryOptimize()
         if (!ok) return;
     }
     adbShell(QString("su -c 'echo %1 > /proc/sys/vm/swappiness; echo DONE'").arg(val));
-    m_memoryStatus->setText(QString("swappiness=%1").arg(val));
     appendOutput(QString("swappiness 已设为 %1").arg(val), false);
 }
 
@@ -566,7 +953,7 @@ void SystemToolPanel::onIOScheduler()
 {
     QString r = adbShell("su -c 'cat /sys/block/mmcblk0/queue/scheduler 2>/dev/null || "
                          "cat /sys/block/sda/queue/scheduler 2>/dev/null || echo N/A'");
-    m_ioStatus->setText("I/O 调度: " + r);
+    if (m_perfStatus) m_perfStatus->setText("I/O 调度: " + r);
     if (r.contains("N/A")) { appendOutput("I/O 调度器信息不可用", true); return; }
 
     // Extract available schedulers from brackets
@@ -582,7 +969,6 @@ void SystemToolPanel::onIOScheduler()
     if (!ok) return;
     adbShell(QString("su -c 'echo %1 > /sys/block/mmcblk0/queue/scheduler 2>/dev/null; "
                      "echo %1 > /sys/block/sda/queue/scheduler 2>/dev/null; echo DONE'").arg(sched));
-    m_ioStatus->setText("I/O: " + sched);
     appendOutput(QString("I/O 调度器已设为 %1").arg(sched), false);
 }
 
@@ -755,7 +1141,7 @@ void SystemToolPanel::onAppRefreshList()
     m_appList->clear();
     appendOutput("正在获取应用列表...", false);
 
-    // Step 1: Get package list
+    // Step 1: Get package list (format: package:/path/apk=com.example.name)
     QString cmd;
     switch (m_appFilter) {
     case 1: cmd = "pm list packages -3 -f 2>/dev/null"; break;
@@ -769,31 +1155,7 @@ void SystemToolPanel::onAppRefreshList()
         return;
     }
 
-    // Step 2: Fetch display name mapping from dumpsys package
-    QMap<QString, QString> labelMap;
-    QString labelOutput = adbShell(
-        "dumpsys package 2>/dev/null | grep -E 'Package \\[|application-label:'");
-    if (!labelOutput.isEmpty() && !labelOutput.contains("Error")) {
-        QString currentPkg;
-        const auto &labelLines = labelOutput.split('\n', Qt::SkipEmptyParts);
-        for (const auto &line : labelLines) {
-            if (line.contains("Package [")) {
-                int start = line.indexOf('[');
-                int end = line.indexOf(']', start);
-                if (start >= 0 && end > start)
-                    currentPkg = line.mid(start + 1, end - start - 1);
-            } else if (line.contains("application-label:") && !currentPkg.isEmpty()) {
-                int start = line.indexOf('\'');
-                if (start >= 0) {
-                    int end = line.indexOf('\'', start + 1);
-                    if (end > start)
-                        labelMap[currentPkg] = line.mid(start + 1, end - start - 1);
-                }
-            }
-        }
-    }
-
-    // Step 3: Populate list with display names
+    // Step 2: Populate list with package names
     QStringList lines = r.split('\n', Qt::SkipEmptyParts);
     int count = 0;
     for (const auto &line : lines) {
@@ -802,17 +1164,15 @@ void SystemToolPanel::onAppRefreshList()
         if (pkg.isEmpty()) continue;
         QString apkPath = line.section(':', 1).section('=', 0, 0).trimmed();
 
-        QString displayName = labelMap.value(pkg, pkg);
-
-        auto *item = new QListWidgetItem(displayName, m_appList);
+        auto *item = new QListWidgetItem(pkg, m_appList);
         item->setData(Qt::UserRole, pkg);
         item->setData(Qt::UserRole + 1, apkPath);
-        item->setData(Qt::UserRole + 2, displayName);
-        item->setToolTip(QString("%1 (%2)").arg(displayName, pkg));
+        item->setData(Qt::UserRole + 2, pkg);
+        item->setToolTip(pkg);
         count++;
     }
 
-    // Step 4: Re-apply search filter and icon state
+    // Step 4: Re-apply search filter
     if (m_searchBox && !m_searchBox->text().isEmpty()) {
         QString text = m_searchBox->text();
         for (int i = 0; i < m_appList->count(); i++) {
@@ -821,10 +1181,6 @@ void SystemToolPanel::onAppRefreshList()
                          item->data(Qt::UserRole + 2).toString().contains(text, Qt::CaseInsensitive);
             item->setHidden(!match);
         }
-    }
-    if (m_showIconsCheck && m_showIconsCheck->isChecked()) {
-        for (int i = 0; i < m_appList->count(); i++)
-            m_appList->item(i)->setIcon(generateAppIcon(m_appList->item(i)));
     }
 
     m_appStatus->setText(QString("共 %1 个应用").arg(count));
@@ -1087,4 +1443,214 @@ void SystemToolPanel::onShizukuStatus()
                          "ps -A | grep -i shizuku 2>/dev/null || echo NOT_FOUND");
     m_shizukuStatus->setText(r.contains("NOT_FOUND") ? "Shizuku: 未运行" : "Shizuku: 检测到");
     appendOutput("Shizuku 状态: " + r, r.contains("NOT_FOUND"));
+}
+
+// =====================================================================
+//  Save Chart — 渲染完整历史数据为 PNG
+// =====================================================================
+
+static void drawHistoryStrip(QPainter &p, const QRect &r,
+                             const QVector<double> &data,
+                             const QString &title, const QString &unit,
+                             const QColor &color,
+                             double minY, double maxY,
+                             bool overlay = false)
+{
+    if (data.isEmpty()) return;
+
+    const int mL = 80, mR = 120, mT = 4, mB = 4;
+    QRect chart(r.x() + mL, r.y() + mT, r.width() - mL - mR, r.height() - mT - mB);
+    double yRange = maxY - minY;
+    if (yRange <= 0) yRange = 1;
+
+    if (!overlay) {
+        // Background
+        p.save();
+        p.setBrush(QColor("#181825"));
+        p.setPen(QPen(QColor("#313244"), 1));
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4);
+        p.restore();
+
+        // Title
+        p.save();
+        QFont tf = p.font(); tf.setPixelSize(11); tf.setBold(true);
+        p.setFont(tf);
+        p.setPen(QColor("#cdd6f4"));
+        p.drawText(r.x() + 4, r.y() + 2, mL - 8, 20, Qt::AlignLeft | Qt::AlignBottom,
+                   title + (unit.isEmpty() ? "" : " (" + unit + ")"));
+        p.restore();
+
+        // Y-axis labels
+        p.save();
+        QFont af = p.font(); af.setPixelSize(8);
+        p.setFont(af);
+        p.setPen(QColor("#6c7086"));
+        for (int i = 0; i <= 4; i++) {
+            int y = chart.top() + chart.height() * i / 4;
+            double val = maxY - (maxY - minY) * i / 4;
+            p.drawText(r.x() + 4, y - 5, mL - 12, 10, Qt::AlignRight | Qt::AlignVCenter,
+                       QString::number(val, 'f', 1));
+        }
+        p.restore();
+
+        // Grid
+        p.save();
+        p.setPen(QPen(QColor("#313244"), 1));
+        for (int i = 0; i <= 4; i++) {
+            int y = chart.top() + chart.height() * i / 4;
+            p.drawLine(chart.left(), y, chart.right(), y);
+        }
+        p.restore();
+    }
+
+    // Line
+    p.save();
+    p.setPen(QPen(color, overlay ? 1.0 : 1.5));
+    int n = data.size();
+    double stepX = n > 1 ? static_cast<double>(chart.width()) / (n - 1) : chart.width();
+    QPainterPath path;
+    path.moveTo(chart.left(), chart.bottom() - (data[0] - minY) / yRange * chart.height());
+    for (int i = 1; i < n; i++) {
+        double x = chart.left() + i * stepX;
+        double y = qBound(static_cast<double>(chart.top()),
+                          chart.bottom() - (data[i] - minY) / yRange * chart.height(),
+                          static_cast<double>(chart.bottom()));
+        path.lineTo(x, y);
+    }
+    p.drawPath(path);
+    p.restore();
+
+    if (!overlay) {
+        // Stats
+        p.save();
+        QFont sf = p.font(); sf.setPixelSize(10);
+        p.setFont(sf);
+        p.setPen(QColor("#a6adc8"));
+        double sum = 0, mn = data[0], mx = data[0];
+        for (double v : data) { sum += v; if (v < mn) mn = v; if (v > mx) mx = v; }
+        double avg = sum / n;
+        int sx = r.right() - mR + 10, sy = r.top() + 10;
+        p.drawText(sx, sy, mR - 14, 16, Qt::AlignLeft, QString("最低: %1").arg(mn, 0, 'f', 1));
+        p.drawText(sx, sy + 18, mR - 14, 16, Qt::AlignLeft, QString("平均: %1").arg(avg, 0, 'f', 1));
+        p.drawText(sx, sy + 36, mR - 14, 16, Qt::AlignLeft, QString("最高: %1").arg(mx, 0, 'f', 1));
+        p.restore();
+    }
+}
+
+void SystemToolPanel::onSaveChart()
+{
+    // Check if any data exists
+    bool hasData = false;
+    for (const auto &h : m_cpuFullHistory) {
+        if (!h.isEmpty()) { hasData = true; break; }
+    }
+    if (!hasData && m_gpuFullHistory.isEmpty() && m_tempFullHistory.isEmpty() && m_memFullHistory.isEmpty()) {
+        appendOutput("没有监控数据可保存，请先开始监控", true);
+        return;
+    }
+
+    QString defaultName = QString("perf_%1_%2.png")
+        .arg(m_deviceInfo.serialNumber.isEmpty() ? "device" : m_deviceInfo.serialNumber)
+        .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+
+    QString filePath = QFileDialog::getSaveFileName(this, "保存监控截图",
+        defaultName, "PNG 图片 (*.png)");
+    if (filePath.isEmpty()) return;
+
+    const int stripHeight = 120;
+    const int headerHeight = 80;
+    const int margin = 20;
+    const int chartWidth = 1200;
+    int totalStrips = m_cpuCharts.size();
+    if (m_gpuChart) totalStrips++;
+    if (m_tempChart) totalStrips++;
+    if (m_memChart) totalStrips++;
+    int totalHeight = headerHeight + totalStrips * stripHeight + (totalStrips + 2) * margin;
+
+    QImage image(chartWidth + 2 * margin, totalHeight, QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor("#1e1e2e"));
+
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing);
+
+    // Header
+    QFont hf = p.font(); hf.setPixelSize(14); hf.setBold(true);
+    p.setFont(hf);
+    p.setPen(QColor("#cdd6f4"));
+
+    int totalPoints = m_cpuFullHistory.isEmpty() ? 0 : m_cpuFullHistory[0].size();
+    // Fallback to GPU history size
+    if (totalPoints == 0) totalPoints = m_gpuFullHistory.size();
+
+    QString hdrLine1 = QString("设备: %1  |  Root: %2  |  记录时间: %3")
+        .arg(m_deviceInfo.serialNumber.isEmpty() ? "未知" : m_deviceInfo.serialNumber)
+        .arg(m_deviceInfo.isRooted ? "是" : "否")
+        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
+    p.drawText(margin, margin, chartWidth, 30, Qt::AlignLeft | Qt::AlignVCenter, hdrLine1);
+
+    QFont sf2 = p.font(); sf2.setPixelSize(12); sf2.setBold(false);
+    p.setFont(sf2);
+    p.setPen(QColor("#6c7086"));
+    double dur = totalPoints * 0.5;
+    QString hdrLine2 = QString("采样间隔: 0.5s  |  总采样: %1 点  |  时长: %2秒 (%3分%4秒)")
+        .arg(totalPoints)
+        .arg(static_cast<int>(dur))
+        .arg(static_cast<int>(dur / 60))
+        .arg(static_cast<int>(dur) % 60);
+    p.drawText(margin, margin + 25, chartWidth, 30, Qt::AlignLeft | Qt::AlignVCenter, hdrLine2);
+
+    // Strips
+    int yOff = headerHeight + margin;
+
+    for (int i = 0; i < m_cpuCharts.size(); i++) {
+        if (i < m_cpuFullHistory.size()) {
+            drawHistoryStrip(p, QRect(margin, yOff, chartWidth, stripHeight - 6),
+                           m_cpuFullHistory[i],
+                           m_cpuCharts[i]->chartTitle(),
+                           m_cpuCharts[i]->chartUnit(),
+                           m_cpuCharts[i]->chartColor(),
+                           m_cpuCharts[i]->minYValue(),
+                           m_cpuCharts[i]->maxYValue());
+        }
+        yOff += stripHeight;
+    }
+
+    if (m_gpuChart) {
+        drawHistoryStrip(p, QRect(margin, yOff, chartWidth, stripHeight - 6),
+                       m_gpuFullHistory, m_gpuChart->chartTitle(),
+                       m_gpuChart->chartUnit(), m_gpuChart->chartColor(),
+                       m_gpuChart->minYValue(), m_gpuChart->maxYValue());
+        yOff += stripHeight;
+    }
+    if (m_tempChart) {
+        drawHistoryStrip(p, QRect(margin, yOff, chartWidth, stripHeight - 6),
+                       m_tempFullHistory, m_tempChart->chartTitle(),
+                       m_tempChart->chartUnit(), m_tempChart->chartColor(),
+                       m_tempChart->minYValue(), m_tempChart->maxYValue());
+        yOff += stripHeight;
+    }
+    if (m_memChart) {
+        drawHistoryStrip(p, QRect(margin, yOff, chartWidth, stripHeight - 6),
+                       m_memFullHistory, "内存 (RAM)",
+                       m_memChart->chartUnit(), QColor("#89b4fa"),
+                       m_memChart->minYValue(), m_memChart->maxYValue());
+        // Overlay swap line
+        if (!m_swapFullHistory.isEmpty()) {
+            drawHistoryStrip(p, QRect(margin, yOff, chartWidth, stripHeight - 6),
+                           m_swapFullHistory, "",
+                           "", QColor("#cba6f7"),
+                           m_memChart->minYValue(), m_memChart->maxYValue(),
+                           true);
+        }
+        yOff += stripHeight;
+    }
+
+    p.end();
+
+    if (image.save(filePath, "PNG")) {
+        appendOutput(QString("监控截图已保存: %1 (%2x%3)")
+            .arg(filePath).arg(image.width()).arg(image.height()), false);
+    } else {
+        appendOutput("保存截图失败: " + filePath, true);
+    }
 }

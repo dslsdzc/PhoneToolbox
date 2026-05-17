@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QTextEdit>
+#include <functional>
 #include "core/device_detector.h"
 #include "core/flash_tool.h"
 
@@ -62,6 +63,28 @@ private slots:
     // 死砖修复
     void onBrickRepairClicked();
 
+    // 连接管理
+    bool ensureEDLConnected();
+    bool ensureMTKConnected();
+
+    // 固件验证
+    QString validateFirmwareDirectory(const QString &dir);
+
+    // 分区匹配
+    QStringList matchPartitionFiles(const QString &dir, const QList<EDLPartition> &parts);
+    QStringList matchPartitionFilesMtk(const QString &dir, const QList<MtkPartition> &parts);
+
+    // 写入
+    bool writePartitionWithRetry(const QString &partName,
+                                 std::function<bool()> writeFn, int maxRetries = 2);
+
+    // 备份
+    QStringList backupCriticalPartitions(const QString &backupDir);
+
+    // 断点续传
+    void saveProgressFile(const QString &dir, int completedIndex);
+    int loadProgressFile(const QString &dir);
+
 private:
     void setupUI();
     bool checkBootloaderUnlock(const QString &deviceId);
@@ -114,6 +137,7 @@ private:
     DeviceInfo m_deviceInfo;
     FlashTool *m_flashTool;
     QStringList m_partitions;
+    int m_lastCompletedIndex = -1;
 };
 
 #endif // FLASH_PANEL_H

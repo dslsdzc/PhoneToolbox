@@ -1,0 +1,25 @@
+# Cross-compilation toolchain for Windows (MinGW-w64) using MSYS2 Qt6
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+
+set(MINGW_SYSROOT $ENV{HOME}/.local/mingw-sysroot/mingw64)
+
+set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
+set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
+set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
+
+# Pass -v to see linker invocations; MinGW ld is the default for this target
+
+set(CMAKE_FIND_ROOT_PATH ${MINGW_SYSROOT})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+set(CMAKE_PREFIX_PATH ${MINGW_SYSROOT})
+
+set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dll.a .lib)
+
+# Qt6 overrides
+set(QT6_HOST_INFO_DIR ${MINGW_SYSROOT})
+set(QT_QMAKE_EXECUTABLE NOTFOUND)

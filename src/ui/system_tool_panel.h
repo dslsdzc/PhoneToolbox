@@ -8,9 +8,12 @@
 #include <QStackedWidget>
 #include <QProcess>
 #include <QLineEdit>
-#include <QCheckBox>
+#include <QTimer>
+#include <QGridLayout>
+#include <QVector>
 #include "core/device_detector.h"
 #include "core/device_info.h"
+#include "ui/live_chart_widget.h"
 
 class SystemToolPanel : public QWidget
 {
@@ -32,6 +35,9 @@ private slots:
     void onCpuGovernor();       void onGpuGovernor();
     void onThermalControl();    void onMemoryOptimize();
     void onIOScheduler();
+    void onPerformancePoll();
+    void onPerfTimerToggle();
+    void onSaveChart();
 
     // 2. 界面定制
     void onSetDpi();            void onSetFont();
@@ -66,7 +72,9 @@ private:
     void runAdbAsync(const QStringList &args);
     void appendOutput(const QString &msg, bool isError = false);
     void logAndRefresh(const QString &label, const QString &result);
-    static QIcon generateAppIcon(QListWidgetItem *item);
+    void startMonitorProcess();
+    void stopMonitorProcess();
+    QString monitorExec(const QString &cmd, int timeoutMs = 5000);
 
     // Top
     QLabel *m_deviceLabel;
@@ -81,7 +89,23 @@ private:
     QList<QWidget*> m_pages;
 
     // 1. 性能调优
-    QLabel *m_cpuStatus, *m_gpuStatus, *m_thermalStatus, *m_memoryStatus, *m_ioStatus;
+    QTimer *m_perfTimer = nullptr;
+    int m_cpuCoreCount = 0;
+    bool m_polling = false;
+    QWidget *m_perfPage = nullptr;
+    QGridLayout *m_cpuGrid = nullptr;
+    QVector<LiveChartWidget*> m_cpuCharts;
+    LiveChartWidget *m_gpuChart = nullptr;
+    LiveChartWidget *m_tempChart = nullptr;
+    LiveChartWidget *m_memChart = nullptr;
+    QLabel *m_perfStatus = nullptr;
+    QPushButton *m_perfToggleBtn = nullptr;
+    QPushButton *m_saveChartBtn = nullptr;
+    // Full history buffers for image export
+    QVector<QVector<double>> m_cpuFullHistory;
+    QVector<double> m_gpuFullHistory, m_tempFullHistory, m_memFullHistory, m_swapFullHistory;
+    int m_tempZoneIndex = 0;
+    QString m_gpuFreqPath;
     // 2. 界面定制
     QLabel *m_dpiStatus, *m_animStatus;
     // 4. 分区管理
@@ -89,7 +113,6 @@ private:
     // 5. 应用管理
     QListWidget *m_appList;
     QLineEdit *m_searchBox = nullptr;
-    QCheckBox *m_showIconsCheck = nullptr;
     QLabel *m_appStatus;
     int m_appFilter = 0; // 0=all, 1=third, 2=system
     // 6. 安全隐私
@@ -99,6 +122,7 @@ private:
 
     DeviceInfo m_deviceInfo;
     QProcess *m_asyncProc = nullptr;
+    QProcess *m_monitorProc = nullptr;
 };
 
 #endif // SYSTEM_TOOL_PANEL_H

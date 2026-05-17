@@ -4,8 +4,13 @@
 #include <QDir>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
 #include <QDebug>
-#include <QThread>
+#include <QUrl>
+#include <QFileInfo>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -14,18 +19,15 @@
 #include <unistd.h>
 #endif
 
-AdbEmbedded::AdbEmbedded(QObject *parent) 
+AdbEmbedded::AdbEmbedded(QObject *parent)
     : QObject(parent)
-    , m_initialized(false)
 {
 }
 
 AdbEmbedded::~AdbEmbedded()
 {
-    // 清理临时文件
-    if (m_tempDir.isValid()) {
+    if (m_tempDir.isValid())
         m_tempDir.remove();
-    }
 }
 
 AdbEmbedded& AdbEmbedded::instance()
@@ -36,142 +38,208 @@ AdbEmbedded& AdbEmbedded::instance()
 
 bool AdbEmbedded::initialize()
 {
-    if (m_initialized) {
+    if (m_initialized)
+        return true;
+
+    qDebug() << "AdbEmbedded: initializing...";
+
+    // 1. 尝试使用系统 ADB
+    if (findSystemAdb()) {
+        qDebug() << "AdbEmbedded: using system ADB at" << m_adbPath;
+        m_initialized = true;
         return true;
     }
 
-    qDebug() << "Initializing embedded ADB...";
+    // 2. 下载 platform-tools
+    qDebug() << "AdbEmbedded: system ADB not found, downloading...";
+    if (downloadPlatformTools()) {
+        qDebug() << "AdbEmbedded: downloaded platform-tools to" << m_adbPath;
+        m_initialized = true;
+        return true;
+    }
 
-    if (!extractEmbeddedTools()) {
-        qWarning() << "Failed to extract embedded ADB tools";
+    qCritical() << "AdbEmbedded: all methods failed";
+    return false;
+}
+
+bool AdbEmbedded::findSystemAdb()
+{
+    // 先检查环境变量 ANDROID_HOME/platform-tools
+    QString androidHome = qEnvironmentVariable("ANDROID_HOME");
+    if (!androidHome.isEmpty()) {
+        QString candidate = androidHome + "/platform-tools/adb";
+#ifdef Q_OS_WIN
+        candidate += ".exe";
+#endif
+        if (QFile::exists(candidate)) {
+            m_adbPath = candidate;
+            m_fastbootPath = androidHome + "/platform-tools/fastboot";
+#ifdef Q_OS_WIN
+            m_fastbootPath += ".exe";
+#endif
+            m_useSystemAdb = true;
+            return true;
+        }
+    }
+
+    // 再查 PATH
+    QString systemAdb = QStandardPaths::findExecutable("adb");
+    if (!systemAdb.isEmpty()) {
+        m_adbPath = systemAdb;
+
+        // 同目录找 fastboot
+        QDir dir = QFileInfo(systemAdb).absoluteDir();
+        QString fb = dir.absolutePath() + "/fastboot";
+#ifdef Q_OS_WIN
+        fb += ".exe";
+#endif
+        if (QFile::exists(fb))
+            m_fastbootPath = fb;
+
+        m_useSystemAdb = true;
+        return true;
+    }
+
+    return false;
+}
+
+bool AdbEmbedded::downloadPlatformTools()
+{
+    if (!m_tempDir.isValid()) {
+        qWarning() << "downloadPlatformTools: temp dir invalid";
         return false;
     }
 
-    m_initialized = true;
-    qDebug() << "Embedded ADB initialized successfully";
+    // 选择平台
+    QString platformKey;
+#ifdef Q_OS_WIN
+    platformKey = "windows";
+#elif defined(Q_OS_MACOS)
+    platformKey = "darwin";
+#else
+    platformKey = "linux";
+#endif
+
+    QString url = QString("https://dl.google.com/android/repository/platform-tools-latest-%1.zip")
+                      .arg(platformKey);
+    QString zipPath = m_tempDir.path() + "/platform-tools.zip";
+
+    qDebug() << "AdbEmbedded: downloading" << url;
+
+    // 下载
+    QNetworkAccessManager mgr;
+    QNetworkRequest req{QUrl(url)};
+    req.setTransferTimeout(60000);
+
+    QNetworkReply *reply = mgr.get(req);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    if (reply->error() != QNetworkReply::NoError) {
+        qWarning() << "downloadPlatformTools: network error" << reply->errorString();
+        reply->deleteLater();
+        return false;
+    }
+
+    QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    if (data.isEmpty()) {
+        qWarning() << "downloadPlatformTools: empty response";
+        return false;
+    }
+
+    QFile f(zipPath);
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "downloadPlatformTools: cannot write" << zipPath;
+        return false;
+    }
+    f.write(data);
+    f.close();
+
+    qDebug() << "AdbEmbedded: downloaded" << data.size() << "bytes, extracting...";
+
+    // 解压
+    if (!extractZip(zipPath, m_tempDir.path())) {
+        qWarning() << "downloadPlatformTools: extract failed";
+        return false;
+    }
+
+    // 清理 zip
+    QFile::remove(zipPath);
+
+    m_downloaded = true;
     return true;
 }
 
-bool AdbEmbedded::extractEmbeddedTools()
+bool AdbEmbedded::extractZip(const QString &zipPath, const QString &destDir)
 {
-    // 确保临时目录有效
-    if (!m_tempDir.isValid()) {
-        qCritical() << "Cannot create temporary directory";
-        return false;
-    }
-
-    QString platformSubdir;
-    QString binaryExtension;
-    
-    // 根据平台设置路径
-#ifdef Q_OS_WIN
-    platformSubdir = "windows/x64";
-    binaryExtension = ".exe";
-#elif defined(Q_OS_MACOS)
-    platformSubdir = "macos/x64";
-    binaryExtension = "";
-#else
-    platformSubdir = "linux/x64";
-    binaryExtension = "";
-#endif
-
-    // 要提取的文件列表
-    QVector<QPair<QString, QString>> filesToExtract = {
-        {QString("adb/%1/adb%2").arg(platformSubdir).arg(binaryExtension), "adb"},
-        {QString("adb/%1/fastboot%2").arg(platformSubdir).arg(binaryExtension), "fastboot"}
-    };
+    QString extractDir = destDir + "/platform-tools";
 
 #ifdef Q_OS_WIN
-    // Windows需要额外的DLL文件
-    filesToExtract.append({
-        {QString("adb/%1/AdbWinApi.dll").arg(platformSubdir), "AdbWinApi.dll"},
-        {QString("adb/%1/AdbWinUsbApi.dll").arg(platformSubdir), "AdbWinUsbApi.dll"}
+    // Windows: 用 PowerShell
+    QProcess p;
+    p.start("powershell", {
+        "-NoProfile",
+        "-Command",
+        QString("Expand-Archive -Path '%1' -DestinationPath '%2' -Force")
+            .arg(zipPath, destDir)
     });
-#endif
-
-    // 提取所有文件
-    for (const auto &filePair : filesToExtract) {
-        QString resourcePath = ":/binaries/" + filePair.first;
-        QString outputPath = m_tempDir.path() + "/" + filePair.second;
-
-        QFile resourceFile(resourcePath);
-        if (!resourceFile.exists()) {
-            qWarning() << "Resource file not found:" << resourcePath;
-            return false;
-        }
-
-        // 复制文件到临时目录
-        if (!resourceFile.copy(outputPath)) {
-            qWarning() << "Failed to copy resource file to:" << outputPath 
-                      << "Error:" << resourceFile.errorString();
-            return false;
-        }
-
-        // 设置文件权限（非Windows系统）
-#ifndef Q_OS_WIN
-        if (chmod(outputPath.toUtf8().constData(), 0755) != 0) {
-            qWarning() << "Failed to set executable permissions for:" << outputPath;
-            return false;
-        }
-#endif
-
-        qDebug() << "Extracted:" << outputPath;
+    if (!p.waitForFinished(120000)) {
+        p.kill();
+        qWarning() << "extractZip: PowerShell timeout";
+        return false;
     }
+    if (p.exitCode() != 0) {
+        qWarning() << "extractZip: PowerShell error:" << p.readAllStandardError();
+        return false;
+    }
+#else
+    // Linux / macOS: 用 unzip
+    QProcess p;
+    p.start("unzip", {"-o", zipPath, "-d", destDir});
+    if (!p.waitForFinished(120000)) {
+        p.kill();
+        qWarning() << "extractZip: unzip timeout";
+        return false;
+    }
+    if (p.exitCode() != 0) {
+        qWarning() << "extractZip: unzip error:" << p.readAllStandardError();
+        return false;
+    }
+#endif
 
-    // 设置ADB和Fastboot路径
-    m_adbPath = m_tempDir.path() + "/adb";
-    m_fastbootPath = m_tempDir.path() + "/fastboot";
-
+    // 设置可执行权限
 #ifdef Q_OS_WIN
-    m_adbPath += ".exe";
-    m_fastbootPath += ".exe";
+    m_adbPath = extractDir + "/adb.exe";
+    m_fastbootPath = extractDir + "/fastboot.exe";
+#else
+    m_adbPath = extractDir + "/adb";
+    m_fastbootPath = extractDir + "/fastboot";
+    chmod(m_adbPath.toUtf8().constData(), 0755);
+    chmod(m_fastbootPath.toUtf8().constData(), 0755);
 #endif
 
-    // 验证文件是否存在且可执行
-    if (!QFile::exists(m_adbPath) || !QFile::exists(m_fastbootPath)) {
-        qCritical() << "Extracted binaries not found";
+    if (!QFile::exists(m_adbPath)) {
+        qWarning() << "extractZip: adb not found after extraction";
         return false;
     }
 
-    // 启动ADB服务器
-    QProcess adbProcess;
-    adbProcess.start(m_adbPath, QStringList() << "start-server");
-    if (!adbProcess.waitForFinished(5000)) {
-        qWarning() << "Failed to start ADB server";
-        // 继续执行，因为ADB可能已经在运行
-    }
-
-    QProcess fastbootTest;
-    fastbootTest.setProgram(m_fastbootPath);
-    fastbootTest.setArguments(QStringList() << "--version");
-    fastbootTest.start();
-    
-    if (fastbootTest.waitForFinished(3000)) {
-        qDebug() << "Fastboot test passed:" << fastbootTest.readAllStandardOutput();
-    } else {
-        qWarning() << "Fastboot test failed";
-        return false;
-    }
-    
     return true;
 }
 
 QString AdbEmbedded::executeCommand(const QString &command, int timeout)
 {
-    if (!m_initialized && !initialize()) {
+    if (!m_initialized && !initialize())
         return "Error: ADB not initialized";
-    }
 
     QProcess process;
     process.setProgram(m_adbPath);
-    
-    // 解析命令参数
     QStringList arguments = command.split(' ', Qt::SkipEmptyParts);
     process.setArguments(arguments);
-
-
     process.start();
-    
+
     if (!process.waitForFinished(timeout)) {
         process.kill();
         return "Error: Command timeout";
@@ -180,9 +248,8 @@ QString AdbEmbedded::executeCommand(const QString &command, int timeout)
     QString output = process.readAllStandardOutput();
     QString error = process.readAllStandardError();
 
-    if (process.exitCode() != 0) {
+    if (process.exitCode() != 0)
         return "Error: " + error;
-    }
 
     return output.isEmpty() ? "Success" : output.trimmed();
 }
@@ -190,30 +257,13 @@ QString AdbEmbedded::executeCommand(const QString &command, int timeout)
 QString AdbEmbedded::getDeviceInfo(const QString &serial, const QString &prop)
 {
     QString command;
-    if (serial.isEmpty()) {
+    if (serial.isEmpty())
         command = QString("shell getprop %1").arg(prop);
-    } else {
+    else
         command = QString("-s %1 shell getprop %2").arg(serial, prop);
-    }
-    
+
     return executeCommand(command).trimmed();
 }
 
-QString AdbEmbedded::getAdbPath() const
-{
-    return m_adbPath;
-}
-
-QString AdbEmbedded::getFastbootPath() const
-{
-    return m_fastbootPath;
-}
-
-QString AdbEmbedded::getPlatformBinaryName(const QString &baseName) const
-{
-#ifdef Q_OS_WIN
-    return baseName + ".exe";
-#else
-    return baseName;
-#endif
-}
+QString AdbEmbedded::getAdbPath() const { return m_adbPath; }
+QString AdbEmbedded::getFastbootPath() const { return m_fastbootPath; }
