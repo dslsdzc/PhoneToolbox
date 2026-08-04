@@ -85,9 +85,12 @@ find_path(BZIP2_INCLUDE_DIR bzlib.h)
 find_library(XZ_LIBRARY lzma)
 find_path(XZ_INCLUDE_DIR lzma.h)
 find_library(BROTLI_LIBRARY brotlidec)
+find_library(BROTLIENC_LIBRARY brotlienc)
 find_path(BROTLI_INCLUDE_DIR brotli/decode.h)
-if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR NOT BROTLI_LIBRARY)
-    message(FATAL_ERROR "Compression libs not found. Linux: pacman -S zstd lz4 bzip2 xz brotli  |  Windows: vcpkg install zstd lz4 bzip2 xz brotli")
+# zlib（gzip 封装）：Qt6::Core 依赖 zlib 但符号不可见，显式链接（与 zstd/lz4/bz2/xz 一致）
+find_library(ZLIB_LIBRARY z)
+if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR NOT BROTLI_LIBRARY OR NOT BROTLIENC_LIBRARY OR NOT ZLIB_LIBRARY)
+    message(FATAL_ERROR "Compression libs not found. Linux: pacman -S zstd lz4 bzip2 xz brotli zlib  |  Windows: vcpkg install zstd lz4 bzip2 xz brotli zlib")
 endif()
 
 # 包含目录
@@ -197,7 +200,8 @@ target_include_directories(image_engine PUBLIC
     ${ZSTD_INCLUDE_DIR} ${LZ4_INCLUDE_DIR} ${BZIP2_INCLUDE_DIR}
     ${XZ_INCLUDE_DIR} ${BROTLI_INCLUDE_DIR})
 target_link_libraries(image_engine PUBLIC Qt6::Core
-    ${ZSTD_LIBRARY} ${LZ4_LIBRARY} ${BZIP2_LIBRARY} ${XZ_LIBRARY} ${BROTLI_LIBRARY})
+    ${ZSTD_LIBRARY} ${LZ4_LIBRARY} ${BZIP2_LIBRARY} ${XZ_LIBRARY}
+    ${BROTLI_LIBRARY} ${BROTLIENC_LIBRARY} ${ZLIB_LIBRARY})
 set_target_properties(image_engine PROPERTIES AUTOMOC ON)
 
 # 主程序链接 image_engine

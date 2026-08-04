@@ -5,9 +5,12 @@ namespace imgcomp {
 
 enum class Type { None, Gzip, Bzip2, Lz4, Xz, Zstd, Brotli };
 
-// 压缩/解压；失败返回空 QByteArray。本任务已实现 Zstd 分支；
-// Gzip（zlib 封装）、Bzip2、Xz、Lz4、Brotli 分支分别由后续任务填充。
+// 压缩/解压；失败返回空 QByteArray。全部类型分支已实现。
 QByteArray compress(Type t, const QByteArray &data);
 QByteArray decompress(Type t, const QByteArray &data);
+
+// gzip 封装（zlib，带 gzip 头 + 魔数标记），委托到 compressor.cpp 内 impl。
+QByteArray gzipCompress(const QByteArray &data);
+QByteArray gzipDecompress(const QByteArray &data);
 
 } // namespace imgcomp

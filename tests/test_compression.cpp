@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "image_engine/compression/brotli_wrapper.h"
 #include "image_engine/compression/bzip2_wrapper.h"
 #include "image_engine/compression/compressor.h"
 #include "image_engine/compression/lz4_wrapper.h"
@@ -19,6 +20,12 @@ private slots:
     void xzRoundTrip();
     void xzInvalidInput();
     void xzStandardRoundTrip();
+    void brotliRoundTrip();
+    void brotliInvalidInput();
+    void gzipRoundTrip();
+    void gzipInvalidInput();
+    void gzipTruncated();
+    void gzipForgedIsize();
     void dispatchRoundTrip();
 };
 
@@ -90,11 +97,57 @@ void TestCompression::xzStandardRoundTrip()
     QCOMPARE(imgcomp::xzDecompress(comp), data);
 }
 
+void TestCompression::brotliRoundTrip()
+{
+    QByteArray data("brotli payload repeated repeated repeated");
+    QByteArray comp = imgcomp::brotliCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QCOMPARE(imgcomp::brotliDecompress(comp), data);
+}
+
+void TestCompression::brotliInvalidInput() { QVERIFY(imgcomp::brotliDecompress("garbage").isEmpty()); }
+
+void TestCompression::gzipRoundTrip()
+{
+    QByteArray data("gzip payload repeated repeated repeated");
+    QByteArray comp = imgcomp::gzipCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QCOMPARE(imgcomp::gzipDecompress(comp), data);
+}
+
+void TestCompression::gzipInvalidInput() { QVERIFY(imgcomp::gzipDecompress("garbage").isEmpty()); }
+
+void TestCompression::gzipTruncated()
+{
+    QByteArray data(1024 * 1024, 'a');
+    QByteArray comp = imgcomp::gzipCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QVERIFY(imgcomp::gzipDecompress(comp.left(comp.size() / 2)).isEmpty());        // deflate 流被切
+    QVERIFY(imgcomp::gzipDecompress(comp.left(comp.size() - 9)).isEmpty());        // 尾 8 字节 + 1 流字节
+}
+
+void TestCompression::gzipForgedIsize()
+{
+    // 伪造尾部 ISIZE 为 ~2GiB：不得按 ISIZE 大分配/崩溃。直接分配路径因
+    // ISIZE 超输入 1024 倍被拒 → 回退流式；流式下 zlib 自行校验 trailer
+    // ISIZE 与解出大小不符 → Z_DATA_ERROR → 必须返回空。
+    QByteArray data("forged isize payload payload payload");
+    QByteArray comp = imgcomp::gzipCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QByteArray forged = comp;
+    const int tail = forged.size() - 4;
+    forged[tail] = char(0xff); forged[tail + 1] = char(0xff);
+    forged[tail + 2] = char(0xff); forged[tail + 3] = char(0x7f); // 0x7fffffff ≈ 2GiB
+    QVERIFY(imgcomp::gzipDecompress(forged).isEmpty());
+}
+
 void TestCompression::dispatchRoundTrip()
 {
     QByteArray data("dispatch test data, dispatch test data.");
     QCOMPARE(imgcomp::decompress(imgcomp::Type::Zstd, imgcomp::compress(imgcomp::Type::Zstd, data)), data);
     QCOMPARE(imgcomp::decompress(imgcomp::Type::Xz, imgcomp::compress(imgcomp::Type::Xz, data)), data);
+    QCOMPARE(imgcomp::decompress(imgcomp::Type::Brotli, imgcomp::compress(imgcomp::Type::Brotli, data)), data);
+    QCOMPARE(imgcomp::decompress(imgcomp::Type::Gzip, imgcomp::compress(imgcomp::Type::Gzip, data)), data);
     QVERIFY(imgcomp::compress(imgcomp::Type::None, data).isEmpty());
     QVERIFY(imgcomp::decompress(imgcomp::Type::None, data).isEmpty());
 }
