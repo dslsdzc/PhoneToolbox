@@ -37,7 +37,7 @@
 | dtbo/dtb/vbmeta | 设备树/AVB | `d\r\n`(dtbo) | 查看 + 打包联动（vbmeta 重算哈希） |
 | `system.new.dat` 系 | Android 5-9 OTA | `transfer.list` 同目录 | 解包（.dat/.dat.gz/.dat.br + transfer.list 增量应用）/ 打包 |
 | TWRP 备份 | TWRP 备份目录 | `.win` 头 | 解包（.win/.win001 分段合并）/ 打包 |
-| MTK `.pac` | SP Flash Tool 整包 | 自描述头 | 解包（含分区描述）/ 打包 |
+| `.pac`（SPD） | Spreadtrum/Unisoc ResearchDownload 整包（非 MTK —— 2026-08-04 审查更正，MTK 用 scatter 文件） | 旧格式 1220B 头无魔数 / 新格式 BP_R1.0.0·BP_R2.0.1 2124B 头 | 解包（含分区描述，双格式自动识别）/ 打包 |
 | EROFS 镜像 | Android 13+ 系统分区 | `\xe2\xe1\xf5\x00`(magic) | 目录浏览、文件提取、替换式重打包 |
 | ext4 镜像 | Android 12- 系统分区 | `\x53\xef`(superblock) | 目录浏览、文件提取、替换式重打包 |
 | LG KDZ / DZ | LG 官方固件 | v2/v3 容器头 | **仅解包**（KDZ→DZ→分区 chunk 按 eMMC 偏移合并；重打包经社区验证不可靠） |
