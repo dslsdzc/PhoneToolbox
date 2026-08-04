@@ -269,6 +269,7 @@ private slots:
     void nonexistentApkFails();
     void apkWithoutMagiskinitFails();
     void invalidBootFails();
+    void repatchFails();
     void nonCpioRamdiskFails();
     void injectUncompressedRamdisk();
     void injectGzipRamdisk();
@@ -342,14 +343,58 @@ void TestPatcher::apkWithoutMagiskinitFails()
 
 void TestPatcher::invalidBootFails()
 {
+    // 合法 APK（含 magiskinit 条目）+ 垃圾 boot 字节：
+    // 必须失败在 boot 镜像解析路径（而非 APK 读取），断言错误信息含 boot
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/magisk.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"lib/arm64-v8a/libmagiskinit.so", "fake magiskinit bytes", 0}}));
+    f.close();
+
     patcher::MagiskPatcher p;
     patcher::PatchConfig cfg;
     cfg.type = patcher::RootType::Magisk;
-    cfg.apkPath = "/nonexistent.apk";
+    cfg.apkPath = apkPath;
     QByteArray out;
     QString err;
     QVERIFY(!p.patch(QByteArray("not a boot image at all"), cfg, out, &err));
     QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("boot", Qt::CaseInsensitive));
+}
+
+void TestPatcher::repatchFails()
+{
+    // 重复修补防护：已修补产物（ramdisk 含 .backup 标记）再次 patch 必须拒绝，
+    // 防止原 init 备份被覆盖为旧 magiskinit（官方 boot_patch.sh 以
+    // "cpio test → 已 Magisk 修补则 restore" 流程防此；本实现直接拒绝并提示还原）
+    const QByteArray initPayload("original init payload");
+    const QByteArray fakeMagiskinit("magiskinit-bytes-for-repatch-guard");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/magisk.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"lib/arm64-v8a/libmagiskinit.so", fakeMagiskinit, 0}}));
+    f.close();
+
+    patcher::MagiskPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    cfg.apkPath = apkPath;
+    QByteArray patched;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, initPayload}})), cfg,
+                     patched, &err),
+             qPrintable(err));
+    // 对已修补产物再次注入：必须失败并提示先还原；失败时输出不得残留
+    QByteArray out2;
+    QString err2;
+    QVERIFY(!p.patch(patched, cfg, out2, &err2));
+    QVERIFY(!err2.isEmpty());
+    QVERIFY(err2.contains("还原", Qt::CaseInsensitive));
+    QVERIFY(out2.isEmpty());
 }
 
 void TestPatcher::nonCpioRamdiskFails()

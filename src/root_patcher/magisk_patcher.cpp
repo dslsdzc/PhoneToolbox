@@ -79,24 +79,26 @@ bool loadZipEntries(const QByteArray &zip, QList<ZipEntry> *out, QString *err)
         return fail(QStringLiteral("ZIP: zip64 归档暂不支持"));
     if (static_cast<quint64>(cdOffset) + cdSize > static_cast<quint64>(zip.size()))
         return fail(QStringLiteral("ZIP: 中央目录越界"));
-    int pos = static_cast<int>(cdOffset);
+    // 位置运算全程 qint64：cdOffset 可接近 INT_MAX（QByteArray 上限），
+    // 与 46/nameLen 等相加时避免 int 溢出（理论边缘，防御性处理）
+    qint64 pos = cdOffset;
     for (int i = 0; i < count; ++i) {
-        if (pos + 46 > zip.size() || le32(zip, pos) != 0x02014b50u)
+        if (pos + 46 > zip.size() || le32(zip, static_cast<int>(pos)) != 0x02014b50u)
             return fail(QStringLiteral("ZIP: 中央目录损坏"));
-        const quint16 nameLen = le16(zip, pos + 28);
-        const quint16 extraLen = le16(zip, pos + 30);
-        const quint16 commentLen = le16(zip, pos + 32);
-        const qint64 entryEnd = static_cast<qint64>(pos) + 46 + nameLen + extraLen + commentLen;
+        const quint16 nameLen = le16(zip, static_cast<int>(pos) + 28);
+        const quint16 extraLen = le16(zip, static_cast<int>(pos) + 30);
+        const quint16 commentLen = le16(zip, static_cast<int>(pos) + 32);
+        const qint64 entryEnd = pos + 46 + nameLen + extraLen + commentLen;
         if (entryEnd > zip.size())
             return fail(QStringLiteral("ZIP: 中央目录条目越界"));
         ZipEntry e;
-        e.name = QString::fromUtf8(zip.constData() + pos + 46, nameLen);
-        e.method = le16(zip, pos + 10);
-        e.compSize = le32(zip, pos + 20);
-        e.uncompSize = le32(zip, pos + 24);
-        e.localOff = le32(zip, pos + 42);
+        e.name = QString::fromUtf8(zip.constData() + static_cast<int>(pos) + 46, nameLen);
+        e.method = le16(zip, static_cast<int>(pos) + 10);
+        e.compSize = le32(zip, static_cast<int>(pos) + 20);
+        e.uncompSize = le32(zip, static_cast<int>(pos) + 24);
+        e.localOff = le32(zip, static_cast<int>(pos) + 42);
         out->append(e);
-        pos = static_cast<int>(entryEnd);
+        pos = entryEnd;
     }
     return true;
 }
@@ -140,8 +142,9 @@ bool extractZipEntry(const QByteArray &zip, const QString &entryName, QByteArray
         // raw DEFLATE：ZIP 条目是无 zlib 头的原始 deflate 流，zlib 的
         // uncompress()（期望 zlib 封装流）不适用，须用 inflateInit2(-MAX_WBITS)。
         // 用真实 Magisk APK 验证过（v25.2 产物，见 task-C3-report.md）。
-        // uncompSize 来自中央目录，超大值防 OOM（真实 magiskinit 仅数百 KB）
-        if (found->uncompSize > 512u * 1024 * 1024)
+        // uncompSize 来自中央目录（攻击者可控）：16MB 上限防恶意 APK 强制
+        // 分配内存致 bad_alloc terminate（真实 magiskinit 仅 ~200-500KB）
+        if (found->uncompSize > 16u * 1024 * 1024)
             return fail(QStringLiteral("ZIP: 条目解压后过大"));
         QByteArray buf(static_cast<int>(found->uncompSize), Qt::Uninitialized);
         z_stream strm = {};
@@ -382,6 +385,13 @@ bool MagiskPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     CpioArchive cpio;
     if (!cpio.parse(ramdiskRaw, &ramdiskErr))
         return fail(QStringLiteral("ramdisk 不是有效 cpio：%1").arg(ramdiskErr));
+
+    // 重复修补防护：官方 boot_patch.sh 先 "cpio test"（1=已 Magisk 修补）再
+    // restore；已修补镜像含 .backup 标记，再次注入会把原 init 备份覆盖成
+    // 旧 magiskinit（损坏还原链）→ 明确拒绝，交由调用方还原原厂镜像
+    CpioEntry probe;
+    if (cpio.find(QStringLiteral(".backup"), &probe))
+        return fail(QStringLiteral("镜像已修补过，请先还原为原厂 boot 镜像"));
 
     // 注入链（与官方 boot_patch.sh "add 0750 init magiskinit" + "backup"
     // 一致）：原 init 条目备份为 .backup/init（运行时 magiskinit 的
