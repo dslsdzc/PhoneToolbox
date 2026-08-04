@@ -29,6 +29,11 @@ Format byExtension(const QString &name)
     if (lower.endsWith(".img") || lower.endsWith(".raw")) return Format::RawImage;
     // pac 旧格式无魔数（divinebird C 版，头 1220B 无魔数）→ 按扩展名兜底
     if (lower.endsWith(".pac")) return Format::Pac;
+    // 华为 update.bin（L2 型分区表）：无魔数 —— 文件头是签名头（解析靠文件名，
+    // 见 imghw::parseUpdateBin 的 L2 型），文件名以 "update.bin" 结尾是唯一信号。
+    // 注意顺序：真实 OTA 的 update.bin 常带 "CrAU"/ext4/sparse 等魔数，先走
+    // detect() 的魔数分支；此处只兜底魔数不匹配的 L2 型文件。
+    if (lower.endsWith("update.bin")) return Format::UpdateBin;
     return Format::Unknown;
 }
 } // namespace

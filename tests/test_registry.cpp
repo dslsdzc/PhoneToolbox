@@ -57,6 +57,11 @@ void TestRegistry::detectByExtension()
     QCOMPARE(imgreg::detect(QByteArray("garbage"), "weird.xyz").format, imgreg::Format::Unknown);
     // pac 旧格式无魔数（divinebird C 版, 头 1220B）→ 扩展名兜底
     QCOMPARE(imgreg::detect(QByteArray(1220, 0), "fw.pac").format, imgreg::Format::Pac);
+    // update.bin（L2 型分区表, 无魔数 → 文件名唯一信号）
+    QCOMPARE(imgreg::detect(QByteArray(512, 0), "update.bin").format, imgreg::Format::UpdateBin);
+    QCOMPARE(imgreg::detect(QByteArray(512, 0), "UPDATE.BIN").format, imgreg::Format::UpdateBin);
+    // 带魔数的 update.bin（真实 OTA payload）→ 魔数优先于文件名
+    QCOMPARE(imgreg::detect(QByteArray("CrAU"), "update.bin").format, imgreg::Format::Payload);
 }
 
 void TestRegistry::detectVendorMagic()
