@@ -12,7 +12,7 @@
 
 ## 目标
 
-1. 100% 覆盖 Android 刷机生态现有镜像格式（见格式矩阵）
+1. **全格式原则**：所有能解包/打包的 Android 镜像格式全部支持（不仅限本矩阵，架构采用格式注册表模式，新增格式注册即用，不改面板代码）
 2. 全自研实现（引擎与装配逻辑），注入物（magiskinit / kernelsu.ko / kpatch）运行时从官方渠道下载
 3. 支持解包与打包双向操作
 4. 支持 Magisk / KernelSU / APatch 三家 Root 修补
@@ -35,6 +35,16 @@
 | `.br` 镜像 | 小米部分分区 | brotli magic | brotli 解压 → 内部再路由 |
 | `.lz4/.xz/.gz/.zst` 裸压缩 | 各厂商散装镜像 | 各压缩魔数 | 解压/压缩 |
 | dtbo/dtb/vbmeta | 设备树/AVB | `d\r\n`(dtbo) | 查看 + 打包联动（vbmeta 重算哈希） |
+| `system.new.dat` 系 | Android 5-9 OTA | `transfer.list` 同目录 | 解包（.dat/.dat.gz/.dat.br + transfer.list 增量应用）/ 打包 |
+| TWRP 备份 | TWRP 备份目录 | `.win` 头 | 解包（.win/.win001 分段合并）/ 打包 |
+| MTK `.pac` | SP Flash Tool 整包 | 自描述头 | 解包（含分区描述）/ 打包 |
+| EROFS 镜像 | Android 13+ 系统分区 | `\xe2\xe1\xf5\x00`(magic) | 目录浏览、文件提取、替换式重打包 |
+| ext4 镜像 | Android 12- 系统分区 | `\x53\xef`(superblock) | 目录浏览、文件提取、替换式重打包 |
+| LG KDZ / DZ | LG 官方固件 | v2/v3 容器头 | **仅解包**（KDZ→DZ→分区 chunk 按 eMMC 偏移合并；重打包经社区验证不可靠） |
+| 华为 `update.app` | 华为安卓固件 | 512B 头 `0x55 0xAA` + 64B 文件表 | 解包/重打包（保持文件表顺序 + 数据段对齐，有工具参考） |
+| 华为 `update.bin` | HarmonyOS 5+ | L2 型分区表 87B/条 | 解包（打包需官方签名） |
+| 索尼 `.sin` | Xperia 固件 | v3 `03 53 49 4E`，块头 `LZ4A`/`ADDR` | **仅解包**（RSA 签名无法重签） |
+| GPT/MBR 整盘镜像 | 全盘备份 | `EFI PART` / 55AA | 分区表解析、单分区提取 / 合成 |
 
 注意: super 镜像魔数为 `0x414C5030`("0PLA")，geometry magic 为 `0x616c4467`("gDla")—— 早期草案中的 "LPML" 有误，已更正。
 
@@ -68,6 +78,18 @@ src/image_engine/            # 纯格式库层 —— 无 UI 依赖、无网络�
   bspatch_image              # bsdiff patch 应用 (SOURCE_BSDIFF/BROTLI_BSDIFF/PUFFDIFF)
   tar_image                  # tar 解包/打包, 三星 .tar.md5 MD5 footer
   avb_image                  # VBMeta 解析/生成, hash footer add/erase, 禁用验证
+  dat_image                  # system.new.dat 系: transfer.list 解析 + 增量应用/生成
+  twrp_image                 # TWRP .win 备份: 分段合并/拆分
+  pac_image                  # MTK .pac 整包: 分区描述解析, 解包/打包
+  kdz_image                  # LG KDZ/DZ: 容器头解析, DZ 分区 chunk 按 eMMC 偏移合并
+  huawei_image               # update.app (512B 头 + 64B/条文件表, 含重打包) / update.bin (L2 分区表)
+  sin_image                  # 索尼 sin v3: ADDR/LZ4A 块描述符 → raw
+  disk_image                 # GPT/MBR 整盘: 分区表解析/单分区提取
+  fs/                        # 文件系统镜像 (无 FUSE, 纯解析):
+    fs_image                 #   FsImage 抽象接口: listFiles/extractFile/replaceFile/repack
+    erofs_reader             #   EROFS 解析器 (目录/提取/替换重打包)
+    ext4_reader              #   ext4 解析器 (extent tree/inline data/xattr)
+  registry.h                 # 格式注册表: detect/unpack/pack/inspect 统一接口, 按魔数路由
   compression/               # zstd / lz4 / bzip2 / xz / brotli 封装层
 
 src/root_patcher/            # 修补层 —— 自研装配逻辑
@@ -138,9 +160,12 @@ Linux 系统包 / Windows vcpkg 获取。
 ## 明确不做（YAGNI）
 
 - ZUCCHINI diff 解包（暂缓，标注提示）
-- 三星 secure boot 重签（技术上不可能，仅提示解锁）
+- 三星 secure boot 重签、索尼 sin 重签（技术上不可能，仅提示解锁）
+- LG KDZ 重打包（社区验证不可靠，仅解包）
 - 增量 OTA 打包生成（只做解包方向，打包为全量）
 - Magisk 模块 / KernelSU 元模块的编辑管理
+- **从零 mkfs 打包文件系统**（EROFS/ext4 只做"基于原镜像的替换式重打包"，参考 e2fsprogs debugfs 思想；从零生成文件系统为后续扩展）
+- f2fs 文件系统浏览（列为 fs 模块后续扩展点）
 
 ## 参考实现（学思想，对照格式，不直接搬代码）
 
@@ -153,6 +178,12 @@ Linux 系统包 / Windows vcpkg 获取。
 | AVB | avbtool (AOSP external/avb) | BSD-2 | VBMeta/hash footer/禁用验证 |
 | bsdiff/puffdiff | bsdiff (Colin Percival)、puffin (Google) | BSD-2 / Apache-2.0 | 增量补丁算法 |
 | 三星重打包 | SamsungImageRepacker (Mnky313) | GPLv3 | tar.md5 重打包 |
+| LG KDZ/DZ | unkdz/undz (IOMonster)、dumpyara (sebaubuntu-python) | MIT/AGPL | KDZ→DZ→chunk 合并 |
+| 华为 update.app | huextract (echo-devim)、HuaweiUpdateExtractor | MIT/GPLv2 | 文件表 + 重打包对齐 |
+| 华为 update.bin | unpack_huawei_package (SimomYung) | MIT | L2 分区表解析 |
+| 索尼 sin | sin2raw (munjeni)、Flashtool | GPLv2 | SIN v3 ADDR/LZ4A 块 |
+| EROFS | erofs-utils (Linux 内核社区) | GPLv2 | fs 解析/重打包 |
+| ext4 | e2fsprogs (debugfs write 思想) | GPLv2 | extent tree/替换重打包 |
 | Magisk 修补 | Magisk (topjohnwu) | GPLv3 | magiskinit 注入装配 |
 | KernelSU 修补 | ksud (tiann/KernelSU) | GPLv3 | init_boot 注入 + KMI 匹配 |
 | APatch 修补 | APatch/KernelPatch (bmax121) | GPLv3 | kpatch 内核段注入 |
