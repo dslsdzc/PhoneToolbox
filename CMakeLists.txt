@@ -75,6 +75,25 @@ else()
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
 endif()
 
+# 压缩库（镜像处理: payload/zstd/lz4/bzip2/xz/brotli）
+find_library(ZSTD_LIBRARY zstd)
+find_path(ZSTD_INCLUDE_DIR zstd.h)
+find_library(LZ4_LIBRARY lz4)
+find_path(LZ4_INCLUDE_DIR lz4frame.h)
+find_library(BZIP2_LIBRARY bz2)
+find_path(BZIP2_INCLUDE_DIR bzlib.h)
+find_library(XZ_LIBRARY lzma)
+find_path(XZ_INCLUDE_DIR lzma.h)
+find_library(BROTLI_LIBRARY brotlidec)
+find_library(BROTLIENC_LIBRARY brotlienc)
+find_path(BROTLI_INCLUDE_DIR brotli/decode.h)
+# zlib（gzip 封装）：Qt6::Core 依赖 zlib 但符号不可见，显式链接（与 zstd/lz4/bz2/xz 一致）。
+# 多名字匹配：Linux 为 libz.so，vcpkg Windows 产出 zlib.lib（而非 z.lib）
+find_library(ZLIB_LIBRARY NAMES z zlib zlib1 zlibstatic)
+if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR NOT BROTLI_LIBRARY OR NOT BROTLIENC_LIBRARY OR NOT ZLIB_LIBRARY)
+    message(FATAL_ERROR "Compression libs not found. Linux: pacman -S zstd lz4 bzip2 xz brotli zlib  |  Windows: vcpkg install zstd lz4 bzip2 xz brotli zlib")
+endif()
+
 # 包含目录
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -90,6 +109,9 @@ file(GLOB_RECURSE SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp"
 )
+
+# image_engine 由独立静态库目标编译，从主程序 GLOB 中排除
+list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
 
 file(GLOB_RECURSE HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
@@ -169,3 +191,55 @@ set_target_properties(PhoneToolbox PROPERTIES
 
 # 安装规则
 install(TARGETS PhoneToolbox DESTINATION bin)
+
+# ---- image_engine 静态库 ----
+file(GLOB_RECURSE IMAGE_ENGINE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.cpp")
+file(GLOB_RECURSE IMAGE_ENGINE_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.h")
+add_library(image_engine STATIC ${IMAGE_ENGINE_SOURCES} ${IMAGE_ENGINE_HEADERS})
+target_include_directories(image_engine PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${ZSTD_INCLUDE_DIR} ${LZ4_INCLUDE_DIR} ${BZIP2_INCLUDE_DIR}
+    ${XZ_INCLUDE_DIR} ${BROTLI_INCLUDE_DIR})
+target_link_libraries(image_engine PUBLIC Qt6::Core
+    ${ZSTD_LIBRARY} ${LZ4_LIBRARY} ${BZIP2_LIBRARY} ${XZ_LIBRARY}
+    ${BROTLI_LIBRARY} ${BROTLIENC_LIBRARY} ${ZLIB_LIBRARY})
+set_target_properties(image_engine PROPERTIES AUTOMOC ON)
+
+# 主程序链接 image_engine
+target_link_libraries(PhoneToolbox image_engine)
+
+# ---- image_engine 单元测试 ----
+option(ENABLE_IMAGE_TESTS "Build image_engine unit tests" ON)
+if(ENABLE_IMAGE_TESTS)
+    find_package(Qt6 QUIET COMPONENTS Test)
+    if(Qt6Test_FOUND)
+        enable_testing()
+        set(IMAGE_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compression.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sparse.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_boot.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tar.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_payload.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bspatch.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dat.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_registry.cpp)
+        if(IMAGE_TEST_SOURCES)
+            # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
+            # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
+            set(_test_count 0)
+            foreach(_test_src IN LISTS IMAGE_TEST_SOURCES)
+                if(_test_count EQUAL 0)
+                    set(_test_target image_engine_tests)
+                else()
+                    get_filename_component(_test_stem ${_test_src} NAME_WE)
+                    set(_test_target image_engine_tests_${_test_stem})
+                endif()
+                math(EXPR _test_count "${_test_count} + 1")
+                add_executable(${_test_target} ${_test_src})
+                target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
+                set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
+                add_test(NAME ${_test_target} COMMAND ${_test_target})
+            endforeach()
+        endif()
+    endif()
+endif()
