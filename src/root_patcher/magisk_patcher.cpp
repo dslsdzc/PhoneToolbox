@@ -1,4 +1,5 @@
 #include "root_patcher/magisk_patcher.h"
+#include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "image_engine/boot_image.h"
 
@@ -449,8 +450,8 @@ QString MagiskPatcher::assetKey(const QString &variant)
     return QStringLiteral("magisk");
 }
 
-// 工厂：C3 仅实现 Magisk 系；其余类型由 C4-C8 在各自实现中扩展
-// （届时在此 switch 中登记）。
+// 工厂：C3 实现 Magisk 系；C4 登记 KernelSU 系（KernelSuPatcher，见
+// kernelsu_patcher.h）；其余类型由 C5-C8 在各自实现中扩展。
 RootPatcher *RootPatcher::create(RootType type)
 {
     switch (type) {
@@ -458,6 +459,11 @@ RootPatcher *RootPatcher::create(RootType type)
     case RootType::MagiskAlpha:
     case RootType::Kitsune:
         return new MagiskPatcher;
+    case RootType::KernelSU:
+    case RootType::KernelSU_Next:
+    case RootType::SukiSU:
+    case RootType::ReSukiSU:
+        return new KernelSuPatcher;
     default:
         return nullptr;
     }

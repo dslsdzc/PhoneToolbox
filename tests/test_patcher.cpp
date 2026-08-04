@@ -3,6 +3,7 @@
 #include <QFile>
 #include "root_patcher/root_patcher.h"
 #include "root_patcher/magisk_patcher.h"
+#include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "image_engine/boot_image.h"
 
@@ -232,8 +233,11 @@ QByteArray buildZip(const QList<TestZipEntry> &entries)
 }
 
 // ---- 测试工具：boot v0 镜像 ----
-// 布局：1632B 头补零到 4096 页 → kernel 4096B（页对齐）→ ramdisk（页对齐结尾）。
-static QByteArray buildBootV0(const QByteArray &ramdisk)
+// 布局：1632B 头补零到 4096 页 → kernel（页对齐，默认 4096B 'K' 填充）→
+// ramdisk（页对齐结尾）。cmdline 写于 offset 64（512B，NUL 填充）。
+static QByteArray buildBootV0(const QByteArray &ramdisk,
+                              const QByteArray &kernel = QByteArray(4096, 'K'),
+                              const QByteArray &cmdline = QByteArray())
 {
     QByteArray hdr(1632, 0);
     hdr.replace(0, 8, "ANDROID!");
@@ -243,15 +247,19 @@ static QByteArray buildBootV0(const QByteArray &ramdisk)
         hdr[off + 2] = char(v >> 16);
         hdr[off + 3] = char(v >> 24);
     };
-    put32(8, 4096);                    // kernel_size
+    put32(8, static_cast<quint32>(kernel.size()));   // kernel_size
     put32(16, static_cast<quint32>(ramdisk.size())); // ramdisk_size
-    put32(24, 0);                      // second_size
-    put32(36, 4096);                   // page_size
-    put32(40, 0);                      // header_version
+    put32(24, 0);                                    // second_size
+    put32(36, 4096);                                 // page_size
+    put32(40, 0);                                    // header_version
+    if (!cmdline.isEmpty())
+        hdr.replace(64, qMin(511, cmdline.size()), cmdline); // cmdline@64 (512B)
     QByteArray out = hdr;
     while (out.size() % 4096)
         out.append('\0');
-    out.append(4096, 'K'); // kernel
+    out.append(kernel);
+    while (out.size() % 4096)
+        out.append('\0'); // 各段页对齐（parseBootImage 按页偏移读段）
     out.append(ramdisk);
     while (out.size() % 4096)
         out.append('\0');
@@ -276,6 +284,27 @@ private slots:
     void injectDeflatedApk();
     void injectFallsBackAbi();
     void downloadUrlKnown();
+
+    // ---- C4: KernelSU 系 ----
+    void ksuDetectKmiFromKernel();
+    void ksuDetectKmiFromCmdline();
+    void ksuDetectKmiNone();
+    void ksuMissingKoFails();
+    void ksuMissingWrapperFails();
+    void ksuNonGkiNoKoFails();
+    void ksuKmiUnsupportedFails();
+    void ksuUnknownVariantFails();
+    void ksuInjectLkmUncompressed();
+    void ksuInjectLkmGzipRamdisk();
+    void ksuInjectLkmIntoRamdisklessBoot();
+    void ksuInjectLkmNoInitRamdisk();
+    void ksuMagiskPatchedBootFails();
+    void ksuRepatchIdempotent();
+    void ksuAnyKernel3Replace();
+    void ksuAnyKernel3DeflatedImage();
+    void ksuAnyKernel3ZipWithoutKernelFails();
+    void ksuLkmPackZipExtracts();
+    void ksuDownloadUrlsKnown();
 };
 
 void TestPatcher::factoryCreate()
@@ -287,11 +316,17 @@ void TestPatcher::factoryCreate()
         QVERIFY2(p.get(), "create() 返回 nullptr");
         QVERIFY(dynamic_cast<patcher::MagiskPatcher *>(p.get()));
     }
-    // 未实现类型返回 nullptr（不崩溃），由后续任务 C4+ 扩展
+    // C4：KernelSU 系四入口均映射到 KernelSuPatcher
     for (patcher::RootType t : {patcher::RootType::KernelSU, patcher::RootType::KernelSU_Next,
-                                patcher::RootType::SukiSU, patcher::RootType::ReSukiSU,
-                                patcher::RootType::APatch, patcher::RootType::KernelPatch,
-                                patcher::RootType::RamdiskSu, patcher::RootType::ModuleInstall})
+                                patcher::RootType::SukiSU, patcher::RootType::ReSukiSU}) {
+        std::unique_ptr<patcher::RootPatcher> p(patcher::RootPatcher::create(t));
+        QVERIFY2(p.get(), "create() 返回 nullptr");
+        QVERIFY(dynamic_cast<patcher::KernelSuPatcher *>(p.get()));
+    }
+    // 未实现类型返回 nullptr（不崩溃），由后续任务 C5+ 扩展
+    for (patcher::RootType t : {patcher::RootType::APatch, patcher::RootType::KernelPatch,
+                                patcher::RootType::RamdiskSu,
+                                patcher::RootType::ModuleInstall})
         QVERIFY(patcher::RootPatcher::create(t) == nullptr);
 }
 
@@ -601,6 +636,584 @@ void TestPatcher::downloadUrlKnown()
     QCOMPARE(patcher::MagiskPatcher::assetKey("official"), QStringLiteral("magisk"));
     QCOMPARE(patcher::MagiskPatcher::assetKey("alpha"), QStringLiteral("magisk-alpha"));
     QCOMPARE(patcher::MagiskPatcher::assetKey("kitsune"), QStringLiteral("magisk-kitsune"));
+}
+
+// ============================================================
+// C4: KernelSU 系（官方/Next/SukiSU/ReSukiSU 参数化 + 非 GKI 路径）
+// 注入机制依 ksud boot_patch.rs（联网验证 2026-08）：init→init.real 改名、
+// init=ksuinit(0755)、kernelsu.ko(0755)
+// ============================================================
+
+void TestPatcher::ksuDetectKmiFromKernel()
+{
+    // GKI 内核版本串（"5.15.137-android13-8-00001-g..."）→ android13-5.15；
+    // kernel 内扫描优先于 cmdline（权威路径），与 ksud parse_kmi 一致
+    imgboot::BootInfo info;
+    info.kernel = "Linux version 5.15.137-android13-8-00001-g97e1e0cd3750 "
+                  "(gcc version 12.2) #1 SMP PREEMPT";
+    info.cmdline = "console=tty0 androidboot.kmi=android13-5.10"; // 冲突 → kernel 优先
+    QCOMPARE(patcher::KernelSuPatcher::detectKmi(info), QStringLiteral("android13-5.15"));
+}
+
+void TestPatcher::ksuDetectKmiFromCmdline()
+{
+    // kernel 无 KMI 串 → cmdline androidboot.kmi= 兜底
+    imgboot::BootInfo info;
+    info.kernel = QByteArray(4096, 'K');
+    info.cmdline = "console=ttyS0 androidboot.kmi=android14-6.1 slot_suffix=_a";
+    QCOMPARE(patcher::KernelSuPatcher::detectKmi(info), QStringLiteral("android14-6.1"));
+}
+
+void TestPatcher::ksuDetectKmiNone()
+{
+    imgboot::BootInfo info;
+    info.kernel = QByteArray(4096, 'K');
+    info.cmdline = "console=ttyS0 no_console_suspend";
+    QVERIFY(patcher::KernelSuPatcher::detectKmi(info).isEmpty());
+    // 空 BootInfo 不崩溃、返回空
+    imgboot::BootInfo empty;
+    QVERIFY(patcher::KernelSuPatcher::detectKmi(empty).isEmpty());
+}
+
+void TestPatcher::ksuMissingKoFails()
+{
+    // KMI 可识别但未提供 kernelsu.ko → 明确错误（提示下载源），不崩溃
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    QByteArray out;
+    QString err;
+    const QByteArray kernel = "Linux version 5.15.137-android13-8-00001-g97e1e0cd3750 "
+                              "kernel-bytes";
+    QVERIFY(!p.patch(buildBootV0(buildCpio({}), kernel), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("kernelsu.ko", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::ksuMissingWrapperFails()
+{
+    // 有 ko 无 ksuinit wrapper → 错误提示 ksuinit
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("fake kernelsu.ko module bytes");
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath; // apkPath 未指定
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})), cfg, out,
+                     &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("ksuinit", Qt::CaseInsensitive));
+}
+
+void TestPatcher::ksuNonGkiNoKoFails()
+{
+    // 非 GKI（kernel 无 KMI 串、cmdline 无 androidboot.kmi）且无注入物：
+    // 诚实边界 —— 明确错误并建议 APatch/Magisk，不假装支持
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({})), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("APatch", Qt::CaseInsensitive));
+    QVERIFY(err.contains("Magisk", Qt::CaseInsensitive));
+}
+
+void TestPatcher::ksuKmiUnsupportedFails()
+{
+    // KMI 可扫描但不在变体支持列表（LKM 仅覆盖 5.10+ GKI 资产）→ 错误 +
+    // APatch 兜底建议
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    QByteArray out;
+    QString err;
+    const QByteArray kernel = "Linux version 5.10.101-android11-9-g30979850fc20 non-gki-err";
+    QVERIFY(!p.patch(buildBootV0(buildCpio({}), kernel), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("android11-5.10"));
+    QVERIFY(err.contains("APatch", Qt::CaseInsensitive));
+}
+
+void TestPatcher::ksuUnknownVariantFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("ko-bytes");
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-bytes");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    cfg.variant = "bogus";
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({})), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("bogus"));
+}
+
+void TestPatcher::ksuInjectLkmUncompressed()
+{
+    // 完整 LKM 注入（未压缩 ramdisk）：
+    // init→init.real（原样保留）、init=ksuinit(0755)、kernelsu.ko(0755)，
+    // 无 .backup 链（与 Magisk 路径区分），kernel/dtb 段不动
+    const QByteArray initPayload("original init payload for kernelsu");
+    const QByteArray wrapperBytes("ksuinit-wrapper-executable-bytes");
+    const QByteArray koBytes("fake kernelsu.ko module bytes");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(koBytes);
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write(wrapperBytes);
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray out;
+    QString err;
+    const QByteArray ramdisk = buildCpio({{"init", kRegMode | 0750, initPayload}});
+    QVERIFY2(p.patch(buildBootV0(ramdisk), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, wrapperBytes);
+    QCOMPARE(init->mode & 0170000, kRegMode);
+    QCOMPARE(init->mode & 0777, 0755u); // ksud add 0755 init
+    const TestCpioEntry *ko = findEntry(entries, "kernelsu.ko");
+    QVERIFY(ko);
+    QCOMPARE(ko->data, koBytes);
+    QCOMPARE(ko->mode & 0170000, kRegMode);
+    QCOMPARE(ko->mode & 0777, 0755u); // ksud add 0755 kernelsu.ko
+    const TestCpioEntry *real = findEntry(entries, "init.real");
+    QVERIFY(real);
+    QCOMPARE(real->data, initPayload);
+    QCOMPARE(real->mode & 0777, 0750u); // mv 保留原模式
+    // 与 Magisk 路径区分：无 .backup 链
+    QVERIFY(findEntry(entries, ".backup") == nullptr);
+    QVERIFY(findEntry(entries, ".backup/init") == nullptr);
+    QCOMPARE(entries.size(), 3);
+    // kernel 段未动
+    QCOMPARE(info.kernel, QByteArray(4096, 'K'));
+}
+
+void TestPatcher::ksuInjectLkmGzipRamdisk()
+{
+    const QByteArray initPayload("original init for gzip ramdisk kernelsu");
+    const QByteArray wrapperBytes("ksuinit-fake-for-gzip");
+    const QByteArray koBytes("ko-for-gzip-test");
+    const QByteArray cpio = buildCpio({{"init", kRegMode | 0750, initPayload}});
+    const QByteArray ramdiskComp = patcher::compressRamdisk(cpio, "gzip");
+    QVERIFY(!ramdiskComp.isEmpty());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(koBytes);
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write(wrapperBytes);
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU_Next; // Next 注入机制相同
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(ramdiskComp), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QString outFmt;
+    QVERIFY(patcher::detectRamdiskFormat(info.ramdisk, outFmt));
+    QCOMPARE(outFmt, "gzip"); // 重压保持原格式
+    QByteArray raw;
+    QString rErr;
+    QVERIFY(patcher::decompressRamdisk(info.ramdisk, raw, &rErr));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(raw, &entries));
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, wrapperBytes);
+    const TestCpioEntry *real = findEntry(entries, "init.real");
+    QVERIFY(real);
+    QCOMPARE(real->data, initPayload);
+    QVERIFY(findEntry(entries, "kernelsu.ko"));
+}
+
+void TestPatcher::ksuInjectLkmIntoRamdisklessBoot()
+{
+    // 无 ramdisk：与 ksud "No ramdisk, create by default" 一致 ——
+    // 创建空 cpio 注入 init + kernelsu.ko
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("ko-bytes");
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-bytes");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::SukiSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(QByteArray()), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QVERIFY(!info.ramdisk.isEmpty());
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    QVERIFY(findEntry(entries, "init"));
+    QVERIFY(findEntry(entries, "kernelsu.ko"));
+    QVERIFY(findEntry(entries, "init.real") == nullptr); // 无原 init 可改名
+}
+
+void TestPatcher::ksuInjectLkmNoInitRamdisk()
+{
+    // ramdisk 无 init 条目：仍注入 init + ko，不产生 init.real
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("ko-bytes");
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-bytes");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ReSukiSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({})), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    QVERIFY(findEntry(entries, "init"));
+    QVERIFY(findEntry(entries, "kernelsu.ko"));
+    QVERIFY(findEntry(entries, "init.real") == nullptr);
+}
+
+void TestPatcher::ksuMagiskPatchedBootFails()
+{
+    // Magisk 修补产物（.backup 链）→ 拒绝（ksud: "Cannot work with
+    // Magisk patched image"）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("ko-bytes");
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-bytes");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray out;
+    QString err;
+    const QByteArray ramdisk =
+        buildCpio({{".backup", kDirMode, QByteArray()}, {"init", kRegMode | 0750, "x"}});
+    QVERIFY(!p.patch(buildBootV0(ramdisk), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("Magisk", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::ksuRepatchIdempotent()
+{
+    // 已修补镜像（ramdisk 含 kernelsu.ko）再次注入：与 ksud 一致跳过
+    // init→init.real 改名（原 init.real 保留），仅幂等重写 init 与 ko
+    const QByteArray initPayload("original init payload");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("ko-v1");
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-v1");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QByteArray patched;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, initPayload}})), cfg,
+                     patched, &err),
+             qPrintable(err));
+
+    // 第二次：换新注入物，成功且 init.real 仍为原 init
+    QFile f3(koPath);
+    QVERIFY(f3.open(QIODevice::WriteOnly));
+    f3.write("ko-v2");
+    f3.close();
+    QFile f4(initPath);
+    QVERIFY(f4.open(QIODevice::WriteOnly));
+    f4.write("ksuinit-v2");
+    f4.close();
+    QByteArray patched2;
+    QString err2;
+    QVERIFY2(p.patch(patched, cfg, patched2, &err2), qPrintable(err2));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(patched2, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, QByteArray("ksuinit-v2"));
+    const TestCpioEntry *ko = findEntry(entries, "kernelsu.ko");
+    QVERIFY(ko);
+    QCOMPARE(ko->data, QByteArray("ko-v2"));
+    const TestCpioEntry *real = findEntry(entries, "init.real");
+    QVERIFY(real);
+    QCOMPARE(real->data, initPayload); // 原 init 未被二次注入破坏
+}
+
+void TestPatcher::ksuAnyKernel3Replace()
+{
+    // 非 GKI 路径：koPath 为 AnyKernel3 包（anykernel.sh + Image.gz）→
+    // 解包提取 Image.gz 替换 boot kernel 段，ramdisk 保持原样
+    const QByteArray fakeKernel("REPLACED-KERNEL-IMAGE-GZ-BYTES-0123456789");
+    const QByteArray ramdisk = buildCpio({{"init", kRegMode | 0750, "keep-me"}});
+    const QByteArray ak3Zip =
+        buildZip({{"anykernel.sh", "kernel.string=FakeKernel by test", 0},
+                  {"Image.gz", fakeKernel, 0}});
+    QVERIFY(!ak3Zip.isEmpty());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/anykernel3.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(ak3Zip);
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = zipPath; // AK3 包经 koPath 传入
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(ramdisk), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QCOMPARE(info.kernel, fakeKernel); // kernel 段替换
+    // ramdisk 未动：原 cpio 原样
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    QCOMPARE(entries.size(), 1);
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, QByteArray("keep-me"));
+}
+
+void TestPatcher::ksuAnyKernel3DeflatedImage()
+{
+    // AK3 包内 Image 为 DEFLATE（真实预置内核包常见压缩）
+    const QByteArray fakeKernel("deflated-kernel-image-bytes");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/anykernel3.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"META-INF/com/google/android/update-binary", "#!/sbin/sh", 0},
+                      {"Image", fakeKernel, 8}})); // method=8 deflate
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({})), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QCOMPARE(info.kernel, fakeKernel);
+}
+
+void TestPatcher::ksuAnyKernel3ZipWithoutKernelFails()
+{
+    // AK3 包缺内核文件 → 明确错误（不假装支持）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/bad.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"anykernel.sh", "kernel.string=NoImage", 0},
+                      {"META-INF/com/google/android/update-binary", "#!/sbin/sh", 0}}));
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({})), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("Image", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::ksuLkmPackZipExtracts()
+{
+    // ReSukiSU 形态：koPath 为 lkm-all.zip（内含 {kmi}_kernelsu.ko）→
+    // 按 deviceKmi 提取对应 ko 做 LKM 注入
+    const QByteArray koBytes("ko-for-android13-5.15");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/lkm-all.zip";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"android13-5.15_kernelsu.ko", koBytes, 0},
+                      {"android15-6.6_kernelsu.ko", "wrong-ko", 0}}));
+    f.close();
+    QFile f2(initPath);
+    QVERIFY(f2.open(QIODevice::WriteOnly));
+    f2.write("ksuinit-bytes");
+    f2.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ReSukiSU;
+    cfg.koPath = zipPath;
+    cfg.apkPath = initPath;
+    cfg.deviceKmi = "android13-5.15"; // 设备指定（kernel 无 KMI 串）
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})), cfg,
+                     out, &err),
+             qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *ko = findEntry(entries, "kernelsu.ko");
+    QVERIFY(ko);
+    QCOMPARE(ko->data, koBytes);
+}
+
+void TestPatcher::ksuDownloadUrlsKnown()
+{
+    // 各变体下载源（联网验证 2026-08）：
+    QVERIFY(patcher::KernelSuPatcher::koUrl("official", "android13-5.15")
+                .toString()
+                .contains("tiann/KernelSU"));
+    QVERIFY(patcher::KernelSuPatcher::koUrl("official", "android13-5.15")
+                .toString()
+                .endsWith("android13-5.15_kernelsu.ko"));
+    QVERIFY(patcher::KernelSuPatcher::koUrl("next", "android13-5.15")
+                .toString()
+                .contains("KernelSU-Next"));
+    QVERIFY(patcher::KernelSuPatcher::koUrl("suki", "android13-5.15")
+                .toString()
+                .contains("SukiSU-Ultra"));
+    // ReSukiSU 无主仓 release 资产 → CI 发行通道 lkm-all.zip
+    QVERIFY(patcher::KernelSuPatcher::koUrl("resuki", "android13-5.15")
+                .toString()
+                .contains("lkm-all.zip"));
+    QVERIFY(patcher::KernelSuPatcher::koUrl("bogus", "android13-5.15").isEmpty());
+
+    // ksuinit wrapper：official 直接资产；resuki ksuinit.zip；
+    // next/suki 无独立资产 → 回退官方（文档化）
+    QVERIFY(patcher::KernelSuPatcher::ksuinitUrl("official")
+                .toString()
+                .contains("tiann/KernelSU"));
+    QVERIFY(patcher::KernelSuPatcher::ksuinitUrl("resuki")
+                .toString()
+                .endsWith("ksuinit.zip"));
+    QVERIFY(!patcher::KernelSuPatcher::ksuinitUrl("next").isEmpty());
+    QVERIFY(!patcher::KernelSuPatcher::ksuinitUrl("suki").isEmpty());
+    QVERIFY(patcher::KernelSuPatcher::ksuinitUrl("bogus").isEmpty());
+
+    // 7 个 KMI 全覆盖（四渠道资产一致，联网验证）
+    const QStringList kmis = patcher::KernelSuPatcher::supportedKmis("official");
+    QCOMPARE(kmis.size(), 7);
+    QVERIFY(kmis.contains("android13-5.15"));
+    QVERIFY(kmis.contains("android16-6.12"));
+    QCOMPARE(patcher::KernelSuPatcher::supportedKmis("next"), kmis);
+    QCOMPARE(patcher::KernelSuPatcher::supportedKmis("suki"), kmis);
+    QCOMPARE(patcher::KernelSuPatcher::supportedKmis("resuki"), kmis);
+    QVERIFY(patcher::KernelSuPatcher::supportedKmis("bogus").isEmpty());
+
+    QCOMPARE(patcher::KernelSuPatcher::assetKey("resuki"), QStringLiteral("ksu-resuki"));
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)
