@@ -75,6 +75,21 @@ else()
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
 endif()
 
+# 压缩库（镜像处理: payload/zstd/lz4/bzip2/xz/brotli）
+find_library(ZSTD_LIBRARY zstd)
+find_path(ZSTD_INCLUDE_DIR zstd.h)
+find_library(LZ4_LIBRARY lz4)
+find_path(LZ4_INCLUDE_DIR lz4frame.h)
+find_library(BZIP2_LIBRARY bz2)
+find_path(BZIP2_INCLUDE_DIR bzlib.h)
+find_library(XZ_LIBRARY lzma)
+find_path(XZ_INCLUDE_DIR lzma.h)
+find_library(BROTLI_LIBRARY brotlidec)
+find_path(BROTLI_INCLUDE_DIR brotli/decode.h)
+if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR NOT BROTLI_LIBRARY)
+    message(FATAL_ERROR "Compression libs not found. Linux: pacman -S zstd lz4 bzip2 xz brotli  |  Windows: vcpkg install zstd lz4 bzip2 xz brotli")
+endif()
+
 # 包含目录
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -90,6 +105,9 @@ file(GLOB_RECURSE SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp"
 )
+
+# image_engine 由独立静态库目标编译，从主程序 GLOB 中排除
+list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
 
 file(GLOB_RECURSE HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
@@ -169,3 +187,33 @@ set_target_properties(PhoneToolbox PROPERTIES
 
 # 安装规则
 install(TARGETS PhoneToolbox DESTINATION bin)
+
+# ---- image_engine 静态库 ----
+file(GLOB_RECURSE IMAGE_ENGINE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.cpp")
+file(GLOB_RECURSE IMAGE_ENGINE_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.h")
+add_library(image_engine STATIC ${IMAGE_ENGINE_SOURCES} ${IMAGE_ENGINE_HEADERS})
+target_include_directories(image_engine PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${ZSTD_INCLUDE_DIR} ${LZ4_INCLUDE_DIR} ${BZIP2_INCLUDE_DIR}
+    ${XZ_INCLUDE_DIR} ${BROTLI_INCLUDE_DIR})
+target_link_libraries(image_engine PUBLIC Qt6::Core
+    ${ZSTD_LIBRARY} ${LZ4_LIBRARY} ${BZIP2_LIBRARY} ${XZ_LIBRARY} ${BROTLI_LIBRARY})
+set_target_properties(image_engine PROPERTIES AUTOMOC ON)
+
+# 主程序链接 image_engine
+target_link_libraries(PhoneToolbox image_engine)
+
+# ---- image_engine 单元测试 ----
+option(ENABLE_IMAGE_TESTS "Build image_engine unit tests" ON)
+if(ENABLE_IMAGE_TESTS)
+    find_package(Qt6 QUIET COMPONENTS Test)
+    if(Qt6Test_FOUND)
+        enable_testing()
+        set(IMAGE_TEST_SOURCES)
+        if(IMAGE_TEST_SOURCES)
+            add_executable(image_engine_tests ${IMAGE_TEST_SOURCES})
+            target_link_libraries(image_engine_tests PRIVATE image_engine Qt6::Test)
+            add_test(NAME image_engine_tests COMMAND image_engine_tests)
+        endif()
+    endif()
+endif()
