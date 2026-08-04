@@ -1,5 +1,6 @@
 #include <QtTest>
 #include "image_engine/compression/compressor.h"
+#include "image_engine/compression/lz4_wrapper.h"
 #include "image_engine/compression/zstd_wrapper.h"
 
 class TestCompression : public QObject
@@ -8,6 +9,8 @@ class TestCompression : public QObject
 private slots:
     void zstdRoundTrip();
     void zstdInvalidInput();
+    void lz4RoundTrip();
+    void lz4InvalidInput();
     void dispatchRoundTrip();
 };
 
@@ -21,6 +24,16 @@ void TestCompression::zstdRoundTrip()
 }
 
 void TestCompression::zstdInvalidInput() { QVERIFY(imgcomp::zstdDecompress("garbage").isEmpty()); }
+
+void TestCompression::lz4RoundTrip()
+{
+    QByteArray data("lz4 frame payload, padding padding padding padding padding");
+    QByteArray comp = imgcomp::lz4Compress(data);
+    QVERIFY(!comp.isEmpty());
+    QCOMPARE(imgcomp::lz4Decompress(comp), data);
+}
+
+void TestCompression::lz4InvalidInput() { QVERIFY(imgcomp::lz4Decompress("garbage").isEmpty()); }
 
 void TestCompression::dispatchRoundTrip()
 {
