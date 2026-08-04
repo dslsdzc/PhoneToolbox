@@ -169,6 +169,22 @@ Linux 系统包 / Windows vcpkg 获取。
 - 下载的签名工具与材料**不写入代码库**，仅缓存于用户数据目录
 - 签名材料按 key 版本化缓存（如 `huawei-sign/`、`lg-kdz/`），下载失败可回退手动导入
 
+### 候选外部下载源（2026-08-04 搜索确认）
+
+| 仓库 | 用途 | 提供的材料 |
+|------|------|-----------|
+| [SimomYung/unpack_huawei_package](https://github.com/SimomYung/unpack_huawei_package) | 华为 update.bin（HarmonyOS 5）解包 | L2 分区表解析 + "08"/"06" 签名头偏移规则（计划 B 直接参考） |
+| [Project-Satori/HuaweiUpdateExtractor](https://github.com/Project-Satori/HuaweiUpdateExtractor) | update.app 解包/重打包 | profiles.xml 机型配置（signaturetrue/checksumtrue 语义） |
+| [scue/unpacker_huawei](https://github.com/scue/unpacker_huawei) | update.app unpack/repack | 重打包对齐规则 |
+| [echo-devim/huextract](https://github.com/echo-devim/huextract) | update.app 提取（Rust） | 校验和验证逻辑 |
+| [R0rt1z2/huawei-playground](https://github.com/R0rt1z2/huawei-playground) | 华为逆向合集 | oeminfo/cm3parser/bootloader 解析 |
+| [sebaubuntu-python/dumpyara](https://github.com/sebaubuntu-python/dumpyara) | 综合固件转储 | kdz/tar.md5/payload/super/EROFS 全格式参考 |
+| [dkpost3/DumprX](https://github.com/dkpost3/DumprX) | dumpyara 改进 fork | kdztools 更新（LG 新版固件） |
+| IOMonster kdztools（unkdz/undz） | LG KDZ 解析 | KDZ 头 + 加密段解密逻辑 |
+| ruuveal（Firmware Extractor 组件） | 三星签名移除 | 需机型 keyfile（用户自备） |
+
+**已知边界（如实标注）**：华为 signature 为证书链+时间戳+设备唯一标识复合结构，**通用重签名大概率失败** —— 安全做法是保留原固件 signature 仅修改 system/boot 分区；三星签名移除需机型 keyfile（用户自备，仓库不内置）。
+
 受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）。
 
 ## 维修诊断模块（计划 E，排期在 D 之后）
