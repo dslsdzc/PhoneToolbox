@@ -229,6 +229,7 @@ if(ENABLE_ROOT_PATCHER_TESTS)
     if(Qt6Test_FOUND)
         enable_testing()
         set(ROOT_PATCHER_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_patcher.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ramdisk.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_downloader.cpp)
         # 与 image_engine 测试一致：每个测试源独立可执行文件（首源沿用 root_patcher_tests 目标名）
