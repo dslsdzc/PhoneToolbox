@@ -87,8 +87,9 @@ find_path(XZ_INCLUDE_DIR lzma.h)
 find_library(BROTLI_LIBRARY brotlidec)
 find_library(BROTLIENC_LIBRARY brotlienc)
 find_path(BROTLI_INCLUDE_DIR brotli/decode.h)
-# zlib（gzip 封装）：Qt6::Core 依赖 zlib 但符号不可见，显式链接（与 zstd/lz4/bz2/xz 一致）
-find_library(ZLIB_LIBRARY z)
+# zlib（gzip 封装）：Qt6::Core 依赖 zlib 但符号不可见，显式链接（与 zstd/lz4/bz2/xz 一致）。
+# 多名字匹配：Linux 为 libz.so，vcpkg Windows 产出 zlib.lib（而非 z.lib）
+find_library(ZLIB_LIBRARY NAMES z zlib zlib1 zlibstatic)
 if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR NOT BROTLI_LIBRARY OR NOT BROTLIENC_LIBRARY OR NOT ZLIB_LIBRARY)
     message(FATAL_ERROR "Compression libs not found. Linux: pacman -S zstd lz4 bzip2 xz brotli zlib  |  Windows: vcpkg install zstd lz4 bzip2 xz brotli zlib")
 endif()

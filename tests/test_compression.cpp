@@ -22,6 +22,7 @@ private slots:
     void xzStandardRoundTrip();
     void brotliRoundTrip();
     void brotliInvalidInput();
+    void brotliTruncated();
     void gzipRoundTrip();
     void gzipInvalidInput();
     void gzipTruncated();
@@ -99,13 +100,28 @@ void TestCompression::xzStandardRoundTrip()
 
 void TestCompression::brotliRoundTrip()
 {
-    QByteArray data("brotli payload repeated repeated repeated");
-    QByteArray comp = imgcomp::brotliCompress(data);
+    // 小负载（单块）与 1MB（触发流式多块/多迭代解压路径；一次性 API 缓冲
+    // 不足返回 ERROR，此用例防止回归到仅能解小负载的实现）
+    QByteArray small("brotli payload repeated repeated repeated");
+    QByteArray comp = imgcomp::brotliCompress(small);
     QVERIFY(!comp.isEmpty());
-    QCOMPARE(imgcomp::brotliDecompress(comp), data);
+    QCOMPARE(imgcomp::brotliDecompress(comp), small);
+    QByteArray big(1024 * 1024, 'a');
+    QByteArray bigComp = imgcomp::brotliCompress(big);
+    QVERIFY(!bigComp.isEmpty());
+    QCOMPARE(imgcomp::brotliDecompress(bigComp), big);
 }
 
 void TestCompression::brotliInvalidInput() { QVERIFY(imgcomp::brotliDecompress("garbage").isEmpty()); }
+
+void TestCompression::brotliTruncated()
+{
+    QByteArray data(1024 * 1024, 'a');
+    QByteArray comp = imgcomp::brotliCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QVERIFY(imgcomp::brotliDecompress(comp.left(comp.size() - 1)).isEmpty()); // 截断末字节（流尾标记缺失）
+    QVERIFY(imgcomp::brotliDecompress(comp.left(comp.size() / 2)).isEmpty());  // 流被切
+}
 
 void TestCompression::gzipRoundTrip()
 {
@@ -123,7 +139,7 @@ void TestCompression::gzipTruncated()
     QByteArray comp = imgcomp::gzipCompress(data);
     QVERIFY(!comp.isEmpty());
     QVERIFY(imgcomp::gzipDecompress(comp.left(comp.size() / 2)).isEmpty());        // deflate 流被切
-    QVERIFY(imgcomp::gzipDecompress(comp.left(comp.size() - 9)).isEmpty());        // 尾 8 字节 + 1 流字节
+    QVERIFY(imgcomp::gzipDecompress(comp.left(comp.size() - 8)).isEmpty());        // 仅 trailer（CRC32+ISIZE 8 字节）被切
 }
 
 void TestCompression::gzipForgedIsize()

@@ -24,7 +24,15 @@ QByteArray gzipCompressImpl(const QByteArray &data)
     if (deflateInit2(&strm, 6, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
         return {};
     uLongf bound = deflateBound(&strm, static_cast<uLong>(data.size()));
-    QByteArray out(static_cast<int>(bound) + 18, Qt::Uninitialized); // +18 兜底
+    // ~INT_MAX 输入时 bound 可能超 int 上限（+18 冗余亦然），static_cast<int>
+    // 溢出为负 → qBadAlloc 崩溃，故超限直接拒绝
+    const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+    const size_t allocSize = static_cast<size_t>(bound) + 18;
+    if (allocSize > maxInt) {
+        deflateEnd(&strm);
+        return {};
+    }
+    QByteArray out(static_cast<int>(allocSize), Qt::Uninitialized); // +18 兜底
     strm.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data.constData()));
     strm.avail_in = static_cast<uInt>(data.size());
     strm.next_out = reinterpret_cast<Bytef *>(out.data());
