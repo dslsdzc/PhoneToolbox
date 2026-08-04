@@ -157,6 +157,33 @@ Linux 系统包 / Windows vcpkg 获取。
 拆分 super → system.img, vendor.img, product.img ...
 ```
 
+## 维修诊断模块（计划 E，排期在 D 之后）
+
+面向手机维修场景的诊断测试功能，落地在 `system_tool_panel` 新增"维修诊断"分类（复用现有 ADB QProcess 执行模式）。
+
+### 功能清单（12 项，全部纳入）
+
+| 测试项 | 实现方式 | 权限 |
+|--------|---------|------|
+| 纯色屏幕测试（坏点检测） | 红/绿/蓝/白/黑全屏 + 亮度调节 | 纯 ADB（部分机型需辅助权限） |
+| 触摸画线测试 | `input swipe` 轨迹 | 纯 ADB |
+| 电池诊断 | `dumpsys battery` + `/sys/class/power_supply` 实时电流/电压/温度 | 纯 ADB |
+| 电池循环次数 | `battery_stats` 节点 | 需 Root |
+| 音频测试 | 测试音播放（扬声器/听筒）+ `dumpsys audio` | 纯 ADB |
+| 麦克风回路 | 录音 + 回放 | 纯 ADB |
+| 传感器读数 | `dumpsys sensorservice` 实时六轴/光感/距离 | 纯 ADB |
+| 相机测试 | 前后摄启动 + 闪光灯 | 纯 ADB |
+| 按键/触摸坐标 | `getevent` 实时流 | 纯 ADB |
+| 通信测试 | WiFi/BT/NFC 状态 + SIM 信号 | 纯 ADB |
+| eMMC/UFS 寿命 | `mmc extcsd` / UFS 健康节点 | 需 Root |
+| IMEI/基带查询 | `dumpsys telephony` / AT 通道 | 纯 ADB（写入需 EDL/MTK，列为后续扩展） |
+
+### 约束
+
+- 纯 ADB 项优先落地；需 Root 项 UI 标注"需 Root"
+- EEPROM/字库读写（EDL/MTK 通道）列为后续扩展，不在本计划
+- 测试：QProcess 命令构造的 mock 验证（无真机依赖）
+
 ## 明确不做（YAGNI）
 
 - ZUCCHINI diff 解包（暂缓，标注提示）
