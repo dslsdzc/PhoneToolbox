@@ -9,6 +9,7 @@ class TestBspatch : public QObject
 private slots:
     void applySimple();
     void applyExtraAndOffset();
+    void negativeOldOffsetAccepted();
     void corruptRejected();
 };
 
@@ -63,6 +64,22 @@ void TestBspatch::applyExtraAndOffset()
     QByteArray extra("XY");
     QByteArray patch = buildPatch(ctrl, diff, extra, 6); // newLen=6
     QCOMPARE(imgbspatch::applyBsdiff(oldData, patch), QByteArray("abcXYg"));
+}
+
+// 负 old_offset 正例（bspatch.c 0 填充语义）: 旧 "abcdef" → 新 "abcabc"
+// ctrl1 (3,0,-3): diff 3 字节(0,0,0) → "abc"；oldPos 0→3，再 += z(-3) → 0
+// ctrl2 (3,0,0): diff 3 字节(0,0,0) → 从 old[0..2] 再次取 "abc"
+// 回归保护: 旧实现若对 oldPos 做符号检查会把负 old_offset 判为损坏 patch 而拒绝；
+// bspatch.c 允许负偏移，越界读由 diff 循环 0 填充守卫兜底（此处 oldPos 恢复为 0，结果 "abcabc"）。
+void TestBspatch::negativeOldOffsetAccepted()
+{
+    QByteArray oldData("abcdef");
+    QByteArray ctrl;
+    put64(ctrl, 3); put64(ctrl, 0); put64(ctrl, static_cast<quint64>(qint64(-3)));
+    put64(ctrl, 3); put64(ctrl, 0); put64(ctrl, 0);
+    QByteArray diff(6, 0);
+    QByteArray patch = buildPatch(ctrl, diff, QByteArray(), 6); // newLen=6
+    QCOMPARE(imgbspatch::applyBsdiff(oldData, patch), QByteArray("abcabc"));
 }
 
 // 负向用例: 损坏 patch 必须返回空且 ok=false（不得回绕/越界/负尺寸分配）
