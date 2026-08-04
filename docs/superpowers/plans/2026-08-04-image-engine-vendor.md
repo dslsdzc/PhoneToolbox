@@ -1319,7 +1319,13 @@ git commit -m "feat: update.app 数据重打包 + update.bin L2 解析 (TDD)"
 **Interfaces:**
 - Produces: `namespace imgsin { struct BlockDesc { QByteArray magic; quint64 dataStart; quint64 blockSize; quint64 dataLength; quint64 dataDest; bool compressed; }; bool isSinV3(const QByteArray&); bool parseSin(const QByteArray &sin, QList<BlockDesc> &blocks, QString *error); QByteArray extractRaw(const QByteArray &sin, const QList<BlockDesc> &blocks, QString *error); }`
 
-SIN v3 结构（已验证）：首字节 0x03 + "SIN" + 头长度 + SinType；随后 SinDataHeader：`MMCF` + mmcfLength + `GPTP` + GPTPsize + GPTGUID(16) + BlockInfoHeader 数组；BlockInfoHeader：magic `LZ4A`(压缩) 或 `ADDR`(非压缩) + BIHLength(0x54/0x44) + dataStart + blockSize(LZ4A) + dataLength + dataDest + destLength(LZ4A) + HashType + SHA256(32)。
+SIN v3 结构（三源核实：flashtool S1ParseLib / ROMExplorer / munjeni sin2raw，**全大端 BE**）：首字节 0x03 + "SIN" + 头长度 + SinType；随后 SinDataHeader：`MMCF` + mmcfLength + `GPTP` + GPTPsize + GPTGUID(16) + BlockInfoHeader 数组；**数据基址 = headerLen + mmcfLen + 8**。
+
+BlockInfoHeader 真实布局（2026-08-04 审查修订，初版计划偏移有误）：
+- ADDR 块（0x44B）：magic@0 + blockLen@4 + **dataOffset@8** + **dataLen@16** + **fileOffset@24** + **hashType@32** + SHA256@36
+- LZ4A 块（0x54B）：magic@0 + blockLen@4 + dataOffset@8 + **uncompDataLen@16** + **compDataLen@24** + **fileOffset@32** + reserved@40 + **hashType@48** + SHA256@52
+- LZ4A 数据为 **LZ4 raw-block 格式（无 frame 头）**，需 LZ4_decompress_safe（dstCapacity = uncompDataLen）
+- 块数组遍历以 mmcfLen 为边界（魔数扫描仅容错兜底）
 
 - [ ] **Step 1: 写失败测试**
 
