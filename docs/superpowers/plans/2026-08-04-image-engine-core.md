@@ -82,6 +82,13 @@ if(NOT ZSTD_LIBRARY OR NOT LZ4_LIBRARY OR NOT BZIP2_LIBRARY OR NOT XZ_LIBRARY OR
 endif()
 ```
 
+在 `file(GLOB_RECURSE SOURCES ...)` 之后（`message(STATUS ...)` 之前）插入排除逻辑（重要：现有 GLOB_RECURSE `src/*.cpp` 会递归收集 image_engine 源文件，必须排除，否则与静态库目标重复编译导致重复符号）：
+
+```cmake
+# image_engine 由独立静态库目标编译，从主程序 GLOB 中排除
+list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
+```
+
 在文件末尾 `install(...)` 之后插入：
 
 ```cmake
