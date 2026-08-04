@@ -59,13 +59,21 @@ QByteArray lz4LegacyDecompress(const QByteArray &raw, QString *error)
             return fail("lz4 legacy: 块头截断");
         const quint32 compSize = readLE32(raw, pos);
         pos += 4;
+        if (compSize == static_cast<quint32>(kLegacyMagic)) {
+            // LG 设备 ramdisk 在块间重复魔数：跳过再读下一 4 字节
+            // （magiskboot v25.2 LZ4_decoder 与 master LZ4BlockDecoder 同逻辑）
+            continue;
+        }
         if (compSize == 0)
             return fail("lz4 legacy: 空块");
-        if (static_cast<int>(compSize) > maxBlock) {
-            // LG 变体：流尾 4 字节为总未压缩大小，流结束
+        if (compSize > static_cast<quint32>(maxBlock)) {
+            // LG 变体流尾（4B LE 总未压缩大小）必须是流的最后 4 字节；
+            // 否则视为畸形（伪流尾 + 尾随垃圾）直接失败
+            if (pos != raw.size())
+                return fail("lz4 legacy: LG 流尾后存在尾随数据");
             break;
         }
-        if (pos + static_cast<int>(compSize) > raw.size())
+        if (static_cast<qint64>(pos) + compSize > static_cast<qint64>(raw.size()))
             return fail("lz4 legacy: 数据越界");
         const int r = LZ4_decompress_safe(raw.constData() + pos, block.data(),
                                           static_cast<int>(compSize), kLegacyBlockSize);

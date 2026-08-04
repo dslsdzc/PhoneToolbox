@@ -12,6 +12,10 @@ private slots:
     void detectLz4Frame();
     void lz4LegacyRoundTrip();
     void lz4LegacyMultiBlock();
+    void lz4LegacyRepeatMagic();
+    void lz4LegacyLgTrailer();
+    void invalidLgTrailerFails();
+    void hugeCompSizeFails();
     void lz4FrameRoundTrip();
     void detectXz();
     void xzRoundTrip();
@@ -97,6 +101,62 @@ void TestRamdisk::lz4LegacyMultiBlock()
     QString err;
     QVERIFY(patcher::decompressRamdisk(comp, out, &err));
     QCOMPARE(out, data);
+}
+
+void TestRamdisk::lz4LegacyRepeatMagic()
+{
+    // LG 设备 ramdisk：块间重复魔数（magiskboot 两代解码器均跳过魔数字），
+    // 修复前会被当作 >8MiB 的 LG 流尾 → 静默截断输出
+    QByteArray a("first block payload abcdefghijklmnop");
+    QByteArray b("second block payload 0123456789");
+    QByteArray ca = patcher::compressRamdisk(a, "lz4");
+    QByteArray cb = patcher::compressRamdisk(b, "lz4");
+    // [magic][块1][magic][块2]：每段去掉各自开头的魔数，块间再插一个魔数
+    QByteArray stream("\x02\x21\x4c\x18", 4);
+    stream.append(ca.mid(4));
+    stream.append("\x02\x21\x4c\x18", 4);
+    stream.append(cb.mid(4));
+    QByteArray out;
+    QString err;
+    QVERIFY(patcher::decompressRamdisk(stream, out, &err));
+    QCOMPARE(out, a + b);
+}
+
+void TestRamdisk::lz4LegacyLgTrailer()
+{
+    // 合法 LG 变体：流尾 4B LE 总未压缩大小（> 单块压缩上限 → LG 分支）
+    QByteArray data("lg ramdisk content with trailer");
+    QByteArray stream = patcher::compressRamdisk(data, "lz4");
+    stream.append('\x00').append('\x00').append('\x00').append('\x01'); // 0x01000000 (16 MiB)
+    QByteArray out;
+    QString err;
+    QVERIFY(patcher::decompressRamdisk(stream, out, &err));
+    QCOMPARE(out, data);
+}
+
+void TestRamdisk::invalidLgTrailerFails()
+{
+    // 块后插入伪 LG 流尾 + 尾随垃圾：必须失败而非静默丢弃垃圾
+    QByteArray data("payload before fake trailer");
+    QByteArray stream = patcher::compressRamdisk(data, "lz4");
+    stream.append('\x00').append('\x00').append('\x00').append('\x01'); // 伪流尾 16 MiB
+    stream.append("trailing garbage");
+    QByteArray out;
+    QString err;
+    QVERIFY(!patcher::decompressRamdisk(stream, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestRamdisk::hugeCompSizeFails()
+{
+    // compSize >= 2^31：int 截断为负的防护（必须失败，不得越界/死循环）
+    QByteArray stream("\x02\x21\x4c\x18", 4);
+    stream.append('\xff').append('\xff').append('\xff').append('\xff'); // 0xFFFFFFFF
+    stream.append("data");
+    QByteArray out;
+    QString err;
+    QVERIFY(!patcher::decompressRamdisk(stream, out, &err));
+    QVERIFY(!err.isEmpty());
 }
 
 void TestRamdisk::lz4FrameRoundTrip()
