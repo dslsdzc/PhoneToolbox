@@ -376,10 +376,12 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         return fail(sErr);
 
     // ---- 1. unpack（官方 boot_patch.sh: ./kptools unpack "$BOOTIMAGE"）----
+    // 各步骤错误信息经局部 stepErr 拼接（error 可空，禁止 *error 解引用）
     QByteArray kout;
+    QString stepErr;
     if (!runKptools(kptools, tmp.path(), {QStringLiteral("unpack"), bootPath},
-                    kKptoolsTimeoutMs, &kout, error))
-        return fail(QStringLiteral("boot 镜像解包失败：%1").arg(*error));
+                    kKptoolsTimeoutMs, &kout, &stepErr))
+        return fail(QStringLiteral("boot 镜像解包失败：%1").arg(stepErr));
     if (!QFile::exists(tmp.path() + QStringLiteral("/kernel")))
         return fail(QStringLiteral("boot 镜像解包失败：未产出 kernel 文件"));
 
@@ -388,8 +390,8 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     const QString kernelPath = tmp.path() + QStringLiteral("/kernel");
     if (!runKptools(kptools, tmp.path(), {QStringLiteral("-i"), QStringLiteral("kernel"),
                                           QStringLiteral("-f")},
-                    kKptoolsTimeoutMs, &kout, error))
-        return fail(QStringLiteral("内核 IKCONFIG 解析失败：%1").arg(*error));
+                    kKptoolsTimeoutMs, &kout, &stepErr))
+        return fail(QStringLiteral("内核 IKCONFIG 解析失败：%1").arg(stepErr));
     if (!kout.contains("CONFIG_KALLSYMS=y"))
         return fail(QStringLiteral("内核未启用 CONFIG_KALLSYMS（或未启用 "
                                    "CONFIG_IKCONFIG 无法校验）：APatch 要求 "
@@ -406,15 +408,15 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
                      QStringLiteral("kernel.ori"), QStringLiteral("-k"),
                      QStringLiteral("kpimg"), QStringLiteral("-o"),
                      QStringLiteral("kernel")},
-                    kKptoolsTimeoutMs, &kout, error))
-        return fail(QStringLiteral("内核补丁失败：%1").arg(*error));
+                    kKptoolsTimeoutMs, &kout, &stepErr))
+        return fail(QStringLiteral("内核补丁失败：%1").arg(stepErr));
 
     // ---- 4. 验证已修补（kptools -l -i kernel 输出含 patched=true，即
     //        kpimg preset（KP_MAGIC "KP1158"）已在镜像内解析成功）----
     if (!runKptools(kptools, tmp.path(),
                     {QStringLiteral("-l"), QStringLiteral("-i"), QStringLiteral("kernel")},
-                    kKptoolsTimeoutMs, &kout, error))
-        return fail(QStringLiteral("修补结果校验失败：%1").arg(*error));
+                    kKptoolsTimeoutMs, &kout, &stepErr))
+        return fail(QStringLiteral("修补结果校验失败：%1").arg(stepErr));
     if (!kout.contains("patched=true"))
         return fail(QStringLiteral("修补结果校验失败：未检测到已修补标记"
                                    "（patched=true）—— kpimg 无效或与 kptools"
@@ -422,8 +424,8 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
 
     // ---- 5. repack（官方: kptools repack "$BOOTIMAGE" → new-boot.img）----
     if (!runKptools(kptools, tmp.path(), {QStringLiteral("repack"), bootPath},
-                    kKptoolsTimeoutMs, &kout, error))
-        return fail(QStringLiteral("boot 镜像重打包失败：%1").arg(*error));
+                    kKptoolsTimeoutMs, &kout, &stepErr))
+        return fail(QStringLiteral("boot 镜像重打包失败：%1").arg(stepErr));
     const QString newBoot = tmp.path() + QStringLiteral("/new-boot.img");
     if (!QFile::exists(newBoot))
         return fail(QStringLiteral("boot 镜像重打包失败：未产出 new-boot.img"));

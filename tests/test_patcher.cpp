@@ -275,7 +275,8 @@ static QByteArray buildBootV0(const QByteArray &ramdisk,
 // 开关（写入 boot 镜像内核段/内容）：
 //   "UNPACK_FAIL" → unpack 退出非零
 //   "REPACK_FAIL" → repack 退出非零
-//   "NO_KALLSYMS" → -f 不输出 CONFIG_KALLSYMS=y（门禁失败）
+//   "FLAG_FAIL"   → -f 自身退出非零（kptools 解析失败，门禁 rc≠0 分支）
+//   "NO_KALLSYMS" → -f 不输出 CONFIG_KALLSYMS=y（门禁内容分支）
 //   "PATCH_FAIL"  → -p 退出非零
 //   "NOPATCH"     → -p 成功但不写入 KP1158 标记（-l 报 patched=false）
 QByteArray apatchMockKptoolsScript()
@@ -316,6 +317,7 @@ if [ "$cmd" = "patch" ]; then
   exit 0
 fi
 if [ "$cmd" = "flag" ]; then
+  grep -q "FLAG_FAIL" "$img" && exit 10
   grep -q "NO_KALLSYMS" "$img" || printf 'CONFIG_KALLSYMS=y\nCONFIG_KALLSYMS_ALL=y\n'
   exit 0
 fi
@@ -399,10 +401,12 @@ private slots:
     void apatchKpatchPathNotDirFails();
     void apatchInvalidBootFails();
     void apatchNoKallsymsFails();
+    void apatchFlagFailFails();
     void apatchUnpackFailFails();
     void apatchPatchFailFails();
     void apatchNotPatchedFails();
     void apatchRepackFailFails();
+    void apatchNullErrorNoCrash();
     void apatchFactoryAndSources();
 };
 
@@ -1560,6 +1564,29 @@ void TestPatcher::apatchNoKallsymsFails()
     QVERIFY(err.contains("CONFIG_KALLSYMS", Qt::CaseInsensitive));
 }
 
+void TestPatcher::apatchFlagFailFails()
+{
+    // kptools -f 自身失败（rc≠0，如内核解析异常）→ 门禁 rc≠0 分支：
+    // 必须走"IKCONFIG 解析失败"错误路径而非继续
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("FLAG_FAIL-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("IKCONFIG", Qt::CaseInsensitive));
+}
+
 void TestPatcher::apatchUnpackFailFails()
 {
     QTemporaryDir dir;
@@ -1640,6 +1667,40 @@ void TestPatcher::apatchRepackFailFails()
     QString err;
     QVERIFY(!p.patch(buildApatchBoot(QByteArray("REPACK_FAIL-kernel")), cfg, out, &err));
     QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchNullErrorNoCrash()
+{
+    // error=nullptr 契约（审查修复回归护栏）：全部失败分支不得解引用 error。
+    // 各开关内核触发对应失败分支，error 传 nullptr —— 仅断言不崩溃且返回 false。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    // 流程失败分支：门禁 rc≠0 / 门禁内容 / unpack / patch / 未修补 / repack
+    for (const QByteArray &mark : {QByteArray("FLAG_FAIL-kernel"),
+                                   QByteArray("NO_KALLSYMS-kernel"),
+                                   QByteArray("UNPACK_FAIL-kernel"),
+                                   QByteArray("PATCH_FAIL-kernel"),
+                                   QByteArray("NOPATCH-kernel"),
+                                   QByteArray("REPACK_FAIL-kernel")}) {
+        out.clear();
+        QVERIFY(!p.patch(buildApatchBoot(mark), cfg, out, nullptr));
+    }
+    // 来源/前置校验失败分支同样不得崩溃
+    patcher::PatchConfig noSource;
+    noSource.type = patcher::RootType::APatch;
+    QVERIFY(!p.patch(buildApatchBoot(), noSource, out, nullptr));
+    QVERIFY(!p.patch(QByteArray("garbage, not boot"), cfg, out, nullptr));
 }
 
 void TestPatcher::apatchFactoryAndSources()

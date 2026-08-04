@@ -23,13 +23,16 @@ enum class RootType {
 //   Magisk 系：apkPath（注入 APK 本地路径；运行时下载经 AssetsDownloader
 //              完成后由调用方填入，手动指定优先）
 //   KernelSU 系：apkPath / koPath / deviceKmi
-//   APatch/KernelPatch：kpatchPath / koPath
+//   APatch/KernelPatch：apkPath（管理器 APK，提取 kptools+kpimg）或
+//                      kpatchPath（手动目录，含 kptools*/kpimg* 文件）
 //   RamdiskSu：suZipPath
 struct PatchConfig {
     RootType type = RootType::Magisk;
     QString apkPath;    // 注入 APK 本地路径（Magisk/KernelSU/APatch 系）
     QString koPath;     // 内核模块 .ko 路径（KernelSU 系）
-    QString kpatchPath; // 内核补丁 .kp 路径（APatch/KernelPatch）
+    QString kpatchPath; // APatch/KernelPatch：含 kptools*/kpimg* 文件的目录
+                        //（KernelPatch release 预编译资产解包形态；与 apkPath
+                        // 互斥，kptools/kpimg 由 APatchPatcher 自该目录取用）
     QString suZipPath;  // su 包 zip 路径（RamdiskSu）
     QString deviceKmi;  // 设备 KMI 版本（KernelSU 系选择内核）
     QString variant;    // 变体细分（Magisk 系 "official"/"alpha"/"kitsune"）
