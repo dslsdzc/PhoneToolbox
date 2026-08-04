@@ -72,6 +72,7 @@ constexpr quint32 kDirentSize  = 12;   // sizeof(struct erofs_dirent)
 constexpr quint32 kXattrHeaderSize = 12;   // sizeof(struct erofs_xattr_ibody_header)
 constexpr quint32 kMaxNameLen = 255;   // EROFS_NAME_LEN
 constexpr quint64 kDirentNidMask = (quint64(1) << 63) - 1;  // 屏蔽 metabox 标志位
+constexpr int kMaxDirDepth = 128;      // 目录递归深度上限（防恶意超深链栈溢出）
 
 // i_format 位域（erofs_fs.h）
 constexpr quint32 kFormatVersionBit    = 0;   // 0 = compact, 1 = extended
@@ -224,13 +225,14 @@ bool readInode(const QByteArray &img, const SuperBlock &sb, quint64 nid,
         if (nlink1) {   // EROFS_I_NLINK_1_BIT: i_nb = startblk_hi, nlink = 1
             ino.startBlk = quint64(le32(img, iloc + 16)) |
                            (quint64(le16(img, iloc + 6)) << 32);
-        } else {
+        } else {        // 其余（目录/常规 compact 文件）：i_nb = nlink，地址仅 32 位
             ino.startBlk = le32(img, iloc + 16);
         }
     }
-    // 非 48BIT 时地址只有 32 位（内核 addrmask = BIT_ULL(32)-1）
-    if (!(sb.featureIncompat & kFeatIncompat48Bit))
-        ino.startBlk &= quint64(0xFFFFFFFF);
+    // 注：extended / NLINK_1 分支恒组合 48 位地址（与 erofs-utils master
+    // lib/inode.c erofs_read_inode_from_disk 一致，不看 48BIT 特性位；
+    // master 的 addrmask 仅用于 NULL_ADDR 判定，本实现不做 NULL_ADDR 特判，
+    // 越界地址由后续数据区 bounds 检查兜底报错）。
     return true;
 }
 
@@ -351,11 +353,15 @@ bool readDirEntries(const QByteArray &img, const SuperBlock &sb,
     return true;
 }
 
-// 递归列出目录（visitedDirs 防损坏镜像中的目录环导致无限递归）
+// 递归列出目录（visitedDirs 防目录环；depth 防无环超深链栈溢出）
 bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
-                const QString &prefix, QSet<quint64> &visitedDirs,
+                const QString &prefix, int depth, QSet<quint64> &visitedDirs,
                 QList<imgfs::FsEntry> &out, QString *error)
 {
+    if (depth > kMaxDirDepth) {
+        setErr(error, QStringLiteral("目录深度超限（>%1）").arg(kMaxDirDepth));
+        return false;
+    }
     const quint64 key = nid & kDirentNidMask;
     if (visitedDirs.contains(key)) {
         setErr(error, QStringLiteral("目录 nid %1 重复出现（镜像损坏）").arg(nid));
@@ -397,7 +403,8 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
         out.append(fe);
 
         if (child.isDir()) {
-            if (!listDirRec(img, sb, e.nid, path, visitedDirs, out, error))
+            if (!listDirRec(img, sb, e.nid, path, depth + 1, visitedDirs,
+                            out, error))
                 return false;
         }
     }
@@ -461,7 +468,7 @@ bool listTree(const QByteArray &image, const SuperBlock &sb,
         return false;
     }
     QSet<quint64> visitedDirs;
-    return listDirRec(image, sb, sb.rootNid, QString(), visitedDirs, out, error);
+    return listDirRec(image, sb, sb.rootNid, QString(), 0, visitedDirs, out, error);
 }
 
 bool extractFile(const QByteArray &image, const SuperBlock &sb,

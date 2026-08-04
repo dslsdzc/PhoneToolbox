@@ -21,7 +21,7 @@ bool parseSuper(const QByteArray &image, SuperBlock &out);
 // 递归遍历整棵树（根目录本身不出现在 out 中）。
 // out 中 FsEntry.path 为相对路径（无前导 '/'，如 "subdir/inner.txt"），
 // isDir/size 来自子 inode；文件 data 不填充（用 extractFile 获取内容）。
-// 失败返回 false 并置 error，非法输入不崩溃。
+// 失败返回 false 并置 error，非法输入不崩溃；目录深度超过 128 报"目录深度超限"。
 bool listTree(const QByteArray &image, const SuperBlock &sb,
               QList<imgfs::FsEntry> &out, QString *error);
 

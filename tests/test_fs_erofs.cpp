@@ -35,6 +35,8 @@ private slots:
     void compressedFailsWithLz4Marker();
     void traverse48BitExtended();
     void corruptedInputs();
+    void depthLimit();
+    void startblk48BitCombination();
 };
 
 static void put16(QByteArray &d, int off, quint32 v)
@@ -245,6 +247,44 @@ static QByteArray build48BitImage()
     return img;
 }
 
+// 48BIT：compact NLINK_1 inode 携带 startblk_hi=1（mkfs 真实组合：
+// need_48bit 且 nlink==1 时保持 compact，i_nb 存 startblk_hi）。
+// startblk = (1<<32)|5 = 4294967301，数据在 2^32+5 块远超镜像 →
+// 必须报"数据区越界（startblk 4294967301）"而非被掩成 32 位读取块 5。
+static QByteArray build48BitHiImage()
+{
+    QByteArray img(4 * kBlksz, 0);
+    putSuper(img, 12, 0, 1, 0x00000080);
+    putInodeCompact(img, kMeta + 0,  0x0000, 0x41ED, 2, 49, 2, 0);   // root 目录
+    putInodeCompact(img, kMeta + 32, 0x0010, 0x81A4, 1, 19, 5, 1);   // hi.bin
+    putDirBlock(img, 2 * kBlksz, { de(0, "."), de(0, ".."), de(1, "hi.bin", 1) });
+    return img;
+}
+
+// 深层目录链：root(nid0) -> d1(nid1) -> ... -> d{depth}(nid{depth})，每层仅一个 "d" 目录项
+static QByteArray buildDeepChainImage(int depth)
+{
+    const int ninodes = depth + 1;                       // root + depth 个子目录
+    const int metaBlocks = (ninodes * 32 + kBlksz - 1) / kBlksz;
+    const int dirStartBlock = 1 + metaBlocks;            // 目录数据块起始
+    QByteArray img((dirStartBlock + depth + 1) * kBlksz, 0);
+    putSuper(img, 12, 0, 1, 0);
+    for (int i = 0; i < ninodes; ++i) {
+        const quint64 iloc = kMeta + quint64(i) * 32;
+        // 中间层目录："." ".." "d"（40B）；最深层：仅 "." ".."（27B）
+        putInodeCompact(img, iloc, 0x0000, 0x41ED, 2,
+                        quint32(i == depth ? 27 : 40),
+                        quint32(dirStartBlock + i), quint32(i));
+    }
+    for (int i = 0; i < depth; ++i)
+        putDirBlock(img, quint64(dirStartBlock + i) * kBlksz,
+                    { de(quint64(i), "."), de(quint64(i), ".."),
+                      de(quint64(i + 1), "d", 2) });
+    putDirBlock(img, quint64(dirStartBlock + depth) * kBlksz,
+                { de(quint64(depth), "."), de(quint64(depth), "..") });
+    return img;
+}
+
 // ===================== B10 测试槽 =====================
 
 void TestErofs::parseSuperMeta()
@@ -399,6 +439,45 @@ void TestErofs::corruptedInputs()
     err.clear();
     QVERIFY(!imgerofs::listTree(img, badSb, out, &err));
     QVERIFY(!err.isEmpty());
+}
+
+void TestErofs::depthLimit()
+{
+    imgerofs::SuperBlock sb;
+    QString err;
+    QList<imgfs::FsEntry> out;
+
+    // 140 层无环目录链（约 580KB）→ 深度超限报错，不栈溢出
+    QByteArray deep = buildDeepChainImage(140);
+    QVERIFY(imgerofs::parseSuper(deep, sb));
+    QVERIFY(!imgerofs::listTree(deep, sb, out, &err));
+    QVERIFY(err.contains("目录深度超限"));
+
+    // 100 层仍在限制内（正向控制）
+    QByteArray ok = buildDeepChainImage(100);
+    QVERIFY(imgerofs::parseSuper(ok, sb));
+    err.clear();
+    QVERIFY2(imgerofs::listTree(ok, sb, out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 100);
+}
+
+void TestErofs::startblk48BitCombination()
+{
+    QByteArray img = build48BitHiImage();
+    imgerofs::SuperBlock sb;
+    QVERIFY(imgerofs::parseSuper(img, sb));
+    QString err;
+    QByteArray data;
+    QList<imgfs::FsEntry> out;
+
+    // 遍历正常（hi.bin 是文件，不递归）
+    QVERIFY2(imgerofs::listTree(img, sb, out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].path, QString("hi.bin"));
+
+    // startblk = (1<<32)|5 = 4294967301：若被掩成 32 位会静默读块 5（无报错）
+    QVERIFY(!imgerofs::extractFile(img, sb, "hi.bin", data, &err));
+    QVERIFY(err.contains("4294967301"));
 }
 
 QTEST_APPLESS_MAIN(TestErofs)
