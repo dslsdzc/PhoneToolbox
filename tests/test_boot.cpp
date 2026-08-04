@@ -9,6 +9,7 @@ private slots:
     void parseV0();
     void parseV2();
     void parseV4();
+    void repackRoundTripV0();
 };
 
 // 构造 v0: header 1632B 占第一页（mkbootimg 将 header 补零到 page_size），
@@ -115,6 +116,19 @@ void TestBoot::parseV4()
     QVERIFY(info.kernel.startsWith("KKKK"));
     QVERIFY(info.ramdisk.startsWith("RRRR"));
     QCOMPARE(info.cmdline, QByteArray("console=ttyS0"));
+}
+
+void TestBoot::repackRoundTripV0()
+{
+    QByteArray raw = buildBootV0();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(raw, info));
+    QByteArray repacked = imgboot::repackBootImage(info);
+    imgboot::BootInfo info2;
+    QVERIFY(imgboot::parseBootImage(repacked, info2));
+    QCOMPARE(info2.kernel, info.kernel);
+    QCOMPARE(info2.ramdisk, info.ramdisk);
+    QCOMPARE(info2.headerVersion, 0u);
 }
 
 QTEST_APPLESS_MAIN(TestBoot)

@@ -87,4 +87,58 @@ bool parseBootImage(const QByteArray &raw, BootInfo &out)
     return true;
 }
 
+QByteArray repackBootImage(const BootInfo &info)
+{
+    auto put32 = [](QByteArray &h, int off, quint32 v) {
+        h[off] = char(v); h[off + 1] = char(v >> 8);
+        h[off + 2] = char(v >> 16); h[off + 3] = char(v >> 24);
+    };
+    if (info.headerVersion <= 2) {
+        const quint32 page = info.pageSize ? info.pageSize : 4096;
+        // packed 头部按版本定长；v0 1632 / v1 1648 / v2 1660（AOSP bootimg.h）
+        const int hdrSize = info.headerVersion >= 2 ? kHdrV2
+                         : info.headerVersion == 1 ? kHdrV1
+                         : kHdrV0;
+        QByteArray hdr(hdrSize, 0);
+        hdr.replace(0, 8, "ANDROID!");
+        put32(hdr, 8, static_cast<quint32>(info.kernel.size()));    // kernel_size
+        put32(hdr, 16, static_cast<quint32>(info.ramdisk.size())); // ramdisk_size
+        put32(hdr, 36, page);                   // page_size
+        put32(hdr, 40, info.headerVersion);     // header_version
+        hdr.replace(64, 512, info.cmdline.left(511));   // cmdline@64 (512B)
+        if (info.headerVersion >= 1)
+            put32(hdr, 1644, static_cast<quint32>(hdrSize)); // header_size
+        if (info.headerVersion >= 2)
+            put32(hdr, 1648, info.dtbSize);     // dtb_size；dtb_addr@1652 留 0
+        // header 补零到页边界（mkbootimg 行为），数据段从页边界开始
+        QByteArray out = hdr;
+        if (out.size() % page) out.append(page - out.size() % page, '\0');
+        out += info.kernel;
+        if (out.size() % page) out.append(page - out.size() % page, '\0');
+        out += info.ramdisk;
+        if (out.size() % page) out.append(page - out.size() % page, '\0');
+        // v2 段序：kernel → ramdisk → second(空) → recovery_dtbo(空) → dtb
+        if (info.headerVersion >= 2 && info.dtbSize) {
+            out += info.dtb;
+            if (out.size() % page) out.append(page - out.size() % page, '\0');
+        }
+        return out;
+    }
+    // v3/v4：固定 4096 页，header 1580B 补零到 4096
+    QByteArray hdr(kHdrV3, 0);
+    hdr.replace(0, 8, "ANDROID!");
+    put32(hdr, 8, static_cast<quint32>(info.kernel.size()));    // kernel_size
+    put32(hdr, 12, static_cast<quint32>(info.ramdisk.size())); // ramdisk_size
+    put32(hdr, 20, kHdrV3);                 // header_size
+    put32(hdr, 40, info.headerVersion);     // header_version
+    hdr.replace(44, 1536, info.cmdline.left(1535)); // cmdline@44 (1536B)
+    QByteArray out = hdr;
+    if (out.size() % 4096) out.append(4096 - out.size() % 4096, '\0');
+    out += info.kernel;
+    if (out.size() % 4096) out.append(4096 - out.size() % 4096, '\0');
+    out += info.ramdisk;
+    if (out.size() % 4096) out.append(4096 - out.size() % 4096, '\0');
+    return out;
+}
+
 } // namespace imgboot
