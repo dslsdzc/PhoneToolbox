@@ -43,9 +43,11 @@ private slots:
     void replaceHugeRun();
     void freeCounts64Bit();
     void replaceSparseFile();
+    void replaceMetaCsumRejected();
     // ---- B12 真实 mke2fs 镜像 ----
     void realListExtract();
     void realReplaceRoundTrip();
+    void realReplaceMetaCsumRejected();
     void realInlineData();
 };
 
@@ -1012,6 +1014,33 @@ void TestExt4::replaceSparseFile()
     QCOMPARE(data, dense);
 }
 
+void TestExt4::replaceMetaCsumRejected()
+{
+    // 带 metadata_csum（feature_ro_compat @1124 bit 0x0400，e2fsprogs
+    // EXT4_FEATURE_RO_COMPAT_METADATA_CSUM）：替换必须显式拒绝 —— 校验和未维护，
+    // 改完内核无法挂载（比失败更危险）。读路径不受影响。
+    QByteArray img = buildFlatImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    put32(img, 1124, 0x0400);   // feature_ro_compat |= META_CSUM
+    QString err;
+    QVERIFY(!imgext4::replaceFile(img, sb, "hello.txt", QByteArray("x"), &err));
+    QVERIFY(err.contains("metadata_csum"));
+    // 拒绝发生在任何修改之前：提取/列出内容不变
+    QByteArray data;
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, QByteArray("Hello, ext4!"));
+    QList<imgfs::FsEntry> out;
+    QVERIFY2(imgext4::listTree(img, sb, out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 3);
+    // 未带该特性的镜像不受影响（正常替换）
+    QByteArray img2 = buildFlatImage();
+    QVERIFY(imgext4::parseSuper(img2, sb));
+    QVERIFY2(imgext4::replaceFile(img2, sb, "hello.txt", QByteArray("ok"), &err), qPrintable(err));
+    QVERIFY2(imgext4::extractFile(img2, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, QByteArray("ok"));
+}
+
 // ===================== 真实 mke2fs 镜像用例 =====================
 
 // 运行 mke2fs -d srcDir 构造真实镜像（找不到 mke2fs 时返回 false）
@@ -1111,7 +1140,12 @@ void TestExt4::realReplaceRoundTrip()
         f.write("hello ext4 world\n");
     }
     QByteArray img;
-    if (!buildRealImage(dir, QStringLiteral("src"), {}, img, errMsg))
+    // mke2fs 默认带 metadata_csum（ro_compat 0x0400，实测 1.47.2 默认 0x46b）→
+    // replaceFile 显式拒绝（校验和未维护）。本测试验证替换/重打包机制本身，
+    // 用 ^metadata_csum 构造（拒绝路径见 replaceMetaCsumRejected/real 变体）。
+    if (!buildRealImage(dir, QStringLiteral("src"),
+                        QStringList() << QStringLiteral("-O") << QStringLiteral("^metadata_csum"),
+                        img, errMsg))
         QSKIP(qPrintable(QStringLiteral("mke2fs 不可用: ") + errMsg));
     imgext4::SuperBlock sb;
     QVERIFY(imgext4::parseSuper(img, sb));
@@ -1141,6 +1175,37 @@ void TestExt4::realReplaceRoundTrip()
     QList<imgfs::FsEntry> out;
     QVERIFY2(imgext4::listTree(packed, sb2, out, &err), qPrintable(err));
     QCOMPARE(out.size(), 2);   // lost+found + hello.txt
+}
+
+void TestExt4::realReplaceMetaCsumRejected()
+{
+    // 真实 mke2fs 默认镜像（带 metadata_csum）→ 替换显式拒绝；读路径正常
+    QString errMsg;
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    QDir().mkpath(dir.path() + QLatin1String("/src"));
+    {
+        QFile f(dir.path() + QLatin1String("/src/hello.txt"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("hello ext4 world\n");
+    }
+    QByteArray img;
+    if (!buildRealImage(dir, QStringLiteral("src"), {}, img, errMsg))
+        QSKIP(qPrintable(QStringLiteral("mke2fs 不可用: ") + errMsg));
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    // 确认镜像确实带 metadata_csum（防止 mke2fs 版本差异使本用例形同虚设）
+    const uchar *sp = reinterpret_cast<const uchar *>(img.constData()) + 1124;
+    const quint32 roCompat = quint32(sp[0]) | (quint32(sp[1]) << 8) |
+                             (quint32(sp[2]) << 16) | (quint32(sp[3]) << 24);
+    QVERIFY(roCompat & 0x0400u);
+    QString err;
+    QVERIFY(!imgext4::replaceFile(img, sb, "hello.txt", QByteArray("x"), &err));
+    QVERIFY(err.contains("metadata_csum"));
+    QByteArray data;
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, QByteArray("hello ext4 world\n"));
 }
 
 void TestExt4::realInlineData()

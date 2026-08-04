@@ -51,12 +51,16 @@ constexpr qint64 kOffInodesPerGrp  = kSuperOffset + 40;
 constexpr qint64 kOffMagic         = kSuperOffset + 56;
 constexpr qint64 kOffInodeSize     = kSuperOffset + 88;
 constexpr qint64 kOffFeatureInc    = kSuperOffset + 96;
+constexpr qint64 kOffFeatureRoCompat = kSuperOffset + 100;   // s_feature_ro_compat
 constexpr qint64 kOffDescSize      = kSuperOffset + 254;
 constexpr qint64 kOffBlocksHi      = kSuperOffset + 336;
 
 constexpr qint64 kSuperMinLen = kSuperOffset + 360;  // 1384：所有 superblock 读取终点
 
 constexpr quint16 kExt4Magic = 0xEF53;
+// EXT4_FEATURE_RO_COMPAT_METADATA_CSUM = 0x0400（e2fsprogs ext4_fs.h；位于
+// feature_ro_compat @100，非 feature_compat）
+constexpr quint32 kRoCompatMetaCsum = 0x0400;
 constexpr quint32 kIncompat64Bit     = 0x0080;
 constexpr quint32 kIncompatFiletype  = 0x0002;
 constexpr quint32 kIncompatMetaBg    = 0x0010;
@@ -998,6 +1002,16 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         return false;
     if (!isExt4(image)) {
         setErr(error, QStringLiteral("不是 ext4 镜像"));
+        return false;
+    }
+    // metadata_csum 镜像：替换会改写 inode/组描述符/superblock，其 crc32c 校验和
+    // （ext4_csum：种子 = s_uuid + 组号，e2fsprogs lib/ext2fs/csum.c）随之失效 →
+    // 内核挂载/读取报校验错误。重算校验和未实现前，对替换明确拒绝（比"改完
+    // 不可挂载"安全）；读路径 listTree/extractFile 不校验校验和，不受影响。
+    if (image.size() >= kOffFeatureRoCompat + 4 &&
+        (le32p(reinterpret_cast<const uchar *>(image.constData()) + kOffFeatureRoCompat)
+         & kRoCompatMetaCsum)) {
+        setErr(error, QStringLiteral("metadata_csum 镜像暂不支持替换"));
         return false;
     }
 
