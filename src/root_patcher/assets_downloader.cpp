@@ -93,7 +93,10 @@ QString AssetsDownloader::cachedPath(const QString &key) const
         if (QFile::exists(p))
             return p;
     }
-    // 回退：扫描 key 目录（预置缓存 / 旧版本下载的缓存）
+    // 回退：扫描 key 目录（预置缓存 / 旧版本下载的缓存）。
+    // 约定：key ↔ URL 一一对应（调用方不得对同一 key 换 URL 重复下载；
+    // 换 URL 须换新 key，如 "magisk-v30.7" 升版为 "magisk-v31.0"）。
+    // 因此同 key 目录内最多一个有效缓存文件，取字母序首个即确定结果。
     const QDir dir(keyDir(key));
     if (!dir.exists())
         return {};
@@ -204,8 +207,13 @@ void AssetsDownloader::downloadAsync(const QUrl &url, const QString &key)
 
 void AssetsDownloader::cancel()
 {
-    for (auto it = m_replies.cbegin(); it != m_replies.cend(); ++it) {
-        if (QNetworkReply *r = it.value())
+    // 先快照再逐个 abort：Qt 6.11 的 abort() 同步触发 finished，finished 处理器
+    // 会从 m_replies 中 remove 对应 key —— 若在迭代 m_replies 的同时 remove，
+    // QHash 迭代器立即失效（++it 为 UB）。快照后 abort 则每次 remove 都发生在
+    // 迭代已结束之后（或无害的空 remove）。
+    const auto replies = m_replies.values();
+    for (QNetworkReply *r : replies) {
+        if (r)
             r->abort(); // finished 处理器负责清理部分文件并以失败信号收尾
     }
     m_replies.clear();

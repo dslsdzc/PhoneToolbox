@@ -7,7 +7,20 @@
 #include <QSignalSpy>
 #include <QNetworkProxy>
 #include <QHostAddress>
+#include <QDeadlineTimer>
 #include "root_patcher/assets_downloader.h"
+
+namespace {
+
+// 轮询等待条件成立（固定 qWait 在慢 CI 上可能 flaky，需驱动事件循环）
+template <typename Fn>
+void waitFor(QDeadlineTimer deadline, Fn &&cond)
+{
+    while (!cond() && !deadline.hasExpired())
+        QTest::qWait(10);
+}
+
+} // namespace
 
 namespace {
 
@@ -99,6 +112,7 @@ private slots:
     void downloadOverLocalServer();
     void downloadFailureCleansPartial();
     void cancelAbortsDownload();
+    void cancelTwoConcurrentDownloads();
 };
 
 void TestDownloader::manualFileShortcut()
@@ -215,7 +229,7 @@ void TestDownloader::cancelAbortsDownload()
     QSignalSpy ok(&dl, &patcher::AssetsDownloader::downloadFinished);
     QSignalSpy fail(&dl, &patcher::AssetsDownloader::downloadFailed);
     dl.downloadAsync(QUrl(server.baseUrl()), "slow-key");
-    QTest::qWait(200); // 等请求到达服务器
+    waitFor(QDeadlineTimer(5000), [&]() { return server.requestCount() >= 1; });
     QCOMPARE(server.requestCount(), 1);
     dl.cancel();
 
@@ -227,6 +241,40 @@ void TestDownloader::cancelAbortsDownload()
     // 取消后不得残留部分文件（.part 须被清理）
     const QDir d(dir.path() + "/slow-key");
     QVERIFY(d.entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty());
+}
+
+void TestDownloader::cancelTwoConcurrentDownloads()
+{
+    NoProxyScope noProxy;
+    MockHttpServer server(200, QByteArray("never delivered"), nullptr);
+    server.setRespond(false); // 永不响应：两个下载都挂起
+    QVERIFY(server.isListening());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    patcher::AssetsDownloader dl;
+    dl.setCacheDir(dir.path());
+
+    QSignalSpy ok(&dl, &patcher::AssetsDownloader::downloadFinished);
+    QSignalSpy fail(&dl, &patcher::AssetsDownloader::downloadFailed);
+    dl.downloadAsync(QUrl(server.baseUrl()), "slow-key-a");
+    dl.downloadAsync(QUrl(server.baseUrl()), "slow-key-b");
+    waitFor(QDeadlineTimer(5000), [&]() { return server.requestCount() >= 2; });
+    QCOMPARE(server.requestCount(), 2);
+    dl.cancel(); // 并发在途下载整体取消：迭代 m_replies 的同时 abort 会触发同步 remove
+
+    QVERIFY2(fail.count() == 2 || fail.wait(5000), "两个取消失败信号未收齐");
+    QCOMPARE(ok.count(), 0);
+    QList<QString> keys;
+    for (const auto &args : fail)
+        keys << args.at(0).toString();
+    keys.sort();
+    QCOMPARE(keys, QList<QString>({QStringLiteral("slow-key-a"), QStringLiteral("slow-key-b")}));
+    // 两个 key 的部分文件均须清理
+    for (const QString &k : keys) {
+        const QDir d(dir.path() + "/" + k);
+        QVERIFY(d.entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty());
+    }
 }
 
 // 注意：须用 QTEST_GUILESS_MAIN（QCoreApplication + 事件循环）。
