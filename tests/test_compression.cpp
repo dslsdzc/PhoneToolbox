@@ -8,6 +8,7 @@ class TestCompression : public QObject
 private slots:
     void zstdRoundTrip();
     void zstdInvalidInput();
+    void dispatchRoundTrip();
 };
 
 void TestCompression::zstdRoundTrip()
@@ -20,6 +21,14 @@ void TestCompression::zstdRoundTrip()
 }
 
 void TestCompression::zstdInvalidInput() { QVERIFY(imgcomp::zstdDecompress("garbage").isEmpty()); }
+
+void TestCompression::dispatchRoundTrip()
+{
+    QByteArray data("dispatch test data, dispatch test data.");
+    QCOMPARE(imgcomp::decompress(imgcomp::Type::Zstd, imgcomp::compress(imgcomp::Type::Zstd, data)), data);
+    QVERIFY(imgcomp::compress(imgcomp::Type::None, data).isEmpty());
+    QVERIFY(imgcomp::decompress(imgcomp::Type::None, data).isEmpty());
+}
 
 QTEST_APPLESS_MAIN(TestCompression)
 #include "test_compression.moc"

@@ -38,19 +38,22 @@ QByteArray zstdDecompress(const QByteArray &data)
     out.reserve(data.size() * 4);
     QByteArray buf(64 * 1024, Qt::Uninitialized);
     ZSTD_inBuffer in{data.constData(), static_cast<size_t>(data.size()), 0};
+    bool done = false;
     while (in.pos < in.size) {
-        ZSTD_outBuffer ob{buf.data(), buf.size(), 0};
+        ZSTD_outBuffer ob{buf.data(), static_cast<size_t>(buf.size()), 0};
         size_t ret = ZSTD_decompressStream(ds, &ob, &in);
         if (ZSTD_isError(ret)) {
             ZSTD_freeDStream(ds);
             return {};
         }
         out.append(buf.constData(), static_cast<int>(ob.pos));
-        if (ret == 0)
+        if (ret == 0) {
+            done = true;
             break;
+        }
     }
     ZSTD_freeDStream(ds);
-    return out;
+    return done ? out : QByteArray();
 }
 
 } // namespace imgcomp
