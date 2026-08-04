@@ -11,11 +11,19 @@ enum OpType { OP_REPLACE = 0, OP_REPLACE_BZ = 1, OP_MOVE = 2, OP_BSDIFF = 3,
               OP_REPLACE_XZ = 8, OP_PUFFDIFF = 9, OP_BROTLI_BSDIFF = 10,
               OP_REPLACE_ZSTD = 11, OP_REPLACE_ZSTD_INC_WINDOW = 12, OP_ZUCCHINI = 13 };
 
+// 块区间（Extent.start_block=1, num_blocks=2）
+struct Extent {
+    quint64 startBlock = 0;
+    quint64 numBlocks = 0;
+};
+
 struct InstallOp {
     int type = OP_REPLACE;
     quint64 dataOffset = 0;
     quint64 dataLength = 0;
     QByteArray dataHash; // data_sha256_hash
+    QList<Extent> srcExtents; // Task 15: SOURCE_* 的源块（旧镜像内）
+    QList<Extent> dstExtents; // Task 15: 输出目标块
 };
 
 struct Partition {
@@ -32,9 +40,11 @@ struct PayloadInfo {
 bool isPayload(const QByteArray &header);                       // "CrAU"
 bool parseManifest(const QByteArray &payload, PayloadInfo &out); // 读头+解析 manifest 字段
 
-// 全量（REPLACE 系）解包: 按 ops 从 blob 取数据拼接为分区镜像。
-// diff 类操作返回"需要旧镜像"错误；失败返回空并填写 error。oldImage 暂未使用（Task 15 diff 解包）。
+// 解包分区镜像: REPLACE 系从 blob 取数据；diff 系（SOURCE_COPY/SOURCE_BSDIFF）基于
+// oldImage 与 src/dst_extents。失败返回空并填写 error。blockSize 传 PayloadInfo.blockSize
+// （缺省 4096）。
 QByteArray extractPartition(const QByteArray &payload, const Partition &part,
-                            const QByteArray &oldImage, QString *error);
+                            const QByteArray &oldImage, QString *error,
+                            quint64 blockSize = 4096);
 
 } // namespace imgpayload

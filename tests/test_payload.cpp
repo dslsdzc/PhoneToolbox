@@ -1,6 +1,8 @@
 #include <QtTest>
 #include "image_engine/wire_format.h"
 #include "image_engine/payload_image.h"
+#include "image_engine/bspatch_image.h"
+#include "image_engine/compression/bzip2_wrapper.h"
 
 class TestWire : public QObject
 {
@@ -94,7 +96,16 @@ private slots:
     void parseUnknownFields();
     void parseOpFields();
     void extractReplaceOp();   // Task 14: 全量 REPLACE 解包
+    void extractSourceCopy();  // Task 15: SOURCE_COPY（src_extents → dst_extents）
+    void extractSourceBsdiff(); // Task 15: SOURCE_BSDIFF（src_extents 旧片段 + bspatch）
 };
+
+// 小端 64 位写入
+static void putU64(QByteArray &d, quint64 v)
+{
+    for (int i = 0; i < 8; ++i)
+        d.append(char((v >> (i * 8)) & 0xFF));
+}
 
 static QByteArray buildMinimalPayload()
 {
@@ -337,6 +348,108 @@ void TestPayload::extractReplaceOp()
     QCOMPARE(out.size(), 4096);
     QVERIFY(out.left(8) == QByteArray(8, '\xCD')); // REPLACE 数据写到了输出头部
     QVERIFY(err.isEmpty());
+}
+
+// ---------- Task 15: payload diff 解包（SOURCE_COPY / SOURCE_BSDIFF） ----------
+
+void TestPayload::extractSourceCopy()
+{
+    // SOURCE_COPY: src_extents(4) 单连续块复制到 dst_extents(6)，无 blob 数据。
+    // oldImage 3 块 'A','C','E'，src={1,2} → 源块 1..2 为 'C','E' ——
+    // 若实现忽略 src startBlock 或误用"整分区拷贝"，断言失败。
+    const quint64 bs = 4096;
+    QByteArray oldImage = QByteArray(static_cast<int>(bs), 'A') + QByteArray(static_cast<int>(bs), 'C')
+                        + QByteArray(static_cast<int>(bs), 'E');
+    QByteArray srcExt = pbwire::encodeVarint(1, 1) + pbwire::encodeVarint(2, 2); // 块 1..2
+    QByteArray dstExt = pbwire::encodeVarint(1, 0) + pbwire::encodeVarint(2, 2); // 块 0..1
+    QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_SOURCE_COPY)
+                  + pbwire::encodeMessage(4, srcExt)
+                  + pbwire::encodeMessage(6, dstExt);
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+    QByteArray manifest = pbwire::encodeVarint(3, bs) + pbwire::encodeMessage(13, part);
+    QByteArray payload;
+    payload.append("CrAU");
+    putU64(payload, 2);
+    putU64(payload, static_cast<quint64>(manifest.size()));
+    auto put32 = [&](quint32 v) {
+        for (int i = 0; i < 4; ++i) payload.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put32(0);
+    payload.append(manifest);
+    payload.append(QByteArray(16, '\xEE')); // blob 区（SOURCE_COPY 不使用）
+
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(payload, info));
+    QCOMPARE(info.partitions[0].ops[0].srcExtents.size(), 1);
+    QCOMPARE(info.partitions[0].ops[0].srcExtents[0].startBlock, 1ull);
+    QCOMPARE(info.partitions[0].ops[0].srcExtents[0].numBlocks, 2ull);
+    QCOMPARE(info.partitions[0].ops[0].dstExtents.size(), 1);
+    QCOMPARE(info.partitions[0].ops[0].dstExtents[0].startBlock, 0ull);
+    QCOMPARE(info.partitions[0].ops[0].dstExtents[0].numBlocks, 2ull);
+
+    QString err;
+    QByteArray out = imgpayload::extractPartition(payload, info.partitions[0], oldImage, &err, bs);
+    QVERIFY(err.isEmpty());
+    QCOMPARE(out.size(), static_cast<int>(2 * bs));
+    QVERIFY(out.left(static_cast<int>(bs)) == QByteArray(static_cast<int>(bs), 'C'));
+    QVERIFY(out.mid(static_cast<int>(bs)) == QByteArray(static_cast<int>(bs), 'E'));
+
+    // 无旧镜像 → 明确报"需要旧镜像"
+    QString err2;
+    QVERIFY(imgpayload::extractPartition(payload, info.partitions[0], QByteArray(), &err2).isEmpty());
+    QVERIFY(err2.contains("旧镜像"));
+}
+
+void TestPayload::extractSourceBsdiff()
+{
+    // SOURCE_BSDIFF: patch 应用对象是 src_extents 对应的旧数据块（本用例块 1 = 'C'），
+    // 结果按 dst_extents 写入。若实现误把整分区当旧数据，会得到 'B' 而非 'D'。
+    const quint64 bs = 4096;
+    QByteArray oldImage = QByteArray(static_cast<int>(bs), 'A') + QByteArray(static_cast<int>(bs), 'C');
+    // bsdiff patch: newLen=4096, diff[i]=1（'C'+1='D'），ctrl=(4096,0,0)
+    QByteArray ctrl, diff(static_cast<int>(bs), '\x01');
+    putU64(ctrl, bs); putU64(ctrl, 0); putU64(ctrl, 0);
+    QByteArray ctrlBz = imgcomp::bzip2Compress(ctrl);
+    QByteArray diffBz = imgcomp::bzip2Compress(diff);
+    QByteArray patch;
+    patch.append("BSDIFF40");
+    putU64(patch, static_cast<quint64>(ctrlBz.size()));
+    putU64(patch, static_cast<quint64>(diffBz.size()));
+    putU64(patch, bs); // 第 3 字段 = new_len（bspatch.c 语义），不是 extra 长度
+    patch.append(ctrlBz).append(diffBz);
+
+    QByteArray srcExt = pbwire::encodeVarint(1, 1) + pbwire::encodeVarint(2, 1); // 块 1
+    QByteArray dstExt = pbwire::encodeVarint(1, 0) + pbwire::encodeVarint(2, 1); // 块 0
+    QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_SOURCE_BSDIFF)
+                  + pbwire::encodeVarint(2, 0)                                  // data_offset=0（blob 相对）
+                  + pbwire::encodeVarint(3, static_cast<quint64>(patch.size()))
+                  + pbwire::encodeMessage(4, srcExt)
+                  + pbwire::encodeMessage(6, dstExt);
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+    QByteArray manifest = pbwire::encodeVarint(3, bs) + pbwire::encodeMessage(13, part);
+    QByteArray payload;
+    payload.append("CrAU");
+    putU64(payload, 2);
+    putU64(payload, static_cast<quint64>(manifest.size()));
+    auto put32 = [&](quint32 v) {
+        for (int i = 0; i < 4; ++i) payload.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put32(0);
+    payload.append(manifest);
+    payload.append(patch); // blob 起点即 patch（data_offset=0）
+
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(payload, info));
+    QCOMPARE(info.blockSize, bs);
+    QString err;
+    QByteArray out = imgpayload::extractPartition(payload, info.partitions[0], oldImage, &err, bs);
+    QVERIFY(err.isEmpty());
+    QCOMPARE(out.size(), static_cast<int>(bs));
+    QVERIFY(out == QByteArray(static_cast<int>(bs), 'D'));
+
+    // 独立验证: src_extents 旧片段 + patch → 'D'
+    QByteArray frag = oldImage.mid(static_cast<int>(bs), static_cast<int>(bs));
+    QCOMPARE(imgbspatch::applyBsdiff(frag, patch), QByteArray(static_cast<int>(bs), 'D'));
 }
 
 // 双测试类（TestWire + TestPayload）共用主函数
