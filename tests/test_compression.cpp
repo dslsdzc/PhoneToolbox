@@ -11,6 +11,7 @@ private slots:
     void zstdInvalidInput();
     void lz4RoundTrip();
     void lz4InvalidInput();
+    void lz4Truncated();
     void dispatchRoundTrip();
 };
 
@@ -27,13 +28,20 @@ void TestCompression::zstdInvalidInput() { QVERIFY(imgcomp::zstdDecompress("garb
 
 void TestCompression::lz4RoundTrip()
 {
-    QByteArray data("lz4 frame payload, padding padding padding padding padding");
+    QByteArray data(1024 * 1024, 'a'); // 1MB 可压缩内容，触发多块/多迭代解压路径
     QByteArray comp = imgcomp::lz4Compress(data);
     QVERIFY(!comp.isEmpty());
     QCOMPARE(imgcomp::lz4Decompress(comp), data);
 }
 
 void TestCompression::lz4InvalidInput() { QVERIFY(imgcomp::lz4Decompress("garbage").isEmpty()); }
+
+void TestCompression::lz4Truncated()
+{
+    QByteArray data(1024 * 1024, 'a');
+    QByteArray comp = imgcomp::lz4Compress(data);
+    QVERIFY(imgcomp::lz4Decompress(comp.left(comp.size() - 1)).isEmpty()); // 截断末字节（endMark/校验和）
+}
 
 void TestCompression::dispatchRoundTrip()
 {

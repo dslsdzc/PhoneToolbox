@@ -34,9 +34,13 @@ QByteArray lz4Decompress(const QByteArray &data)
     }
     size_t remaining = static_cast<size_t>(data.size()) - consumed;
     QByteArray out;
-    out.reserve(fi.contentSize ? static_cast<int>(fi.contentSize) : data.size() * 4);
+    if (fi.contentSize && fi.contentSize < 512 * 1024 * 1024) // 上限防护：避免溢出/巨量分配
+        out.reserve(static_cast<int>(fi.contentSize));
+    else
+        out.reserve(static_cast<int>(data.size() * 4));
     QByteArray chunk(64 * 1024, Qt::Uninitialized);
     const char *src = data.constData() + consumed;
+    bool frameDone = false;
     while (remaining > 0) {
         size_t srcSize = remaining;
         size_t dstSize = chunk.size();
@@ -48,11 +52,15 @@ QByteArray lz4Decompress(const QByteArray &data)
         out.append(chunk.constData(), static_cast<int>(dstSize));
         src += srcSize;
         remaining -= srcSize;
-        if (srcSize == 0 && dstSize == 0)
+        if (err == 0) { // 帧完整解完（含 endMark/校验和）
+            frameDone = true;
+            break;
+        }
+        if (srcSize == 0 && dstSize == 0) // 防御：无进度则停止，避免死循环
             break;
     }
     LZ4F_freeDecompressionContext(ctx);
-    return out;
+    return frameDone ? out : QByteArray(); // 输入耗尽而帧未完成（截断/损坏）→ 返回空
 }
 
 } // namespace imgcomp
