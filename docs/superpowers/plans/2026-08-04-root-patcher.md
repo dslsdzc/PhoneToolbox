@@ -477,6 +477,8 @@ git commit -m "feat: root_patcher 抽象与 Magisk 注入 (TDD)"
 
 KernelSU 系 LKM 注入（参考 ksud boot-patch）：init_boot/boot 解包 → ramdisk 解压 → 根目录放入 `kernelsu.ko` + init 启动链追加 kernelsu 加载（`init.rc` 修改或 init wrapper —— 简化：把 .ko 放入 ramdisk + 注入 `init` wrapper 脚本调用 `insmod`，以 ksud 实际行为为准）→ 重打包。KMI 匹配：`android13-5.15` 等格式，下载 `{kmi}_kernelsu.ko`。**入口参数化（variant）**：官方 tiann/KernelSU、KernelSU-Next（内核 4.4-6.6 支持更广）、SukiSU-Ultra（SukiSU-Ultra/SukiSU-Ultra，含 susfs）、ReSukiSU —— .ko 下载源与 KMI 匹配范围不同，注入机制相同。
 
+**非 GKI 全自动路径（2026-08-05 补充，机制已验证）**：GKI 判定（boot cmdline `androidboot.kmi` 缺失 / KMI 匹配失败）→ 自动走 **AnyKernel3 内核替换**：从社区预置内核仓库（XDA/设备专属仓库）下载匹配设备型号的预置内核 zip（AnyKernel3 包：`Image`/`Image.gz` 内核文件 + 安装脚本）→ 解包提取 Image → boot 解包 → **Image 替换 kernel 段**（ReSukiSU 文档确认的 magiskboot 手动修补机制）→ 重打包。KMI 匹配失败时优先提示 APatch（内核 3.18+ 仅需 boot.img）作为兜底。**诚实边界**：预置内核的可用性依赖社区仓库覆盖（热门机型有，冷门可能无）—— 仓库无匹配时返回明确错误 + 建议 APatch/Magisk 路径，不假装支持。
+
 - [ ] **Step 1-4: TDD 循环**（测试：detectKmi 从构造 cmdline 提取；注入后 ramdisk 含 kernelsu.ko）
 
 - [ ] **Step 5: Commit**
