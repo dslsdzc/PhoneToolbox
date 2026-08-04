@@ -40,30 +40,34 @@ bool extractTar(const QByteArray &tar, QList<TarEntry> &entries)
 QByteArray appendMd5Footer(const QByteArray &tar)
 {
     const QByteArray hash = QCryptographicHash::hash(tar, QCryptographicHash::Md5).toHex();
-    // 校验行作为最后一个 '\n' 之后的独立行：verifyMd5Footer 取最后一行做 32hex 校验，
-    // 并对 '\n' 之前的部分计算 md5 —— 故归档与校验行之间需以 '\n' 分隔。
-    return tar + '\n' + hash + "  " + QByteArray("firmware.tar.md5");
+    // 真实三星 .tar.md5: [tar][32hex]  name\n —— 校验行直接接在归档后（md5sum 输出行），
+    // 中间无空行；校验行带尾 '\n'。早期实现多插了一个 '\n' 分隔符，与 Odin 实际格式不符。
+    return tar + hash + "  " + QByteArray("firmware.tar.md5") + '\n';
 }
 
 bool verifyMd5Footer(const QByteArray &tarMd5)
 {
-    // 兼容两种格式:
-    //   appendMd5Footer 产物: [tar]\n[32hex]  name          (无尾 \n)
-    //   真实三星 .tar.md5:    [tar]\n[32hex]  name\n        (校验行后带尾 \n)
-    // 先去掉末尾 '\n', 再取最后一个 '\n' 之后的一行为校验行。
-    QByteArray body = tarMd5;
-    if (body.endsWith('\n'))
-        body.chop(1);
-    const int nl = body.lastIndexOf('\n');
-    const QByteArray lastLine = nl >= 0 ? body.mid(nl + 1).trimmed() : body.trimmed();
-    if (lastLine.size() < 32)
-        return false;
-    const QByteArray hashHex = lastLine.left(32);
-    for (char c : hashHex)
-        if (!QByteArray("0123456789abcdefABCDEF").contains(c))
-            return false;
-    const QByteArray tarPart = nl >= 0 ? body.left(nl) : body;
-    return QCryptographicHash::hash(tarPart, QCryptographicHash::Md5).toHex() == hashHex;
+    // 兼容三种形态（校验行均在文件尾，由"32hex + 两个空格"定位，从尾部取最大匹配）:
+    //   [tar][32hex]  name\n         真实三星 .tar.md5（appendMd5Footer 现产物）
+    //   [tar]\n[32hex]  name         旧 appendMd5Footer 产物（分隔 \n，无尾 \n）
+    //   [tar]\n[32hex]  name\n       分隔 \n + 尾 \n 变体
+    // 校验行前缀若是 '\n'（旧格式分隔符）则不计入归档；tar 内部即使含 32hex+空格
+    // 也不会误判（真实校验行在文件尾，匹配位置最大）。
+    const QByteArray &s = tarMd5;
+    for (int i = s.size() - 1; i >= 0; --i) {
+        if (i + 34 > s.size() || s[i + 32] != ' ' || s[i + 33] != ' ')
+            continue;
+        bool hex = true;
+        for (int k = i; k < i + 32; ++k)
+            if (!QByteArray("0123456789abcdefABCDEF").contains(s[k])) { hex = false; break; }
+        if (!hex)
+            continue;
+        const QByteArray hashHex = s.mid(i, 32);
+        const int tarEnd = (i > 0 && s[i - 1] == '\n') ? i - 1 : i;
+        const QByteArray tarPart = s.left(tarEnd);
+        return QCryptographicHash::hash(tarPart, QCryptographicHash::Md5).toHex() == hashHex;
+    }
+    return false;
 }
 
 // ---- Task 11: tar 打包 (ustar) ----
