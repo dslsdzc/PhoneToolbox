@@ -169,23 +169,29 @@ Linux 系统包 / Windows vcpkg 获取。
 - 下载的签名工具与材料**不写入代码库**，仅缓存于用户数据目录
 - 签名材料按 key 版本化缓存（如 `huawei-sign/`、`lg-kdz/`），下载失败可回退手动导入
 
-### 候选外部下载源（2026-08-04 搜索确认）
+### 候选外部下载源（2026-08-04 搜索确认，全厂商）
 
-| 仓库 | 用途 | 提供的材料 |
-|------|------|-----------|
-| [SimomYung/unpack_huawei_package](https://github.com/SimomYung/unpack_huawei_package) | 华为 update.bin（HarmonyOS 5）解包 | L2 分区表解析 + "08"/"06" 签名头偏移规则（计划 B 直接参考） |
-| [Project-Satori/HuaweiUpdateExtractor](https://github.com/Project-Satori/HuaweiUpdateExtractor) | update.app 解包/重打包 | profiles.xml 机型配置（signaturetrue/checksumtrue 语义） |
-| [scue/unpacker_huawei](https://github.com/scue/unpacker_huawei) | update.app unpack/repack | 重打包对齐规则 |
-| [echo-devim/huextract](https://github.com/echo-devim/huextract) | update.app 提取（Rust） | 校验和验证逻辑 |
-| [R0rt1z2/huawei-playground](https://github.com/R0rt1z2/huawei-playground) | 华为逆向合集 | oeminfo/cm3parser/bootloader 解析 |
-| [sebaubuntu-python/dumpyara](https://github.com/sebaubuntu-python/dumpyara) | 综合固件转储 | kdz/tar.md5/payload/super/EROFS 全格式参考 |
-| [dkpost3/DumprX](https://github.com/dkpost3/DumprX) | dumpyara 改进 fork | kdztools 更新（LG 新版固件） |
-| IOMonster kdztools（unkdz/undz） | LG KDZ 解析 | KDZ 头 + 加密段解密逻辑 |
-| ruuveal（Firmware Extractor 组件） | 三星签名移除 | 需机型 keyfile（用户自备） |
+| 厂商 | 仓库 | 签名/加密机制 | 能力与限制 |
+|------|------|--------------|-----------|
+| 华为/荣耀 | [unpack_huawei_package](https://github.com/SimomYung/unpack_huawei_package)、[HuaweiUpdateExtractor](https://github.com/Project-Satori/HuaweiUpdateExtractor)、[unpacker_huawei](https://github.com/scue/unpacker_huawei)、[huextract](https://github.com/echo-devim/huextract)、[huawei-playground](https://github.com/R0rt1z2/huawei-playground) | update.app signature（type 0x05）复合结构 + update.bin "08"/"06" 签名头 | 解析参数可获取；**重签名不可行**（保留原签名仅改分区） |
+| LG | IOMonster kdztools（unkdz/undz）、[dumpyara](https://github.com/sebaubuntu-python/dumpyara)、[DumprX](https://github.com/dkpost3/DumprX) | KDZ 加密段 | 解密可获取；新版加密（V60 后）部分不支持 |
+| HTC | [kmdm/ruuveal](https://github.com/kmdm/ruuveal)、[kmdm/unruu](https://github.com/kmdm/unruu)、[topjohnwu/HTC-RUU-Decrypt-Tool](https://github.com/topjohnwu/HTC-RUU-Decrypt-Tool) | RUU 加密 ZIP（RC4/AES-CBC，70+ 机型） | 可解密/再加密；**刷写仍需 S-OFF**（无私钥无法正确签名） |
+| OPPO/OnePlus/realme | [bkerler/oppo_decrypt](https://github.com/bkerler/oppo_decrypt)（含 [realme fork](https://github.com/djdoolky76/oppo-realme_decrypt)） | ofp 加密（QC/MTK）、ops 加解密 | 解密逻辑可获取；ofs 无公开资料 |
+| 三星 | 无公开重签工具（[dumpyara](https://github.com/sebaubuntu-python/dumpyara) 仅解包） | sboot RSA 签名 | 无公开重签路径；官方路径为解锁（Knox 熔断） |
+| 索尼 | sin2raw（munjeni）、Flashtool | sin RSA 签名（v3 ADDR/LZ4A） | 可解包；**不可重签** |
+| 小米 | 无专用签名仓库（通用 [avbtool](https://android.googlesource.com/platform/external/avb)） | AVB 2.0 vbmeta | avbtool 通用处理（disable verification） |
+| Google Pixel | avbtool（AOSP） | AVB | 开源通用 |
+| vivo/iQOO | **无公开签名逆向资源**（如实标注） | 私有加密 | 无 |
+| 摩托罗拉 | （Firmware Extractor 组件） | xml.zip + 签名 | 无专项公开工具 |
+| 联发科 MTK | [mtkclient](https://github.com/bkerler/mtkclient)（已有子模块） | DA 签名 | GPLv3 子模块已有 |
 
-**已知边界（如实标注）**：华为 signature 为证书链+时间戳+设备唯一标识复合结构，**通用重签名大概率失败** —— 安全做法是保留原固件 signature 仅修改 system/boot 分区；三星签名移除需机型 keyfile（用户自备，仓库不内置）。
+**已知边界（如实标注）**：
+- 华为 signature 为证书链+时间戳+设备唯一标识复合结构，**通用重签名大概率失败** —— 安全做法是保留原固件 signature 仅修改 system/boot 分区
+- HTC 重加密后**仍需 S-OFF 才能刷**（无私钥无法正确签名）
+- 三星无公开重签工具；官方路径为 bootloader 解锁（Knox 熔断）
+- vivo/iQOO 无公开签名逆向资源
 
-受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）。
+受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）、HTC RUU（E 阶段后续）。
 
 ## 维修诊断模块（计划 E，排期在 D 之后）
 
