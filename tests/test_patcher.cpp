@@ -304,6 +304,7 @@ private slots:
     void ksuAnyKernel3DeflatedImage();
     void ksuAnyKernel3ZipWithoutKernelFails();
     void ksuLkmPackZipExtracts();
+    void ksuLkmPackZipWithoutKmiFails();
     void ksuDownloadUrlsKnown();
 };
 
@@ -1168,6 +1169,33 @@ void TestPatcher::ksuLkmPackZipExtracts()
     const TestCpioEntry *ko = findEntry(entries, "kernelsu.ko");
     QVERIFY(ko);
     QCOMPARE(ko->data, koBytes);
+}
+
+void TestPatcher::ksuLkmPackZipWithoutKmiFails()
+{
+    // 多 ko 包 + KMI 未知（kernel 无 KMI 串、未指定 deviceKmi）→ 拒绝静默
+    // 任选第一个 ko，报错提示 deviceKmi（与 ksud parse_kmi 失败时要求手动
+    // 指定 --kmi 一致）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/lkm-all.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"android13-5.15_kernelsu.ko", "ko-a", 0},
+                      {"android15-6.6_kernelsu.ko", "ko-b", 0}}));
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ReSukiSU;
+    cfg.koPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("deviceKmi", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
 }
 
 void TestPatcher::ksuDownloadUrlsKnown()

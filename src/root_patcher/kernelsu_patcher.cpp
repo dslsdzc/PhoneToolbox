@@ -441,10 +441,7 @@ bool KernelSuPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         if (raw.isEmpty())
             return fail(QStringLiteral("注入物文件为空：%1").arg(cfg.koPath));
         koIsZip = isZip(raw);
-        if (!koIsZip)
-            ko = raw;
-        else
-            ko = raw; // 保留原样，解包逻辑在下（LKM 包 / AnyKernel3 判定）
+        ko = raw; // zip 时保留原样，解包逻辑在下（LKM 包 / AnyKernel3 判定）
     }
     if (!cfg.apkPath.isEmpty()) {
         QByteArray raw;
@@ -511,6 +508,12 @@ bool KernelSuPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             // KMI 已知但包内无对应 ko（如过期的 lkm-all 包）→ 明确报错而非
             // 拿错内核模块注入
             return fail(QStringLiteral("LKM 包内未找到 %1_kernelsu.ko").arg(wanted));
+        if (wanted.isEmpty() && !koEntry.isEmpty())
+            // KMI 未知（kernel 扫描与 cmdline 均无）且包内含多 ko —— 与 ksud
+            // parse_kmi 失败时要求手动指定一致：拒绝静默任选第一个，提示
+            // 经 cfg.deviceKmi 指定
+            return fail(QStringLiteral("LKM 包内含内核模块但未识别 KMI：请经 "
+                                       "deviceKmi 指定（如 android13-5.15）后重试"));
         if (!koEntry.isEmpty()) {
             if (!extractZipEntry(ko, koEntry, ko, &zerr))
                 return fail(zerr);
@@ -523,7 +526,7 @@ bool KernelSuPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         if (wrapper.isEmpty())
             return fail(QStringLiteral("缺少 ksuinit init wrapper：请经 ksuinitUrl(variant) "
                                        "下载后填入 apkPath"));
-        QString fmt;
+        QString fmt = QStringLiteral("raw"); // 空 ramdisk 时 detect 返回 false，显式归 raw
         patcher::detectRamdiskFormat(info.ramdisk, fmt);
         QByteArray ramdiskRaw;
         QString ramdiskErr;
