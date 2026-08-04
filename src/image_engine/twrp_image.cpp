@@ -67,12 +67,22 @@ bool extractWin(const QString &winPath, QByteArray &outRaw, QString *error)
         for (int i = 1; ; ++i) {
             const QString seg = fi.absolutePath() + "/" + fi.completeBaseName() +
                                 QString(".win%1").arg(i, 3, 10, QChar('0'));
+            // 防呆: 调用方误传分段文件自身时（分段名恰好与 winPath 重合）避免重复拼接
+            if (seg == winPath)
+                break;
             QFile sf(seg);
             if (!sf.exists())
                 break;
             if (!sf.open(QIODevice::ReadOnly))
                 break;
             data.append(sf.readAll());
+        }
+        // packed_size 为跨分段总量: 主文件单独短读是合法场景（其余数据在 .win001 等分段），
+        // 故必须在分段拼接完成之后校验总量 —— 主文件截断与分段链断裂
+        // （如 .win001 缺失而 .win002 存在，拼接后总量仍不足）均在此暴露为失败
+        if (data.size() < static_cast<qint64>(wh.packedSize)) {
+            if (error) *error = "备份数据不完整";
+            return false;
         }
     } else {
         if (!extractV23(f, wh.packedSize, data))
