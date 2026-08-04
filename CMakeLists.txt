@@ -225,7 +225,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_registry.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_super.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_twrp.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disk.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disk.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_kdz.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
