@@ -1163,7 +1163,7 @@ git commit -m "feat: 华为 update.app 解析与容器骨架 (TDD)"
 
 **Interfaces:**
 - Consumes: `imghw::AppFile`（Task B5）
-- Produces: `QByteArray imghw::buildUpdateAppWithData(const QList<QPair<AppFile, QByteArray>>& files)`（头 + 文件表 + 顺序数据段，保持偏移对齐）；`namespace imghw { struct BinPartition { QString name; quint64 size; QString guid; }; bool parseUpdateBin(const QByteArray &bin, QList<BinPartition> &out, QString *error); }`（L2 型：178B 文件头 + 2B 分区信息总长 + 87B/条 + "update/info.bin" 定位）
+- Produces: `QByteArray imghw::buildUpdateAppWithData(const QList<QPair<AppFile, QByteArray>>& files)`（头 + 文件表 + 顺序数据段，保持偏移对齐）；`namespace imghw { struct BinPartition { QString name; quint64 size; QString guid; }; bool parseUpdateBin(const QByteArray &bin, QList<BinPartition> &out, QString *error); }`（L2 型：178B 文件头 + 2B 分区信息总长 + 87B/条 + "update/info.bin" 定位）；**签名材料获取（spec 2026-08-04 补充，运行时下载 + 手动导入）**：`struct SignConfig { QString sigHeaderType; // "08"/"06" 等签名头处理类型（update.bin） quint32 sigLenOffset; bool haveKey; QString keyPath; }; bool loadSignConfig(const QString &jsonPath, SignConfig &out, QString *error); bool fetchSignConfig(const QString &repoUrl, const QString &version, SignConfig &out, QString *error);`（fetch 走 AssetsDownloader 从外部仓库下载，下载源列表可配置；不内置、不写入代码库，缓存于用户数据目录）；重打包入口 `buildUpdateAppWithData` 增加可选 `const SignConfig *sign = nullptr` 参数（提供时应用签名，未提供时产物标记"未签名"并提示）；**签名材料导入（spec 2026-08-04 补充）**：`struct SignConfig { QString sigHeaderType; // "08"/"06" 等签名头处理类型（update.bin） quint32 sigLenOffset; bool haveKey; QString keyPath; }; bool loadSignConfig(const QString &jsonPath, SignConfig &out, QString *error);` —— 签名参数/密钥路径从用户导入的配置文件读取，不内置；重打包入口 `buildUpdateAppWithData` 增加可选 `const SignConfig *sign = nullptr` 参数（提供时应用签名，未提供时产物标记"未签名"）
 
 - [ ] **Step 1: 添加失败测试**
 

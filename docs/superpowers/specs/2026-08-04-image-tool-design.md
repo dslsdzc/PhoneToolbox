@@ -157,6 +157,20 @@ Linux 系统包 / Windows vcpkg 获取。
 拆分 super → system.img, vendor.img, product.img ...
 ```
 
+## 签名材料获取原则（2026-08-04 补充）
+
+华为等私有厂商固件（update.app / update.bin / KDZ 等）的签名验证材料与密钥参数**不内置、不捆绑分发**，但支持**运行时从外部获取 + 手动导入**两种途径：
+
+1. **运行时下载（优先）**：从外部公开仓库（如提供签名工具/材料的逆向仓库）下载签名处理工具与参数配置 —— 复用 `AssetsDownloader` 模式（与 Magisk/KernelSU/APatch 注入物、AdbEmbedded 的 Google platform-tools 下载同一模式），下载源列表可配置（JSON 配置：仓库 URL + 文件路径 + 版本），产物缓存于用户数据目录（`QStandardPaths::AppDataLocation + "/patcher/"`）
+2. **手动导入（兜底）**：签名处理参数配置文件（JSON：签名头类型 "08"/"06"、签名长度偏移规则）+ 厂商签名密钥/证书文件路径，UI 提供"导入签名材料"入口
+
+使用规则：
+- 未获取/未导入签名材料时，相应操作（重打包/打包）禁用并提示"需要签名材料（可从仓库下载或手动导入）"
+- 下载的签名工具与材料**不写入代码库**，仅缓存于用户数据目录
+- 签名材料按 key 版本化缓存（如 `huawei-sign/`、`lg-kdz/`），下载失败可回退手动导入
+
+受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）。
+
 ## 维修诊断模块（计划 E，排期在 D 之后）
 
 面向手机维修场景的诊断测试功能，落地在 `system_tool_panel` 新增"维修诊断"分类（复用现有 ADB QProcess 执行模式）。
