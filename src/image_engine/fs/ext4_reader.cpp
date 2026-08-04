@@ -1031,9 +1031,27 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
     }
 
     const quint64 newSize = quint64(data.size());
-    const bool needsGrow = !(ino.flags & kFlInlineData)
+    bool needsGrow = !(ino.flags & kFlInlineData)
             ? (newSize > capacity)
             : (newSize > quint64(kMinInlineDataSize));
+
+    // 原地写前置校验：extent 必须从逻辑块 0 起连续覆盖 ceil(newSize/blk) 块。
+    // 含空洞/非零起点的稀疏文件（如 {lb0, lb2}）逐 extent 顺序写后，内核视角下
+    // 空洞处读零、后续块落位错乱 —— 而自校验按 extent 拼接读取不建模空洞，
+    // 恰好通过 → 静默错误成功。不满足连续覆盖 → 改走增长路径重建稠密树。
+    if (!needsGrow && !(ino.flags & kFlInlineData)) {
+        const quint64 needBlocks = (newSize + sb.blockSize - 1) / sb.blockSize;
+        quint64 covered = 0;
+        for (const Extent &ex : extents) {
+            if (covered >= needBlocks)
+                break;                      // 前缀已连续覆盖
+            if (ex.lblock != covered) {     // 空洞或非零起点 → 稀疏
+                needsGrow = true;
+                break;
+            }
+            covered += ex.len;
+        }
+    }
 
     if (!needsGrow) {
         // ---- 原地写（extent 覆盖或 inline ≤60B），只更新 i_size ----
@@ -1099,6 +1117,22 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         setErr(error, QStringLiteral("空闲块过于碎片化（>4 段）"));
         return false;
     }
+    // 先行校验（提交前，不修改镜像）：根 extent 区域与全部新分配块数据区必须落在
+    // 镜像内 —— 若等步骤 3/5 才发现越界，位图/树已被改写 → "已污染再报错"。
+    // findFreeRuns 已保证 run.pblock < blockCount，此处补乘法溢出与镜像边界。
+    const qint64 root = ino.offset + kInBlock;
+    if (!inBounds(image, root, 12 + 12 * runs.size())) {
+        setErr(error, QStringLiteral("extent 根区域越界"));
+        return false;
+    }
+    for (const Extent &run : runs) {
+        if (run.pblock > (Q_UINT64_C(0x7FFFFFFFFFFFFFFF) / sb.blockSize) ||
+            !inBounds(image, qint64(run.pblock * sb.blockSize),
+                      qint64(run.len) * sb.blockSize)) {
+            setErr(error, QStringLiteral("新分配块越界"));
+            return false;
+        }
+    }
 
     // 1) 释放旧 extent 数据块
     // 注：仅回收叶 extent 覆盖的数据块；原 depth>0 树的索引块未单独追踪，
@@ -1128,12 +1162,7 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         lblock += run.len;
     }
 
-    // 3) 重建 extent 树（root 头 + 每段一个 extent）
-    const qint64 root = ino.offset + kInBlock;
-    if (!inBounds(image, root, 12 + 12 * runs.size())) {
-        setErr(error, QStringLiteral("extent 根区域越界"));
-        return false;
-    }
+    // 3) 重建 extent 树（root 头 + 每段一个 extent；区域已在提交前校验）
     put16(image, root, quint16(kExtMagic & 0xFFFF));
     put16(image, root + 2, quint16(runs.size()));
     put16(image, root + 4, 4);                       // eh_max

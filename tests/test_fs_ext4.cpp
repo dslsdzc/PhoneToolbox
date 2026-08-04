@@ -42,6 +42,7 @@ private slots:
     void extentCycle();
     void replaceHugeRun();
     void freeCounts64Bit();
+    void replaceSparseFile();
     // ---- B12 真实 mke2fs 镜像 ----
     void realListExtract();
     void realReplaceRoundTrip();
@@ -213,6 +214,46 @@ static QByteArray buildFlatImage()
     putDirBlock(img, 6 * kBlk, { de(12, "."), de(12, ".."), de(13, "inner.txt", 1) });
     memcpy(img.data() + 7 * kBlk, "Hello, ext4!", 12);
     memcpy(img.data() + 8 * kBlk, "inner file data", 15);
+    return img;
+}
+
+// 稀疏文件镜像：hello.txt 两个 extent（lb0→块7、lb2→块9），逻辑块 1 为空洞，
+// i_size = 8192（2 块）→ 容量 2 块。块 9 因此必须标记占用。
+// 旧实现原地替换（容量内）不校验逻辑连续性：数据顺序写进两个 extent 物理块，
+// 自校验按 extent 拼接恰好通过 → 静默错误成功（内核视角空洞处读零、内容错乱）。
+static QByteArray buildSparseFileImage()
+{
+    QByteArray img(13 * kBlk, 0);
+    putSuper(img, 16, 2048, 128);
+    putDesc(img, 0, 2, 3, kTableBlock);
+    for (int b = 0; b <= 9; ++b)
+        markUsed(img, b);
+    putInode128(img, 2, 0x41ED, kBlk, 0x80000);
+    putInode128(img, 11, 0x81A4, 2 * kBlk, 0x80000);   // hello.txt：2 逻辑块
+    putInode128(img, 12, 0x41ED, kBlk, 0x80000);
+    putInode128(img, 13, 0x81A4, 15, 0x80000);
+    putExtents(img, inoOff(2), { { 5, 1 } });
+    putExtents(img, inoOff(12), { { 6, 1 } });
+    putExtents(img, inoOff(13), { { 8, 1 } });
+    // hello.txt 手工写 extent：lb0→块7、lb2→块9（逻辑块 1 空洞）
+    const int off = inoOff(11) + 40;
+    put16(img, off + 0, 0xF30A);
+    put16(img, off + 2, 2);
+    put16(img, off + 4, 4);
+    img[off + 6] = char(0);
+    put32(img, off + 8, 0);
+    put32(img, off + 12, 0);   // ee_block = 0
+    put16(img, off + 16, 1);
+    put32(img, off + 20, 7);
+    put32(img, off + 24, 2);   // ee_block = 2
+    put16(img, off + 28, 1);
+    put32(img, off + 32, 9);
+    putDirBlock(img, 5 * kBlk, { de(2, "."), de(2, ".."),
+                                 de(11, "hello.txt", 1), de(12, "sub") });
+    putDirBlock(img, 6 * kBlk, { de(12, "."), de(12, ".."), de(13, "inner.txt", 1) });
+    memcpy(img.data() + 7 * kBlk, "Hello, ext4!", 12);
+    memcpy(img.data() + 8 * kBlk, "inner file data", 15);
+    memcpy(img.data() + 9 * kBlk, "holey second block", 18);
     return img;
 }
 
@@ -931,6 +972,44 @@ void TestExt4::freeCounts64Bit()
     QByteArray data;
     QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
     QCOMPARE(data, big);
+}
+
+void TestExt4::replaceSparseFile()
+{
+    // 含空洞文件（lb0→7、lb2→9，逻辑块 1 空洞）+ 容量内替换：
+    // 旧实现原地顺序写两 extent → 内核视角内容错误却自校验通过（自校验按 extent
+    // 拼接不建模空洞）→ 静默错误成功。修复后走增长路径重建稠密树。
+    QByteArray img = buildSparseFileImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    QString err;
+    // 2 块数据（跨空洞）：旧实现原地把后半写进 lb2→块9，内核视角 lb1 空洞读零、
+    // 内容错乱却自校验通过。修复后走增长路径重建稠密树。
+    const QByteArray small(2 * kBlk, 'a');   // ≤ 容量 8192 → 容量内，但稀疏必须走增长路径
+    QVERIFY2(imgext4::replaceFile(img, sb, "hello.txt", small, &err), qPrintable(err));
+    QByteArray data;
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, small);
+    // 稠密树：单段 extent，从逻辑块 0 起（原镜像空闲首块 = 块 10，因块 0..9 均占用）
+    const int off = inoOff(11) + 40;
+    QCOMPARE(rd16(img, off + 2), 1u);            // entries == 1
+    QCOMPARE(rd32(img, off + 12), 0u);           // ee_block == 0
+    QCOMPARE(rd16(img, off + 16), 2u);           // ee_len == 2（连续覆盖）
+    QCOMPARE(rd32(img, off + 20), 10u);          // ee_start_lo == 10
+    // 位图：旧块 7、9 已释放；块 10/11 新占用
+    const uchar *bm = reinterpret_cast<const uchar *>(img.constData()) + 2 * kBlk;
+    QVERIFY(!(bm[0] & 0x01));          // bit 7（旧 extent1）已清
+    QVERIFY(!(bm[1] & 0x40));          // bit 9（旧 extent2）已清
+    QVERIFY((bm[1] & 0x20));           // bit 10（新分配）占用
+    QVERIFY((bm[1] & 0x10));           // bit 11（新分配）占用
+    // 其余文件不受影响
+    QVERIFY2(imgext4::extractFile(img, sb, "sub/inner.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, QByteArray("inner file data"));
+    // 再替换一次（现在已是稠密树 → 原地路径），回读一致
+    const QByteArray dense(2048, 'b');
+    QVERIFY2(imgext4::replaceFile(img, sb, "hello.txt", dense, &err), qPrintable(err));
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, dense);
 }
 
 // ===================== 真实 mke2fs 镜像用例 =====================
