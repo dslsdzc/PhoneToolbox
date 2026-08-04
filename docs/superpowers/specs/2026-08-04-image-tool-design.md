@@ -1,0 +1,160 @@
+# 镜像处理工具（Image Tool）设计文档
+
+日期: 2026-08-04
+状态: 待审查
+范围: PhoneToolbox 新增独立镜像处理面板，全自研格式引擎 + 全格式覆盖
+
+## 背景与动机
+
+用户反馈当前刷机功能支持不足。经头脑风暴确定四个扩展方向（镜像处理、一键批量刷机、备份/恢复向导、更多协议），决定**镜像处理先行** —— 它是批量刷机的前置（解包才能匹配分区），且纯本地、不依赖设备连接。
+
+2026 年 Root 生态调研结论：Magisk（修补 boot ramdisk）、KernelSU（LKM 修补 init_boot）、APatch（修补 boot 内核段）三家的共同地基都是 **boot 镜像解包/重打包引擎**，与 payload/super/sparse/tar 格式处理一起构成本工具的核心。
+
+## 目标
+
+1. 100% 覆盖 Android 刷机生态现有镜像格式（见格式矩阵）
+2. 全自研实现（引擎与装配逻辑），注入物（magiskinit / kernelsu.ko / kpatch）运行时从官方渠道下载
+3. 支持解包与打包双向操作
+4. 支持 Magisk / KernelSU / APatch 三家 Root 修补
+5. 支持增量 OTA diff 分区解包（需旧分区镜像）
+6. 处理签名/校验层（Odin MD5、AVB footer、解锁提示）
+
+## 格式覆盖矩阵
+
+| 格式 | 来源 | 魔数/特征 | 支持操作 |
+|------|------|-----------|---------|
+| `payload.bin` | Pixel/一加/摩托等 OTA | `CrAU` | 解包（含 5 类分区特殊处理）、全量打包 |
+| zip 刷机包 | 小米/Lineage/fastboot update | `PK\x03\x04` | 内层继续识别（Qt QZipReader） |
+| 小米 `.tgz` | 小米/红米固件 | gzip tar | 解包 → 内层 .img 路由 |
+| 三星 `.tar.md5` | 三星固件 | tar + 尾部 MD5 | 解包/重打包（重算 MD5 footer） |
+| `.img` 集合 | 任意已解包 ROM | 按内部格式 | 识别并路由 |
+| sparse 镜像 | 所有现代系统分区 | `0xED26FF3A` | 双向: simg2img / img2simg（4.0 格式） |
+| super 分区 | 动态分区设备 | `0x414C5030`("0PLA") | 拆分逻辑分区 / 合并回 super |
+| boot / init_boot | 内核+ramdisk（13+ 分离） | `ANDROID!` | header v0-v4 解析、解包/重打包 |
+| vendor_boot | Pixel 系（vendor ramdisk） | `VNDRBOOT` | 同上 + vendor_ramdisk_table 关联 |
+| `.br` 镜像 | 小米部分分区 | brotli magic | brotli 解压 → 内部再路由 |
+| `.lz4/.xz/.gz/.zst` 裸压缩 | 各厂商散装镜像 | 各压缩魔数 | 解压/压缩 |
+| dtbo/dtb/vbmeta | 设备树/AVB | `d\r\n`(dtbo) | 查看 + 打包联动（vbmeta 重算哈希） |
+
+注意: super 镜像魔数为 `0x414C5030`("0PLA")，geometry magic 为 `0x616c4467`("gDla")—— 早期草案中的 "LPML" 有误，已更正。
+
+### 增量 OTA diff 分区解包
+
+| 操作类型 | 含义 | 策略 |
+|---------|------|------|
+| `SOURCE_COPY` | 从旧分区复制块 | 直接实现 |
+| `SOURCE_BSDIFF` | bspatch 打补丁 | 自研 bspatch |
+| `BROTLI_BSDIFF` | brotli 压缩 bsdiff | bspatch + brotli 解压 |
+| `PUFFDIFF` | Google gzip 差分 | 自研 puffpatch（puffin 格式） |
+| `ZUCCHINI` | Chromium 差分 | **暂缓**（安卓 OTA 极少用） |
+
+所有 diff 解包需要用户提供旧分区镜像，UI 检测到 diff 分区时提示选择源镜像。
+
+### 签名/校验层（响应"三星签名"讨论）
+
+- **Odin 刷写层**: 只校验尾部 MD5（完整性），重打包后重算即可刷入
+- **Secure boot 层**: boot.img 内嵌厂商 RSA 签名 + AVB 链，无法伪造；**仅已解锁 Bootloader 设备可刷自定义镜像** —— UI 明确提示
+- **AVB 处理**（自研 avbtool 核心逻辑）: boot/vendor_boot 重打包后剥离/重算 hash footer（AVB_FOOTER 32 字节 + VBMeta）、重生成 vbmeta（支持 `VERIFICATION_DISABLED` flag）
+
+## 架构
+
+```
+src/image_engine/            # 纯格式库层 —— 无 UI 依赖、无网络依赖，可独立测试
+  image_detector             # 魔数嗅探 + 格式路由
+  sparse_image               # simg2img / img2simg
+  super_image                # lp metadata 解析/生成, 逻辑分区拆分/合并
+  boot_image                 # boot/init_boot/vendor_boot: header v0-v4, ramdisk
+  payload_image              # payload.bin: protobuf wire 手写解析/序列化, 全量解包/打包
+  bspatch_image              # bsdiff patch 应用 (SOURCE_BSDIFF/BROTLI_BSDIFF/PUFFDIFF)
+  tar_image                  # tar 解包/打包, 三星 .tar.md5 MD5 footer
+  avb_image                  # VBMeta 解析/生成, hash footer add/erase, 禁用验证
+  compression/               # zstd / lz4 / bzip2 / xz / brotli 封装层
+
+src/root_patcher/            # 修补层 —— 自研装配逻辑
+  RootPatcher (抽象接口)      #   patch(bootImage, config) → patchedImage, 自动备份原镜像
+  magisk_patcher             # 下载 Magisk APK → 提取 magiskinit → 注入 ramdisk + init 链替换
+  kernelsu_patcher           # 读设备 KMI → 下载匹配 kernelsu.ko → 注入 init_boot ramdisk
+  apatch_patcher             # 下载 APatch APK → 提取 kpatch → 内核段注入
+  assets_downloader          # 官方注入物下载器（版本缓存, 失败可手动指定本地文件）
+
+src/ui/image_tool_panel      # 左侧第 5 个独立面板
+```
+
+分层原则: `image_engine` 纯库（不碰网络/UI），`root_patcher` 依赖它做修补，`image_tool_panel` 只做编排。
+
+## 数据流与交互
+
+整个面板是拖放目标（`setAcceptDrops(true)`，无单独"拖拽区"），文件拖到任意位置即识别；"打开文件"按钮兜底。
+
+```
+拖入文件 → 魔数嗅探 → 格式信息展示(分区列表/版本/元数据)
+  → 用户选择动作:
+      解包 → 选输出目录 → 进度条 → 完成(列出产物)
+      打包 → 选输入目录/文件 → 自动识别组 → 生成
+      转换 → sparse↔raw / 压缩↔解压
+      修补 → 选 Root 方案(Magisk/KernelSU/APatch) → 下载注入物 → 输出 patched 镜像
+      (diff 分区 → 提示选旧镜像 → 应用补丁)
+```
+
+UI 布局沿用现有面板风格: 格式识别信息卡、动作按钮组（按识别结果动态启用）、进度条 + 日志（OutputPanel 风格）。
+
+## 错误处理
+
+- 格式损坏 → 定位到具体结构（如 "lp metadata tables_checksum 不匹配"），不抛裸异常
+- diff 分区缺旧镜像 → 明确提示需要的分区名，不静默跳过
+- 注入物下载失败 → 可手动指定本地文件（APK / .ko / APatch APK）
+- 修补/重打包前自动备份原镜像（`xxx.orig.bak`）
+- 输出校验: 解包产物校验 SHA-256（payload manifest 自带 data_sha256_hash）
+
+## 测试策略
+
+- `image_engine` 用 Qt Test（项目已依赖 Qt6，零新依赖）:
+  - sparse 往返转换、lp metadata 解析（构造二进制样本）、boot header v0-v4 解析、bsdiff patch 应用（小样本）、AVB footer 往返
+- 真实样本冒烟测试: 仓库提供 2-3 个小 payload/super 样本下载脚本（不入库）
+
+## 新增依赖
+
+- `zstd`、`lz4`、`bzip2`、`xz`（payload + 裸压缩镜像）
+- `brotli`（.br 镜像 + BROTLI_BSDIFF）
+- 无 protobuf —— payload 手写 wire format 解析（格式固定，主流 payload_dumper 同做法）
+
+Linux 系统包 / Windows vcpkg 获取。
+
+## CMake 变更
+
+- 新增 `image_engine`、`root_patcher` 静态库目标
+- `image_tool_panel` 编入主程序
+- 可选 `ENABLE_IMAGE_TESTS` 开关生成测试二进制
+
+## 产物结构
+
+```
+解包 payload → <输出>/system.img, vendor.img, boot.img, init_boot.img ...（sparse 保留/转 raw 可选）
+解包 zip/tgz/tar.md5 → 原目录结构 + 每镜像再路由
+修补 boot → boot_patched.img + .orig.bak
+拆分 super → system.img, vendor.img, product.img ...
+```
+
+## 明确不做（YAGNI）
+
+- ZUCCHINI diff 解包（暂缓，标注提示）
+- 三星 secure boot 重签（技术上不可能，仅提示解锁）
+- 增量 OTA 打包生成（只做解包方向，打包为全量）
+- Magisk 模块 / KernelSU 元模块的编辑管理
+
+## 参考实现（学思想，对照格式，不直接搬代码）
+
+| 模块 | 参考项目 | 许可证 | 学习点 |
+|------|---------|--------|--------|
+| boot/init_boot/vendor_boot | magiskboot (topjohnwu/Magisk) | GPLv3 | boot 解包/重打包权威实现 |
+| payload 解包 | payload_dumper-go (ssut)、ota-dump (Rust) | GPLv3 / Apache-2.0 | 手写 protobuf + 压缩分派 |
+| super 拆分 | lpunpack (unix3dgforce)、AOSP liblp | GPLv3 / Apache-2.0 | lp metadata 结构 |
+| sparse 转换 | AOSP libsparse | Apache-2.0 | sparse 4.0 格式 |
+| AVB | avbtool (AOSP external/avb) | BSD-2 | VBMeta/hash footer/禁用验证 |
+| bsdiff/puffdiff | bsdiff (Colin Percival)、puffin (Google) | BSD-2 / Apache-2.0 | 增量补丁算法 |
+| 三星重打包 | SamsungImageRepacker (Mnky313) | GPLv3 | tar.md5 重打包 |
+| Magisk 修补 | Magisk (topjohnwu) | GPLv3 | magiskinit 注入装配 |
+| KernelSU 修补 | ksud (tiann/KernelSU) | GPLv3 | init_boot 注入 + KMI 匹配 |
+| APatch 修补 | APatch/KernelPatch (bmax121) | GPLv3 | kpatch 内核段注入 |
+
+所有许可证与 GPLv3 兼容，与项目现有 edl/、mtkclient/ 子模块风格一致。
