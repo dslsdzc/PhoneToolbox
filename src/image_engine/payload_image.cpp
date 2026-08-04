@@ -189,23 +189,26 @@ QByteArray extractPartition(const QByteArray &payload, const Partition &part,
         return {};
     }
 
-    // 输出大小: 非 diff 操作取 max(dataOffset+dataLength)，diff 操作取 max(dst_extents 末端)，
-    // 再 ceil 到 blockSize。先扫一遍求 maxEnd 再一次性 resize（不边写边扩）。
+    // 输出大小: 所有 op（含 ZERO/DISCARD 的输出空间）的 dst_extents 覆盖的最大块范围，
+    // 再 ceil 到 blockSize。dst_extents 为空（无 extent 的简化 manifest）时回退到
+    // max(dataOffset+dataLength)——解压类 op 此时按解压后大小预算（见下方回退写入路径）。
+    // 先扫一遍求 maxEnd 再一次性 resize（不边写边扩）。
     quint64 maxEnd = 0;
     for (const InstallOp &op : part.ops) {
-        if (isDiffOp(op.type)) {
-            for (const Extent &e : op.dstExtents) {
-                if (e.startBlock > std::numeric_limits<quint64>::max() - e.numBlocks)
-                    continue; // 溢出（恶意/损坏 manifest）→ 写入阶段会报越界
-                const quint64 total = e.startBlock + e.numBlocks;
-                if (total > std::numeric_limits<quint64>::max() / blockSize)
-                    continue;
-                const quint64 end = total * blockSize;
-                if (end > maxEnd)
-                    maxEnd = end;
-            }
-            continue;
+        bool hasExtents = false;
+        for (const Extent &e : op.dstExtents) {
+            hasExtents = true;
+            if (e.startBlock > std::numeric_limits<quint64>::max() - e.numBlocks)
+                continue; // 溢出（恶意/损坏 manifest）→ 写入阶段会报越界
+            const quint64 total = e.startBlock + e.numBlocks;
+            if (total > std::numeric_limits<quint64>::max() / blockSize)
+                continue;
+            const quint64 end = total * blockSize;
+            if (end > maxEnd)
+                maxEnd = end;
         }
+        if (hasExtents)
+            continue;
         if (op.dataOffset > std::numeric_limits<quint64>::max() - op.dataLength)
             continue; // 溢出（恶意/损坏 manifest）→ 逐 op 阶段会报"数据越界"，不计入分配
         const quint64 end = op.dataOffset + op.dataLength;
@@ -309,6 +312,16 @@ QByteArray extractPartition(const QByteArray &payload, const Partition &part,
             return {};
         }
         QByteArray blob = payload.mid(static_cast<int>(off), static_cast<int>(op.dataLength));
+        // data_sha256_hash（字段 8）的 AOSP 语义: 对压缩后 blob 计算（delta_performer.cc
+        // ValidateOperationHash 对原始 blob 校验）。REPLACE 不压缩，data==blob，二者一致；
+        // 解压类 op 必须先对 blob 校验再解压（与 SOURCE_BSDIFF 分支对 patch blob 校验一致）。
+        if (!op.dataHash.isEmpty()) {
+            const QByteArray actual = QCryptographicHash::hash(blob, QCryptographicHash::Sha256);
+            if (actual != op.dataHash) {
+                if (error) *error = "SHA-256 校验失败";
+                return {};
+            }
+        }
         QByteArray data;
         switch (op.type) {
         case OP_REPLACE: data = blob; break;
@@ -325,24 +338,22 @@ QByteArray extractPartition(const QByteArray &payload, const Partition &part,
             if (error) *error = QString("解压失败 type=%1").arg(op.type);
             return {};
         }
-        if (!op.dataHash.isEmpty()) {
-            const QByteArray actual = QCryptographicHash::hash(data, QCryptographicHash::Sha256);
-            if (actual != op.dataHash) {
-                if (error) *error = "SHA-256 校验失败";
+        // 写入定位: 真实 payload 按 dst_extents 决定目标块（dataOffset 只是 blobs 区偏移，
+        // 与分区内块位置无固定关系；含 ZERO/DISCARD 的 payload 若按 dataOffset 连续映射
+        // 会整体错位）。无 dst_extents 的简化 manifest 回退到 blockIdx = dataOffset/blockSize
+        // 的连续映射，此时输出预算对应 dataOffset+dataLength。
+        if (op.dstExtents.isEmpty()) {
+            const quint64 blockIdx = op.dataOffset / blockSize;
+            const qint64 dst = static_cast<qint64>(blockIdx * blockSize);
+            if (dst > out.size() || data.size() > out.size() - dst) {
+                if (error) *error = "解压后数据超出输出范围";
                 return {};
             }
+            out.replace(static_cast<int>(dst), data.size(), data);
+        } else {
+            if (!writeExtents(out, blockSize, op.dstExtents, data, error))
+                return {};
         }
-        // 写入定位: blockIdx = dataOffset / blockSize 的连续映射（简化实现；真实 payload
-        // 按 dst_extents 定位，非连续 extents 支持在 Task 15 完善）。
-        // 缓冲区按 dataOffset+dataLength 预算: REPLACE 的 data 恰为 dataLength 恒可放下；
-        // 解压类 op 的 data 为解压后大小（真实 payload 中恰好填满一块），超出预算视为异常。
-        const quint64 blockIdx = op.dataOffset / blockSize;
-        const qint64 dst = static_cast<qint64>(blockIdx * blockSize);
-        if (dst > out.size() || data.size() > out.size() - dst) {
-            if (error) *error = "解压后数据超出输出范围";
-            return {};
-        }
-        out.replace(static_cast<int>(dst), data.size(), data);
     }
     return out;
 }

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QCryptographicHash>
 #include "image_engine/wire_format.h"
 #include "image_engine/payload_image.h"
 #include "image_engine/bspatch_image.h"
@@ -99,6 +100,8 @@ private slots:
     void extractReplaceOp();   // Task 14: 全量 REPLACE 解包
     void extractSourceCopy();  // Task 15: SOURCE_COPY（src_extents → dst_extents）
     void extractSourceBsdiff(); // Task 15: SOURCE_BSDIFF（src_extents 旧片段 + bspatch）
+    void extractReplaceBzExtentsAndHash(); // Final review C1/C2/C3: REPLACE_BZ + blob hash + dst_extents
+    void extractReplaceZeroInterleave();   // Final review C1/C3: ZERO 交错 + dst_extents 落位
 };
 
 // 小端 64 位写入
@@ -486,6 +489,131 @@ void TestPayload::extractSourceBsdiff()
     // 独立验证: src_extents 旧片段 + patch → 'D'
     QByteArray frag = oldImage.mid(static_cast<int>(bs), static_cast<int>(bs));
     QCOMPARE(imgbspatch::applyBsdiff(frag, patch), QByteArray(static_cast<int>(bs), 'D'));
+}
+
+// ---------- Final review 修复: REPLACE 系接入 dst_extents（C1 预算 / C2 hash / C3 定位） ----------
+
+void TestPayload::extractReplaceBzExtentsAndHash()
+{
+    // 真实 OTA 语义: REPLACE_BZ 的 data_sha256_hash 对压缩后 blob 计算（AOSP
+    // delta_performer 的 ValidateOperationHash 校验原始 blob）；dst_extents 决定写入位置
+    // （startBlock=3，而 dataOffset/blockSize=0 —— 若按旧"dataOffset 连续映射"会写到块 0）；
+    // 输出预算按 dst_extents 覆盖范围（5 块）而非 dataOffset+dataLength（blob 压缩后较小）。
+    const quint64 bs = 4096;
+    const QByteArray payloadData(static_cast<int>(2 * bs), 'D'); // 2 块解压后数据
+    QByteArray blob = imgcomp::bzip2Compress(payloadData);
+    QVERIFY(!blob.isEmpty());
+    QVERIFY(blob.size() < payloadData.size()); // 压缩有效（若 bzip2 意外退化为不压缩，断言仍成立）
+
+    const QByteArray blobHash = QCryptographicHash::hash(blob, QCryptographicHash::Sha256);
+    QByteArray dstExt = pbwire::encodeVarint(1, 3) + pbwire::encodeVarint(2, 2); // 块 3..4
+
+    auto build = [&](const QByteArray &hashBytes) {
+        QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_REPLACE_BZ)
+                      + pbwire::encodeVarint(2, 64)                                  // data_offset 非零（blobs 区偏移）
+                      + pbwire::encodeVarint(3, static_cast<quint64>(blob.size()))
+                      + pbwire::encodeMessage(6, dstExt)
+                      + pbwire::encodeBytes(8, hashBytes);
+        QByteArray part = pbwire::encodeBytes(1, QByteArray("vendor")) + pbwire::encodeMessage(8, op);
+        QByteArray manifest = pbwire::encodeVarint(3, bs) + pbwire::encodeMessage(13, part);
+        QByteArray payload;
+        payload.append("CrAU");
+        putU64(payload, 2);
+        putU64(payload, static_cast<quint64>(manifest.size()));
+        for (int i = 0; i < 4; ++i) payload.append(char(0)); // metadata_signature_size
+        payload.append(manifest);
+        payload.append(QByteArray(64, '\xEE')); // blobs 区填充（dataOffset=64 起点）
+        payload.append(blob);
+        return payload;
+    };
+
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(build(blobHash), info));
+    const imgpayload::InstallOp &pop = info.partitions[0].ops[0];
+    QCOMPARE(pop.type, imgpayload::OP_REPLACE_BZ);
+    QCOMPARE(pop.dstExtents.size(), 1);
+    QCOMPARE(pop.dstExtents[0].startBlock, 3ull);
+    QCOMPARE(pop.dstExtents[0].numBlocks, 2ull);
+    QCOMPARE(pop.dataHash, blobHash);
+
+    QString err;
+    QByteArray out = imgpayload::extractPartition(build(blobHash), info.partitions[0],
+                                                  QByteArray(), &err, bs);
+    QVERIFY(err.isEmpty());
+    QCOMPARE(out.size(), static_cast<int>(5 * bs)); // 预算 = dst_extents 末端（块 5）
+    QVERIFY(out.left(static_cast<int>(3 * bs)) == QByteArray(static_cast<int>(3 * bs), '\0'));
+    QVERIFY(out.mid(static_cast<int>(3 * bs), static_cast<int>(2 * bs)) == payloadData);
+
+    // 负向: hash 对"解压后"数据计算 → 与 AOSP 语义不符，必须校验失败
+    // （用各自 payload 解析出的 manifest，保证校验的是该 payload 携带的 dataHash）
+    const QByteArray wrongHash = QCryptographicHash::hash(payloadData, QCryptographicHash::Sha256);
+    QVERIFY(wrongHash != blobHash);
+    imgpayload::PayloadInfo infoWrong;
+    QVERIFY(imgpayload::parseManifest(build(wrongHash), infoWrong));
+    QString err2;
+    QVERIFY(imgpayload::extractPartition(build(wrongHash), infoWrong.partitions[0],
+                                         QByteArray(), &err2, bs).isEmpty());
+    QVERIFY(err2.contains("SHA-256"));
+
+    // blob 损坏 → 同样校验失败
+    QByteArray corrupt = build(blobHash);
+    corrupt.chop(1);
+    corrupt.append('\xFF');
+    imgpayload::PayloadInfo infoCorrupt;
+    QVERIFY(imgpayload::parseManifest(corrupt, infoCorrupt));
+    QString err3;
+    QVERIFY(imgpayload::extractPartition(corrupt, infoCorrupt.partitions[0],
+                                         QByteArray(), &err3, bs).isEmpty());
+    QVERIFY(err3.contains("SHA-256"));
+}
+
+void TestPayload::extractReplaceZeroInterleave()
+{
+    // ZERO op 不消费 blob 但占输出空间（0x00）；其后 REPLACE 必须按 dst_extents 落位。
+    // 旧实现按 dataOffset/blockSize 连续映射会把后续 REPLACE 整体错位（ZERO 无 blob，
+    // 其 dataOffset 不推进），本用例 ZERO 前缀 + 中间交错 + 两块 REPLACE 同时验证。
+    const quint64 bs = 4096;
+    const QByteArray blobB(static_cast<int>(bs), 'B');
+    const QByteArray blobC(static_cast<int>(bs), 'C');
+    QByteArray zeroExt = pbwire::encodeVarint(1, 0) + pbwire::encodeVarint(2, 1);   // 块 0 (ZERO)
+    QByteArray repBExt = pbwire::encodeVarint(1, 1) + pbwire::encodeVarint(2, 1);   // 块 1
+    QByteArray zeroExt2 = pbwire::encodeVarint(1, 2) + pbwire::encodeVarint(2, 1);  // 块 2 (ZERO)
+    QByteArray repCExt = pbwire::encodeVarint(1, 3) + pbwire::encodeVarint(2, 1);   // 块 3
+    QByteArray opZero = pbwire::encodeVarint(1, imgpayload::OP_ZERO)
+                      + pbwire::encodeMessage(6, zeroExt);
+    QByteArray opB = pbwire::encodeVarint(1, imgpayload::OP_REPLACE)
+                   + pbwire::encodeVarint(2, 0)
+                   + pbwire::encodeVarint(3, static_cast<quint64>(blobB.size()))
+                   + pbwire::encodeMessage(6, repBExt);
+    QByteArray opZero2 = pbwire::encodeVarint(1, imgpayload::OP_ZERO)
+                       + pbwire::encodeMessage(6, zeroExt2);
+    QByteArray opC = pbwire::encodeVarint(1, imgpayload::OP_REPLACE)
+                   + pbwire::encodeVarint(2, static_cast<quint64>(blobB.size()))
+                   + pbwire::encodeVarint(3, static_cast<quint64>(blobC.size()))
+                   + pbwire::encodeMessage(6, repCExt);
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("system"))
+                    + pbwire::encodeMessage(8, opZero) + pbwire::encodeMessage(8, opB)
+                    + pbwire::encodeMessage(8, opZero2) + pbwire::encodeMessage(8, opC);
+    QByteArray manifest = pbwire::encodeVarint(3, bs) + pbwire::encodeMessage(13, part);
+    QByteArray payload;
+    payload.append("CrAU");
+    putU64(payload, 2);
+    putU64(payload, static_cast<quint64>(manifest.size()));
+    for (int i = 0; i < 4; ++i) payload.append(char(0));
+    payload.append(manifest);
+    payload.append(blobB).append(blobC); // blobs 区: 仅两块 REPLACE 数据
+
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(payload, info));
+    QCOMPARE(info.partitions[0].ops.size(), 4);
+    QString err;
+    QByteArray out = imgpayload::extractPartition(payload, info.partitions[0], QByteArray(), &err, bs);
+    QVERIFY(err.isEmpty());
+    QCOMPARE(out.size(), static_cast<int>(4 * bs)); // 预算含 ZERO 的输出空间（块 4 末端）
+    QVERIFY(out.left(static_cast<int>(bs)) == QByteArray(static_cast<int>(bs), '\0'));
+    QVERIFY(out.mid(static_cast<int>(bs), static_cast<int>(bs)) == blobB);
+    QVERIFY(out.mid(static_cast<int>(2 * bs), static_cast<int>(bs)) == QByteArray(static_cast<int>(bs), '\0'));
+    QVERIFY(out.mid(static_cast<int>(3 * bs), static_cast<int>(bs)) == blobC);
 }
 
 // 双测试类（TestWire + TestPayload）共用主函数
