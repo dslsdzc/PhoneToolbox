@@ -105,11 +105,13 @@ QByteArray repackBootImage(const BootInfo &info)
         put32(hdr, 16, static_cast<quint32>(info.ramdisk.size())); // ramdisk_size
         put32(hdr, 36, page);                   // page_size
         put32(hdr, 40, info.headerVersion);     // header_version
-        hdr.replace(64, 512, info.cmdline.left(511));   // cmdline@64 (512B)
         if (info.headerVersion >= 1)
             put32(hdr, 1644, static_cast<quint32>(hdrSize)); // header_size
         if (info.headerVersion >= 2)
             put32(hdr, 1648, info.dtbSize);     // dtb_size；dtb_addr@1652 留 0
+        // cmdline@64 (512B)：等长替换，避免 QByteArray::replace 收缩改变数组大小
+        const QByteArray c = info.cmdline.left(511);
+        hdr.replace(64, c.size(), c);
         // header 补零到页边界（mkbootimg 行为），数据段从页边界开始
         QByteArray out = hdr;
         if (out.size() % page) out.append(page - out.size() % page, '\0');
@@ -131,7 +133,9 @@ QByteArray repackBootImage(const BootInfo &info)
     put32(hdr, 12, static_cast<quint32>(info.ramdisk.size())); // ramdisk_size
     put32(hdr, 20, kHdrV3);                 // header_size
     put32(hdr, 40, info.headerVersion);     // header_version
-    hdr.replace(44, 1536, info.cmdline.left(1535)); // cmdline@44 (1536B)
+    // cmdline@44 (1536B)：等长替换，避免 replace 收缩改变数组大小
+    const QByteArray c = info.cmdline.left(1535);
+    hdr.replace(44, c.size(), c);
     QByteArray out = hdr;
     if (out.size() % 4096) out.append(4096 - out.size() % 4096, '\0');
     out += info.kernel;

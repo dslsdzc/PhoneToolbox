@@ -10,6 +10,8 @@ private slots:
     void parseV2();
     void parseV4();
     void repackRoundTripV0();
+    void repackRoundTripV2();
+    void repackRoundTripV4();
 };
 
 // 构造 v0: header 1632B 占第一页（mkbootimg 将 header 补零到 page_size），
@@ -31,6 +33,46 @@ static QByteArray buildBootV0()
     put32(44, 0x000A0B0C); // os_version
     hdr.replace(64, 13, QByteArray("console=ttyS0", 13)); // cmdline@64 (512B)
     return hdr + QByteArray(4096 - 1632, '\0') + kernel + ramdisk;
+}
+
+// 构造 v2: header 1660B 占第一页，kernel/ramdisk/dtb 各 1 页，second 与 recovery_dtbo 为空
+static QByteArray buildBootV2()
+{
+    QByteArray hdr(1660, 0);
+    hdr.replace(0, 8, "ANDROID!");
+    auto put32 = [&](int off, quint32 v) {
+        hdr[off] = char(v); hdr[off + 1] = char(v >> 8);
+        hdr[off + 2] = char(v >> 16); hdr[off + 3] = char(v >> 24);
+    };
+    put32(8, 4096);    // kernel_size
+    put32(16, 4096);   // ramdisk_size
+    put32(36, 4096);   // page_size
+    put32(40, 2);      // header_version
+    put32(1644, 1660); // header_size
+    put32(1648, 4096); // dtb_size
+    hdr.replace(64, 13, QByteArray("console=ttyS0", 13)); // cmdline@64
+    return hdr + QByteArray(4096 - 1660, '\0')
+         + QByteArray(4096, 'K')  // kernel
+         + QByteArray(4096, 'R')  // ramdisk
+         + QByteArray(4096, 'T'); // dtb
+}
+
+// 构造 v4: header 1580B 占第一页，kernel 4096 + ramdisk 4096（固定 4096 页）
+static QByteArray buildBootV4()
+{
+    QByteArray hdr(1580, 0);
+    hdr.replace(0, 8, "ANDROID!");
+    auto put32 = [&](int off, quint32 v) {
+        hdr[off] = char(v); hdr[off + 1] = char(v >> 8);
+        hdr[off + 2] = char(v >> 16); hdr[off + 3] = char(v >> 24);
+    };
+    put32(8, 4096);   // kernel_size
+    put32(12, 4096);  // ramdisk_size
+    put32(20, 1580);  // header_size
+    put32(40, 4);     // header_version
+    hdr.replace(44, 13, QByteArray("console=ttyS0", 13)); // cmdline@44 (1536B)
+    return hdr + QByteArray(4096 - 1580, '\0')
+         + QByteArray(4096, 'K') + QByteArray(4096, 'R');
 }
 
 void TestBoot::detect()
@@ -94,20 +136,7 @@ void TestBoot::parseV2()
 
 void TestBoot::parseV4()
 {
-    // v4: header 1580B 占第一页，kernel 4096 + ramdisk 4096（固定 4096 页）
-    QByteArray hdr(1580, 0);
-    hdr.replace(0, 8, "ANDROID!");
-    auto put32 = [&](int off, quint32 v) {
-        hdr[off] = char(v); hdr[off + 1] = char(v >> 8);
-        hdr[off + 2] = char(v >> 16); hdr[off + 3] = char(v >> 24);
-    };
-    put32(8, 4096);   // kernel_size
-    put32(12, 4096);  // ramdisk_size
-    put32(20, 1580);  // header_size
-    put32(40, 4);     // header_version
-    hdr.replace(44, 13, QByteArray("console=ttyS0", 13)); // cmdline@44 (1536B)
-    QByteArray raw = hdr + QByteArray(4096 - 1580, '\0')
-                   + QByteArray(4096, 'K') + QByteArray(4096, 'R');
+    QByteArray raw = buildBootV4();
     imgboot::BootInfo info;
     QVERIFY(imgboot::parseBootImage(raw, info));
     QCOMPARE(info.headerVersion, 4u);
@@ -129,6 +158,38 @@ void TestBoot::repackRoundTripV0()
     QCOMPARE(info2.kernel, info.kernel);
     QCOMPARE(info2.ramdisk, info.ramdisk);
     QCOMPARE(info2.headerVersion, 0u);
+    QCOMPARE(info2.pageSize, info.pageSize);
+    QCOMPARE(info2.cmdline, info.cmdline);
+}
+
+void TestBoot::repackRoundTripV2()
+{
+    QByteArray raw = buildBootV2();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(raw, info));
+    QByteArray repacked = imgboot::repackBootImage(info);
+    imgboot::BootInfo info2;
+    QVERIFY(imgboot::parseBootImage(repacked, info2));
+    QCOMPARE(info2.headerVersion, 2u);
+    QCOMPARE(info2.dtbSize, info.dtbSize);
+    QCOMPARE(info2.kernel, info.kernel);
+    QCOMPARE(info2.ramdisk, info.ramdisk);
+    QCOMPARE(info2.dtb, info.dtb);
+    QCOMPARE(info2.cmdline, info.cmdline);
+}
+
+void TestBoot::repackRoundTripV4()
+{
+    QByteArray raw = buildBootV4();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(raw, info));
+    QByteArray repacked = imgboot::repackBootImage(info);
+    imgboot::BootInfo info2;
+    QVERIFY(imgboot::parseBootImage(repacked, info2));
+    QCOMPARE(info2.headerVersion, 4u);
+    QCOMPARE(info2.kernel, info.kernel);
+    QCOMPARE(info2.ramdisk, info.ramdisk);
+    QCOMPARE(info2.cmdline, info.cmdline);
 }
 
 QTEST_APPLESS_MAIN(TestBoot)
