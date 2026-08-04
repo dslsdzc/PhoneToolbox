@@ -109,10 +109,16 @@ bool parseKdz(const QByteArray &kdz, QList<DzFile> &out, QString *error)
     qsizetype pos = 8;
     if (pos < kdz.size() && static_cast<uchar>(kdz[pos]) == 0x03)
         ++pos;
+    // unkdz.py getPartitions 的停止语义（等价 cont = not last）:
+    // 读到 0x03 后【再解析一条记录然后无条件停止】——不依赖 0x00 终止符/EOF。
+    // 否则 mkkdz.py 产物（0x03 后最后记录直接接数据、无 0x00 填充）会把
+    // 载荷字节当作记录解析而错误拒绝。
+    bool last = false;
     while (pos + kKdzRecordLen <= kdz.size()) {
         const char *p = kdz.constData() + pos;
         QString name;
         if (!trimName(p, 256, name)) {
+            out.clear();
             if (error) *error = QStringLiteral("KDZ 记录名内部含 NUL");
             return false;
         }
@@ -120,6 +126,7 @@ bool parseKdz(const QByteArray &kdz, QList<DzFile> &out, QString *error)
         const quint64 offset = qFromLittleEndian<quint64>(p + 264);
         if (offset > static_cast<quint64>(kdz.size()) ||
             length > static_cast<quint64>(kdz.size()) - offset) {
+            out.clear();
             if (error) *error = QStringLiteral("KDZ 记录偏移越界");
             return false;
         }
@@ -127,16 +134,18 @@ bool parseKdz(const QByteArray &kdz, QList<DzFile> &out, QString *error)
         f.name = name;
         f.data = kdz.mid(static_cast<qsizetype>(offset), static_cast<qsizetype>(length));
         out.append(f);
+        if (last) // 0x03 之后的最后一条记录已解析 → 无条件停止
+            break;
         pos += kKdzRecordLen;
         if (pos >= kdz.size())
             break;
         const uchar c = static_cast<uchar>(kdz[pos]);
         if (c == 0x03) { // 下一条为最后一条记录（mkkdz.py 将 0x03 写于最后一个记录前）
+            last = true;
             ++pos;
-            continue;
-        }
-        if (c == 0x00) // 记录表结束
+        } else if (c == 0x00) { // 记录表结束
             break;
+        }
         // 其它字节: 下一条记录直接紧跟
     }
     if (out.isEmpty()) {
@@ -161,16 +170,19 @@ bool parseDz(const QByteArray &dz, QList<DzChunk> &out, QString *error)
     qsizetype pos = kDzHeaderLen;
     for (quint32 i = 0; i < chunkCount; ++i) {
         if (pos + kDzChunkHeadLen > dz.size()) {
+            out.clear();
             if (error) *error = QStringLiteral("DZ 分区表截断");
             return false;
         }
         const char *p = dz.constData() + pos;
         if (memcmp(p, kChunkMagic, 4) != 0) {
+            out.clear();
             if (error) *error = QStringLiteral("DZ 分区头魔数错误");
             return false;
         }
         QString slice;
         if (!trimName(p + 4, 32, slice)) {
+            out.clear();
             if (error) *error = QStringLiteral("DZ 分区名内部含 NUL");
             return false;
         }
@@ -182,10 +194,12 @@ bool parseDz(const QByteArray &dz, QList<DzChunk> &out, QString *error)
         c.offset = static_cast<quint64>(targetAddr) << kSectorShift; // eMMC 偏移
         if (dataSize > 0) {
             if (pos + dataSize > dz.size()) {
+                out.clear();
                 if (error) *error = QStringLiteral("DZ 分区数据越界");
                 return false;
             }
             if (!inflateZlib(dz.mid(pos, dataSize), c.data)) {
+                out.clear();
                 if (error) *error = QStringLiteral("DZ 分区数据解压失败");
                 return false;
             }
@@ -198,15 +212,19 @@ bool parseDz(const QByteArray &dz, QList<DzChunk> &out, QString *error)
 
 QByteArray mergeChunks(const QList<DzChunk> &chunks, QString *error)
 {
-    // 按 eMMC 偏移合并为单镜像; 空洞填零; 后写 chunk 覆盖先写（与 DZ 写序一致）
-    quint64 maxEnd = 0;
-    for (const DzChunk &c : chunks)
-        maxEnd = qMax(maxEnd, c.offset + static_cast<quint64>(c.data.size()));
+    // 按 eMMC 偏移合并为单镜像; 空洞填零; 后写 chunk 覆盖先写（与 DZ 写序一致）。
+    // 逐 chunk 判定上限（2^33 = 8GB）: 同时防御 offset + size 的 quint64 回绕
+    // （offset ≥ 2^64 - size 时求和回绕为小值会绕过旧的"maxEnd 上限"检查）。
     const quint64 cap =
         qMin<quint64>(kMaxMerge, static_cast<quint64>(std::numeric_limits<qsizetype>::max()));
-    if (maxEnd > cap) {
-        if (error) *error = QStringLiteral("分区镜像过大（超过 8GB 上限）");
-        return {};
+    quint64 maxEnd = 0;
+    for (const DzChunk &c : chunks) {
+        const quint64 sz = static_cast<quint64>(c.data.size());
+        if (c.offset > cap || sz > cap - c.offset) {
+            if (error) *error = QStringLiteral("分区镜像过大（超过 8GB 上限）");
+            return {};
+        }
+        maxEnd = qMax(maxEnd, c.offset + sz);
     }
     QByteArray out(static_cast<qsizetype>(maxEnd), 0);
     for (const DzChunk &c : chunks) {

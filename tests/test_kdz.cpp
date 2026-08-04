@@ -101,12 +101,16 @@ class TestKdz : public QObject
 private slots:
     void mergeChunks();
     void mergeChunksOverLimit();
+    void mergeChunksWraparound();
     void parseKdz();
+    void parseKdzNoZeroTerminator();
     void parseKdzMkkdzSingle();
     void parseKdzMulti();
     void parseKdzInvalid();
+    void parseKdzPartialFailure();
     void parseDz();
     void parseDzInvalid();
+    void parseDzPartialFailure();
 };
 
 // 两个 chunk: boot 偏移 100 数据 "AAA", system 偏移 200 数据 "BBB"
@@ -141,6 +145,22 @@ void TestKdz::mergeChunksOverLimit()
     QVERIFY(err.contains("过大"));
 }
 
+void TestKdz::mergeChunksWraparound()
+{
+    // 2^64 回绕防御: offset + size 回绕成小值（绕过 maxEnd 上限检查）也必须在
+    // 逐 chunk 判定处拒绝, 否则负偏移替换会越界崩溃
+    QList<imgkdz::DzChunk> chunks;
+    imgkdz::DzChunk c;
+    c.partition = "system";
+    c.offset = ~quint64(0) - 99; // 2^64 - 100
+    c.data = QByteArray(200, '\x01'); // offset + 200 回绕为 100
+    chunks.append(c);
+    QString err;
+    QByteArray merged = imgkdz::mergeChunks(chunks, &err);
+    QVERIFY(merged.isEmpty());
+    QVERIFY(err.contains("过大"));
+}
+
 // 真实布局: 8B 魔数 28 05 00 00 24 38 22 25 + 1 条 272B 记录 (name[256]+length+offset)
 // + 对齐填充 + 数据
 void TestKdz::parseKdz()
@@ -153,6 +173,26 @@ void TestKdz::parseKdz()
     QCOMPARE(files.size(), 1);
     QCOMPARE(files[0].name, QString("firmware.dz"));
     QCOMPARE(files[0].data, payload);
+}
+
+// 0x03 停止语义回归（unkdz.py: 读到 0x03 后再解析一条记录然后无条件停止）:
+// rec0 + 0x03 + rec1(最后一条) 之后【直接接非零载荷、无 0x00 终止符】——
+// 不得把载荷字节当记录解析（旧实现会因 0x44 载荷解析出越界记录而错误拒绝）
+void TestKdz::parseKdzNoZeroTerminator()
+{
+    const QByteArray payload(300, '\x44'); // 非零载荷（旧实现会解析成伪记录 → 偏移越界 → 拒绝）
+    QByteArray kdz(QByteArray::fromHex("2805000024382225"));
+    kdz.append(kdzRecord(QByteArray("a.bin"), 8, 553));    // rec0 @8..280
+    kdz.append(char(0x03));                                // @280
+    kdz.append(kdzRecord(QByteArray("b.dz"), 300, 553));   // rec1 @281..553 (最后一条)
+    kdz.append(payload);                                   // @553 直接跟数据, 无 0x00 终止
+    QList<imgkdz::DzFile> files;
+    QString err;
+    QVERIFY2(imgkdz::parseKdz(kdz, files, &err), qPrintable(err));
+    QCOMPARE(files.size(), 2);
+    QCOMPARE(files[0].name, QString("a.bin"));
+    QCOMPARE(files[1].name, QString("b.dz"));
+    QCOMPARE(files[1].data, payload);
 }
 
 // mkkdz.py 单记录缺陷布局: 0x03 标记被写在魔数后偏移 8（该工具自身也无法读回,
@@ -218,6 +258,20 @@ void TestKdz::parseKdzInvalid()
     QVERIFY(!imgkdz::parseKdz(kdz3, files, &err));
 }
 
+// 中途失败: 第一条记录合法、第二条 offset 越界 → 失败且 out 必须为空（不残留已解析记录）
+void TestKdz::parseKdzPartialFailure()
+{
+    QByteArray kdz(QByteArray::fromHex("2805000024382225"));
+    kdz.append(kdzRecord(QByteArray("a.bin"), 4, 300));      // 合法记录 0
+    kdz.append(kdzRecord(QByteArray("b.bin"), 4, 100000));   // 记录 1 offset 越界
+    kdz.resize(600);
+    QList<imgkdz::DzFile> files;
+    QString err;
+    QVERIFY(!imgkdz::parseKdz(kdz, files, &err));
+    QVERIFY(files.isEmpty());
+    QVERIFY(err.contains("越界"));
+}
+
 // 真实布局: 512B 主头 + (512B chunk 子头 + zlib 压缩数据) * N;
 // chunk eMMC 偏移 = targetAddr << 9 (512 字节扇区)
 void TestKdz::parseDz()
@@ -270,6 +324,23 @@ void TestKdz::parseDzInvalid()
     dz4.append(dzChunkHeader(QByteArray("x"), QByteArray("x_1.bin"), 8, 8, 1));
     dz4.append(QByteArray("notzlib!", 8));
     QVERIFY(!imgkdz::parseDz(dz4, chunks, &err));
+}
+
+// 中途失败: 第一个 chunk 合法、第二个解压失败 → 失败且 out 必须为空
+void TestKdz::parseDzPartialFailure()
+{
+    const QByteArray zok = zlibCompress(QByteArray(64, '\x01'));
+    QByteArray dz = dzHeader(2);
+    dz.append(dzChunkHeader(QByteArray("x"), QByteArray("x_1.bin"),
+                            static_cast<quint32>(64), static_cast<quint32>(zok.size()), 1));
+    dz.append(zok);
+    dz.append(dzChunkHeader(QByteArray("y"), QByteArray("y_2.bin"), 8, 8, 2));
+    dz.append(QByteArray("notzlib!", 8));
+    QList<imgkdz::DzChunk> chunks;
+    QString err;
+    QVERIFY(!imgkdz::parseDz(dz, chunks, &err));
+    QVERIFY(chunks.isEmpty());
+    QVERIFY(err.contains("解压失败"));
 }
 
 QTEST_APPLESS_MAIN(TestKdz)
