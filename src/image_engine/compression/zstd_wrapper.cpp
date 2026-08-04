@@ -1,5 +1,6 @@
 #include "zstd_wrapper.h"
 #include <zstd.h>
+#include <limits>
 
 namespace imgcomp {
 
@@ -22,6 +23,10 @@ QByteArray zstdDecompress(const QByteArray &data)
         return {};
     size_t sz = ZSTD_getFrameContentSize(data.constData(), data.size());
     if (sz != ZSTD_CONTENTSIZE_UNKNOWN && sz != ZSTD_CONTENTSIZE_ERROR) {
+        // 攻击者可控: 声明 3-4GiB 时 static_cast<int> 窄化回绕为负 → qBadAlloc terminate。
+        // 与 brotli/gzip/xz/lz4 对齐: 超过 int 上限直接返回失败（失败返回空，不得崩溃）。
+        if (sz > static_cast<size_t>(std::numeric_limits<int>::max()))
+            return {};
         QByteArray out(static_cast<int>(sz), Qt::Uninitialized);
         size_t r = ZSTD_decompress(out.data(), sz, data.constData(), data.size());
         if (ZSTD_isError(r))
