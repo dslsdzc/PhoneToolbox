@@ -216,7 +216,8 @@ if(ENABLE_IMAGE_TESTS)
         enable_testing()
         set(IMAGE_TEST_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compression.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sparse.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sparse.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_boot.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
