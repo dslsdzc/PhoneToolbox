@@ -25,21 +25,22 @@ bool isDiffOp(int type)
     }
 }
 
-// 解析 Extent 消息列表（InstallOperation.src_extents=4 / dst_extents=6）
+// 解析单个 Extent 消息（start_block=1, num_blocks=2，字段顺序任意）：
+// src_extents=4 / dst_extents=6 的每个 repeated 字段各含一个 Extent，调用方负责追加。
 static QList<Extent> parseExtents(const QByteArray &bytes)
 {
-    QList<Extent> out;
     bool ok = false;
     const QList<pbwire::Field> fields = pbwire::parseMessage(bytes, ok);
     if (!ok)
         return {};
-    for (const pbwire::Field &e : fields) {
-        if (e.number == 1 && e.wireType == 0)
-            out.append({e.varint, 0});
-        else if (!out.isEmpty() && e.number == 2 && e.wireType == 0)
-            out.last().numBlocks = e.varint;
+    Extent e;
+    for (const pbwire::Field &f : fields) {
+        if (f.number == 1 && f.wireType == 0)
+            e.startBlock = f.varint;
+        else if (f.number == 2 && f.wireType == 0)
+            e.numBlocks = f.varint;
     }
-    return out;
+    return QList<Extent>{e};
 }
 
 // 依次拼接 extents 对应的块数据（含边界检查）；失败返回空并填 error
@@ -143,9 +144,10 @@ bool parseManifest(const QByteArray &payload, PayloadInfo &out)
                         case 1: if (of.wireType == 0) op.type = static_cast<int>(of.varint); break;
                         case 2: if (of.wireType == 0) op.dataOffset = of.varint; break;
                         case 3: if (of.wireType == 0) op.dataLength = of.varint; break;
-                        case 4: if (of.wireType == 2) op.srcExtents = parseExtents(of.bytes); break;
-                        case 6: if (of.wireType == 2) op.dstExtents = parseExtents(of.bytes); break;
-                        case 7: if (of.wireType == 2) op.dataHash = of.bytes; break;
+                        case 4: if (of.wireType == 2) op.srcExtents += parseExtents(of.bytes); break;
+                        case 6: if (of.wireType == 2) op.dstExtents += parseExtents(of.bytes); break;
+                        case 7: if (of.wireType == 0) op.dstLength = of.varint; break;
+                        case 8: if (of.wireType == 2) op.dataHash = of.bytes; break;
                         }
                     }
                     part.ops.append(op);
@@ -280,8 +282,9 @@ QByteArray extractPartition(const QByteArray &payload, const Partition &part,
                 QByteArray oldFrag = gatherExtents(oldImage, blockSize, op.srcExtents, srcBlocks, error);
                 if (oldFrag.isEmpty() && error && !error->isEmpty())
                     return {};
-                data = imgbspatch::applyBsdiff(oldFrag, patchBlob);
-                if (data.isEmpty()) {
+                bool ok = false;
+                data = imgbspatch::applyBsdiff(oldFrag, patchBlob, &ok);
+                if (!ok) {
                     if (error) *error = "bspatch 应用失败";
                     return {};
                 }

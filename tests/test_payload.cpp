@@ -95,6 +95,7 @@ private slots:
     void parseV1();
     void parseUnknownFields();
     void parseOpFields();
+    void parseMultipleExtents(); // Task 15 审查: 多 extent 追加不覆盖
     void extractReplaceOp();   // Task 14: 全量 REPLACE 解包
     void extractSourceCopy();  // Task 15: SOURCE_COPY（src_extents → dst_extents）
     void extractSourceBsdiff(); // Task 15: SOURCE_BSDIFF（src_extents 旧片段 + bspatch）
@@ -264,13 +265,14 @@ void TestPayload::parseUnknownFields()
     QCOMPARE(info.partitions[0].ops[0].dataLength, 8ull);
 }
 
-// data_offset 非零 + data_sha256_hash 提取；manifest 无 block_size 字段 → 缺省 4096
+// data_offset 非零 + dst_length + data_sha256_hash 提取；manifest 无 block_size 字段 → 缺省 4096
 static QByteArray buildPayloadWithOpFields()
 {
     QByteArray op = pbwire::encodeVarint(1, 1)                             // type=REPLACE_BZ
                   + pbwire::encodeVarint(2, 65536)                         // data_offset 非零
                   + pbwire::encodeVarint(3, 128)                           // data_length
-                  + pbwire::encodeBytes(7, QByteArray(32, '\x42'));        // data_sha256_hash
+                  + pbwire::encodeVarint(7, 8192)                          // dst_length
+                  + pbwire::encodeBytes(8, QByteArray(32, '\x42'));        // data_sha256_hash
     QByteArray part = pbwire::encodeBytes(1, QByteArray("vendor"))
                     + pbwire::encodeMessage(8, op);
     QByteArray manifest = pbwire::encodeMessage(13, part);                 // 无 block_size
@@ -300,7 +302,41 @@ void TestPayload::parseOpFields()
     QCOMPARE(info.partitions[0].ops[0].type, 1);
     QCOMPARE(info.partitions[0].ops[0].dataOffset, 65536ull);
     QCOMPARE(info.partitions[0].ops[0].dataLength, 128ull);
-    QCOMPARE(info.partitions[0].ops[0].dataHash, QByteArray(32, '\x42'));
+    QCOMPARE(info.partitions[0].ops[0].dstLength, 8192ull);   // 字段 7 (varint)
+    QCOMPARE(info.partitions[0].ops[0].dataHash, QByteArray(32, '\x42')); // 字段 8 (bytes)
+}
+
+// 多 extent 必须追加而非覆盖（src_extents=4 / dst_extents=6 是 repeated 字段）
+void TestPayload::parseMultipleExtents()
+{
+    QByteArray e1 = pbwire::encodeVarint(1, 0) + pbwire::encodeVarint(2, 1);
+    QByteArray e2 = pbwire::encodeVarint(1, 5) + pbwire::encodeVarint(2, 2);
+    QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_SOURCE_COPY)
+                  + pbwire::encodeMessage(4, e1) + pbwire::encodeMessage(4, e2)
+                  + pbwire::encodeMessage(6, e1) + pbwire::encodeMessage(6, e2);
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+    QByteArray manifest = pbwire::encodeMessage(13, part);
+    QByteArray payload;
+    payload.append("CrAU");
+    putU64(payload, 2);
+    putU64(payload, static_cast<quint64>(manifest.size()));
+    auto put32 = [&](quint32 v) {
+        for (int i = 0; i < 4; ++i) payload.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put32(0);
+    payload.append(manifest);
+
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(payload, info));
+    const imgpayload::InstallOp &pop = info.partitions[0].ops[0];
+    QCOMPARE(pop.srcExtents.size(), 2);
+    QCOMPARE(pop.srcExtents[0].startBlock, 0ull);
+    QCOMPARE(pop.srcExtents[0].numBlocks, 1ull);
+    QCOMPARE(pop.srcExtents[1].startBlock, 5ull);
+    QCOMPARE(pop.srcExtents[1].numBlocks, 2ull);
+    QCOMPARE(pop.dstExtents.size(), 2);
+    QCOMPARE(pop.dstExtents[0].startBlock, 0ull);
+    QCOMPARE(pop.dstExtents[1].numBlocks, 2ull);
 }
 
 // ---------- Task 14: payload 全量解包（REPLACE 系） ----------

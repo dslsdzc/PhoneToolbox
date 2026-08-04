@@ -16,6 +16,17 @@ quint64 readU64(const QByteArray &d, int off)
     return v;
 }
 
+// qint64 检查加法：溢出返回 false（防回绕 UB）
+bool addChecked(qint64 a, qint64 b, qint64 &sum)
+{
+    if (b > 0 && a > std::numeric_limits<qint64>::max() - b)
+        return false;
+    if (b < 0 && a < std::numeric_limits<qint64>::min() - b)
+        return false;
+    sum = a + b;
+    return true;
+}
+
 // bzip2 流式解压器（单次读完输入）。read 逐块解压，多余输出缓存到 cache，
 // 直到凑满 n 字节或流结束（BZ_STREAM_END）；返回实际读到的字节数。
 // 调用方把 got < 请求数视为失败（流截断/解压错误）。
@@ -74,8 +85,9 @@ struct BzStream {
 
 } // namespace
 
-QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch)
+QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch, bool *ok)
 {
+    if (ok) *ok = false;
     if (patch.size() < 32 || patch.left(8) != "BSDIFF40")
         return {};
     const quint64 ctrlLen = readU64(patch, 8);
@@ -114,13 +126,19 @@ QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch)
         const qint64 diffLenThis = static_cast<qint64>(readU64(ctrlBuf, 0));
         const qint64 extraLen = static_cast<qint64>(readU64(ctrlBuf, 8));
         const qint64 oldOffset = static_cast<qint64>(readU64(ctrlBuf, 16));
-        // 边界（bspatch.c 语义）: 长度非负、输出不越界、old 位置不为负
-        if (diffLenThis < 0 || extraLen < 0 || oldPos + oldOffset < 0
+        // 边界（对照 FreeBSD bspatch.c）:
+        // 1) 各段长度先按值限制在 newLen 内（newLen ≤ INT_MAX → 天然排除 INT 级回绕/负尺寸分配）；
+        // 2) 再分段检查 newPos 推进不越界（此时 diffLenThis/extraLen ≤ newLen、newPos ≤ newLen，
+        //    和 ≤ 3*newLen 无回绕）。
+        if (diffLenThis < 0 || extraLen < 0
+            || diffLenThis > newLen || extraLen > newLen
+            || newPos + static_cast<quint64>(diffLenThis) > newLen
             || newPos + static_cast<quint64>(diffLenThis) + static_cast<quint64>(extraLen) > newLen) {
             ctrl.finish(); diff.finish(); extra.finish();
             return {};
         }
-        // diff 段: 旧数据 + diff 字节（mod 256）；旧数据越界视为 0
+        // oldPos 不符号检查（真实 bsdiff 允许负 old_offset；越界由 diff 循环 0 填充守卫兜底），
+        // 但加减用检查算术防 qint64 回绕 UB。diff 段读取用推进前的 oldPos（bspatch.c 语义）。
         QByteArray diffBuf(static_cast<int>(diffLenThis), Qt::Uninitialized);
         if (diff.read(diffBuf.data(), static_cast<size_t>(diffLenThis)) != static_cast<size_t>(diffLenThis)) {
             ctrl.finish(); diff.finish(); extra.finish();
@@ -128,13 +146,19 @@ QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch)
         }
         for (qint64 i = 0; i < diffLenThis; ++i) {
             char oldc = 0;
-            const qint64 idx = oldPos + i;
-            if (idx >= 0 && idx < static_cast<qint64>(oldData.size()))
+            qint64 idx = 0;
+            if (addChecked(oldPos, i, idx)
+                && idx >= 0 && idx < static_cast<qint64>(oldData.size()))
                 oldc = oldData[static_cast<int>(idx)];
             out[static_cast<int>(newPos + i)] =
                 char((static_cast<uchar>(oldc) + static_cast<uchar>(diffBuf[static_cast<int>(i)])) & 0xFF);
         }
-        oldPos += diffLenThis;
+        qint64 nextOldPos;
+        if (!addChecked(oldPos, diffLenThis, nextOldPos)) {
+            ctrl.finish(); diff.finish(); extra.finish();
+            return {};
+        }
+        oldPos = nextOldPos;
         newPos += static_cast<quint64>(diffLenThis);
         // extra 段: 直接复制
         QByteArray extraBuf(static_cast<int>(extraLen), Qt::Uninitialized);
@@ -144,9 +168,14 @@ QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch)
         }
         out.replace(static_cast<int>(newPos), static_cast<int>(extraLen), extraBuf);
         newPos += static_cast<quint64>(extraLen);
-        oldPos += oldOffset;
+        if (!addChecked(oldPos, oldOffset, nextOldPos)) {
+            ctrl.finish(); diff.finish(); extra.finish();
+            return {};
+        }
+        oldPos = nextOldPos;
     }
     ctrl.finish(); diff.finish(); extra.finish();
+    if (ok) *ok = true;
     return out;
 }
 

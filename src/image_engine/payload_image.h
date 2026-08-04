@@ -21,9 +21,10 @@ struct InstallOp {
     int type = OP_REPLACE;
     quint64 dataOffset = 0;
     quint64 dataLength = 0;
-    QByteArray dataHash; // data_sha256_hash
-    QList<Extent> srcExtents; // Task 15: SOURCE_* 的源块（旧镜像内）
-    QList<Extent> dstExtents; // Task 15: 输出目标块
+    quint64 dstLength = 0;   // dst_length（字段 7，update_metadata.proto）
+    QByteArray dataHash;     // data_sha256_hash（字段 8，update_metadata.proto）
+    QList<Extent> srcExtents; // 字段 4: SOURCE_* 的源块（旧镜像内）
+    QList<Extent> dstExtents; // 字段 6: 输出目标块
 };
 
 struct Partition {
