@@ -2,6 +2,7 @@
 #include "image_engine/compression/bzip2_wrapper.h"
 #include "image_engine/compression/compressor.h"
 #include "image_engine/compression/lz4_wrapper.h"
+#include "image_engine/compression/xz_wrapper.h"
 #include "image_engine/compression/zstd_wrapper.h"
 
 class TestCompression : public QObject
@@ -15,6 +16,8 @@ private slots:
     void lz4Truncated();
     void bzip2RoundTrip();
     void bzip2InvalidInput();
+    void xzRoundTrip();
+    void xzInvalidInput();
     void dispatchRoundTrip();
 };
 
@@ -55,6 +58,16 @@ void TestCompression::bzip2RoundTrip()
 }
 
 void TestCompression::bzip2InvalidInput() { QVERIFY(imgcomp::bzip2Decompress("garbage").isEmpty()); }
+
+void TestCompression::xzRoundTrip()
+{
+    QByteArray data("xz payload with some repetition repetition repetition");
+    QByteArray comp = imgcomp::xzCompress(data);
+    QVERIFY(!comp.isEmpty());
+    QCOMPARE(imgcomp::xzDecompress(comp), data);
+}
+
+void TestCompression::xzInvalidInput() { QVERIFY(imgcomp::xzDecompress("garbage").isEmpty()); }
 
 void TestCompression::dispatchRoundTrip()
 {
