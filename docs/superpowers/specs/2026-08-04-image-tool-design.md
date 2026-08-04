@@ -177,7 +177,7 @@ Linux 系统包 / Windows vcpkg 获取。
 | LG | IOMonster kdztools（unkdz/undz）、[dumpyara](https://github.com/sebaubuntu-python/dumpyara)、[DumprX](https://github.com/dkpost3/DumprX) | KDZ 加密段 | 解密可获取；新版加密（V60 后）部分不支持 |
 | HTC | [kmdm/ruuveal](https://github.com/kmdm/ruuveal)、[kmdm/unruu](https://github.com/kmdm/unruu)、[topjohnwu/HTC-RUU-Decrypt-Tool](https://github.com/topjohnwu/HTC-RUU-Decrypt-Tool) | RUU 加密 ZIP（RC4/AES-CBC，70+ 机型） | 可解密/再加密；**刷写仍需 S-OFF**（无私钥无法正确签名） |
 | OPPO/OnePlus/realme | [bkerler/oppo_decrypt](https://github.com/bkerler/oppo_decrypt)（含 [realme fork](https://github.com/djdoolky76/oppo-realme_decrypt)） | ofp 加密（QC/MTK）、ops 加解密 | 解密逻辑可获取；ofs 无公开资料 |
-| 三星 | 无公开重签工具（[dumpyara](https://github.com/sebaubuntu-python/dumpyara) 仅解包） | sboot RSA 签名 | 无公开重签路径；官方路径为解锁（Knox 熔断） |
+| 三星 | **[Heimdall](https://github.com/benjamin-dobell/Heimdall)**（Odin 3 协议完整开源实现，MIT）、[dumpyara](https://github.com/sebaubuntu-python/dumpyara)（解包） | Odin 3 协议 + sboot RSA 签名 | **可集成刷机协议**（不依赖闭源 Odin）；签名层仍需解锁（Knox 熔断） |
 | 索尼 | sin2raw（munjeni）、Flashtool | sin RSA 签名（v3 ADDR/LZ4A） | 可解包；**不可重签** |
 | 小米 | 无专用签名仓库（通用 [avbtool](https://android.googlesource.com/platform/external/avb)） | AVB 2.0 vbmeta | avbtool 通用处理（disable verification） |
 | Google Pixel | avbtool（AOSP） | AVB | 开源通用 |
@@ -188,8 +188,10 @@ Linux 系统包 / Windows vcpkg 获取。
 **已知边界（如实标注）**：
 - 华为 signature 为证书链+时间戳+设备唯一标识复合结构，**通用重签名大概率失败** —— 安全做法是保留原固件 signature 仅修改 system/boot 分区
 - HTC 重加密后**仍需 S-OFF 才能刷**（无私钥无法正确签名）
-- 三星无公开重签工具；官方路径为 bootloader 解锁（Knox 熔断）
+- 三星**无公开重签工具**，但刷机协议有 Heimdall 开源实现（Odin 3）；签名层官方路径为 bootloader 解锁（Knox 熔断）
 - vivo/iQOO 无公开签名逆向资源
+
+**维修行业真实通道（2026-08-04 搜索确认，对应"死局"质疑）**：签名层不存在"破解"，但刷机有完整通道 —— ① 解锁 Bootloader（官方/工程解锁，已有实现）；② 协议级开源实现（Heimdall 三星 Odin、EDL 高通、mtkclient 联发科，已有/待集成）；③ 售后/工程工具（华为 HDB 协议 + 旧版 HiSuite 通道、高通 msmdownloadtool 工程版）。工具覆盖面按此三通道规划，不依赖签名破解。
 
 受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）、HTC RUU（E 阶段后续）。
 
