@@ -27,6 +27,11 @@ namespace {
 //     md5[16] @108; targetAddr u32 @124（eMMC 起始块号）; trimCount u32 @128;
 //     dev u32 @132; crc32 u32 @136; pad[372] @140
 //   eMMC 偏移 = targetAddr << shiftLBA, shiftLBA 默认 9（512 字节扇区, undz.py 默认值）
+//
+//   B4 遗留评估（CRC32/MD5 校验）: 子头带 md5@108 / crc32@136，但 zlib 流解压本身
+//   已逐块校验 adler32（损坏即 inflate 返回 Z_DATA_ERROR），校验和再验属冗余加固；
+//   且严格门禁对真实固件的未知 chunk 变体/尾部数据有误杀风险（无真实固件回归样本）。
+//   决定: 暂不实现，保留为真实固件回归时的跟踪项。
 // =============================================================================
 
 constexpr unsigned char kKdzMagic[8]   = {0x28, 0x05, 0x00, 0x00, 0x24, 0x38, 0x22, 0x25};

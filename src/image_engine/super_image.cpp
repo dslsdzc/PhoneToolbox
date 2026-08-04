@@ -84,6 +84,13 @@ bool parseSuper(const QByteArray &image, SuperInfo &out)
         part.firstExtentIndex = qFromLittleEndian<quint32>(p + 40);
         part.numExtents = qFromLittleEndian<quint32>(p + 44);
         part.groupIndex = qFromLittleEndian<quint32>(p + 48);
+        // 遗留修复: extent 索引区间必须完整落在 extents 表内。恶意 firstExtentIndex/
+        // numExtents 直接索引表外（或 firstExtentIndex+e 在 quint32 上回绕）会读到
+        // 表外/图像外数据；quint64 运算防 firstExtentIndex+numExtents 回绕。
+        const quint64 firstExt = part.firstExtentIndex;
+        if (part.numExtents > extDesc.numEntries || firstExt > extDesc.numEntries ||
+            firstExt + part.numExtents > extDesc.numEntries)
+            return false;
         for (quint32 e = 0; e < part.numExtents; ++e) {
             const qint64 eoff = tablesBase + extDesc.offset +
                                 static_cast<qint64>(part.firstExtentIndex + e) * extDesc.entrySize;
@@ -122,7 +129,11 @@ QList<QByteArray> extractPartitions(const QByteArray &image, const SuperInfo &in
                     break;
                 }
                 const quint64 byteOff = ext.targetData * kSector;
-                if (byteOff + byteLen > static_cast<quint64>(image.size())) {
+                // 遗留修复: 减法形式越界校验。byteOff/byteLen 各自 ≤ 2^64-512（见
+                // kMaxSectors），加法可能回绕 —— 回绕后误放行会让 mid() 用负偏移
+                // 产出错误内容。改减法后无回绕路径（先验 byteLen ≤ size）。
+                const quint64 size = static_cast<quint64>(image.size());
+                if (byteLen > size || byteOff > size - byteLen) {
                     ok = false;
                     if (error) *error = QString("分区 %1 extent 越界").arg(part.name);
                     break;

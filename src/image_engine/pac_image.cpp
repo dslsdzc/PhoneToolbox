@@ -200,17 +200,28 @@ bool isPac(const QByteArray &pac)
 bool parsePac(const QByteArray &pac, QList<PacPartition> &out, QString *error)
 {
     out.clear();
+    bool ok = false;
     // 新格式: 头 2124B 且版本串（UTF-16LE）命中 —— 官方版本门禁
+    // （版本命中则仅走新格式解析；解析失败不回退旧格式，与原始语义一致）
+    bool isNew = false;
     if (pac.size() >= kNewHdrSize) {
         const QString ver = sprdString(pac, 0, 22);
-        if (ver == QLatin1String("BP_R1.0.0") || ver == QLatin1String("BP_R2.0.1"))
-            return parseNewFormat(pac, out, error);
+        if (ver == QLatin1String("BP_R1.0.0") || ver == QLatin1String("BP_R2.0.1")) {
+            isNew = true;
+            ok = parseNewFormat(pac, out, error);
+        }
     }
     // 旧格式: 无魔数/版本, 仅结构校验（分区数/表偏移/条目链/数据范围全通过才认可）
-    if (pac.size() >= kOldHdrSize)
-        return parseLegacyFormat(pac, out, error);
-    if (error) *error = QStringLiteral("不是 PAC 固件（头长度不足）");
-    return false;
+    if (!isNew && pac.size() >= kOldHdrSize)
+        ok = parseLegacyFormat(pac, out, error);
+    if (!ok) {
+        // B8 遗留吸收: 失败出口清空部分填充（parseNewFormat/parseLegacyFormat 中途
+        // 失败时 out 可能残留已读条目）
+        out.clear();
+        if (error && error->isEmpty())
+            *error = QStringLiteral("不是 PAC 固件（头长度不足）");
+    }
+    return ok;
 }
 
 } // namespace imgpac
