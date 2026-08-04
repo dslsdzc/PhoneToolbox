@@ -33,13 +33,17 @@ Detected detect(const QByteArray &header, const QString &fileName)
         return {Format::Boot, "boot 镜像"};
     if (header.size() >= 8 && header.left(8) == "VNDRBOOT")
         return {Format::VendorBoot, "vendor_boot 镜像"};
-    if (header.size() >= 4 &&
-        static_cast<uchar>(header[0]) == '0' && static_cast<uchar>(header[1]) == 'P' &&
-        static_cast<uchar>(header[2]) == 'L' && static_cast<uchar>(header[3]) == 'A')
+    // super 动态分区: geometry magic 0x616c4467（"gDla"）小端落盘，位于偏移 4096
+    // （LP_METADATA_GEOMETRY_OFFSET）；偏移 0 是保留区，"0PLA" metadata 头在偏移 8192。
+    if (header.size() >= 4100 &&
+        static_cast<uchar>(header[4096]) == 'g' && static_cast<uchar>(header[4097]) == 'D' &&
+        static_cast<uchar>(header[4098]) == 'l' && static_cast<uchar>(header[4099]) == 'a')
         return {Format::Super, "super 动态分区"};
-    if (header.size() >= 4 &&
-        static_cast<uchar>(header[0]) == 0xE2 && static_cast<uchar>(header[1]) == 0xE1 &&
-        static_cast<uchar>(header[2]) == 0xF5 && static_cast<uchar>(header[3]) == 0x00)
+    // EROFS: magic 0xE0F5E1E2 小端落盘为 E2 E1 F5 E0，superblock 位于偏移 1024
+    // （EROFS_SUPER_OFFSET），偏移 0 是保留区。
+    if (header.size() >= 1028 &&
+        static_cast<uchar>(header[1024]) == 0xE2 && static_cast<uchar>(header[1025]) == 0xE1 &&
+        static_cast<uchar>(header[1026]) == 0xF5 && static_cast<uchar>(header[1027]) == 0xE0)
         return {Format::Erofs, "EROFS 文件系统"};
     if (header.size() >= 2 && header.left(2) == "\x1f\x8b")
         return {Format::Gzip, "gzip 压缩"};
