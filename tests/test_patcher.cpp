@@ -4,6 +4,7 @@
 #include "root_patcher/root_patcher.h"
 #include "root_patcher/magisk_patcher.h"
 #include "root_patcher/kernelsu_patcher.h"
+#include "root_patcher/apatch_patcher.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "image_engine/boot_image.h"
 
@@ -266,6 +267,86 @@ static QByteArray buildBootV0(const QByteArray &ramdisk,
     return out;
 }
 
+// ---- C5 测试工具：mock kptools ----
+// 行为完全由输入内容驱动（无外部开关文件），实现与官方 kptools 的
+// 命令面一致：unpack <boot> / -i kernel -f / -p -i ... -k ... -o ... /
+// -l -i kernel / repack <boot>。每次调用把全部参数追加进 mock-calls.log
+// （repack 时并入 new-boot.img，供测试断言官方参数形态）。
+// 开关（写入 boot 镜像内核段/内容）：
+//   "UNPACK_FAIL" → unpack 退出非零
+//   "REPACK_FAIL" → repack 退出非零
+//   "NO_KALLSYMS" → -f 不输出 CONFIG_KALLSYMS=y（门禁失败）
+//   "PATCH_FAIL"  → -p 退出非零
+//   "NOPATCH"     → -p 成功但不写入 KP1158 标记（-l 报 patched=false）
+QByteArray apatchMockKptoolsScript()
+{
+    return QByteArray(R"(#!/bin/sh
+echo "invoked: $*" >> mock-calls.log
+if [ "$1" = "unpack" ]; then
+  grep -q "UNPACK_FAIL" "$2" && exit 7
+  cp "$2" kernel
+  printf 'MOCKKERNEL' >> kernel
+  exit 0
+fi
+if [ "$1" = "repack" ]; then
+  grep -q "REPACK_FAIL" "$2" && exit 8
+  cp "$2" new-boot.img
+  printf 'MOCKREPACK' >> new-boot.img
+  cat mock-calls.log >> new-boot.img 2>/dev/null
+  [ -f kernel ] && cat kernel >> new-boot.img
+  exit 0
+fi
+img=; out=; cmd=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -i) img="$2"; shift 2 ;;
+    -k) shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -p) cmd=patch; shift ;;
+    -f) cmd=flag; shift ;;
+    -l) cmd=list; shift ;;
+    -s|-S) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$cmd" = "patch" ]; then
+  grep -q "PATCH_FAIL" "$img" && exit 9
+  cp "$img" "$out"
+  grep -q "NOPATCH" "$img" || printf 'KP1158MOCKPATCH' >> "$out"
+  exit 0
+fi
+if [ "$cmd" = "flag" ]; then
+  grep -q "NO_KALLSYMS" "$img" || printf 'CONFIG_KALLSYMS=y\nCONFIG_KALLSYMS_ALL=y\n'
+  exit 0
+fi
+if [ "$cmd" = "list" ]; then
+  if grep -q "KP1158" "$img"; then printf 'patched=true\n'; else printf 'patched=false\n'; fi
+  exit 0
+fi
+exit 0
+)");
+}
+
+// 构造含 libkptools.so（mock 脚本）+ assets/kpimg 的 APatch 管理器 APK。
+QByteArray buildApatchApk(const QByteArray &mockKptools,
+                          const QByteArray &kpimg = QByteArray("mock-kpimg-data"))
+{
+    return buildZip({
+        {"lib/arm64-v8a/libkptools.so", mockKptools, 0},
+        {"lib/arm64-v8a/libkpatch.so", QByteArray("mock"), 0},
+        {"assets/kpimg", kpimg, 0},
+    });
+}
+
+// 构造 C5 测试用 boot 镜像：kernel 段内容可控（mock 开关经此处写入）。
+QByteArray buildApatchBoot(const QByteArray &kernelMark = QByteArray())
+{
+    QByteArray kernel = QByteArray(4096, 'K');
+    if (!kernelMark.isEmpty())
+        kernel = kernelMark;
+    return buildBootV0(buildCpio({}), kernel, QByteArray("androidboot.test=1"));
+}
+
 } // namespace
 
 class TestPatcher : public QObject
@@ -306,6 +387,23 @@ private slots:
     void ksuLkmPackZipExtracts();
     void ksuLkmPackZipWithoutKmiFails();
     void ksuDownloadUrlsKnown();
+
+    // ---- C5: APatch/KernelPatch 系 ----
+    void apatchInjectFromApk();
+    void apatchInjectFromManualDir();
+    void apatchMissingSourceFails();
+    void apatchBothSourcesFails();
+    void apatchApkMissingEntryFails();
+    void apatchApkNotZipFails();
+    void apatchKpatchDirMissingFilesFails();
+    void apatchKpatchPathNotDirFails();
+    void apatchInvalidBootFails();
+    void apatchNoKallsymsFails();
+    void apatchUnpackFailFails();
+    void apatchPatchFailFails();
+    void apatchNotPatchedFails();
+    void apatchRepackFailFails();
+    void apatchFactoryAndSources();
 };
 
 void TestPatcher::factoryCreate()
@@ -324,9 +422,10 @@ void TestPatcher::factoryCreate()
         QVERIFY2(p.get(), "create() 返回 nullptr");
         QVERIFY(dynamic_cast<patcher::KernelSuPatcher *>(p.get()));
     }
-    // 未实现类型返回 nullptr（不崩溃），由后续任务 C5+ 扩展
-    for (patcher::RootType t : {patcher::RootType::APatch, patcher::RootType::KernelPatch,
-                                patcher::RootType::RamdiskSu,
+    // C5：APatch/KernelPatch 两入口映射到 APatchPatcher（详见
+    // apatchFactoryAndSources）；未实现类型返回 nullptr（不崩溃），
+    // 由后续任务 C6+ 扩展
+    for (patcher::RootType t : {patcher::RootType::RamdiskSu,
                                 patcher::RootType::ModuleInstall})
         QVERIFY(patcher::RootPatcher::create(t) == nullptr);
 }
@@ -1242,6 +1341,322 @@ void TestPatcher::ksuDownloadUrlsKnown()
     QVERIFY(patcher::KernelSuPatcher::supportedKmis("bogus").isEmpty());
 
     QCOMPARE(patcher::KernelSuPatcher::assetKey("resuki"), QStringLiteral("ksu-resuki"));
+}
+
+// ================= C5: APatch/KernelPatch 系 =================
+
+void TestPatcher::apatchInjectFromApk()
+{
+    // 官方路径：APatch 管理器 APK 提取 libkptools.so + assets/kpimg（与
+    // APatch App prepare() 一致）→ 官方 kptools 流程（mock）。断言：
+    //   1) 输出 boot 镜像含原始 boot 段与 MOCKREPACK（repack 产物）
+    //   2) 含 KP1158 标记 —— 注入后 boot 镜像含 kpatch（kpimg KP_MAGIC）标记
+    //   3) mock-calls.log（并入输出）证明官方命令形态：
+    //      unpack boot.img → -i kernel -f → -p -i kernel.ori -k kpimg
+    //      -o kernel → -l -i kernel → repack boot.img
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    const QByteArray boot = buildApatchBoot();
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(boot, cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+    QVERIFY(out.contains(boot)); // 原始 boot 段透传进 repack 产物
+    QVERIFY(out.contains("KP1158")); // kpatch 标记
+    QVERIFY(out.contains("KP1158MOCKPATCH"));
+    QVERIFY(out.contains("MOCKREPACK"));
+    QVERIFY(out.contains("MOCKKERNEL"));
+    QVERIFY(out.contains("invoked: unpack"));
+    QVERIFY(out.contains("invoked: repack"));
+    QVERIFY(out.contains("-i kernel -f"));
+    QVERIFY(out.contains("-p -i kernel.ori -k kpimg -o kernel"));
+    QVERIFY(out.contains("-l -i kernel"));
+}
+
+void TestPatcher::apatchInjectFromManualDir()
+{
+    // 手动路径：kpatchPath 目录含 kptools+kpimg 文件（KernelPatch release
+    // 预编译资产解包形态，文件名前缀匹配）；kptools 无执行位也须成功
+    //（patcher 负责 chmod +x）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile kp(dir.path() + "/kptools-linux");
+    QVERIFY(kp.open(QIODevice::WriteOnly));
+    kp.write(apatchMockKptoolsScript());
+    kp.close();
+    QFile ki(dir.path() + "/kpimg-android");
+    QVERIFY(ki.open(QIODevice::WriteOnly));
+    ki.write("mock-kpimg-data");
+    ki.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelPatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildApatchBoot(), cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+    QVERIFY(out.contains("KP1158"));
+}
+
+void TestPatcher::apatchMissingSourceFails()
+{
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch; // apkPath 与 kpatchPath 均未指定
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchBothSourcesFails()
+{
+    // 两种来源互斥：同时指定会误导（版本不一致风险）→ 明确报错
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchApkMissingEntryFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"lib/arm64-v8a/libmagiskinit.so", "wrong patcher", 0}}));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("libkptools", Qt::CaseInsensitive));
+}
+
+void TestPatcher::apatchApkNotZipFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("not a zip archive");
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchKpatchDirMissingFilesFails()
+{
+    // 目录存在但缺 kptools / kpimg
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile ki(dir.path() + "/kpimg");
+    QVERIFY(ki.open(QIODevice::WriteOnly));
+    ki.write("mock-kpimg-data");
+    ki.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchKpatchPathNotDirFails()
+{
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.kpatchPath = "/nonexistent/patch-dir";
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchInvalidBootFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray("not a boot image at all"), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("boot", Qt::CaseInsensitive));
+}
+
+void TestPatcher::apatchNoKallsymsFails()
+{
+    // CONFIG_KALLSYMS 门禁（官方 boot_patch.sh: kptools -i kernel -f |
+    // grep CONFIG_KALLSYMS=y）：内核未启用 → 明确报错，不得继续
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("NO_KALLSYMS-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("CONFIG_KALLSYMS", Qt::CaseInsensitive));
+}
+
+void TestPatcher::apatchUnpackFailFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("UNPACK_FAIL-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchPatchFailFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("PATCH_FAIL-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchNotPatchedFails()
+{
+    // -p 成功但 -l 未检测到 patched=true（如 kpimg 无效被 kptools 拒绝
+    // 或布局不符）→ 必须拒绝交付，不得把未成功修补的镜像当成功
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("NOPATCH-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchRepackFailFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(QByteArray("REPACK_FAIL-kernel")), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchFactoryAndSources()
+{
+    // 工厂：APatch/KernelPatch 两入口均映射到 APatchPatcher
+    for (patcher::RootType t : {patcher::RootType::APatch,
+                                patcher::RootType::KernelPatch}) {
+        std::unique_ptr<patcher::RootPatcher> p(patcher::RootPatcher::create(t));
+        QVERIFY2(p.get(), "create() 返回 nullptr");
+        QVERIFY(dynamic_cast<patcher::APatchPatcher *>(p.get()));
+    }
+    // 下载源（联网验证 2026-08-05）：APatch 官方 release 单 APK 资产，
+    // 缓存 key 基名 apatch（版本化子目录由调用方追加，如 apatch-11219）
+    QVERIFY(patcher::APatchPatcher::apkDownloadUrl()
+                .toString()
+                .contains("bmax121/APatch"));
+    QCOMPARE(patcher::APatchPatcher::assetKey(), QStringLiteral("apatch"));
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)
