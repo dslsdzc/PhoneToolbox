@@ -92,6 +92,7 @@ private slots:
     void parseInvalid();
     void parseV1();
     void parseUnknownFields();
+    void parseOpFields();
 };
 
 static QByteArray buildMinimalPayload()
@@ -216,6 +217,16 @@ void TestPayload::parseInvalid()
     QVERIFY(!imgpayload::parseManifest(p, info));
     // manifest 内部嵌套消息截断 → false
     QVERIFY(!imgpayload::parseManifest(buildTruncatedInnerPayload(), info));
+    // v2 头在 metadata_signature_size 处截断（仅 20 字节, manifest_size=5）
+    // → dataStart=24 > size, 负差不可再越过界检查（审查 Important 修复）
+    QByteArray t;
+    t.append("CrAU");
+    auto put64 = [&](quint64 v) {
+        for (int i = 0; i < 8; ++i) t.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put64(2); // version
+    put64(5); // manifest_size
+    QVERIFY(!imgpayload::parseManifest(t, info));
 }
 
 void TestPayload::parseV1()
@@ -239,6 +250,45 @@ void TestPayload::parseUnknownFields()
     QCOMPARE(info.partitions[0].ops.size(), 1);
     QCOMPARE(info.partitions[0].ops[0].type, 0);
     QCOMPARE(info.partitions[0].ops[0].dataLength, 8ull);
+}
+
+// data_offset 非零 + data_sha256_hash 提取；manifest 无 block_size 字段 → 缺省 4096
+static QByteArray buildPayloadWithOpFields()
+{
+    QByteArray op = pbwire::encodeVarint(1, 1)                             // type=REPLACE_BZ
+                  + pbwire::encodeVarint(2, 65536)                         // data_offset 非零
+                  + pbwire::encodeVarint(3, 128)                           // data_length
+                  + pbwire::encodeBytes(7, QByteArray(32, '\x42'));        // data_sha256_hash
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("vendor"))
+                    + pbwire::encodeMessage(8, op);
+    QByteArray manifest = pbwire::encodeMessage(13, part);                 // 无 block_size
+    QByteArray payload;
+    payload.append("CrAU");
+    auto put64 = [&](quint64 v) {
+        for (int i = 0; i < 8; ++i) payload.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put64(2);
+    put64(static_cast<quint64>(manifest.size()));
+    auto put32 = [&](quint32 v) {
+        for (int i = 0; i < 4; ++i) payload.append(char((v >> (i * 8)) & 0xFF));
+    };
+    put32(0);
+    payload.append(manifest);
+    return payload;
+}
+
+void TestPayload::parseOpFields()
+{
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(buildPayloadWithOpFields(), info));
+    QCOMPARE(info.blockSize, 4096ull);                                     // 缺省值
+    QCOMPARE(info.partitions.size(), 1);
+    QCOMPARE(info.partitions[0].name, "vendor");
+    QCOMPARE(info.partitions[0].ops.size(), 1);
+    QCOMPARE(info.partitions[0].ops[0].type, 1);
+    QCOMPARE(info.partitions[0].ops[0].dataOffset, 65536ull);
+    QCOMPARE(info.partitions[0].ops[0].dataLength, 128ull);
+    QCOMPARE(info.partitions[0].ops[0].dataHash, QByteArray(32, '\x42'));
 }
 
 // 双测试类（TestWire + TestPayload）共用主函数

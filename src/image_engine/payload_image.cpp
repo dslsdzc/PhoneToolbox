@@ -5,8 +5,6 @@
 namespace imgpayload {
 
 namespace {
-constexpr int kMagicSize = 4;
-
 quint64 readU64(const QByteArray &d, int off)
 {
     return qFromLittleEndian<quint64>(reinterpret_cast<const uchar *>(d.constData() + off));
@@ -25,7 +23,7 @@ bool parseManifest(const QByteArray &payload, PayloadInfo &out)
     const quint64 version = readU64(payload, 4);
     const quint64 manifestSize = readU64(payload, 12);
     int dataStart = 20 + (version >= 2 ? 4 : 0);
-    if (manifestSize > static_cast<quint64>(payload.size() - dataStart))
+    if (dataStart > payload.size() || manifestSize > static_cast<quint64>(payload.size() - dataStart))
         return false;
     out.manifestRaw = payload.mid(dataStart, static_cast<int>(manifestSize));
     bool ok = false;
@@ -52,10 +50,10 @@ bool parseManifest(const QByteArray &payload, PayloadInfo &out)
                     InstallOp op;
                     for (const pbwire::Field &of : opFields) {
                         switch (of.number) {
-                        case 1: op.type = static_cast<int>(of.varint); break;
-                        case 2: op.dataOffset = of.varint; break;
-                        case 3: op.dataLength = of.varint; break;
-                        case 7: op.dataHash = of.bytes; break;
+                        case 1: if (of.wireType == 0) op.type = static_cast<int>(of.varint); break;
+                        case 2: if (of.wireType == 0) op.dataOffset = of.varint; break;
+                        case 3: if (of.wireType == 0) op.dataLength = of.varint; break;
+                        case 7: if (of.wireType == 2) op.dataHash = of.bytes; break;
                         }
                     }
                     part.ops.append(op);
