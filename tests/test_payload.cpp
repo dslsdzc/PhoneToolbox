@@ -93,6 +93,7 @@ private slots:
     void parseV1();
     void parseUnknownFields();
     void parseOpFields();
+    void extractReplaceOp();   // Task 14: 全量 REPLACE 解包
 };
 
 static QByteArray buildMinimalPayload()
@@ -289,6 +290,53 @@ void TestPayload::parseOpFields()
     QCOMPARE(info.partitions[0].ops[0].dataOffset, 65536ull);
     QCOMPARE(info.partitions[0].ops[0].dataLength, 128ull);
     QCOMPARE(info.partitions[0].ops[0].dataHash, QByteArray(32, '\x42'));
+}
+
+// ---------- Task 14: payload 全量解包（REPLACE 系） ----------
+
+void TestPayload::extractReplaceOp()
+{
+    // data_offset 语义: 相对 blob 起点的偏移（真实 payload 格式，AOSP 首个 op 即 data_offset=0），
+    // 读取位置 = totalBase(4+8+8+4+manifest.size) + data_offset。
+    // brief 原构造把 data_offset 写成 blob 的绝对起点(24+manifest.size) —— 与 totalBase 重复
+    // 叠加后越界，构造不自洽。此处重建: 数据放 blob[8..16)，data_offset=8；blob 用 0xEE 填充
+    // 其余位置 —— 若实现漏加 totalBase 或加错位置，断言会读到 0xEE 而失败，真实验证定位。
+    QByteArray p = buildMinimalPayload();
+    imgpayload::PayloadInfo info;
+    QVERIFY(imgpayload::parseManifest(p, info));
+    // blob 实际起点(绝对) = 4("CrAU") + 8(version) + 8(manifest_size) + 4(meta_sig_size) + manifest.size
+    const int blobStart = 4 + 8 + 8 + 4 + info.manifestRaw.size();
+    // 重建 op: REPLACE data_offset=8(blob 相对) len=8
+    QByteArray op = pbwire::encodeVarint(1, 0) + pbwire::encodeVarint(2, 8)
+                  + pbwire::encodeVarint(3, 8);
+    QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+    QByteArray manifest = pbwire::encodeVarint(3, 4096) + pbwire::encodeMessage(13, part);
+    QByteArray payload;
+    payload.append("CrAU");
+    auto put64 = [&](quint64 v) { for (int i = 0; i < 8; ++i) payload.append(char((v >> (i * 8)) & 0xFF)); };
+    put64(2); put64(static_cast<quint64>(manifest.size()));
+    auto put32 = [&](quint32 v) { for (int i = 0; i < 4; ++i) payload.append(char((v >> (i * 8)) & 0xFF)); };
+    put32(0);
+    payload.append(manifest);
+    payload.append(QByteArray(8, '\xEE'));  // blob 区填充（非数据，验证定位用）
+    payload.append(QByteArray(8, '\xCD'));  // blob[8..16): REPLACE 数据
+    payload.append(QByteArray(16, '\xEE')); // blob 区余量
+    imgpayload::PayloadInfo info2;
+    QVERIFY(imgpayload::parseManifest(payload, info2));
+    // 自洽性: 数据必须真实位于 (blob 起点 + data_offset) 处。两次构造的 op 形状相同
+    // （data_offset 均为 1 字节 varint）→ manifest 同尺寸 → blobStart 与真实起点一致;
+    // manifest 大小若变化，blob 起点随之漂移，此处直接用第二次解析结果重算并验证
+    const int realStart = 4 + 8 + 8 + 4 + info2.manifestRaw.size();
+    QCOMPARE(info2.manifestRaw.size(), info.manifestRaw.size());
+    QCOMPARE(realStart, blobStart);
+    QVERIFY(payload.mid(realStart + 8, 8) == QByteArray(8, '\xCD'));
+    QCOMPARE(info2.partitions[0].ops[0].dataOffset, 8ull);
+    QString err;
+    QByteArray out = imgpayload::extractPartition(payload, info2.partitions[0], QByteArray(), &err);
+    // 输出大小 = maxEnd(dataOffset+dataLength=16) ceil 到 blockSize → 1 块 4096
+    QCOMPARE(out.size(), 4096);
+    QVERIFY(out.left(8) == QByteArray(8, '\xCD')); // REPLACE 数据写到了输出头部
+    QVERIFY(err.isEmpty());
 }
 
 // 双测试类（TestWire + TestPayload）共用主函数

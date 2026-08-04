@@ -32,4 +32,9 @@ struct PayloadInfo {
 bool isPayload(const QByteArray &header);                       // "CrAU"
 bool parseManifest(const QByteArray &payload, PayloadInfo &out); // 读头+解析 manifest 字段
 
+// 全量（REPLACE 系）解包: 按 ops 从 blob 取数据拼接为分区镜像。
+// diff 类操作返回"需要旧镜像"错误；失败返回空并填写 error。oldImage 暂未使用（Task 15 diff 解包）。
+QByteArray extractPartition(const QByteArray &payload, const Partition &part,
+                            const QByteArray &oldImage, QString *error);
+
 } // namespace imgpayload
