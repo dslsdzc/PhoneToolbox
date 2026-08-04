@@ -38,6 +38,10 @@ private slots:
     void corruptedInputs();
     void replaceHandBuilt();
     void replaceInvalid();
+    // ---- 评审修复：extent 环 / ee_len 截断 / 64BIT 计数双加 ----
+    void extentCycle();
+    void replaceHugeRun();
+    void freeCounts64Bit();
     // ---- B12 真实 mke2fs 镜像 ----
     void realListExtract();
     void realReplaceRoundTrip();
@@ -65,6 +69,15 @@ static void put64(QByteArray &d, int off, quint64 v)
 {
     for (int i = 0; i < 8; ++i)
         d[off + i] = char((v >> (i * 8)) & 0xFF);
+}
+static quint16 rd16(const QByteArray &d, int off)
+{
+    return quint16(uchar(d[off])) | (quint16(uchar(d[off + 1])) << 8);
+}
+static quint32 rd32(const QByteArray &d, int off)
+{
+    return quint32(uchar(d[off])) | (quint32(uchar(d[off + 1])) << 8) |
+           (quint32(uchar(d[off + 2])) << 16) | (quint32(uchar(d[off + 3])) << 24);
 }
 
 // superblock（文件偏移 1024 起）；inodeSize 256 时 extra_isize=32（inline 测试用）。
@@ -98,9 +111,9 @@ static void putDesc(QByteArray &d, int idx, quint32 bitmap, quint32 inodeBitmap,
 
 // inode 表项（128B）：mode/size_lo/flags；extent 与 inline 数据另行写入
 static void putInode128(QByteArray &d, int nid, quint16 mode, quint32 size,
-                        quint32 flags)
+                        quint32 flags, int tableOff = kTableBlock * kBlk)
 {
-    const int off = kTableBlock * kBlk + (nid - 1) * 128;
+    const int off = tableOff + (nid - 1) * 128;
     put16(d, off + 0, mode);
     put32(d, off + 4, size);
     put32(d, off + 32, flags);
@@ -148,13 +161,14 @@ static TestDirEntry de(quint32 nid, const char *name, quint8 ft = 2)
 // 线性目录块：非末项最小 rec_len，末项延伸到块尾；oldFormat=true 时按
 // ext2_dir_entry 老格式写 16 位 name_len（bytes 6-7），无 file_type 字节
 static void putDirBlock(QByteArray &d, int blockOff,
-                        const QList<TestDirEntry> &entries, bool oldFormat = false)
+                        const QList<TestDirEntry> &entries, bool oldFormat = false,
+                        int blockSize = kBlk)
 {
     int pos = 0;
     for (int i = 0; i < entries.size(); ++i) {
         const int nameLen = int(qstrlen(entries[i].name));
         const bool last = (i == entries.size() - 1);
-        const quint32 recLen = last ? quint32(kBlk - pos) : quint32((8 + nameLen + 3) & ~3);
+        const quint32 recLen = last ? quint32(blockSize - pos) : quint32((8 + nameLen + 3) & ~3);
         put32(d, blockOff + pos, entries[i].nid);
         put16(d, blockOff + pos + 4, recLen);
         if (oldFormat) {
@@ -324,6 +338,98 @@ static QByteArray buildDepth1Image()
     put32(img, root + 12, 0);      // ei_block
     put32(img, root + 16, 6);      // ei_leaf_lo
     memcpy(img.data() + 7 * kBlk, kContent, sizeof(kContent) - 1);
+    return img;
+}
+
+// 环状索引块：root → 块 6 → 块 7 → 块 6（环）。深度守卫必须终止递归并报错
+// （旧实现 depth 递减 → 守卫恒不成立 → 无限递归栈溢出）
+static QByteArray buildCycleImage()
+{
+    QByteArray img(9 * kBlk, 0);
+    putSuper(img, 16, 2048, 128);
+    putDesc(img, 0, 2, 3, kTableBlock);
+    putInode128(img, 2, 0x41ED, kBlk, 0x80000);
+    putInode128(img, 11, 0x81A4, 18, 0x80000);
+    putExtents(img, inoOff(2), { { 5, 1 } });
+    putDirBlock(img, 5 * kBlk, { de(2, "."), de(2, ".."), de(11, "cyc.txt", 1) });
+    // root 索引条目 → 块 6
+    const int root = inoOff(11) + 40;
+    put16(img, root, 0xF30A);
+    put16(img, root + 2, 1);
+    put16(img, root + 4, 4);
+    img[root + 6] = char(1);       // depth = 1
+    put32(img, root + 12, 0);
+    put32(img, root + 16, 6);      // ei_leaf_lo → 6
+    // 块 6 索引 → 块 7
+    const int b6 = 6 * kBlk;
+    put16(img, b6, 0xF30A);
+    put16(img, b6 + 2, 1);
+    put16(img, b6 + 4, 340);
+    img[b6 + 6] = char(1);         // depth = 1
+    put32(img, b6 + 12, 0);
+    put32(img, b6 + 16, 7);        // ei_leaf_lo → 7
+    // 块 7 索引 → 块 6（环）
+    const int b7 = 7 * kBlk;
+    put16(img, b7, 0xF30A);
+    put16(img, b7 + 2, 1);
+    put16(img, b7 + 4, 340);
+    img[b7 + 6] = char(1);         // depth = 1
+    put32(img, b7 + 12, 0);
+    put32(img, b7 + 16, 6);        // ei_leaf_lo → 6
+    return img;
+}
+
+// 1K 块宽镜像（单块组 65536 块）：hello.txt 仅 1 块，块 15.. 大片连续空闲
+// （>32767 块）。replace 32768 块数据 → findFreeRuns 必须把连续区拆成
+// 32767+1 两段 extent（ee_len 低 15 位上限），旧实现直接取 32768 → 截断为 0x8000
+// 注意：块位图在 block 3，读取跨 4125 字节（块 3..7）——inode 表等必须放在
+// block 7 之后，否则其非零字节会污染位图位（把块 16384+ 误判为占用）
+//   block0: boot | block1: super | block2: GDT | block3: 块位图（跨 3..7）
+//   block8: inode 位图 | block9..12: inode 表（32×128B）| block13: root 目录
+//   block14: hello.txt 数据
+static QByteArray buildWideImage()
+{
+    constexpr int kWideBlk = 1024;
+    constexpr int kBlocks = 33000;
+    QByteArray img(kBlocks * kWideBlk, 0);
+    // superblock @1024（1K 块：first_data_block=1、log_block_size=0）
+    putSuper(img, 16, kBlocks, 128);
+    img[1048] = char(0);            // log_block_size → 1024
+    put32(img, 1044, 1);            // first_data_block（1K 块 = 1）
+    put32(img, 1056, 65536);        // blocks_per_group 放大（覆盖全部块）
+    // GDT @block 2（blockSize==1024 → gdtBlock=2）
+    const int gdt = 2 * kWideBlk;
+    put32(img, gdt + 0, 3);         // block bitmap @3
+    put32(img, gdt + 4, 8);         // inode bitmap @8
+    put32(img, gdt + 8, 9);         // inode table @9
+    put16(img, gdt + 12, 0xFF00);   // free_blocks（组内 0x0FFF 块空闲，只取低 16 位值）
+    // inode 表 @block 9（inode n 在表内偏移 (n-1)*128）
+    const int tbl = 9 * kWideBlk;
+    putInode128(img, 2, 0x41ED, kWideBlk, 0x80000, tbl);
+    putInode128(img, 11, 0x81A4, 12, 0x80000, tbl);
+    putExtents(img, tbl + 128, { { 13, 1 } });            // inode 2（根目录）
+    putExtents(img, tbl + 10 * 128, { { 14, 1 } });       // inode 11（hello.txt）
+    putDirBlock(img, 13 * kWideBlk,
+                { de(2, "."), de(2, ".."), de(11, "hello.txt", 1) }, false, kWideBlk);
+    memcpy(img.data() + 14 * kWideBlk, "hello wide!", 12);
+    // 块位图 @block 3：块 0..14 占用（字节序 MSB-first 与实现一致；
+    // 块 15..32999 空闲 → 连续空闲 32985 块 ≥ 32768）
+    for (int b = 0; b <= 14; ++b)
+        img[3 * kWideBlk + b / 8] =
+            char(uchar(img[3 * kWideBlk + b / 8]) | (0x80u >> (b & 7)));
+    return img;
+}
+
+// 64BIT 变体：buildFlatImage 改造（incompat|0x80、desc_size=64），组 0 描述符
+// free_blocks_lo=0x0002 @+12、hi=0x0100 @+44 → 计数值 (0x0100<<16)|2。
+// 增长替换净 -2 块后应为 0x01000000（旧实现 lo/hi 各减 → hi=0x00FE 双加）
+static QByteArray build64BitFlatImage()
+{
+    QByteArray img = buildFlatImage();
+    put32(img, 1120, 0x82);         // incompat: FILETYPE | 64BIT
+    put16(img, 1278, 64);           // desc_size = 64
+    put16(img, kBlk + 12, 0x0002);  // free_blocks_lo
+    put16(img, kBlk + 44, 0x0100);  // free_blocks_hi
     return img;
 }
 
@@ -770,6 +876,61 @@ void TestExt4::replaceInvalid()
     QByteArray data;
     QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
     QVERIFY(data.isEmpty());
+}
+
+void TestExt4::extentCycle()
+{
+    QByteArray img = buildCycleImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    QByteArray data;
+    QString err;
+    // 环状索引块：必须报深度错误而非无限递归（旧实现 depth 递减 → 栈溢出崩溃）
+    QVERIFY(!imgext4::extractFile(img, sb, "cyc.txt", data, &err));
+    QVERIFY(err.contains("深度超限"));
+}
+
+void TestExt4::replaceHugeRun()
+{
+    // 1K 块宽镜像：hello.txt 1 块 → 替换 32768 块数据（>32767 上限）。
+    // findFreeRuns 必须拆成 32767+1 两段（旧实现单段 32768 → ee_len 截断 0x8000
+    // → 读回 0 → 自校验失败、镜像已被破坏）
+    QByteArray img = buildWideImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    QCOMPARE(sb.blockSize, 1024u);
+    const QByteArray big(32768 * 1024, 'W');
+    QString err;
+    QVERIFY2(imgext4::replaceFile(img, sb, "hello.txt", big, &err), qPrintable(err));
+    QByteArray data;
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, big);
+    // extent 头：2 段，ee_len 不截断（32767 + 1）
+    const int root = 9 * 1024 + 10 * 128 + 40;   // inode 11 i_block（1K 块，表 @block9）
+    QCOMPARE(rd16(img, root + 2), 2u);           // entries
+    QCOMPARE(rd16(img, root + 12 + 4), 32767u);  // 第一段 ee_len
+    QCOMPARE(rd32(img, root + 12 + 8), 15u);     // 第一段 ee_start_lo
+    QCOMPARE(rd16(img, root + 24 + 4), 1u);      // 第二段 ee_len
+    QCOMPARE(rd32(img, root + 24 + 8), 32782u);  // 第二段 ee_start_lo
+}
+
+void TestExt4::freeCounts64Bit()
+{
+    QByteArray img = build64BitFlatImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    QCOMPARE(sb.descSize, 64u);
+    // 增长替换：释放块 7（+1）、占用 9/10/11（-3）→ 净 -2
+    const QByteArray big(10000, 'z');
+    QString err;
+    QVERIFY2(imgext4::replaceFile(img, sb, "hello.txt", big, &err), qPrintable(err));
+    // 组 0 free_blocks = (0x0100<<16)|0x0002 - 2 = 0x01000000 → lo=0x0000, hi=0x0100
+    // （旧实现 lo/hi 各减 2 → hi=0x00FE，双加）
+    QCOMPARE(rd16(img, kBlk + 12), 0x0000u);
+    QCOMPARE(rd16(img, kBlk + 44), 0x0100u);
+    QByteArray data;
+    QVERIFY2(imgext4::extractFile(img, sb, "hello.txt", data, &err), qPrintable(err));
+    QCOMPARE(data, big);
 }
 
 // ===================== 真实 mke2fs 镜像用例 =====================

@@ -86,6 +86,8 @@ constexpr quint32 kExtMagic = 0xF30A;
 constexpr quint16 kExtUnwritten = 0x8000;
 constexpr int kMaxExtentDepth = 8;      // 内核实际 ≤ 5
 constexpr quint32 kExtMaxLen = 32768;   // 单个 extent 最多 32768 块
+constexpr quint32 kExtMaxWritableLen = 32767;  // ee_len 仅低 15 位（bit15=未写标志）
+                                               // 写入上限；32768(0x8000) 读回为 0
 
 // ---- 目录 ----
 constexpr int kMinRecLen = 12;          // sizeof(ext4_dir_entry_2) 的头 8B + 1 名对齐
@@ -354,8 +356,10 @@ bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
                 setErr(error, QStringLiteral("extent 索引块号过大"));
                 return false;
             }
+            // 递归 depth+1（根=0）：守卫 depth > kMaxExtentDepth 才能拦下环状
+            // 索引块（A→B→A）——旧实现传 depth-1 使守卫恒不成立 → 无限递归栈溢出
             if (!readExtentsRec(img, sb, ino, qint64(leaf * sb.blockSize),
-                                depth - 1, out, error))
+                                depth + 1, out, error))
                 return false;
         }
     }
@@ -499,6 +503,8 @@ bool readExtentData(const QByteArray &img, const SuperBlock &sb,
         need -= take;
     }
     if (need != 0) {
+        // 稀疏文件空洞（逻辑块未被 extent 覆盖）被保守拒绝：不补零返回，
+        // 避免无意识扩大文件（替换语义下空洞区不参与容量计算，跳过即可）
         setErr(error, QStringLiteral("extent 不足以覆盖文件大小"));
         return false;
     }
@@ -754,7 +760,11 @@ bool findFreeRuns(const QByteArray &img, const SuperBlock &sb, quint32 needBlock
                 while (i + runLen < inGroup &&
                        !(bm[(i + runLen) >> 3] & (0x80u >> ((i + runLen) & 7))))
                     ++runLen;
-                const quint32 take = quint32(qMin<quint64>(runLen, remaining));
+                // 每段 ≤ 32767 块（ee_len 低 15 位可写上限）：超长空闲区拆成
+                // 多段，剩余部分下次迭代继续取（i += take 而非 runLen）。
+                // 旧实现直接取整段 → put16 截断 ee_len → 读回 0 → 自校验失败
+                const quint32 take = quint32(qMin<quint64>(
+                    qMin<quint64>(runLen, remaining), kExtMaxWritableLen));
                 const quint64 block = first + i;
                 if (!is64 && block > 0xFFFFFFFFull) {
                     setErr(error, QStringLiteral("非 64BIT 文件系统空闲块超出 32 位"));
@@ -766,7 +776,7 @@ bool findFreeRuns(const QByteArray &img, const SuperBlock &sb, quint32 needBlock
                 ex.pblock = block;
                 runs.append(ex);
                 remaining -= take;
-                i += runLen;
+                i += take;
             } else {
                 ++i;
             }
@@ -824,31 +834,24 @@ void updateFreeCounts(QByteArray &img, const SuperBlock &sb,
     qint64 total = 0;
     for (auto it = freeDelta.begin(); it != freeDelta.end(); ++it) {
         total += it.value();
-        // 组描述符 @12 为 16 位计数（64 字节描述符 +44 为高 16 位）
-        qint64 lo, hi = 0;
-        qint64 curLo, curHi = 0;
-        // 组描述符偏移
+        // 组描述符 @12 为 16 位计数（64 字节描述符 +44 为高 16 位），
+        // 合并 (hi<<16)|lo 整体加减 delta 后再拆分 —— 旧实现 lo/hi 各加一次
+        // delta（计数被加了两次），且不处理低 16 位借位
         const quint64 gdtBlock = (sb.blockSize == 1024) ? 2 : 1;
         const qint64 dOff = qint64(gdtBlock * quint64(sb.blockSize) +
                                    it.key() * quint64(sb.descSize));
-        if (!inBounds(img, dOff + 12, 2))
+        const qint64 need = (sb.descSize >= 48) ? 46 : 14;
+        if (!inBounds(img, dOff, need))
             continue;
-        curLo = le16p(reinterpret_cast<const uchar *>(img.constData()) + dOff + 12);
-        lo = curLo + it.value();
-        if (sb.descSize >= 48) {
-            curHi = le16p(reinterpret_cast<const uchar *>(img.constData()) + dOff + 44);
-            hi = curHi + it.value();
-            if (hi < 0 || hi > 0xFFFF) {
-                // 溢出：回退为仅低 16 位（16 位计数精度有限，尽力而为）
-                lo = qMax<qint64>(0, qMin<qint64>(0xFFFF, lo));
-                hi = qMax<qint64>(0, qMin<qint64>(0xFFFF, hi));
-            }
-        } else {
-            lo = qMax<qint64>(0, qMin<qint64>(0xFFFF, lo));
-        }
-        put16(img, dOff + 12, quint16(lo & 0xFFFF));
+        const uchar *gp = reinterpret_cast<const uchar *>(img.constData()) + dOff;
+        qint64 combined = le16p(gp + 12);
         if (sb.descSize >= 48)
-            put16(img, dOff + 44, quint16(hi & 0xFFFF));
+            combined |= qint64(le16p(gp + 44)) << 16;
+        combined += it.value();
+        combined = qMax<qint64>(0, qMin<qint64>(0xFFFFFFFFLL, combined));
+        put16(img, dOff + 12, quint16(combined & 0xFFFF));
+        if (sb.descSize >= 48)
+            put16(img, dOff + 44, quint16((combined >> 16) & 0xFFFF));
     }
     // superblock s_free_blocks_count_lo @12（64BIT 时并入 @332 高 32 位）
     qint64 sbLo = le32p(reinterpret_cast<const uchar *>(img.constData()) + kOffFreeBlocksLo);
@@ -993,8 +996,10 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         error->clear();
     if (!validSuper(sb, error))
         return false;
-    if (!isExt4(image))
+    if (!isExt4(image)) {
+        setErr(error, QStringLiteral("不是 ext4 镜像"));
         return false;
+    }
 
     quint64 nid;
     if (!walkPath(image, sb, path, nid, error))
@@ -1095,7 +1100,9 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         return false;
     }
 
-    // 1) 释放旧 extent 块
+    // 1) 释放旧 extent 数据块
+    // 注：仅回收叶 extent 覆盖的数据块；原 depth>0 树的索引块未单独追踪，
+    // 保持位图占用（不重复分配即可，属保守选择，不影响正确性）
     QMap<quint64, qint64> freeDelta;
     if (!(ino.flags & kFlInlineData)) {
         for (const Extent &ex : extents) {
