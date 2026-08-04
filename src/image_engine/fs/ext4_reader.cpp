@@ -38,6 +38,11 @@ bool parseSuper(const QByteArray &image, SuperBlock &out)
 {
     if (!isExt4(image))
         return false;
+    // 边界守卫：字段读取终点为 blocks_count_hi@1360+4=1364（64BIT 时），
+    // inode_size@1112+2=1114、feature_incompat@1120+4=1124 均在内；
+    // isExt4 只保证 1082 字节，截断输入 [1082, 1363] 必须拒绝而非越界读。
+    if (image.size() < kSuperOffset + 360)   // 1384 ≥ 1364（所有读取终点）
+        return false;
     const uchar *p = reinterpret_cast<const uchar *>(image.constData());
 
     const quint32 logBlockSize = qFromLittleEndian<quint32>(p + kLogBlockSize);
