@@ -5,7 +5,7 @@
 
 // super 动态分区镜像：lp metadata 解析与逻辑分区提取。
 // 布局（对照 AOSP metadata_format.h，已由 spec 验证）：
-//   保留区 [0, 4096) → geometry "gDla" [4096, 8192) → metadata 头+表 [8192, ...)
+//   geometry 主副本区 [0, 4096) → 几何块 "gDla" [4096, 8192) → metadata 头+表 [8192, ...)
 //   LpMetadataPartition 52B / LpMetadataExtent 24B / 逻辑扇区 512B。
 namespace imgsuper {
 

@@ -8,6 +8,10 @@ private slots:
     void detect();
     void parseMinimal();
     void extractLinear();
+    void zeroExtent();
+    void rejectSectorOverflow();
+    void rejectHugeLinear();
+    void rejectBadEntrySize();
 };
 
 static QByteArray put32(quint32 v)
@@ -23,11 +27,15 @@ static QByteArray put64(quint64 v)
     return b;
 }
 
-// 最小 super: 4096 保留 + 4096 geometry + metadata(头 128 + 表 140B) + 分区数据
+// 最小 super: geometry 主副本区 4096 + 几何块 4096 + metadata(头 128 + 表 140B) + 分区数据
 // 布局对照 AOSP metadata_format.h / images.cpp（lp metadata 布局已由 spec 验证）：
-//   保留区 [0, 4096) → geometry "gDla" [4096, 8192) → metadata 头+表 [8192, 8460)
+//   geometry 主副本区 [0, 4096) → 几何块 "gDla" [4096, 8192) → metadata 头+表 [8192, 8460)
 //   数据区从 metadata 区之后按 logical_block_size(4096) 对齐起始（扇区 24 = 字节 12288）
-static QByteArray buildMinimalSuper()
+static QByteArray buildMinimalSuper(quint32 extentType = 0,      // 0=LINEAR 1=ZERO
+                                    quint64 numSectors = 8,
+                                    quint64 targetData = 24,
+                                    quint32 partEntrySize = 52,
+                                    quint32 extEntrySize = 24)
 {
     // geometry（AOSP LpMetadataGeometry 固定 52B；块本身占 4096B）
     QByteArray geom(4096, 0);
@@ -44,9 +52,9 @@ static QByteArray buildMinimalSuper()
     partitions.replace(40, 4, put32(0));  // first_extent_index
     partitions.replace(44, 4, put32(1));  // num_extents
     QByteArray extents(24, 0);
-    extents.replace(0, 8, put64(8));   // num_sectors (4KB)
-    extents.replace(8, 4, put32(0));   // LINEAR
-    extents.replace(12, 8, put64(24)); // target_data: 数据起点扇区 24（metadata 区之后按 4096 对齐）
+    extents.replace(0, 8, put64(numSectors)); // num_sectors
+    extents.replace(8, 4, put32(extentType)); // target_type: 0=LINEAR 1=ZERO
+    extents.replace(12, 8, put64(targetData)); // target_data: 数据起点扇区（metadata 区之后按 4096 对齐）
     extents.replace(20, 4, put32(0));  // target_source: block device 0
     // block_devices 表 (1×64)
     QByteArray bd(64, 0);
@@ -60,17 +68,17 @@ static QByteArray buildMinimalSuper()
     hdr.replace(44, 4, put32(tablesSize)); // tables_size
     hdr.replace(80, 4, put32(0));      // partitions offset (相对 header 尾)
     hdr.replace(84, 4, put32(1));      // num partitions
-    hdr.replace(88, 4, put32(52));     // entry size
+    hdr.replace(88, 4, put32(partEntrySize)); // entry size
     hdr.replace(92, 4, put32(52));     // extents offset
     hdr.replace(96, 4, put32(1));      // num extents
-    hdr.replace(100, 4, put32(24));    // entry size
+    hdr.replace(100, 4, put32(extEntrySize)); // entry size
     hdr.replace(104, 4, put32(52 + 24)); // groups offset
     hdr.replace(108, 4, put32(0));     // num groups (默认组省略)
     hdr.replace(116, 4, put32(52 + 24)); // block_devices offset
     hdr.replace(120, 4, put32(1));     // num block devices
     hdr.replace(124, 4, put32(64));    // entry size
     QByteArray img;
-    img.append(QByteArray(4096, 0));  // 保留区
+    img.append(QByteArray(4096, 0));  // geometry 主副本区
     img.append(geom);
     img.append(hdr).append(partitions).append(extents).append(bd);
     // metadata 区结束于 4096+4096+128+140 = 8460B；按 logical_block_size 对齐到 12288（扇区 24），
@@ -108,6 +116,56 @@ void TestSuper::extractLinear()
     QCOMPARE(parts.size(), 1);
     QCOMPARE(parts[0].size(), 4096);
     QVERIFY(parts[0] == QByteArray(4096, '\xAA'));
+}
+
+void TestSuper::zeroExtent()
+{
+    // ZERO extent（target_type=1）：提取结果为等长零填充，且长度可与镜像文件大小无关
+    QByteArray img = buildMinimalSuper(/*ZERO*/ 1);
+    imgsuper::SuperInfo info;
+    QVERIFY(imgsuper::parseSuper(img, info));
+    QString err;
+    QList<QByteArray> parts = imgsuper::extractPartitions(img, info, &err);
+    QCOMPARE(parts.size(), 1);
+    QCOMPARE(parts[0].size(), 4096);
+    QVERIFY(parts[0] == QByteArray(4096, 0));
+}
+
+void TestSuper::rejectSectorOverflow()
+{
+    // numSectors = 2^55：×512 将回绕 quint64，必须拒绝（元数据本身合法，parse 应成功）
+    QByteArray img = buildMinimalSuper(/*LINEAR*/ 0, Q_UINT64_C(1) << 55, 24);
+    imgsuper::SuperInfo info;
+    QVERIFY(imgsuper::parseSuper(img, info));
+    QString err;
+    QList<QByteArray> parts = imgsuper::extractPartitions(img, info, &err);
+    QVERIFY(parts.isEmpty());
+    QVERIFY(!err.isEmpty());
+}
+
+void TestSuper::rejectHugeLinear()
+{
+    // LINEAR extent 声明 2^31+512 字节：旧实现 static_cast<int> 会回绕为负（崩溃/错内容），
+    // 新实现先按 qint64 上界校验，应干净拒绝并报错
+    QByteArray img = buildMinimalSuper(/*LINEAR*/ 0, (Q_UINT64_C(1) << 22) + 1, 24);
+    imgsuper::SuperInfo info;
+    QVERIFY(imgsuper::parseSuper(img, info));
+    QString err;
+    QList<QByteArray> parts = imgsuper::extractPartitions(img, info, &err);
+    QVERIFY(parts.isEmpty());
+    QVERIFY(!err.isEmpty());
+}
+
+void TestSuper::rejectBadEntrySize()
+{
+    // partitions 条目大小 53 ≠ 52：必须拒绝
+    QByteArray img = buildMinimalSuper(0, 8, 24, /*partEntrySize*/ 53);
+    imgsuper::SuperInfo info;
+    QVERIFY(!imgsuper::parseSuper(img, info));
+    // extents 条目大小 25 ≠ 24：必须拒绝
+    QByteArray img2 = buildMinimalSuper(0, 8, 24, 52, /*extEntrySize*/ 25);
+    imgsuper::SuperInfo info2;
+    QVERIFY(!imgsuper::parseSuper(img2, info2));
 }
 
 QTEST_APPLESS_MAIN(TestSuper)
