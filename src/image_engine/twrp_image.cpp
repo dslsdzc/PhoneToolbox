@@ -26,16 +26,20 @@ bool parseHeader(const QByteArray &hdr, WinHeader &out)
     return out.version >= 1 && out.version <= 3;
 }
 
-// 版本 2/3: 片段流。每片段头: magic[4]="FRAG"? —— 实际为备份文件内部结构，以 TWRP
-// backup.cpp 为准: 片段头含片段长度。此处按"按序读取至 packedSize"实现：
-// v2/v3 的 restore 数据 = 顺序连接各片段数据区。
-bool extractV23(QFile &f, quint64 packedSize, QByteArray &out)
+// 版本 2/3: 片段流。TWRP backup.cpp 的 twrpbackup 按版本选择 restore 数据格式：
+// v2 为无压缩分片、v3 为压缩流（backup.cpp 中 twrp_backup v2/v3 每片段自带头部，
+// 还原需按片段头解析、解压后拼接）——不能像 v1 那样按 packedSize 顺序拼接原始
+// 字节。直接 readAll 会把压缩流/片段头原样当镜像内容返回（静默垃圾，比失败更
+// 危险），且无长度校验。真实解压逻辑（对照 backup.cpp 的 twrpbackup 片段格式）
+// 未实现前，显式拒绝。
+bool extractV23(QFile &f, quint64 packedSize, QByteArray &out, QString *error)
 {
-    // 简化实现: v2/v3 与 v1 一致顺序读取 packedSize 字节；
-    // 片段边界由 TWRP 流式读写决定，拼接结果与原始镜像逐字节一致。
+    Q_UNUSED(f);
     Q_UNUSED(packedSize);
-    out = f.readAll();
-    return true;
+    Q_UNUSED(out);
+    if (error)
+        *error = QStringLiteral("v2/v3 备份解压未实现");
+    return false;
 }
 } // namespace
 
@@ -79,14 +83,17 @@ bool extractWin(const QString &winPath, QByteArray &outRaw, QString *error)
         }
         // packed_size 为跨分段总量: 主文件单独短读是合法场景（其余数据在 .win001 等分段），
         // 故必须在分段拼接完成之后校验总量 —— 主文件截断与分段链断裂
-        // （如 .win001 缺失而 .win002 存在，拼接后总量仍不足）均在此暴露为失败
-        if (data.size() < static_cast<qint64>(wh.packedSize)) {
+        // （如 .win001 缺失而 .win002 存在，拼接后总量仍不足）均在此暴露为失败。
+        // v1 未压缩，restore_size == packed_size：两个声明长度都不得超出实际数据，
+        // 否则调用方按 restore_size 消费会读到垃圾/越界。
+        if (data.size() < static_cast<qint64>(wh.packedSize) ||
+            data.size() < static_cast<qint64>(wh.restoreSize)) {
             if (error) *error = "备份数据不完整";
             return false;
         }
     } else {
-        if (!extractV23(f, wh.packedSize, data))
-            data.clear();
+        if (!extractV23(f, wh.packedSize, data, error))
+            return false;
     }
     if (data.isEmpty()) {
         if (error) *error = "备份数据为空";

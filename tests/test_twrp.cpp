@@ -11,6 +11,8 @@ private slots:
     void extractV1();
     void extractV1Split();
     void extractV1Truncated();
+    void extractV23Unsupported();
+    void extractV1RestoreSizeMismatch();
 };
 
 void TestTwrp::detect()
@@ -88,6 +90,60 @@ void TestTwrp::extractV1Truncated()
     put64(5, 8192);    // restore_size
     put64(13, 8192);   // packed_size
     put64(21, 8192);   // restore_used
+    QFile f(win);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(hdr);
+    f.write(QByteArray(4096, '\x33'));
+    f.close();
+    QByteArray out;
+    QString err;
+    QVERIFY(!imgtwrp::extractWin(win, out, &err));
+    QVERIFY(err.contains("不完整"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestTwrp::extractV23Unsupported()
+{
+    // v2/v3: 压缩/分片格式，解压未实现 → 必须显式失败并报"未实现"，
+    // 不得把压缩流当镜像内容静默返回（旧实现 extractV23 直接 readAll）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    for (int ver : {2, 3}) {
+        const QString win = dir.filePath(QStringLiteral("boot_%1.win").arg(ver));
+        QByteArray hdr(64, 0);
+        hdr.replace(0, 4, "TWRP");
+        hdr[4] = char(ver);
+        auto put64 = [&](int off, quint64 v) { for (int i = 0; i < 8; ++i) hdr[off + i] = char((v >> (i * 8)) & 0xFF); };
+        put64(5, 4096);    // restore_size
+        put64(13, 4096);   // packed_size
+        put64(21, 4096);   // restore_used
+        QFile f(win);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(hdr);
+        f.write(QByteArray(4096, '\x9C'));   // 压缩流垃圾数据
+        f.close();
+        QByteArray out;
+        QString err;
+        QVERIFY(!imgtwrp::extractWin(win, out, &err));
+        QVERIFY(err.contains("未实现"));
+        QVERIFY(out.isEmpty());
+    }
+}
+
+void TestTwrp::extractV1RestoreSizeMismatch()
+{
+    // v1 负例: packed_size=4096 与实际一致，但 restore_size=8192 超出现有数据
+    // → 必须按"备份数据不完整"失败（调用方按 restore_size 消费会读到垃圾）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString win = dir.filePath("boot.win");
+    QByteArray hdr(64, 0);
+    hdr.replace(0, 4, "TWRP");
+    hdr[4] = 1;
+    auto put64 = [&](int off, quint64 v) { for (int i = 0; i < 8; ++i) hdr[off + i] = char((v >> (i * 8)) & 0xFF); };
+    put64(5, 8192);    // restore_size（超实际数据）
+    put64(13, 4096);   // packed_size
+    put64(21, 4096);   // restore_used
     QFile f(win);
     QVERIFY(f.open(QIODevice::WriteOnly));
     f.write(hdr);
