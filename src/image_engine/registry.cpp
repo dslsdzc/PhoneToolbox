@@ -1,9 +1,21 @@
 #include "registry.h"
 #include <QFileInfo>
+#include <QtEndian>
 
 namespace imgreg {
 
 namespace {
+
+// ASCII 串转 UTF-16LE 落盘形式（字符间嵌 \0，如 pac 头版本串）
+QByteArray toUtf16Le(const char *ascii)
+{
+    const QByteArray a(ascii);
+    QByteArray out(a.size() * 2, 0);
+    for (int i = 0; i < a.size(); ++i)
+        out[i * 2] = a[i];
+    return out;
+}
+
 Format byExtension(const QString &name)
 {
     const QString lower = name.toLower();
@@ -15,6 +27,8 @@ Format byExtension(const QString &name)
     if (lower.endsWith(".gz")) return Format::Gzip;
     if (lower.endsWith(".zst") || lower.endsWith(".zstd")) return Format::Zstd;
     if (lower.endsWith(".img") || lower.endsWith(".raw")) return Format::RawImage;
+    // pac 旧格式无魔数（divinebird C 版，头 1220B 无魔数）→ 按扩展名兜底
+    if (lower.endsWith(".pac")) return Format::Pac;
     return Format::Unknown;
 }
 } // namespace
@@ -45,6 +59,33 @@ Detected detect(const QByteArray &header, const QString &fileName)
         static_cast<uchar>(header[1024]) == 0xE2 && static_cast<uchar>(header[1025]) == 0xE1 &&
         static_cast<uchar>(header[1026]) == 0xF5 && static_cast<uchar>(header[1027]) == 0xE0)
         return {Format::Erofs, "EROFS 文件系统"};
+    // KDZ v3: 8B 魔数（kdztools unkdz.py _dz_header = \x28\x05\x00\x00\x24\x38\x22\x25）
+    if (header.size() >= 8 && header.left(8) == QByteArrayLiteral("\x28\x05\x00\x00\x24\x38\x22\x25"))
+        return {Format::Kdz, "LG KDZ 固件包"};
+    // SIN v3: [0]=0x03 + "SIN"（flashtool S1ParseLib sin/v3）
+    if (header.size() >= 4 && static_cast<uchar>(header[0]) == 0x03 &&
+        header.mid(1, 3) == QByteArrayLiteral("SIN"))
+        return {Format::Sin, "索尼 SIN v3 镜像"};
+    // 华为 update.app: 魔数 0x55 0xAA（512B 头，与 imghw::isUpdateApp 一致）
+    if (header.size() >= 2 && static_cast<uchar>(header[0]) == 0x55 &&
+        static_cast<uchar>(header[1]) == 0xAA)
+        return {Format::UpdateApp, "华为 update.app 固件"};
+    // GPT: 主分区表头 "EFI PART" 位于 LBA1（偏移 512）
+    if (header.size() >= 520 && header.mid(512, 8) == QByteArrayLiteral("EFI PART"))
+        return {Format::DiskGpt, "GPT 磁盘镜像"};
+    // TWRP 备份: 头魔数 "TWRP"（imgtwrp::isTwrpBackup 同判定）
+    if (header.size() >= 4 && header.left(4) == QByteArrayLiteral("TWRP"))
+        return {Format::TwrpWin, "TWRP 备份"};
+    // pac 新格式: 版本串 "BP_R1.0.0"/"BP_R2.0.1" 以 UTF-16LE 落盘于偏移 0（imgpac 官方版本门禁）
+    if (header.size() >= 18) {
+        const QByteArray utf16 = header.left(18);
+        if (utf16 == toUtf16Le("BP_R1.0.0") || utf16 == toUtf16Le("BP_R2.0.1"))
+            return {Format::Pac, "pac 固件（新格式）"};
+    }
+    // pac 新格式辅助信号: 0xfffafffa 魔数 @2116（参考实现仅 CRC 用途，不作解析门禁）
+    if (header.size() >= 2120 &&
+        qFromLittleEndian<quint32>(header.constData() + 2116) == 0xFFFAFFFAu)
+        return {Format::Pac, "pac 固件（新格式）"};
     if (header.size() >= 2 && header.left(2) == "\x1f\x8b")
         return {Format::Gzip, "gzip 压缩"};
     if (header.size() >= 4 && header.left(4) == "\x28\xb5\x2f\xfd")
