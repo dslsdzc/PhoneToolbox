@@ -48,6 +48,7 @@ QByteArray simg2img(const QByteArray &sparse)
         ch.totalSz = qFromLittleEndian<quint32>(sparse.constData() + pos + 8);
         const quint64 chunkBytes = static_cast<quint64>(ch.chunkSz) * h.blkSz;
         if (written + chunkBytes > static_cast<quint64>(out.size())) return {};
+        if (ch.totalSz < h.chunkHdrSz) return {}; // 非法 total_sz，防止 pos 不推进导致自旋
         switch (ch.type) {
         case kChunkRaw: {
             const qint64 dataSz = ch.totalSz - h.chunkHdrSz;
@@ -62,14 +63,13 @@ QByteArray simg2img(const QByteArray &sparse)
             if (dataSz != 4) return {};
             const QByteArray fillByte = sparse.mid(pos + h.chunkHdrSz, 4);
             if (fillByte.size() != 4) return {};
-            QByteArray block(static_cast<int>(h.blkSz), fillByte[0]);
-            // 校验四个字节一致，不一致则逐块填充
-            bool uniform = fillByte[0] == fillByte[1] && fillByte[1] == fillByte[2] && fillByte[2] == fillByte[3];
-            for (quint64 b = 0; b < ch.chunkSz; ++b) {
-                if (!uniform)
-                    block = QByteArray(static_cast<int>(h.blkSz), fillByte[b % 4]);
+            // 4 字节 pattern 按 pattern[i % 4] 重复填充整块（Android libsparse 语义）；
+            // 每块内容相同，可复用同一 block
+            QByteArray block(static_cast<int>(h.blkSz), Qt::Uninitialized);
+            for (int j = 0; j < block.size(); ++j)
+                block[j] = fillByte[j % 4];
+            for (quint64 b = 0; b < ch.chunkSz; ++b)
                 out.replace(static_cast<int>(written + b * h.blkSz), static_cast<int>(h.blkSz), block);
-            }
             break;
         }
         case kChunkDontCare:
@@ -125,8 +125,10 @@ QByteArray img2simg(const QByteArray &raw, quint32 blockSize)
                 bytes += nl;
                 ++n;
             }
-            chunks.append({kChunkRaw, static_cast<quint32>(n), static_cast<quint32>(12 + bytes),
-                           raw.mid(off, static_cast<int>(bytes))});
+            QByteArray data = raw.mid(off, static_cast<int>(bytes));
+            if (static_cast<quint64>(data.size()) < n * blockSize) // 末块不足块大小：补零 pad 到整块
+                data.append(QByteArray(static_cast<int>(n * blockSize - static_cast<quint64>(data.size())), '\0'));
+            chunks.append({kChunkRaw, static_cast<quint32>(n), static_cast<quint32>(12 + data.size()), data});
             i += n;
         }
     }
