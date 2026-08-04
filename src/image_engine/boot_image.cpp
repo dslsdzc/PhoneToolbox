@@ -5,8 +5,8 @@
 namespace imgboot {
 
 namespace {
-constexpr int kHdrV0 = 1632; // v0/v1 基础 header（AOSP boot_img_hdr_v0）
-constexpr int kHdrV1 = 1648; // v1: + recovery_dtbo_size(8)@1632 + recovery_dtbo_offset(8)@1640
+constexpr int kHdrV0 = 1632; // v0（AOSP boot_img_hdr_v0，packed）
+constexpr int kHdrV1 = 1648; // v1: + recovery_dtbo_size(4)@1632 + recovery_dtbo_offset(8)@1636 + header_size(4)@1644
 constexpr int kHdrV2 = 1660; // v2: + dtb_size(4)@1648 + dtb_addr(8)@1652
 constexpr int kHdrV3 = 1580; // v3/v4
 
@@ -38,12 +38,14 @@ bool parseBootImage(const QByteArray &raw, BootInfo &out)
         Q_UNUSED(osVer); // 按正确偏移读取（os_version@44）；BootInfo 暂不承载该字段
         out.cmdline = raw.mid(64, 512).split('\0').first(); // name@48, cmdline@64
         quint32 secondSize = 0;
-        quint64 recoveryDtboSize = 0;
+        quint32 recoveryDtboSize = 0;
         if (ver >= 2) {
             if (raw.size() < kHdrV2) return false;
             out.dtbSize = qFromLittleEndian<quint32>(raw.constData() + 1648); // dtb_size
             secondSize = qFromLittleEndian<quint32>(raw.constData() + 24);
-            recoveryDtboSize = qFromLittleEndian<quint64>(raw.constData() + 1632); // recovery_dtbo_size
+            // recovery_dtbo_size 为 uint32@1632（packed：recovery_dtbo_offset 紧随 @1636，
+            // 读 8 字节会跨字段）
+            recoveryDtboSize = qFromLittleEndian<quint32>(raw.constData() + 1632);
         }
         // header 占第一页（mkbootimg 将 header 补零到 page_size），数据段从页边界开始
         quint64 off = alignUp(static_cast<quint64>(kHdrV0), out.pageSize);
