@@ -193,6 +193,19 @@ Linux 系统包 / Windows vcpkg 获取。
 
 **维修行业真实通道（2026-08-04 搜索确认，对应"死局"质疑）**：签名层不存在"破解"，但刷机有完整通道 —— ① 解锁 Bootloader（官方/工程解锁，已有实现）；② 协议级开源实现（Heimdall 三星 Odin、EDL 高通、mtkclient 联发科，已有/待集成）；③ 售后/工程工具（华为 HDB 协议 + 旧版 HiSuite 通道、高通 msmdownloadtool 工程版）。工具覆盖面按此三通道规划，不依赖签名破解。
 
+### BL 解锁策略架构（2026-08-04 补充，回应"通用解法进不去"）
+
+**现实**：官方通用解锁命令（`oem unlock`/`flashing unlock`）大量机型进不去（命令移除/封禁/机型不支持）；真实解锁 = 官方命令（两轨之一）+ **机型特定漏洞利用**（Towelroot/Dirty Pipe/Mali CVE/Mtk-Su/小米 HyperOS 绕过等）。
+
+**架构**：解锁模块改为**策略注册表**（现有 `unlockBootloader` 多策略探测的扩展）：
+- 策略类型 1：官方命令策略（已有：多品牌解锁命令 + 探测顺序）
+- 策略类型 2：漏洞利用策略 —— 挂在现有 vuln_db/exploit_engine 框架上（CVE 匹配 + 三段式利用已实现），漏洞库条目扩展 `unlock: true` 标记，扫描命中后走"检测→利用→验证"流程完成解锁
+- 策略类型 3：EDL/MTK 强通道（已有 edl/mtkclient 子模块，testpoint 短接说明文档化）
+
+**可引用资源**：[awesome-android-root-exploits](https://github.com/DuncanParSky/awesome-android-root-exploits)（锁定 BL 设备漏洞合集）、[Xiaomi-HyperOS-BootLoader-Bypass](https://github.com/MlgmXyysd/Xiaomi-HyperOS-BootLoader-Bypass)、[cn-bootloader-unlock-wall-of-shame](https://github.com/Hydro3ia/cn-bootloader-unlock-wall-of-shame)（厂商难度分级，UI 展示各品牌解锁路径指引）。
+
+**风险标注**：漏洞利用解锁有硬件熔断风险（三星 Knox/TEE 永久损坏、小米硬件级风险）—— UI 在解锁前明确警示（现有解锁流程已有提示，补强机型特定风险）。
+
 受影响模块：华为 update.app/update.bin（B5/B6）、LG KDZ（重打包需签名验证材料时）、HTC RUU（E 阶段后续）。
 
 ## 维修诊断模块（计划 E，排期在 D 之后）
