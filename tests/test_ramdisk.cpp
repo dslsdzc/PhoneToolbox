@@ -24,6 +24,9 @@ private slots:
     void detectUnknown();
     void rawPassthrough();
     void corruptLz4LegacyFails();
+    void corruptGzipFails();
+    void corruptXzFails();
+    void corruptLzmaFails();
 };
 
 void TestRamdisk::detectGzip()
@@ -262,6 +265,73 @@ void TestRamdisk::corruptLz4LegacyFails()
     zeroBlock.append(QByteArray(4, '\x00'));
     err.clear();
     QVERIFY(!patcher::decompressRamdisk(zeroBlock, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestRamdisk::corruptGzipFails()
+{
+    // 损坏/截断的 gzip 帧必须失败并给出错误，不得静默返回部分数据
+    QByteArray data("ramdisk payload for gzip corruption tests");
+    const QByteArray comp = patcher::compressRamdisk(data, "gzip");
+    QVERIFY(!comp.isEmpty());
+
+    QByteArray out;
+    QString err;
+
+    // 截断（尾部 trailer 被切掉）
+    QVERIFY(!patcher::decompressRamdisk(comp.left(comp.size() - 5), out, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 载荷字节翻转 → inflate/CRC32 校验失败
+    QByteArray corrupt = comp;
+    const int mid = corrupt.size() / 2;
+    corrupt[mid] = char(corrupt[mid] ^ 0xFF);
+    err.clear();
+    QVERIFY(!patcher::decompressRamdisk(corrupt, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestRamdisk::corruptXzFails()
+{
+    QByteArray data("ramdisk payload for xz corruption tests 0123456789");
+    const QByteArray comp = patcher::compressRamdisk(data, "xz");
+    QVERIFY(!comp.isEmpty());
+
+    QByteArray out;
+    QString err;
+
+    // 截断：xz footer（尾部 12 字节）缺失 → 必须失败
+    QVERIFY(!patcher::decompressRamdisk(comp.left(comp.size() - 6), out, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 载荷损坏
+    QByteArray corrupt = comp;
+    const int mid = corrupt.size() / 2;
+    corrupt[mid] = char(corrupt[mid] ^ 0x01);
+    err.clear();
+    QVERIFY(!patcher::decompressRamdisk(corrupt, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestRamdisk::corruptLzmaFails()
+{
+    QByteArray data("ramdisk payload for lzma-alone corruption tests");
+    const QByteArray comp = patcher::compressRamdisk(data, "lzma");
+    QVERIFY(!comp.isEmpty());
+
+    QByteArray out;
+    QString err;
+
+    // 截断：压缩数据不完整（保留 13 字节头以通过格式检测）
+    QVERIFY(!patcher::decompressRamdisk(comp.left(comp.size() - 4), out, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 载荷字节翻转 → LZMA_DATA_ERROR
+    QByteArray corrupt = comp;
+    const int tail = corrupt.size() - 3;
+    corrupt[tail] = char(corrupt[tail] ^ 0xFF);
+    err.clear();
+    QVERIFY(!patcher::decompressRamdisk(corrupt, out, &err));
     QVERIFY(!err.isEmpty());
 }
 

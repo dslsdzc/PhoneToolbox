@@ -119,6 +119,10 @@ file(GLOB_RECURSE HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.h"
 )
+# HEADERS 同样必须过滤：root_patcher 的 Q_OBJECT 头若进主程序 AUTOMOC，
+# 会生成引用未链接构造函数的 moc，导致主程序链接失败
+list(FILTER HEADERS EXCLUDE REGEX "/image_engine/")
+list(FILTER HEADERS EXCLUDE REGEX "/root_patcher/")
 
 message(STATUS "Found sources: ${SOURCES}")
 message(STATUS "Found headers: ${HEADERS}")
@@ -225,7 +229,8 @@ if(ENABLE_ROOT_PATCHER_TESTS)
     if(Qt6Test_FOUND)
         enable_testing()
         set(ROOT_PATCHER_TEST_SOURCES
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ramdisk.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ramdisk.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_downloader.cpp)
         # 与 image_engine 测试一致：每个测试源独立可执行文件（首源沿用 root_patcher_tests 目标名）
         set(_test_count 0)
         foreach(_test_src IN LISTS ROOT_PATCHER_TEST_SOURCES)
