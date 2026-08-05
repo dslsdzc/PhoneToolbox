@@ -1028,6 +1028,10 @@ void ImageToolPanel::startDetect(const QString &path)
 
 void ImageToolPanel::onDetectFinished(const QString &path, const imgreg::Detected &detected)
 {
+    // 丢弃过期结果：worker 串行保证结果按投递顺序到达，非当前文件的回调
+    // 只可能是文件已切换后的旧结果（Qt::QueuedConnection 排队的遗留信号）
+    if (path != m_currentFile)
+        return;
     m_detected = detected;
     m_formatLabel->setText(formatName(detected.format));
     m_detailLabel->setText(detected.detail.isEmpty() ? QStringLiteral("—") : detected.detail);
@@ -1047,15 +1051,16 @@ void ImageToolPanel::onDetectFinished(const QString &path, const imgreg::Detecte
 void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
 {
     const imgreg::Format f = detected.format;
-    // 解包：容器/分区类镜像（纯压缩流不直接解包；Raw 本身即已解包格式）
-    m_unpackBtn->setEnabled(f == imgreg::Format::Payload || f == imgreg::Format::Zip ||
+    // 解包：仅 enable 后端有"解包到目录"实现的格式（核实见 image_worker.cpp doUnpack
+    // switch 各 case）。Zip/VendorBoot/Vbmeta/Dtb/UpdateBin 无解包引擎，后端扩展待办，
+    // 不 enable（否则按钮可用但必然报错，见 doUnpack 尾部降级分支）。
+    m_unpackBtn->setEnabled(f == imgreg::Format::Payload ||
                             f == imgreg::Format::Tar || f == imgreg::Format::TarMd5 ||
                             f == imgreg::Format::Sparse || f == imgreg::Format::Super ||
-                            f == imgreg::Format::Boot || f == imgreg::Format::VendorBoot ||
-                            f == imgreg::Format::Vbmeta || f == imgreg::Format::Dtb ||
+                            f == imgreg::Format::Boot ||
                             f == imgreg::Format::Dat || f == imgreg::Format::Pac ||
                             f == imgreg::Format::Kdz || f == imgreg::Format::UpdateApp ||
-                            f == imgreg::Format::UpdateBin || f == imgreg::Format::Sin ||
+                            f == imgreg::Format::Sin ||
                             f == imgreg::Format::DiskGpt || f == imgreg::Format::TwrpWin ||
                             f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
     // 打包（D6 接线）：按"后端可用打包接口"enable —— sparse→raw（simg2img 逆向）、
@@ -1068,8 +1073,9 @@ void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
                           f == imgreg::Format::Tar || f == imgreg::Format::TarMd5);
     // 转换（D3 接线）：sparse↔raw
     m_convertBtn->setEnabled(f == imgreg::Format::Sparse || f == imgreg::Format::RawImage);
-    // 修补（D4 接线）：boot 类镜像
-    m_patchBtn->setEnabled(f == imgreg::Format::Boot || f == imgreg::Format::VendorBoot);
+    // 修补（D4 接线）：仅 boot 镜像。VendorBoot 不 enable：patchFile 只认
+    // "ANDROID!" 魔数（apatch_patcher.cpp L258），vendor_boot "VNDRBOOT" 必然失败。
+    m_patchBtn->setEnabled(f == imgreg::Format::Boot);
     // 文件系统浏览（D5 接线）：imgfs::openFsImage 仅支持 EROFS/ext4
     //（registry detect 已覆盖 E2 E1 F5 E0@1024 / 0xEF53@1080）
     m_fsBrowseBtn->setEnabled(f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
