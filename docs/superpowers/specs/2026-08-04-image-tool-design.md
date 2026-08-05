@@ -15,7 +15,7 @@
 1. **全格式原则**：所有能解包/打包的 Android 镜像格式全部支持（不仅限本矩阵，架构采用格式注册表模式，新增格式注册即用，不改面板代码）
 2. 全自研实现（引擎与装配逻辑），注入物（magiskinit / kernelsu.ko / kpatch）运行时从官方渠道下载
 3. 支持解包与打包双向操作
-4. 支持 Magisk / KernelSU / APatch 三家 Root 修补
+4. **Root/修补全覆盖原则（2026-08-05 补充）**：凡是能产生 root 能力、与 root 修补相关的方案全部纳入 —— 8 个 boot 修补入口（Magisk 官方/Kitsune/Alpha + KernelSU 官方/Next/SukiSU/ReSukiSU + APatch）+ 通用 ramdisk su 注入（老设备：SuperSU/LineageOS su/早期 su 二进制）+ 模块/框架安装（Zygisk Next/Riru/LSPosed 类，注入已 root 环境）。**诚实边界**：闭源方案（SuperSU 2.80+、KingRoot）注入物提取受限时标注"尽力支持/参考"而非假装完整
 5. 支持增量 OTA diff 分区解包（需旧分区镜像）
 6. 处理签名/校验层（Odin MD5、AVB footer、解锁提示）
 
@@ -94,9 +94,11 @@ src/image_engine/            # 纯格式库层 —— 无 UI 依赖、无网络�
 
 src/root_patcher/            # 修补层 —— 自研装配逻辑
   RootPatcher (抽象接口)      #   patch(bootImage, config) → patchedImage, 自动备份原镜像
-  magisk_patcher             # 下载 Magisk APK → 提取 magiskinit → 注入 ramdisk + init 链替换
-  kernelsu_patcher           # 读设备 KMI → 下载匹配 kernelsu.ko → 注入 init_boot ramdisk
-  apatch_patcher             # 下载 APatch APK → 提取 kpatch → 内核段注入
+  magisk_patcher             # Magisk 系: 下载 Magisk/Kitsune APK → 提取 magiskinit → 注入 ramdisk + init 链替换
+                             #   （入口参数化: 官方 magisk / kitsune 分支, 同一注入机制）
+  kernelsu_patcher           # KernelSU 系: 读设备 KMI → 下载匹配 .ko (official/next/suki 源) → 注入 init_boot ramdisk
+                             #   （入口参数化: 官方 / KernelSU-Next / SukiSU-Ultra, KMI 匹配范围不同）
+  apatch_patcher             # APatch: 下载 APatch APK → 提取 kpatch → 内核段注入
   assets_downloader          # 官方注入物下载器（版本缓存, 失败可手动指定本地文件）
 
 src/ui/image_tool_panel      # 左侧第 5 个独立面板

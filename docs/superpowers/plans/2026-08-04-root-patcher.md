@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 `root_patcher` 修补层：对 boot/init_boot 镜像注入 Magisk / KernelSU / APatch 三家 root 方案（自研装配逻辑，注入物从官方渠道下载），自动备份原镜像。
+**Goal:** 实现 `root_patcher` 修补层：对 boot/init_boot 镜像注入 **root 生态全覆盖**（2026-08-05 扩展）—— Magisk 系（官方/Alpha/Kitsune）、KernelSU 系（官方/Next/SukiSU/ReSukiSU）、APatch/KernelPatch、通用 ramdisk su 注入（老设备）、模块框架安装（Zygisk/LSPosed 类）。自研装配逻辑，注入物从官方渠道下载，自动备份原镜像。
 
 **Architecture:** `src/root_patcher/` 依赖计划 A 的 `image_engine`（boot_image 解包/重打包 + imgcomp 压缩）。统一抽象 `RootPatcher`（`patch(bootImage, config) → patchedImage`），三个实现分别处理三家方案。注入物（magiskinit / kernelsu.ko / kpatch）由 `AssetsDownloader` 运行时下载（APK 或 .ko），缓存到用户数据目录，失败可手动指定本地文件。
 
@@ -16,6 +16,7 @@
 - 修补产物命名 `<name>_patched.img`
 - 每个任务独立 commit，前缀 `feat:`；TDD 循环（测试用 mock 注入物 + 构造 boot 镜像，不依赖真实网络）
 - 下载失败 → 返回错误并提示可手动指定本地文件（不静默失败）
+- **默认信息不可信原则（2026-08-05 用户要求）**：本计划文档中的格式细节、机制描述、下载源 URL 一律视为"待验证起点" —— **每个任务实现时必须联网搜索验证**（WebSearch/WebFetch 官方仓库、文档、参考实现源码），以搜索到的权威信息为准；验证结果写入报告（验证了什么、来源、与计划的差异）。禁止凭记忆/常识直接实现未验证的格式或机制
 
 ---
 
@@ -369,7 +370,7 @@ git commit -m "feat: 注入物下载器与缓存 (TDD)"
 
 ---
 
-### Task C3: root_patcher 抽象 + magisk_patcher
+### Task C3: root_patcher 抽象 + magisk_patcher（参数化 3 入口）
 
 **Files:**
 - Create: `src/root_patcher/root_patcher.h`, `src/root_patcher/magisk_patcher.h`, `src/root_patcher/magisk_patcher.cpp`
@@ -378,11 +379,11 @@ git commit -m "feat: 注入物下载器与缓存 (TDD)"
 
 **Interfaces:**
 - Consumes: `imgboot::BootInfo/parseBootImage/repackBootImage`（计划 A）、`patcher::decompressRamdisk/compressRamdisk`（C1）、`AssetsDownloader`（C2）
-- Produces: `enum class RootType { Magisk, KernelSU, APatch }; struct PatchConfig { RootType type; QString magiskApkPath; QString kernelsuKoPath; QString apatchApkPath; QString deviceKmi; }; class RootPatcher { public: virtual ~RootPatcher() = default; virtual bool patch(const QByteArray &bootImage, const PatchConfig &cfg, QByteArray &out, QString *error) = 0; static RootPatcher *create(RootType type); };`；`class MagiskPatcher : public RootPatcher`
+- Produces: `enum class RootType { Magisk, MagiskAlpha, Kitsune, KernelSU, KernelSU_Next, SukiSU, ReSukiSU, APatch, KernelPatch, RamdiskSu, ModuleInstall }; struct PatchConfig { RootType type; QString apkPath; QString koPath; QString kpatchPath; QString suZipPath; QString deviceKmi; QString variant; }; class RootPatcher { public: virtual ~RootPatcher() = default; virtual bool patch(const QByteArray &bootImage, const PatchConfig &cfg, QByteArray &out, QString *error) = 0; static RootPatcher *create(RootType type); };`；`class MagiskPatcher : public RootPatcher`（variant 区分官方/Alpha/Kitsune —— 下载源不同，注入机制相同：APK 内 `lib/<abi>/libmagiskinit.so` 提取）
 
-Magisk 注入逻辑（参考 magiskinit 装配方式）：boot 解包 → ramdisk 解压 → 根目录放入 `magiskinit` 二进制（来自 Magisk APK 的 `lib/<abi>/libmagiskinit.so`，用 QZipReader 提取）→ 把原 `init` 改名 `init.orig` → 新 `init` 为 magiskinit（符号链接或拷贝）→ ramdisk 重压 → boot 重打包。`patched` 输出 = repackBootImage 结果；自动备份由调用方（UI 层）处理。
+Magisk 系注入逻辑（参考 magiskinit 装配方式）：boot 解包 → ramdisk 解压 → 根目录放入 `magiskinit` 二进制（来自对应 APK 的 `lib/<abi>/libmagiskinit.so`，用 QZipReader 提取）→ 把原 `init` 改名 `init.orig` → 新 `init` 为 magiskinit（符号链接或拷贝）→ ramdisk 重压 → boot 重打包。`patched` 输出 = repackBootImage 结果；自动备份由调用方（UI 层）处理。**下载源**：官方 topjohnwu/Magisk、Alpha vvb2060/Magisk、Kitsune 分支（以各自 GitHub Releases APK 为下载源，AssetsDownloader 版本化缓存）。
 
-**注意**：完整 Magisk 修补还涉及 `overlay.d`、sepolicy 处理等 —— 本实现聚焦核心链路（magiskinit 接管 init），其余以参考实现文档为准，UI 提示"高级修补请用 Magisk App 完成"。
+**注意**：完整修补还涉及 `overlay.d`、sepolicy 处理等 —— 本实现聚焦核心链路（magiskinit 接管 init），其余以参考实现文档为准，UI 提示"高级修补请用对应 App 完成"。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -465,17 +466,19 @@ git commit -m "feat: root_patcher 抽象与 Magisk 注入 (TDD)"
 
 ---
 
-### Task C4: kernelsu_patcher — KMI 匹配与 init_boot 注入
+### Task C4: kernelsu_patcher — KMI 匹配与 init_boot 注入（参数化 4 入口）
 
 **Files:**
 - Create: `src/root_patcher/kernelsu_patcher.h`, `src/root_patcher/kernelsu_patcher.cpp`
 - Modify: `tests/test_patcher.cpp`
 
 **Interfaces:**
-- Consumes: C3 的抽象 + PatchConfig（新增 `kernelsuKoPath`）
+- Consumes: C3 的抽象 + PatchConfig（`koPath`、`variant`）
 - Produces: `class patcher::KernelSuPatcher : public RootPatcher`；`QString patcher::detectKmi(const imgboot::BootInfo &info)`（从 boot cmdline 提取 `androidboot.kmi` 或回退设备查询 —— cmdline 无则返回空）
 
-KernelSU LKM 注入（参考 ksud boot-patch）：init_boot/boot 解包 → ramdisk 解压 → 根目录放入 `kernelsu.ko` + init 启动链追加 kernelsu 加载（`init.rc` 修改或 init wrapper —— 简化：把 .ko 放入 ramdisk + 注入 `init` wrapper 脚本调用 `insmod`，以 ksud 实际行为为准）→ 重打包。KMI 匹配：`android13-5.15` 等格式，下载 `{kmi}_kernelsu.ko`。
+KernelSU 系 LKM 注入（参考 ksud boot-patch）：init_boot/boot 解包 → ramdisk 解压 → 根目录放入 `kernelsu.ko` + init 启动链追加 kernelsu 加载（`init.rc` 修改或 init wrapper —— 简化：把 .ko 放入 ramdisk + 注入 `init` wrapper 脚本调用 `insmod`，以 ksud 实际行为为准）→ 重打包。KMI 匹配：`android13-5.15` 等格式，下载 `{kmi}_kernelsu.ko`。**入口参数化（variant）**：官方 tiann/KernelSU、KernelSU-Next（内核 4.4-6.6 支持更广）、SukiSU-Ultra（SukiSU-Ultra/SukiSU-Ultra，含 susfs）、ReSukiSU —— .ko 下载源与 KMI 匹配范围不同，注入机制相同。
+
+**非 GKI 全自动路径（2026-08-05 补充，机制已验证）**：GKI 判定（boot cmdline `androidboot.kmi` 缺失 / KMI 匹配失败）→ 自动走 **AnyKernel3 内核替换**：从社区预置内核仓库（XDA/设备专属仓库）下载匹配设备型号的预置内核 zip（AnyKernel3 包：`Image`/`Image.gz` 内核文件 + 安装脚本）→ 解包提取 Image → boot 解包 → **Image 替换 kernel 段**（ReSukiSU 文档确认的 magiskboot 手动修补机制）→ 重打包。KMI 匹配失败时优先提示 APatch（内核 3.18+ 仅需 boot.img）作为兜底。**诚实边界**：预置内核的可用性依赖社区仓库覆盖（热门机型有，冷门可能无）—— 仓库无匹配时返回明确错误 + 建议 APatch/Magisk 路径，不假装支持。
 
 - [ ] **Step 1-4: TDD 循环**（测试：detectKmi 从构造 cmdline 提取；注入后 ramdisk 含 kernelsu.ko）
 
@@ -527,6 +530,52 @@ git commit -m "feat: APatch 内核段注入 (TDD)"
 ```bash
 git add src/root_patcher tests/test_patcher.cpp
 git commit -m "feat: root_patcher 文件级入口与自动备份 (TDD)"
+```
+
+---
+
+### Task C7: ramdisk_su_patcher — SuperSU 老设备注入
+
+**Files:**
+- Create: `src/root_patcher/ramdisk_su_patcher.h/.cpp`
+- Modify: `tests/test_patcher.cpp`
+
+**Interfaces:**
+- Consumes: C3 抽象 + PatchConfig（`suZipPath`）
+- Produces: `class patcher::RamdiskSuPatcher : public RootPatcher`
+
+SuperSU 老设备注入（**机制已搜索验证，2026-08-05**）：用户提供 SuperSU ZIP（recovery 刷入包：update-binary + su 二进制 + Superuser.apk）→ QZipReader 提取 su 二进制（su/daemonsu 为同一文件）→ boot 解包 → ramdisk 解压 → 放入 `init.superuser.rc`（模板：`service daemonsu /system/xbin/daemonsu --auto-daemon` + class core/user root/oneshot）→ `init.rc` 追加 `import /init.superuser.rc`（若不存在该行）→ ramdisk 重压 → boot 重打包。**诚实边界**：SuperSU 2.80+ 闭源停更、su 二进制路径约定（/system/xbin）依赖老 ROM 布局 —— 提取受限或路径不符时返回明确错误 + 提示"老设备建议 Magisk"，不假装完整支持。**不做** LineageOS 注入（其 su 为 ROM 内置，开发者选项启用，无需修补 boot —— 2026-08-05 核实）。
+
+- [ ] **Step 1-4: TDD 循环**（测试：构造含 su 二进制的 SuperSU 式 ZIP → 注入 → 断言 ramdisk 含 su + init.superuser.rc + init.rc import 行）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/root_patcher tests/test_patcher.cpp
+git commit -m "feat: SuperSU 老设备 ramdisk 注入 (TDD)"
+```
+
+---
+
+### Task C8: module_installer — 模块框架安装（Zygisk/LSPosed 类）
+
+**Files:**
+- Create: `src/root_patcher/module_installer.h/.cpp`
+- Modify: `tests/test_patcher.cpp`
+
+**Interfaces:**
+- Consumes: C3 抽象 + PatchConfig（`moduleZipPath`）
+- Produces: `class patcher::ModuleInstaller : public RootPatcher`（安装 Zygisk Next / Riru / LSPosed 等模块 zip 到已修补的 root 镜像 ramdisk 或标注"需已 root 系统"）
+
+模块框架安装：与 boot 修补解耦 —— 输入已修补镜像（Magisk/KernelSU 系产物）或已 root 设备：模块 zip（Magisk 模块格式：`module.prop` + 文件树，**格式细节实现时对照 Magisk 官方模块规范文档核实，不凭记忆**）解包 → 写入 ramdisk 的 `/data/adb/modules/` 预留结构 → 重打包。**诚实边界**：完整模块安装依赖运行时模块加载器（magiskd/ksud）—— 本实现做"模块 zip 解包 + 注入预留目录 + 校验 module.prop"，运行时激活由对应 root 方案处理，UI 标注"模块激活需对应 App"。
+
+- [ ] **Step 1-4: TDD 循环**（测试：构造最小模块 zip → 注入 → 断言 module.prop 位置与文件树）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/root_patcher tests/test_patcher.cpp
+git commit -m "feat: 模块框架安装 (Zygisk/LSPosed 类) (TDD)"
 ```
 
 ---

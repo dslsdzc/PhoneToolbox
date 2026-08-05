@@ -110,14 +110,19 @@ file(GLOB_RECURSE SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp"
 )
 
-# image_engine 由独立静态库目标编译，从主程序 GLOB 中排除
+# image_engine 与 root_patcher 由独立静态库目标编译，从主程序 GLOB 中排除
 list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
+list(FILTER SOURCES EXCLUDE REGEX "/root_patcher/")
 
 file(GLOB_RECURSE HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.h"
 )
+# HEADERS 同样必须过滤：root_patcher 的 Q_OBJECT 头若进主程序 AUTOMOC，
+# 会生成引用未链接构造函数的 moc，导致主程序链接失败
+list(FILTER HEADERS EXCLUDE REGEX "/image_engine/")
+list(FILTER HEADERS EXCLUDE REGEX "/root_patcher/")
 
 message(STATUS "Found sources: ${SOURCES}")
 message(STATUS "Found headers: ${HEADERS}")
@@ -207,6 +212,43 @@ set_target_properties(image_engine PROPERTIES AUTOMOC ON)
 
 # 主程序链接 image_engine
 target_link_libraries(PhoneToolbox image_engine)
+
+# ---- root_patcher 静态库 ----
+file(GLOB_RECURSE ROOT_PATCHER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.cpp")
+file(GLOB_RECURSE ROOT_PATCHER_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.h")
+add_library(root_patcher STATIC ${ROOT_PATCHER_SOURCES} ${ROOT_PATCHER_HEADERS})
+target_include_directories(root_patcher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# lz4/lzma 头与库经 image_engine PUBLIC 传递；Qt6::Network 供后续下载类使用
+target_link_libraries(root_patcher PUBLIC image_engine Qt6::Core Qt6::Network)
+set_target_properties(root_patcher PROPERTIES AUTOMOC ON)
+
+# ---- root_patcher 单元测试 ----
+option(ENABLE_ROOT_PATCHER_TESTS "Build root_patcher unit tests" ON)
+if(ENABLE_ROOT_PATCHER_TESTS)
+    find_package(Qt6 QUIET COMPONENTS Test)
+    if(Qt6Test_FOUND)
+        enable_testing()
+        set(ROOT_PATCHER_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_patcher.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ramdisk.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_downloader.cpp)
+        # 与 image_engine 测试一致：每个测试源独立可执行文件（首源沿用 root_patcher_tests 目标名）
+        set(_test_count 0)
+        foreach(_test_src IN LISTS ROOT_PATCHER_TEST_SOURCES)
+            if(_test_count EQUAL 0)
+                set(_test_target root_patcher_tests)
+            else()
+                get_filename_component(_test_stem ${_test_src} NAME_WE)
+                set(_test_target root_patcher_tests_${_test_stem})
+            endif()
+            math(EXPR _test_count "${_test_count} + 1")
+            add_executable(${_test_target} ${_test_src})
+            target_link_libraries(${_test_target} PRIVATE root_patcher image_engine Qt6::Test)
+            set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
+            add_test(NAME ${_test_target} COMMAND ${_test_target})
+        endforeach()
+    endif()
+endif()
 
 # ---- image_engine 单元测试 ----
 option(ENABLE_IMAGE_TESTS "Build image_engine unit tests" ON)
