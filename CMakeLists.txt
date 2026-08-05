@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(PhoneToolbox VERSION 1.0.0 LANGUAGES CXX)
+project(PhoneToolbox VERSION 2.0.0 LANGUAGES CXX)
 
 # 选项：静态构建（Windows 单 EXE）
 option(STATIC_BUILD "Build fully static executable (single EXE on Windows)" OFF)
