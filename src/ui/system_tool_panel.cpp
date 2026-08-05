@@ -1482,18 +1482,21 @@ void SystemToolPanel::onOpenEngineerMode()
     const QString activity = e.activity.trimmed();
     const QString dialCode = e.dialCode.trimmed();
 
+    bool launched = false;
     if (!activity.isEmpty() && engmode::isValid(e)) {
         // 2a) 已验证 Activity：直启（仅 MTK 工程模式 / 系统 Testing）
         QString r = adbShell(QString("am start -n %1").arg(activity));
-        bool ok = !r.contains("Error");
-        appendOutput(QString("打开 %1 (%2): %3").arg(e.name, activity, ok ? "已启动" : r), !ok);
+        launched = !r.contains("Error");
+        appendOutput(QString("打开 %1 (%2): %3").arg(e.name, activity, launched ? "已启动" : r), !launched);
         if (m_engModeStatus)
-            m_engModeStatus->setText(ok ? QString("已启动: %1").arg(e.name)
-                                        : QString("启动失败: %1").arg(e.name));
-    } else if (!dialCode.isEmpty() && engmode::isValid(e)) {
-        // 2b) 仅拨号码：打开拨号盘并预填代码，不自动拨打（按拨号键触发）。
+            m_engModeStatus->setText(launched ? QString("已启动: %1").arg(e.name)
+                                              : QString("启动失败: %1").arg(e.name));
+    }
+    if (!launched && !dialCode.isEmpty() && engmode::isValid(e)) {
+        // 2b) 仅拨号码，或 2a Activity 启动失败后的回退：打开拨号盘并预填代码，不自动拨打（按拨号键触发）。
         //     tel: URI 中 '#' 是片段分隔符（'*' 亦为保留字符），先百分号编码，
         //     避免设备端 Uri 解析截断代码、以及远程 shell 将 # 当注释。
+        //     回退原因：OEM 定制 Settings 组件常不存在、MTK 部分机型移除包，拨号码是已验证兜底。
         QString tel = QStringLiteral("tel:%1").arg(
             QString::fromLatin1(dialCode.toUtf8().toPercentEncoding()));
         QString r = adbShell(QString("am start -a android.intent.action.DIAL -d \"%1\"").arg(tel));
@@ -1503,7 +1506,7 @@ void SystemToolPanel::onOpenEngineerMode()
         if (m_engModeStatus)
             m_engModeStatus->setText(ok ? QString("拨号盘已打开: %1").arg(dialCode)
                                         : QString("打开拨号盘失败"));
-    } else {
+    } else if (!launched) {
         // 2c) 无已知入口（降级 Entry）
         appendOutput("该设备无已知工程模式入口", true);
         if (m_engModeStatus) m_engModeStatus->setText("无已知工程模式入口");

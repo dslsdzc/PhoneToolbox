@@ -15,6 +15,7 @@ private slots:
     void lookup_unknownBrand_empty();
     void lookup_chipFallback_mtk();
     void lookup_chipFallback_qualcomm();
+    void lookup_brandWinsOverChip();
     void lookup_blankInputs_noCrash();
     void isValid_rejectsEmptyAcceptsEntry();
 };
@@ -95,6 +96,21 @@ void TestEngMode::lookup_chipFallback_qualcomm()
         QVERIFY2(e.dialCode.contains(QStringLiteral("4636")),
                  qPrintable(QStringLiteral("高通/系统拨号码应含 4636，实际 %1").arg(e.dialCode)));
     }
+}
+
+void TestEngMode::lookup_brandWinsOverChip()
+{
+    // 匹配优先级：品牌表优先于芯片回退 —— 小米 + 高通芯片 → CIT 拨号（品牌胜）；
+    // 无品牌 + 高通芯片 → 系统 Testing（芯片回退兜底）。
+    const engmode::Entry xiaomi = engmode::lookup(QStringLiteral("Xiaomi"), QStringLiteral("sm8250"), QString());
+    QVERIFY2(engmode::isValid(xiaomi), "已知品牌命中应优先于芯片回退");
+    QVERIFY2(xiaomi.dialCode.contains(QStringLiteral("6484")),
+             qPrintable(QStringLiteral("小米应返回 CIT 拨号，实际 %1").arg(xiaomi.dialCode)));
+
+    const engmode::Entry qc = engmode::lookup(QString(), QStringLiteral("sm8250"), QString());
+    QVERIFY2(engmode::isValid(qc), "无品牌应命中芯片回退");
+    QVERIFY2(qc.dialCode.contains(QStringLiteral("4636")),
+             qPrintable(QStringLiteral("高通回退应返回系统 Testing 拨号，实际 %1").arg(qc.dialCode)));
 }
 
 void TestEngMode::lookup_blankInputs_noCrash()

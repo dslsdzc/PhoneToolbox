@@ -283,6 +283,9 @@ if(ENABLE_IMAGE_TESTS)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
             set(_test_count 0)
+            # 首轮循环走 if(_test_count EQUAL 0) 分支，不会经 get_filename_component
+            # 赋值 _test_stem —— 循环前显式置空，避免读未初始化变量/残留值。
+            set(_test_stem "")
             foreach(_test_src IN LISTS IMAGE_TEST_SOURCES)
                 if(_test_count EQUAL 0)
                     set(_test_target image_engine_tests)
