@@ -1,5 +1,8 @@
 #include <QtTest>
 #include <QtEndian>
+#include <QFile>
+#include <QProcess>
+#include <QTemporaryDir>
 #include "image_engine/sparse_image.h"
 
 class TestSparse : public QObject
@@ -18,6 +21,13 @@ private slots:
     void simg2imgFillPattern();
     void aospHeaderU16Layout();
     void img2simgWritesAospHeader();
+    void simg2imgStreamMatchesOld();
+    void img2simgStreamMatchesOld();
+    void streamProgressCallback();
+    void simg2imgStreamRejectsTruncated();
+    void img2simgStreamEmptyInput();
+    void systemImg2simgInterop();
+    void systemSimg2imgInterop();
 };
 
 static QByteArray buildSparseHeader(quint32 totalBlks, quint32 totalChunks)
@@ -232,6 +242,206 @@ void TestSparse::img2simgWritesAospHeader()
     QCOMPARE(qFromLittleEndian<quint16>(s.constData() + 28), quint16(0xCAC2));
     QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 32), 2u);
     QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 36), 16u);
+}
+
+static bool writeFile(const QString &path, const QByteArray &d)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+    return f.write(d) == d.size();
+}
+
+static QByteArray readFile(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    return f.readAll();
+}
+
+void TestSparse::simg2imgStreamMatchesOld()
+{
+    // 流式输出必须与旧接口逐字节一致（含 FILL/DONTCARE/RAW 混合、非 uniform pattern）
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.sparse"), outPath = dir.filePath("out.img");
+
+    // 用例 1：2 块 RAW
+    {
+        QByteArray payload(8192, '\xAB');
+        QByteArray sparse = buildSparseHeader(2, 1) + buildRawChunk(payload);
+        QVERIFY(writeFile(inPath, sparse));
+        QString err;
+        QVERIFY(imgsparse::simg2imgStream(inPath, outPath, {}, &err));
+        QCOMPARE(readFile(outPath), payload);
+        QCOMPARE(readFile(outPath), imgsparse::simg2img(sparse));
+    }
+    // 用例 2：FILL + DONTCARE
+    {
+        QByteArray sparse = buildSparseHeader(2, 2);
+        QByteArray fill(12, Qt::Uninitialized);
+        auto put16 = [](QByteArray &d, int off, quint16 v) { d[off] = char(v); d[off + 1] = char(v >> 8); };
+        auto put32 = [](QByteArray &d, int off, quint32 v) {
+            d[off] = char(v); d[off + 1] = char(v >> 8); d[off + 2] = char(v >> 16); d[off + 3] = char(v >> 24);
+        };
+        put16(fill, 0, 0xCAC2); put16(fill, 2, 0); put32(fill, 4, 1); put32(fill, 8, 16);
+        fill.append(QByteArray(4, '\x11'));
+        QByteArray dc(12, Qt::Uninitialized);
+        put16(dc, 0, 0xCAC3); put16(dc, 2, 0); put32(dc, 4, 1); put32(dc, 8, 12);
+        sparse.append(fill).append(dc);
+        QVERIFY(writeFile(inPath, sparse));
+        QString err;
+        QVERIFY(imgsparse::simg2imgStream(inPath, outPath, {}, &err));
+        QCOMPARE(readFile(outPath), imgsparse::simg2img(sparse));
+    }
+    // 用例 3：非 uniform 4 字节 FILL pattern
+    {
+        QByteArray sparse = buildSparseHeader(1, 1);
+        QByteArray c(12, Qt::Uninitialized);
+        auto put16 = [](QByteArray &d, int off, quint16 v) { d[off] = char(v); d[off + 1] = char(v >> 8); };
+        auto put32 = [](QByteArray &d, int off, quint32 v) {
+            d[off] = char(v); d[off + 1] = char(v >> 8); d[off + 2] = char(v >> 16); d[off + 3] = char(v >> 24);
+        };
+        put16(c, 0, 0xCAC2); put16(c, 2, 0); put32(c, 4, 1); put32(c, 8, 16);
+        c.append(QByteArray("\x11\x22\x33\x44", 4));
+        sparse.append(c);
+        QVERIFY(writeFile(inPath, sparse));
+        QString err;
+        QVERIFY(imgsparse::simg2imgStream(inPath, outPath, {}, &err));
+        QCOMPARE(readFile(outPath), imgsparse::simg2img(sparse));
+    }
+}
+
+void TestSparse::img2simgStreamMatchesOld()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.raw"), outPath = dir.filePath("out.sparse");
+
+    // 用例 1：全同块（FILL）
+    QByteArray raw1(4096 * 3, '\x42');
+    QVERIFY(writeFile(inPath, raw1));
+    QString err;
+    QVERIFY(imgsparse::img2simgStream(inPath, outPath, 4096, {}, &err));
+    QCOMPARE(readFile(outPath), imgsparse::img2simg(raw1));
+    // 用例 2：伪随机 + FILL 混排（RAW/FILL 边界）
+    QByteArray raw2(4096 * 16, '\x00');
+    for (int i = 0; i < raw2.size(); ++i)
+        raw2[i] = char((i * 31 + (i / 4096) * 7) & 0xFF);
+    for (int b = 3; b < 6; ++b) raw2.replace(b * 4096, 4096, QByteArray(4096, '\x77'));
+    QVERIFY(writeFile(inPath, raw2));
+    QVERIFY(imgsparse::img2simgStream(inPath, outPath, 4096, {}, &err));
+    QCOMPARE(readFile(outPath), imgsparse::img2simg(raw2));
+    // 用例 3：末块不足整块（pad 语义一致）
+    QByteArray raw3(4196, '\x00');
+    for (int i = 0; i < raw3.size(); ++i)
+        raw3[i] = char(0x10 + (i % 7));
+    QVERIFY(writeFile(inPath, raw3));
+    QVERIFY(imgsparse::img2simgStream(inPath, outPath, 4096, {}, &err));
+    QCOMPARE(readFile(outPath), imgsparse::img2simg(raw3));
+}
+
+void TestSparse::streamProgressCallback()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.raw"), outPath = dir.filePath("out.sparse");
+    QByteArray raw(4096 * 4, '\x00');
+    for (int i = 0; i < raw.size(); ++i)
+        raw[i] = char((i * 13) & 0xFF);
+    raw.replace(0, 4096, QByteArray(4096, '\xEE')); // 开头一段 FILL
+    QVERIFY(writeFile(inPath, raw));
+    QList<quint64> calls;
+    QString err;
+    QVERIFY(imgsparse::img2simgStream(inPath, outPath, 4096,
+                                      [&](quint64 b) { calls.append(b); }, &err));
+    QVERIFY(calls.size() >= 2);
+    for (int i = 1; i < calls.size(); ++i)
+        QVERIFY(calls[i] >= calls[i - 1]); // 单调不减
+    QCOMPARE(calls.last(), quint64(raw.size()));
+    QCOMPARE(calls.first(), quint64(0));
+}
+
+void TestSparse::simg2imgStreamRejectsTruncated()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("trunc.sparse"), outPath = dir.filePath("out.img");
+    QByteArray sparse = buildSparseHeader(2, 1);
+    QByteArray c(12, Qt::Uninitialized);
+    auto put16 = [](QByteArray &d, int off, quint16 v) { d[off] = char(v); d[off + 1] = char(v >> 8); };
+    auto put32 = [](QByteArray &d, int off, quint32 v) {
+        d[off] = char(v); d[off + 1] = char(v >> 8); d[off + 2] = char(v >> 16); d[off + 3] = char(v >> 24);
+    };
+    put16(c, 0, 0xCAC1); put16(c, 2, 0); put32(c, 4, 2); put32(c, 8, 12 + 8192);
+    sparse.append(c).append(QByteArray(4096, '\x55')); // 只有 1 块数据，声明 2 块
+    QVERIFY(writeFile(inPath, sparse));
+    QString err;
+    QVERIFY(!imgsparse::simg2imgStream(inPath, outPath, {}, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(!QFile::exists(outPath)); // 失败时输出文件被清理
+    // 非 sparse 输入
+    QVERIFY(writeFile(inPath, QByteArray("ANDROID!")));
+    QVERIFY(!imgsparse::simg2imgStream(inPath, outPath, {}, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestSparse::img2simgStreamEmptyInput()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("empty.raw"), outPath = dir.filePath("out.sparse");
+    QVERIFY(writeFile(inPath, QByteArray()));
+    QString err;
+    QVERIFY(!imgsparse::img2simgStream(inPath, outPath, 4096, {}, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(!QFile::exists(outPath));
+}
+
+void TestSparse::systemImg2simgInterop()
+{
+    if (!QFile::exists(QStringLiteral("/usr/bin/img2simg")))
+        QSKIP("系统 img2simg 不存在，跳过 AOSP 互操作实测");
+    QTemporaryDir dir;
+    const QString rawPath = dir.filePath("raw.bin"), sparsePath = dir.filePath("sys.sparse"),
+                  outPath = dir.filePath("out.img");
+    // 5.0MB 伪随机 + 100KB 全同 + 尾部 123456 字节（末块不足）
+    QByteArray raw;
+    for (int b = 0; b < 1250; ++b) {
+        QByteArray blk(4096, '\x00');
+        if (b % 16 == 0) blk.fill(char('A' + (b % 8))); // 1/16 全同块
+        else for (int i = 0; i < blk.size(); ++i) blk[i] = char((b * 131 + i * 7) & 0xFF);
+        raw.append(blk);
+    }
+    raw.append(QByteArray(123456, '\x00'));
+    for (int i = 0; i < 123456; ++i) raw[raw.size() - 123456 + i] = char((i * 11) & 0xFF);
+    QVERIFY(writeFile(rawPath, raw));
+    QProcess p;
+    p.start(QStringLiteral("/usr/bin/img2simg"), { rawPath, sparsePath });
+    QVERIFY(p.waitForFinished(60000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0);
+    // AOSP 工具产物（u16 头字段）必须能被流式接口正确解析，且逐字节还原（末块补零 pad 一致）
+    QString err;
+    QVERIFY2(imgsparse::simg2imgStream(sparsePath, outPath, {}, &err), qPrintable(err));
+    QByteArray expect = raw + QByteArray((-raw.size()) & (4096 - 1), '\0');
+    QCOMPARE(readFile(outPath), expect);
+}
+
+void TestSparse::systemSimg2imgInterop()
+{
+    if (!QFile::exists(QStringLiteral("/usr/bin/simg2img")))
+        QSKIP("系统 simg2img 不存在，跳过 AOSP 互操作实测");
+    QTemporaryDir dir;
+    const QString rawPath = dir.filePath("raw.bin"), sparsePath = dir.filePath("ours.sparse"),
+                  outPath = dir.filePath("out.img");
+    QByteArray raw(4096 * 8, '\x00');
+    for (int i = 0; i < raw.size(); ++i)
+        raw[i] = char((i * 23 + (i / 4096) * 5) & 0xFF);
+    raw.replace(2 * 4096, 4096, QByteArray(4096, '\x00')); // 注意：0x00 块是合法的 FILL
+    raw.replace(4 * 4096, 2 * 4096, QByteArray(2 * 4096, '\x33'));
+    QVERIFY(writeFile(rawPath, raw));
+    // 库产物必须能被系统 simg2img（AOSP libsparse）接受并逐字节还原
+    QString err;
+    QVERIFY2(imgsparse::img2simgStream(rawPath, sparsePath, 4096, {}, &err), qPrintable(err));
+    QProcess p;
+    p.start(QStringLiteral("/usr/bin/simg2img"), { sparsePath, outPath });
+    QVERIFY(p.waitForFinished(60000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0);
+    QCOMPARE(readFile(outPath), raw);
 }
 
 QTEST_APPLESS_MAIN(TestSparse)
