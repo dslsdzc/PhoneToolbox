@@ -81,11 +81,17 @@ bool runKptools(const QString &kptoolsPath, const QString &cwd, const QStringLis
 }
 
 // 目录内按前缀找唯一文件（kptools*/kpimg* 形态，KernelPatch release 资产）。
+// 精确名优先（C8 吸收的 C7 Minor：手动目录同时含 "kpimg" 与 "kpimg-*" 时取
+// 精确名，与 zip_util extractZipEntryByPrefix 语义一致）。
 bool findInDirByPrefix(const QString &dirPath, const QString &prefix, QString *found,
                        QString *err)
 {
     QDir dir(dirPath);
     const QStringList entries = dir.entryList(QDir::Files | QDir::NoDotAndDotDot);
+    if (entries.contains(prefix)) {
+        *found = dir.filePath(prefix);
+        return true;
+    }
     for (const auto &e : entries) {
         if (e.startsWith(prefix)) {
             *found = dir.filePath(e);

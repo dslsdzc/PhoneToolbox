@@ -16,12 +16,31 @@ namespace {
 // Zygisk Next ~2MB，512MB 远大于合法上限。单条目 64MB 上限由 zip_util 覆盖。
 constexpr quint64 kMaxUnpackedTotal = 512ull * 1024 * 1024;
 
+// 输入 zip 文件大小上限（1GB）：readAll 整读之前先拒绝，防数 GB 恶意文件
+// 先触发分配失败 terminate（审查 Important）。合法模块 zip 远小于此。
+constexpr qint64 kMaxInputZipSize = 1024ll * 1024 * 1024;
+
+// 模块树条目数上限：EOCD 条目数/写入端为 quint16（65535），输出 zip 条目 =
+// 1（module.prop）+ 树条目 ≤ 65535 防回绕（输入 zip 经 EOCD 上限 ≤ 65535，
+// 防御性显式声明该不变式，zip64 支持扩展后仍成立）。
+constexpr int kMaxTreeEntries = 65534;
+
 // 官方 id 正则（topjohnwu/Magisk docs/guides.md："^[a-zA-Z][a-zA-Z0-9._-]+$"）。
 // 目录名安全关键：拒绝 '/' 与 ".."（安装目录 /data/adb/modules/<id>/ 派生自 id）。
 const QRegularExpression &moduleIdRegex()
 {
     static const QRegularExpression re(QStringLiteral("^[a-zA-Z][a-zA-Z0-9._-]+$"));
     return re;
+}
+
+// 条目路径含 '..' 路径段（zip 规范用 '/' 分隔；'..' 段为穿越向量）。
+bool hasDotDotSegment(const QString &name)
+{
+    const QStringList segs = name.split(QLatin1Char('/'));
+    for (const QString &s : segs)
+        if (s == QLatin1String(".."))
+            return true;
+    return false;
 }
 
 // ---- 最小 ZIP 写入（PKWARE STORE 存储）----
@@ -97,6 +116,8 @@ QByteArray buildZipStore(const QList<OutZipEntry> &entries)
     putLE32(eocd, 0x06054b50);
     putLE16(eocd, 0); // disk
     putLE16(eocd, 0); // cd disk
+    // 条目数 quint16 安全：entries = 1（module.prop）+ m_tree ≤ 1 + kMaxTreeEntries
+    // ≤ 65535（kMaxTreeEntries 防回绕不变式，见解包循环）
     putLE16(eocd, static_cast<quint16>(entries.size()));
     putLE16(eocd, static_cast<quint16>(entries.size()));
     putLE32(eocd, static_cast<quint32>(cdb.size()));
@@ -213,6 +234,12 @@ bool ModuleInstaller::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     QFile zipFile(cfg.moduleZipPath);
     if (!zipFile.open(QIODevice::ReadOnly))
         return fail(QStringLiteral("无法打开模块 ZIP：%1").arg(cfg.moduleZipPath));
+    // 审查 Important：整读前先按文件大小拒绝（readAll 分配发生在解包上限
+    // 检查之前，数 GB 文件会先触发 bad_alloc terminate）
+    if (zipFile.size() > kMaxInputZipSize)
+        return fail(QStringLiteral("模块 ZIP 超过 %1 MB 大小上限（防整读分配失败）：%2")
+                        .arg(kMaxInputZipSize / (1024 * 1024))
+                        .arg(cfg.moduleZipPath));
     const QByteArray zip = zipFile.readAll();
     zipFile.close();
     if (zip.isEmpty())
@@ -259,6 +286,11 @@ bool ModuleInstaller::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             continue;
         if (n.endsWith(QLatin1Char('/')))
             continue; // 纯目录条目（文件树隐含，不落字节）
+        // 纵深防御（审查 Minor）：zip 规范要求相对路径，真实模块 zip 无前导
+        // '/' 或 '..' 段 —— 拒绝防 UI 推送 /data/adb/modules/<id>/ 时路径穿越
+        if (n.startsWith(QLatin1Char('/')) || hasDotDotSegment(n))
+            return fail(QStringLiteral("模块条目路径非法（含前导 '/' 或 '..' 段）：%1")
+                            .arg(n));
         QByteArray data;
         if (!patcher::extractZipEntry(zip, n, data, &zipErr))
             return fail(QStringLiteral("模块条目 %1 提取失败：%2").arg(n, zipErr));
@@ -267,6 +299,9 @@ bool ModuleInstaller::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             return fail(QStringLiteral("模块解包总量超过 %1 MB 上限（疑似 zip bomb，已中止）")
                             .arg(kMaxUnpackedTotal / (1024 * 1024)));
         m_tree.insert(n, data);
+        if (m_tree.size() > kMaxTreeEntries)
+            return fail(QStringLiteral("模块条目数超过 %1 上限（重打包 EOCD 计数防回绕）")
+                            .arg(kMaxTreeEntries));
     }
 
     // ---- boot 镜像框架门禁（可选输入，诚实边界）----
@@ -281,8 +316,6 @@ bool ModuleInstaller::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         if (info.ramdisk.isEmpty())
             return fail(QStringLiteral("boot 镜像不含 ramdisk：无法承载 Magisk/KernelSU "
                                        "模块框架，请用对应 App 修补"));
-        QString fmt;
-        patcher::detectRamdiskFormat(info.ramdisk, fmt);
         QByteArray ramdiskRaw;
         QString ramdiskErr;
         if (!patcher::decompressRamdisk(info.ramdisk, ramdiskRaw, &ramdiskErr))
@@ -296,9 +329,15 @@ bool ModuleInstaller::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         const bool ksuFramework =
             cpio.exists(QStringLiteral("init.real")) && cpio.exists(QStringLiteral("kernelsu.ko"));
         if (!magiskFramework && !ksuFramework)
-            return fail(QStringLiteral("镜像未含 Magisk/KernelSU 模块框架标记（.backup / "
-                                       "init.real+kernelsu.ko）：模块运行时依赖设备上的 "
-                                       "magiskd/ksud，请先修补 boot 镜像或在已 root 设备上安装"));
+            // 文案注明门禁识别范围（审查 Minor）：仅 Magisk 与 KernelSU LKM
+            // 形态有 ramdisk 标记；GKI 内核 / APatch 修补镜像无此标记，应省略
+            // 镜像输入直接走已 root 设备安装路径（模块运行时依赖设备上的
+            // magiskd/ksud，ramdisk 标记缺失不等同于设备未 root）
+            return fail(QStringLiteral("镜像未含可识别的 Magisk/KernelSU 模块框架标记"
+                                       "（.backup / init.real+kernelsu.ko）：本门禁仅识别"
+                                       " Magisk 与 KernelSU LKM 形态；GKI 内核/APatch 修补"
+                                       " 镜像无 ramdisk 标记，请省略该镜像输入，直接走已 "
+                                       "root 设备安装路径"));
     }
 
     // ---- 重打包干净模块 zip（module.prop 规范化 + 文件树，剔除 META-INF）----

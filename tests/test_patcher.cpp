@@ -537,6 +537,9 @@ private slots:
     void moduleInvalidBootFails();
     void moduleNullErrorNoCrash();
     void modulePatchFileRejectsModuleType();
+    void moduleOversizeZipFails();
+    void moduleTraversalEntryFails();
+    void zipPrefixPreferExact();
 };
 
 void TestPatcher::factoryCreate()
@@ -2980,6 +2983,77 @@ void TestPatcher::modulePatchFileRejectsModuleType()
     QVERIFY(err.contains("ModuleInstaller"));
     QVERIFY(outPath.isEmpty());
     QVERIFY(!QFile::exists(bootPath + ".orig.bak")); // 不落任何产物
+}
+
+void TestPatcher::moduleOversizeZipFails()
+{
+    // 审查 Important：readAll 整读前按文件大小拒绝（1GB+ 稀疏文件，内容无关，
+    // 验证不会尝试分配）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/module.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    QVERIFY(f.resize(1024ll * 1024 * 1024 + 1)); // 稀疏文件，即时完成
+    f.close();
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("大小上限"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::moduleTraversalEntryFails()
+{
+    // 审查 Minor（纵深防御）：'..' 路径段与前导 '/' 条目拒绝（防 UI 推送
+    // /data/adb/modules/<id>/ 时路径穿越）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(
+        dir.path(), buildZip({{"module.prop", kModuleProp, 0},
+                              {"../evil.sh", QByteArray("rm -rf /\n"), 0}}));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("非法"));
+    QVERIFY(out.isEmpty());
+
+    // 前导 '/' 同样拒绝（覆盖写同一文件）
+    QVERIFY(writeModuleZip(dir.path(),
+                           buildZip({{"module.prop", kModuleProp, 0},
+                                     {"/abs/path.sh", QByteArray("x\n"), 0}})) == zipPath);
+    patcher::PatchConfig cfg2 = cfg; // moduleZipPath 指向覆盖后的同一文件
+    QVERIFY(!p.patch(QByteArray(), cfg2, out, &err));
+    QVERIFY(err.contains("非法"));
+}
+
+void TestPatcher::zipPrefixPreferExact()
+{
+    // C8 吸收的 C7 Minor（apatch kpimg 精确名优先）：同 zip 同时含精确名与
+    // 前缀名时取精确名（与目录扫描 findInDirByPrefix 语义一致）
+    const QByteArray zip = buildZip({{"assets/kpimg-old", QByteArray("old"), 0},
+                                     {"assets/kpimg", QByteArray("exact"), 0},
+                                     {"assets/kpimg-extra", QByteArray("extra"), 0}});
+    QByteArray out;
+    QString err;
+    QVERIFY(patcher::extractZipEntryByPrefix(zip, QStringLiteral("assets/kpimg"), out, &err));
+    QCOMPARE(out, QByteArray("exact")); // 精确名优先（旧行为返回 "old"）
+
+    // 无精确名时回退前缀
+    const QByteArray zip2 = buildZip({{"assets/kpimg-abc", QByteArray("abc"), 0}});
+    QVERIFY(patcher::extractZipEntryByPrefix(zip2, QStringLiteral("assets/kpimg"), out, &err));
+    QCOMPARE(out, QByteArray("abc"));
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)

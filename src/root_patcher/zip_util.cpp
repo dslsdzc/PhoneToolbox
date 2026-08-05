@@ -192,6 +192,13 @@ bool extractZipEntryByPrefix(const QByteArray &zip, const QString &prefix, QByte
     QList<ZipEntry> entries;
     if (!loadZipEntries(zip, &entries, err))
         return false;
+    // 精确名优先，再前缀回退（C8 吸收的 C7 Minor：APatch kpimg 形态
+    // "assets/kpimg" 应优先于 "assets/kpimg-*"，与目录扫描 findInDirByPrefix
+    // 语义一致）
+    for (const auto &e : entries) {
+        if (e.name == prefix)
+            return extractEntryAt(zip, &e, out, err);
+    }
     for (const auto &e : entries) {
         if (e.name.startsWith(prefix))
             return extractEntryAt(zip, &e, out, err);
