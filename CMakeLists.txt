@@ -213,6 +213,10 @@ set_target_properties(image_engine PROPERTIES AUTOMOC ON)
 # 主程序链接 image_engine
 target_link_libraries(PhoneToolbox image_engine)
 
+# 主程序链接 root_patcher（D1 Minor 2 吸收：D4 修补接线需要 patcher::patchFile；
+# root_patcher PUBLIC 传递 image_engine，顺序无关）
+target_link_libraries(PhoneToolbox root_patcher)
+
 # ---- root_patcher 静态库 ----
 file(GLOB_RECURSE ROOT_PATCHER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.cpp")
 file(GLOB_RECURSE ROOT_PATCHER_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.h")
