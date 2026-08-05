@@ -108,6 +108,7 @@ private slots:
     void extractStreamReplaceMatchesOld(); // G2: 流式 == 旧接口（REPLACE 系 + ZERO + 回退映射）
     void extractStreamDiffMatchesOld();    // G2: 流式 == 旧接口（SOURCE_COPY + SOURCE_BSDIFF）
     void extractStreamErrors();            // G2: 流式失败语义 + 输出清理
+    void extractStreamAllocGuards();       // G2 审查: 超大声明分配上限防护 + 病态输入错误消息对齐
 };
 
 // 小端 64 位写入
@@ -924,6 +925,132 @@ void TestPayload::extractStreamErrors()
     err.clear();
     QVERIFY(!imgpayload::extractPartitionStream(payloadPath, info4.partitions[0], outPath, {}, &err, QString(), 0));
     QVERIFY(err.contains("block_size"));
+}
+
+void TestPayload::extractStreamAllocGuards()
+{
+    // 审查修复: 不可信输入不得崩溃 —— 稀疏文件可伪造逻辑大小骗过"越界"检查，超大声明
+    // 必须在上限处被拒（false + error）；病态输入的错误消息与旧接口对齐。
+    const quint64 bs = 4096;
+    const quint64 g4 = 4ull * 1024 * 1024 * 1024;
+    auto build = [&](const QByteArray &partBytes, const QByteArray &blobArea) {
+        QByteArray manifest = pbwire::encodeVarint(3, bs) + pbwire::encodeMessage(13, partBytes);
+        QByteArray payload;
+        payload.append("CrAU");
+        putU64(payload, 2);
+        putU64(payload, static_cast<quint64>(manifest.size()));
+        for (int i = 0; i < 4; ++i) payload.append(char(0));
+        payload.append(manifest);
+        payload.append(blobArea);
+        return payload;
+    };
+    // 写内容后用同一句柄稀疏扩展（QFile 的 WriteOnly 打开隐含截断，另开句柄会清空已写内容）
+    auto writeAndExtend = [](const QString &path, const QByteArray &content, qint64 logicalSize) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        if (f.write(content) != content.size())
+            return false;
+        return f.resize(logicalSize); // Linux 稀疏文件: 逻辑大、物理小
+    };
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString payloadPath = dir.filePath("payload.bin");
+    const QString outPath = dir.filePath("out.img");
+    const QString oldPath = dir.filePath("old.img");
+
+    // 1) 压缩系 op 声明 4GiB blob（文件稀疏扩展到 6GiB 通过越界检查）→ 分配上限拒绝，不崩溃
+    {
+        QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_REPLACE_BZ)
+                      + pbwire::encodeVarint(2, 0)
+                      + pbwire::encodeVarint(3, g4)
+                      + pbwire::encodeMessage(6, extentMsg(0, 1));
+        QByteArray part = pbwire::encodeBytes(1, QByteArray("system")) + pbwire::encodeMessage(8, op);
+        const QByteArray payload = build(part, QByteArray(16, '\xAB'));
+        QVERIFY(writeAndExtend(payloadPath, payload, 6LL * 1024 * 1024 * 1024));
+        imgpayload::PayloadInfo info;
+        QVERIFY(imgpayload::parseManifest(payload, info));
+        QString err;
+        QVERIFY(!imgpayload::extractPartitionStream(payloadPath, info.partitions[0], outPath, {}, &err));
+        QVERIFY(err.contains("上限"));
+        QVERIFY(!QFile::exists(outPath));
+    }
+
+    // 2) SOURCE_BSDIFF 旧片段声明 4GiB（旧镜像稀疏扩展到 6GiB）→ 分配上限拒绝，不崩溃
+    {
+        const QByteArray patch(64, '\x01');
+        QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_SOURCE_BSDIFF)
+                      + pbwire::encodeVarint(2, 0)
+                      + pbwire::encodeVarint(3, static_cast<quint64>(patch.size()))
+                      + pbwire::encodeMessage(4, extentMsg(0, 1024 * 1024)) // 4GiB 旧片段
+                      + pbwire::encodeMessage(6, extentMsg(0, 1024 * 1024))
+                      + pbwire::encodeBytes(8, QCryptographicHash::hash(patch, QCryptographicHash::Sha256));
+        QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+        const QByteArray payload = build(part, patch);
+        QVERIFY(writeAndExtend(payloadPath, payload, 6LL * 1024 * 1024 * 1024));
+        QVERIFY(writeAndExtend(oldPath, QByteArray(4096, '\x00'), 6LL * 1024 * 1024 * 1024));
+        imgpayload::PayloadInfo info;
+        QVERIFY(imgpayload::parseManifest(payload, info));
+        QString err;
+        QVERIFY(!imgpayload::extractPartitionStream(payloadPath, info.partitions[0], outPath, {}, &err,
+                                                    oldPath, bs));
+        QVERIFY(err.contains("过大")); // 旧片段分配上限（kMaxOpAlloc）
+        QVERIFY(!QFile::exists(outPath));
+    }
+
+    // 3) manifest_size 声明 4GiB（稀疏文件通过越界检查）→ parseManifestFile false，不崩溃
+    {
+        QByteArray head;
+        head.append("CrAU");
+        putU64(head, 2);
+        putU64(head, g4); // manifest_size = 4GiB
+        for (int i = 0; i < 4; ++i) head.append(char(0));
+        QVERIFY(writeAndExtend(payloadPath, head, 6LL * 1024 * 1024 * 1024));
+        imgpayload::PayloadInfo info;
+        QVERIFY(!imgpayload::parseManifestFile(payloadPath, info));
+    }
+
+    // 4) M1: 空 blob + hash 不匹配的 REPLACE → 与旧接口一致先报 "SHA-256 校验失败"
+    {
+        QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_REPLACE)
+                      + pbwire::encodeVarint(2, 0)
+                      + pbwire::encodeVarint(3, 0) // data_length = 0
+                      + pbwire::encodeMessage(6, extentMsg(0, 1))
+                      + pbwire::encodeBytes(8, QByteArray(32, '\x42'));
+        QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+        const QByteArray payload = build(part, {});
+        QVERIFY(writeFile(payloadPath, payload));
+        imgpayload::PayloadInfo info;
+        QVERIFY(imgpayload::parseManifest(payload, info));
+        QString oldErr;
+        QVERIFY(imgpayload::extractPartition(payload, info.partitions[0], QByteArray(), &oldErr, bs).isEmpty());
+        QString err;
+        QVERIFY(!imgpayload::extractPartitionStream(payloadPath, info.partitions[0], outPath, {}, &err));
+        QCOMPARE(err, oldErr); // 与旧接口同消息（SHA-256 校验失败）
+        QVERIFY(!QFile::exists(outPath));
+    }
+
+    // 5) M2: 病态块号（startBlock/numBlocks ≈ 2^51，合计超预算）→ 与旧接口一致报
+    //    "extent 超出输出/数据范围"（而非"extent 越界"）
+    {
+        const quint64 hugeBlock = (1ull << 51) + 1;
+        QByteArray op = pbwire::encodeVarint(1, imgpayload::OP_REPLACE)
+                      + pbwire::encodeVarint(2, 0)
+                      + pbwire::encodeVarint(3, static_cast<quint64>(bs))
+                      + pbwire::encodeMessage(6, extentMsg(hugeBlock, hugeBlock));
+        QByteArray part = pbwire::encodeBytes(1, QByteArray("boot")) + pbwire::encodeMessage(8, op);
+        const QByteArray payload = build(part, QByteArray(static_cast<int>(bs), '\xAB'));
+        QVERIFY(writeFile(payloadPath, payload));
+        imgpayload::PayloadInfo info;
+        QVERIFY(imgpayload::parseManifest(payload, info));
+        QString oldErr;
+        QVERIFY(imgpayload::extractPartition(payload, info.partitions[0], QByteArray(), &oldErr, bs).isEmpty());
+        QString err;
+        QVERIFY(!imgpayload::extractPartitionStream(payloadPath, info.partitions[0], outPath, {}, &err));
+        QCOMPARE(err, oldErr); // 与旧接口同消息（extent 超出输出/数据范围）
+        QVERIFY(!QFile::exists(outPath));
+    }
 }
 
 // 双测试类（TestWire + TestPayload）共用主函数
