@@ -1,7 +1,7 @@
 # Maintainer: PhoneToolbox Developers
 
 pkgname=phonetoolbox
-pkgver=1.0.0
+pkgver=0.0.1
 pkgrel=1
 pkgdesc='Cross-platform phone toolbox for Android device management (ADB/Fastboot)'
 arch=(x86_64)

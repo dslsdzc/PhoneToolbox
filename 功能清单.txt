@@ -1,0 +1,238 @@
+PhoneToolbox - Android 设备多功能工具箱 v0.0.1-beta03
+================================================
+开源 / GPLv3 / Qt6 C++17 / 跨平台 (Linux + Windows)
+
+GitHub: https://github.com/DslsDZC/PhoneToolbox
+构建: cmake -B build && cmake --build build
+
+
+一、设备连接与检测
+--------------------
+[√] 六模式自动轮询检测: ADB / Fastboot / Fastbootd / EDL 9008 / MTK DA / Recovery
+[√] 设备信息采集: 型号 / Android 版本 / SDK / 安全补丁 / Bootloader 状态 / Root
+[√] CPU 信息 / 内存 / 电池 / WiFi MAC / IMEI / SELinux 状态
+[√] Fastboot 详细: product / variant / hardware / bootloader 版本 / 解锁状态
+[√] EDL USB 枚举 (Qualcomm / Sony / Sierra / Netgear / ZTE VID/PID)
+[√] ADB 自动获取: 系统 PATH → ANDROID_HOME → Google 官方下载
+
+
+二、刷机工具
+------------
+[√] Fastboot 单分区刷入 / 擦除 / 格式化
+[√] Fastboot 完整包更新 (fastboot update)
+[√] Fastboot 临时启动镜像 (fastboot boot)
+[√] ADB Sideload 刷机 (Recovery 模式)
+[√] ADB Root 刷入 (push + dd)
+[√] EDL Sahara 连接 + 加载 Programmer + Firehose 模式
+[√] EDL Firehose 分区读写
+[√] MTK DA 连接 / 分区读写 / 全分区备份
+[√] MTK Bootloader 解锁 / 回锁
+[√] Fastboot 解锁 / 回锁 (多策略适配各品牌)
+[√] FRP 清除: Fastboot / ADB Root / EDL / MTK 四模式
+[√] Fastboot 内存转储
+[√] 运行刷机脚本 (flash-all.sh/bat)
+[√] 分区列表获取: Fastboot / ADB / EDL Firehose / MTK 四通道
+[√] 死砖修复: 固件自动校验 → 分区文件权重匹配 → 稀疏镜像检测
+[√] 死砖修复: 镜像大小校验 → 按优先级排序写入 → 失败重试 → 进度保存/恢复
+
+
+三、系统工具 - 性能监控
+------------------------
+[√] CPU 每核实时频率折线图 (自动检测核心数)
+[√] GPU 实时频率折线图 (自动检测 GPU 类型: kgsl / Mali)
+[√] 温度实时监控 (自动选择最优 thermal zone)
+[√] 内存实时双线图 (RAM 使用率 + Swap)
+[√] CPU Governor 查看/修改
+[√] I/O 调度器设置
+[√] vm.swappiness 内存优化 (Performance / Standard / Powersave)
+[√] 监控截图保存为 PNG
+[√] 一键开始/暂停监控
+
+
+四、系统工具 - 界面定制
+------------------------
+[√] DPI 密度调整
+[√] 动画速度调整 (三个动画 scale)
+[√] 状态栏定制 (电池百分比 / 秒数 / 沉浸模式)
+[√] 导航栏定制 (三键/手势 / 高度 / 沉浸)
+[√] 开机动画替换 (推送 + 权限设置)
+[√] 字体替换指南
+
+
+五、系统工具 - 分区管理
+------------------------
+[√] 列出块设备 (/dev/block/by-name/)
+[√] Super 分区信息 (lpdump)
+[√] 挂载 System 为读写
+[√] 卸载分区
+
+
+六、系统工具 - 应用管理
+------------------------
+[√] 应用列表 (pm list packages)
+[√] 三方 / 系统应用筛选
+[√] 包名/标签实时搜索
+[√] 启动应用 (monkey)
+[√] 冻结 / 解冻应用
+[√] 卸载应用
+[√] 提取 APK
+
+
+七、系统工具 - 安全隐私
+------------------------
+[√] build.prop 在线编辑
+[√] 设备信息伪造指南
+[√] SELinux 强制 / 宽容切换
+[√] SafetyNet 绕过检测
+[√] 签名伪造支持检测
+
+
+八、系统工具 - 开发调试
+------------------------
+[√] Logcat (最近日志 / 错误日志 / 清除 / 持续输出)
+[√] Bugreport (生成并拉取)
+[√] Dumpsys (batterystats / meminfo / cpuinfo / diskstats / package / power / window)
+[√] Shizuku 服务状态检测
+[√] ROM 工具参考 (payload_dumper / simg2img / apktool)
+[√] 维修诊断: 打开工程模式 (12 品牌入口, 厂商自检模块)
+
+
+九、系统工具 - Xposed 增强
+---------------------------
+[√] LSPosed 安装状态检测
+[√] 启动 LSPosed Manager
+[√] Xposed 模块推荐
+
+
+十、漏洞扫描与利用
+------------------
+[√] 本地 JSON 漏洞库加载 (QFileDialog)
+[√] 设备自动匹配: 版本号 + 安全补丁日期 + SDK + 平台通配符
+[√] 风险评分 0-100 (颜色编码)
+[√] 三段式利用: 检测(detect) → 利用(exploit) → 验证(verify)
+[√] 批量扫描所有漏洞
+[√] 批量利用全部漏洞
+[√] 单条漏洞利用 (表格行级按钮)
+[√] 二进制 Payload 推送 (base64 解压 + 权限设置)
+[√] 状态追踪: 待检测 → 存在漏洞/不受影响 → 已利用/失败
+[√] JSON 持久化 (保存 / 加载)
+[√] 内置 10 个示例漏洞 (Dirty Pipe / Pixel 提权 / Mali GPU 等)
+
+
+十一、重启工具
+--------------
+[√] 重启至 System (ADB / Fastboot)
+[√] 重启至 Recovery (ADB / Fastboot)
+[√] 重启至 Bootloader (ADB / Fastboot)
+[√] 重启至 Fastbootd (ADB / Fastboot)
+[√] 重启至 EDL 9008 (ADB)
+[√] 关机 (ADB / Fastboot)
+
+
+十二、ROM 文件名解析
+--------------------
+[√] 自动识别 18+ ROM 类型: MIUI / LineageOS / PixelExperience / crDroid
+    HavocOS / DerpFest / EvolutionX / ArrowOS / AOSP / ParanoidAndroid
+    dotOS / ProjectElixir / OctaviOS / SparkOS / ColtOS / BlissROM
+    Xiaomi / OxygenOS / Samsung OneUI
+[√] 设备型号 CSV 数据库匹配 (KHwang9883/MobileModels)
+[√] 多格式解包: .zip / .tar.md5 / .tar.gz / .tgz / .gz / .tar / .br / .img
+
+
+十三、镜像处理工具 (镜像工具面板)
+---------------------------------
+[√] 全面板拖放识别 (27 种格式, 魔数嗅探 + 扩展名兜底)
+[√] 格式信息卡: 格式类型 / 分区列表 / 元数据展示
+[√] 动作按钮按格式动态启用 (解包 / 转换 / 打包 / 修补 / 浏览)
+[√] 后台线程执行 (worker 线程, UI 不卡顿) + 进度条 + 彩色日志
+
+--- 解包 (15 种格式真实实现) ---
+[√] payload.bin 解包 (含增量 OTA diff: bspatch / SOURCE_COPY, 手写 protobuf)
+[√] sparse 镜像 simg2img (RAW / FILL / DONTCARE, >2GB 防护)
+[√] boot / init_boot 解包 (header v0-v4 + ramdisk 压缩识别)
+[√] tar / 三星 tar.md5 解包 (Odin MD5 校验)
+[√] super 动态分区拆分 (lp metadata 解析, 逻辑分区提取)
+[√] system.new.dat 系 (transfer.list + .dat 应用)
+[√] LG KDZ / DZ 容器解包 (eMMC 偏移 chunk 合并)
+[√] 华为 update.app 解包 (512B 头 + 64B 文件表, UTF-16LE/ASCII 双变体)
+[√] 华为 update.bin 解包 (HarmonyOS 5 L2 分区表)
+[√] 索尼 SIN v3 解包 (ADDR / LZ4A 块, 真实布局三源核实)
+[√] SPD .pac 固件解包 (旧格式 / BP_R1.0.0·R2.0.1 新格式双识别)
+[√] TWRP .win 备份解包 (v1 + 分段合并)
+[√] GPT 整盘分区提取
+[√] EROFS 文件系统提取 (目录遍历 / flat 文件, mkfs.erofs 真镜像验证)
+[√] ext4 文件系统提取 (extent tree / inline data / 符号链接, mke2fs 真镜像验证)
+
+--- 转换 / 打包 ---
+[√] sparse ↔ raw 双向转换 (img2simg / simg2img)
+[√] .img 集合打包 tar / tar.md5 (Odin 兼容)
+[√] raw → sparse 打包 (FILL 合并 + 非对齐 pad)
+[√] 压缩流解压 (zstd / lz4 / xz / gzip / brotli / bzip2, 截断/恶意输入防护)
+
+--- 文件系统浏览 ---
+[√] EROFS / ext4 目录树浏览
+[√] 文件提取 (双击外部打开 / 另存)
+[√] ext4 文件替换 + 保存修改镜像 (metadata_csum 拒绝标注)
+
+--- 签名材料 ---
+[√] 厂商签名材料不内置, 支持配置导入 + 外部仓库运行时获取
+
+
+十四、Root 修补 (全方案覆盖)
+----------------------------
+[√] 修补前自动备份原镜像 (.orig.bak) + 产物命名 _patched.img
+[√] 注入物运行时下载 (官方渠道, 版本缓存, 失败可手动指定本地文件)
+
+--- Magisk 系 (3 入口, boot ramdisk 注入) ---
+[√] Magisk 官方 (magiskinit 注入 + .backup/init 链, 真实 APK 端到端验证)
+[√] Magisk Alpha (vvb2060 分支)
+[√] Kitsune Magisk (无官方源, 手动 APK 兜底)
+
+--- KernelSU 系 (4 入口, LKM init_boot 注入) ---
+[√] KernelSU 官方 (ksuinit + kernelsu.ko, KMI 自动匹配)
+[√] KernelSU-Next (4.4-6.6 内核支持)
+[√] SukiSU-Ultra (SUSFS 隐藏, KPM)
+[√] ReSukiSU (多管理器)
+[√] 非 GKI 内核: AnyKernel3 内核替换路径 (Image 替换 kernel 段)
+[√] KMI 未知时拒绝静默选取 (提示手动指定)
+
+--- APatch / KernelPatch ---
+[√] APatch 内核段注入 (kpimg KP1158, 官方 kptools 自研编排)
+[√] KernelPatch 独立使用
+[√] 宿主架构门禁 (APK 内 arm64 二进制仅测试钩子放行)
+
+--- 老设备 / 模块 ---
+[√] SuperSU 老设备 ramdisk 注入 (init.superuser.rc, 真实包验证)
+[√] 模块框架安装 (Zygisk / LSPosed 类: 校验 + 规范化 + /data 路径, 激活需对应 App)
+
+
+十五、UI 框架
+-------------
+[√] 暗色主题 (Catppuccin Mocha 风格)
+[√] 设备列表 (序列号 + 型号 + 模式标签)
+[√] 实时折线图 (多系列 / 渐变填充 / 自动缩放)
+[√] 拖拽加载 ROM 文件 (自动切换到刷机面板)
+[√] 颜色编码日志输出 (绿/红/橙/灰)
+[√] 五工具切换: 设备信息 / 刷机 / 系统工具 / 漏洞扫描 / 镜像工具
+[√] 支持复制日志文本
+
+
+十六、第三方依赖
+----------------
+[√] Qt 6 (LGPL v3) - UI 框架
+[√] libusb-1.0 (LGPL v2.1) - USB 通讯
+[√] bkerler/edl (GPL v3) - EDL Sahara/Firehose 协议 (参照自研)
+[√] bkerler/mtkclient (GPL v3) - MTK DA/BROM 协议 (参照自研)
+[√] KHwang9883/MobileModels-csv (CC BY-NC-SA 4.0) - 设备型号数据库
+[√] Google platform-tools (Apache 2.0) - ADB / Fastboot
+[√] zstd / lz4 / bzip2 / xz / brotli (压缩算法, 镜像处理)
+
+
+规划中 (计划 F, 全自研)
+------------------------
+[ ] MTK BROM 直刷 (旧平台免 DA + V6 新平台 preloader + payload 绕过)
+[ ] 华为 HDB/HiSuite 刷机通道
+[ ] OPPO/一加/realme EDL 刷机链 (OFP/OPS 解密 + Sahara/Firehose 自研)
+[ ] 展锐 ResearchDownload 刷写通道
+[ ] 三星 Heimdall 集成 (Odin 协议开源实现)
+[ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)

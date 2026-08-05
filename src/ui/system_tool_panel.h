@@ -63,6 +63,7 @@ private slots:
     // 7. 开发调试
     void onLogcat();            void onDumpsys();
     void onShizukuStatus();     void onTakeBugreport();
+    void onOpenEngineerMode();
 
 private:
     void setupUI();
@@ -119,6 +120,7 @@ private:
     QLabel *m_selinuxLabel, *m_buildPropStatus;
     // 7. 开发调试
     QLabel *m_shizukuStatus;
+    QLabel *m_engModeStatus = nullptr;
 
     DeviceInfo m_deviceInfo;
     QProcess *m_asyncProc = nullptr;
