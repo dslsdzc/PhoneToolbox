@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 补齐维修行业刷机协议覆盖（2026-08-05 用户指定前两个方向）：① MTK BROM 直刷模式接入（含 V6 新平台 preloader 模式与 payload 绕过）；② 华为刷机通道接入（HDB/HiSuite）。后续可扩展：三星 Heimdall（Odin 协议开源实现，已调研）、维修工具 DLL 解析等。
+**Goal:** 补齐维修行业刷机协议覆盖（2026-08-05 探索增强为四项）：① MTK BROM 直刷（含 V6 新平台 preloader 与 payload 绕过）；② 华为 HDB/HiSuite 通道；③ **OPPO/一加/realme EDL 刷机链（OFP/OPS 解密 + Firehose 刷入，2026-08-05 探索发现 OplusEdlTool v2 + oppo_decrypt）**；④ **展锐 ResearchDownload 刷写通道（pac 解包已有、刷写缺失）**。后续候选：三星 Heimdall（Odin 协议开源实现，已调研）、维修工具 DLL 解析、工作站化。
 
-**Architecture:** 沿用 `mtk_handler` 的 mtk_bridge 子进程 JSON-RPC 桥接模式（mtkclient 封装）：扩展 mtk_bridge 暴露 BROM 模式命令（`--preloader` 直刷/分区读写/printgpt/payload）。华为通道复用 `assets_downloader`/`SignConfig` 模式（签名材料不内置，运行时获取/手动导入）。
+**Architecture:** 沿用 `mtk_handler` 的 mtk_bridge 子进程 JSON-RPC 桥接模式（mtkclient 封装）：扩展 mtk_bridge 暴露 BROM 模式命令（`--preloader` 直刷/分区读写/printgpt/payload）。华为通道复用 `assets_downloader`/`SignConfig` 模式（签名材料不内置，运行时获取/手动导入）。OPPO 链复用现有 edl 子模块（Sahara/Firehose）+ 外部工具编排（oppo_decrypt 解密 OFP/OPS → 提取镜像 → EDL 刷入）。展锐刷写以社区工具（SPD ResearchDownload 生态）为参考，复用 pac 解包（计划 B）产物。
 
 **Tech Stack:** C++17, Qt6, 现有 mtk_bridge（Python，mtkclient 封装）、image_engine（签名材料接口 B6 已建）。
 
@@ -52,9 +52,33 @@
 
 ---
 
+### Task F3: OPPO/一加/realme EDL 刷机链（2026-08-05 探索新增）
+
+**背景**：2026-08-05 搜索确认 [OplusEdlTool v2](https://github.com/salokrwhite/OplusEdlTool)（OPPO 系完整 EDL 刷机：OFP/OPS 加密包 + devprg Firehose + super 自动合并）+ [bkerler/oppo_decrypt](https://github.com/bkerler/oppo_decrypt)（ofp QC/MTK 解密 + ops 加解密，spec 候选源已列）。
+
+**实现**：
+- OFP/OPS 加密包解密（oppo_decrypt 编排，子进程模式如 kptools）→ 提取分区镜像（含 super 拆分，复用计划 B imgsuper）
+- EDL 刷入：复用现有 edl 子模块（Sahara/Firehose），devprg*.mbn 加载 → 分区写入
+- **诚实边界**：新机型写保护收紧（开端口只能读不能写）、HSM/AVB 2.0/eFUSE（标注）；`backdoor.py`（MsmDownloadTool readback）能力评估后定
+- **验证**：解密链路单测（构造 ofp 样本） + EDL 命令编排冒烟（若设备可用）
+
+---
+
+### Task F4: 展锐 ResearchDownload 刷写通道（2026-08-05 探索新增）
+
+**背景**：计划 B 已支持 pac 解包（双格式识别）；刷写通道缺失。展锐 ResearchDownload（SPD 刷机工具生态）是最后缺口。
+
+**实现**：
+- 刷写协议接入：以社区工具/逆向资料为参考（不可信原则，实现时联网核实 ResearchDownload 协议细节）
+- 复用 pac 解包产物 → 分区匹配 → ResearchDownload 刷写
+- **诚实边界**：展锐生态工具多为闭源（SPD Research Tool 等），公开协议资料有限 —— 若协议细节不可得，标注"仅解包 + 引导用户使用官方工具"，不假装支持
+
+---
+
 ## Self-Review 记录
 
-- **Spec 覆盖**：spec"维修行业三通道"中通道②（协议级开源实现）的 MTK BROM 补全 + 通道③（售后/工程工具）的华为 HDB —— 与 spec 已列方向一致。
-- **不可信原则**：F1 已探索确认（mtkclient 现状）；F2 HDB 协议细节实现时联网核实（不可信原则强制）。
-- **依赖顺序**：F1 依赖现有 mtk_handler/mtk_bridge；F2 依赖 B5/B6（update.app/SignConfig）；两者独立可并行。
-- **后续候选**（本计划范围外，另立）：三星 Heimdall 集成、维修工具 DLL 解析（用户方案）、工作站化（QDockWidget 布局）。
+- **Spec 覆盖**：spec"维修行业三通道"中通道②（协议级开源实现）的 MTK BROM 补全 + OPPO EDL 链 + 展锐刷写；通道③（售后/工程工具）的华为 HDB —— 2026-08-05 探索后计划 F 扩为四项。
+- **不可信原则**：F1 已探索确认（mtkclient 现状）；F2 HDB / F4 展锐协议细节实现时联网核实（强制）；F3 参考仓库已确认存在。
+- **诚实边界**：2026-08-05 搜索确认的行业趋势（新机型写保护收紧、HSM/AVB 2.0/eFUSE 熔断）—— 各任务如实标注，不假装支持受限设备。
+- **依赖顺序**：F1 依赖 mtk_handler/mtk_bridge；F2 依赖 B5/B6；F3 依赖 edl 子模块 + oppo_decrypt 编排 + B 计划 imgsuper；F4 依赖 B 计划 pac；四者独立可并行。
+- **后续候选**（本计划范围外，另立）：三星 Heimdall 集成、维修工具 DLL 解析（用户方案）、工作站化（QDockWidget 布局，用户已定不加菜单栏）。
