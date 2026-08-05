@@ -122,6 +122,11 @@ bool patchFile(const QString &bootPath, const PatchConfig &cfg,
         return fail(error, patchErr);
     }
 
+    // 防御：patcher 返回 true 但产物为空（异常实现/极端输入）→ 拒绝交付，
+    // 不写备份不留产物（与"失败不落产物"契约一致）
+    if (patched.isEmpty())
+        return fail(error, QStringLiteral("修补产物为空，拒绝交付（patcher 实现异常）"));
+
     // 成功：先备份原镜像（失败不留任何产物），再写修补产物
     if (!writeFile(backupPath, boot, error))
         return false;

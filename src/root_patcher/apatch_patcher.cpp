@@ -1,112 +1,14 @@
 #include "root_patcher/apatch_patcher.h"
+#include "root_patcher/zip_util.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QList>
 #include <QProcess>
 #include <QTemporaryDir>
 
-#include <zlib.h>
-
-#include <cstdio>
-#include <cstring>
-
 namespace patcher {
 namespace {
-
-// ============================================================
-// 最小 ZIP 读取（PKWARE 规范；与 magisk_patcher.cpp / kernelsu_patcher.cpp
-// 内实现同源 —— C5 按任务文件清单保持 apatch_patcher 自包含，C7 宜合并为
-// 共享工具）
-// ============================================================
-
-quint16 le16(const QByteArray &d, int pos)
-{
-    return static_cast<quint16>(static_cast<uchar>(d[pos])) |
-           (static_cast<quint16>(static_cast<uchar>(d[pos + 1])) << 8);
-}
-
-quint32 le32(const QByteArray &d, int pos)
-{
-    return static_cast<quint32>(static_cast<uchar>(d[pos])) |
-           (static_cast<quint32>(static_cast<uchar>(d[pos + 1])) << 8) |
-           (static_cast<quint32>(static_cast<uchar>(d[pos + 2])) << 16) |
-           (static_cast<quint32>(static_cast<uchar>(d[pos + 3])) << 24);
-}
-
-struct ZipEntry {
-    QString name;
-    quint16 method = 0; // 0=store 8=deflate
-    quint32 compSize = 0;
-    quint32 uncompSize = 0;
-    quint32 localOff = 0;
-};
-
-bool findEocd(const QByteArray &zip, quint16 *entryCount, quint32 *cdSize, quint32 *cdOffset)
-{
-    if (zip.size() < 22)
-        return false;
-    const int scan = qMin(zip.size(), 65536 + 22);
-    for (int i = zip.size() - 22; i >= zip.size() - scan; --i) {
-        if (i < 0)
-            break;
-        if (le32(zip, i) == 0x06054b50u) {
-            const quint16 commentLen = le16(zip, i + 20);
-            if (i + 22 + commentLen == zip.size()) {
-                *entryCount = le16(zip, i + 10);
-                *cdSize = le32(zip, i + 12);
-                *cdOffset = le32(zip, i + 16);
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool loadZipEntries(const QByteArray &zip, QList<ZipEntry> *out, QString *err)
-{
-    auto fail = [err](const QString &msg) {
-        if (err)
-            *err = msg;
-        return false;
-    };
-    quint16 count;
-    quint32 cdSize, cdOffset;
-    if (!findEocd(zip, &count, &cdSize, &cdOffset))
-        return fail(QStringLiteral("ZIP: 未找到 EOCD 记录"));
-    if (count == 0xFFFF || cdSize == 0xFFFFFFFFu || cdOffset == 0xFFFFFFFFu)
-        return fail(QStringLiteral("ZIP: zip64 归档暂不支持"));
-    if (static_cast<quint64>(cdOffset) + cdSize > static_cast<quint64>(zip.size()))
-        return fail(QStringLiteral("ZIP: 中央目录越界"));
-    qint64 pos = cdOffset;
-    for (int i = 0; i < count; ++i) {
-        if (pos + 46 > zip.size() || le32(zip, static_cast<int>(pos)) != 0x02014b50u)
-            return fail(QStringLiteral("ZIP: 中央目录损坏"));
-        const quint16 nameLen = le16(zip, static_cast<int>(pos) + 28);
-        const quint16 extraLen = le16(zip, static_cast<int>(pos) + 30);
-        const quint16 commentLen = le16(zip, static_cast<int>(pos) + 32);
-        const qint64 entryEnd = pos + 46 + nameLen + extraLen + commentLen;
-        if (entryEnd > zip.size())
-            return fail(QStringLiteral("ZIP: 中央目录条目越界"));
-        ZipEntry e;
-        e.name = QString::fromUtf8(zip.constData() + static_cast<int>(pos) + 46, nameLen);
-        e.method = le16(zip, static_cast<int>(pos) + 10);
-        e.compSize = le32(zip, static_cast<int>(pos) + 20);
-        e.uncompSize = le32(zip, static_cast<int>(pos) + 24);
-        e.localOff = le32(zip, static_cast<int>(pos) + 42);
-        out->append(e);
-        pos = entryEnd;
-    }
-    return true;
-}
-
-bool isZip(const QByteArray &data)
-{
-    return data.size() >= 4 && static_cast<uchar>(data[0]) == 'P' &&
-           static_cast<uchar>(data[1]) == 'K' && static_cast<uchar>(data[2]) == 0x03 &&
-           static_cast<uchar>(data[3]) == 0x04;
-}
 
 // 读文件（目录/空文件/不可读一律失败，写 err）。
 bool readFile(const QString &path, QByteArray *data, QString *err)
@@ -143,71 +45,6 @@ bool writeFile(const QString &path, const QByteArray &data, QString *err)
     }
     f.close();
     return true;
-}
-
-// 从 APK 提取指定条目（含名称前缀匹配的宽松形态，如 assets/kpimg）。
-bool extractZipEntryNames(const QByteArray &zip, const QString &entryName,
-                          const QString &fallbackPrefix, QByteArray &out, QString *err)
-{
-    auto fail = [err](const QString &msg) {
-        if (err)
-            *err = msg;
-        return false;
-    };
-    QList<ZipEntry> entries;
-    if (!loadZipEntries(zip, &entries, err))
-        return false;
-    const ZipEntry *found = nullptr;
-    for (const auto &e : entries) {
-        if (e.name == entryName) {
-            found = &e;
-            break;
-        }
-    }
-    if (!found && !fallbackPrefix.isEmpty()) {
-        for (const auto &e : entries) {
-            if (e.name.startsWith(fallbackPrefix)) {
-                found = &e;
-                break;
-            }
-        }
-    }
-    if (!found)
-        return fail(QStringLiteral("ZIP: 未找到条目 %1").arg(entryName));
-    if (static_cast<quint64>(found->localOff) + 30 > static_cast<quint64>(zip.size()) ||
-        le32(zip, static_cast<int>(found->localOff)) != 0x04034b50u)
-        return fail(QStringLiteral("ZIP: 本地文件头损坏"));
-    const quint16 lhNameLen = le16(zip, static_cast<int>(found->localOff) + 26);
-    const quint16 lhExtraLen = le16(zip, static_cast<int>(found->localOff) + 28);
-    const qint64 dataOff = static_cast<qint64>(found->localOff) + 30 + lhNameLen + lhExtraLen;
-    if (dataOff + found->compSize > zip.size())
-        return fail(QStringLiteral("ZIP: 条目数据越界"));
-    const QByteArray comp = zip.mid(static_cast<int>(dataOff), static_cast<int>(found->compSize));
-    if (found->method == 0) {
-        out = comp;
-        return true;
-    }
-    if (found->method == 8) {
-        if (found->uncompSize > 64u * 1024 * 1024)
-            return fail(QStringLiteral("ZIP: 条目解压后过大"));
-        QByteArray buf(static_cast<int>(found->uncompSize), Qt::Uninitialized);
-        z_stream strm = {};
-        if (inflateInit2(&strm, -MAX_WBITS) != Z_OK)
-            return fail(QStringLiteral("ZIP: inflate 初始化失败"));
-        strm.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(comp.constData()));
-        strm.avail_in = static_cast<uInt>(comp.size());
-        strm.next_out = reinterpret_cast<Bytef *>(buf.data());
-        strm.avail_out = static_cast<uInt>(buf.size());
-        const int rc = inflate(&strm, Z_FINISH);
-        const bool streamOk = (rc == Z_STREAM_END);
-        const int produced = static_cast<int>(buf.size()) - static_cast<int>(strm.avail_out);
-        inflateEnd(&strm);
-        if (!streamOk)
-            return fail(QStringLiteral("ZIP: DEFLATE 解压失败"));
-        out = buf.left(produced);
-        return true;
-    }
-    return fail(QStringLiteral("ZIP: 不支持的压缩方法 %1").arg(found->method));
 }
 
 // 运行 kptools 子进程。cwd 为工作目录，args 为参数；timeoutMs 超时即杀。
@@ -324,7 +161,7 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         bool found = false;
         for (const auto &abi : abiChain) {
             const QString entry = QStringLiteral("lib/%1/libkptools.so").arg(abi);
-            if (extractZipEntryNames(apk, entry, QString(), kptoolsData, &sErr)) {
+            if (extractZipEntry(apk, entry, kptoolsData, &sErr)) {
                 found = true;
                 break;
             }
@@ -333,8 +170,8 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             return fail(QStringLiteral("APK 内未找到 libkptools.so（%1）：%2")
                             .arg(cfg.apkPath, sErr));
         // assets/kpimg 或 assets 下 kpimg* 前缀
-        if (!extractZipEntryNames(apk, QStringLiteral("assets/kpimg"),
-                                  QStringLiteral("assets/kpimg"), kpimgData, &sErr))
+        if (!extractZipEntryByPrefix(apk, QStringLiteral("assets/kpimg"), kpimgData,
+                                    &sErr))
             return fail(QStringLiteral("APK 内未找到 kpimg（%1）：%2")
                             .arg(cfg.apkPath, sErr));
     } else {

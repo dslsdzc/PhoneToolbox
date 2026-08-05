@@ -5,6 +5,7 @@
 #include "root_patcher/magisk_patcher.h"
 #include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/apatch_patcher.h"
+#include "root_patcher/ramdisk_su_patcher.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "image_engine/boot_image.h"
 
@@ -349,6 +350,29 @@ QByteArray buildApatchBoot(const QByteArray &kernelMark = QByteArray())
     return buildBootV0(buildCpio({}), kernel, QByteArray("androidboot.test=1"));
 }
 
+// ---- C7 测试工具：SuperSU 式刷入包（update-binary + su + Superuser.apk）----
+// 结构对齐真实产物（联网验证 SuperSU-v2.82-SR5 zip）：su 按 ABI 目录存放
+//（arm64/su、arm/su、armv7/su、x86/su、x64/su、mips/su、mips64/su），
+// META-INF/com/google/android/update-binary 为安装脚本。
+QByteArray buildSupersuZip(const QByteArray &suBytes, int suMethod = 0)
+{
+    return buildZip({{"META-INF/com/google/android/update-binary", "#!/sbin/sh\n", 0},
+                     {"arm64/su", suBytes, suMethod},
+                     {"common/Superuser.apk", QByteArray("mock-superuser-apk"), 0}});
+}
+
+// 写 SuperSU zip 到临时目录，返回路径（空表示失败）。
+QString writeSupersuZip(const QString &dirPath, const QByteArray &suBytes, int suMethod = 0)
+{
+    const QString path = dirPath + "/UPDATE-SuperSU.zip";
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return QString();
+    f.write(buildSupersuZip(suBytes, suMethod));
+    f.close();
+    return path;
+}
+
 } // namespace
 
 class TestPatcher : public QObject
@@ -418,6 +442,25 @@ private slots:
     void patchFileUnimplementedTypeFails();
     void patchFileFactoryDispatchKernelSu();
     void patchFileNullArgsNoCrash();
+
+    // ---- C7: SuperSU 老设备 ramdisk 注入 ----
+    void suInjectHappyPath();
+    void suInjectGzipRamdisk();
+    void suInjectFallsBackAbi();
+    void suInjectDeflatedSu();
+    void suMissingZipFails();
+    void suNonexistentZipFails();
+    void suZipNotZipFails();
+    void suZipWithoutSuFails();
+    void suNotElfFails();
+    void suInvalidBootFails();
+    void suNoRamdiskFails();
+    void suNoInitRcFails();
+    void suRepatchFails();
+    void suMagiskPatchedFails();
+    void suNullErrorNoCrash();
+    void suPatchFileHappyPath();
+    void suPatchFileRollbackNoBackup();
 };
 
 void TestPatcher::factoryCreate()
@@ -437,11 +480,22 @@ void TestPatcher::factoryCreate()
         QVERIFY(dynamic_cast<patcher::KernelSuPatcher *>(p.get()));
     }
     // C5：APatch/KernelPatch 两入口映射到 APatchPatcher（详见
-    // apatchFactoryAndSources）；未实现类型返回 nullptr（不崩溃），
-    // 由后续任务 C6+ 扩展
-    for (patcher::RootType t : {patcher::RootType::RamdiskSu,
-                                patcher::RootType::ModuleInstall})
-        QVERIFY(patcher::RootPatcher::create(t) == nullptr);
+    // apatchFactoryAndSources）
+    for (patcher::RootType t : {patcher::RootType::APatch,
+                                patcher::RootType::KernelPatch}) {
+        std::unique_ptr<patcher::RootPatcher> p(patcher::RootPatcher::create(t));
+        QVERIFY2(p.get(), "create() 返回 nullptr");
+        QVERIFY(dynamic_cast<patcher::APatchPatcher *>(p.get()));
+    }
+    // C7：RamdiskSu 映射到 RamdiskSuPatcher；未实现类型返回 nullptr（不崩溃），
+    // 由 C8 模块框架在实现中扩展
+    {
+        std::unique_ptr<patcher::RootPatcher> p(patcher::RootPatcher::create(
+            patcher::RootType::RamdiskSu));
+        QVERIFY2(p.get(), "create() 返回 nullptr");
+        QVERIFY(dynamic_cast<patcher::RamdiskSuPatcher *>(p.get()));
+    }
+    QVERIFY(patcher::RootPatcher::create(patcher::RootType::ModuleInstall) == nullptr);
 }
 
 void TestPatcher::missingApkFails()
@@ -1885,7 +1939,7 @@ void TestPatcher::patchFileKitsuneMissingApkHintsManual()
 
 void TestPatcher::patchFileUnimplementedTypeFails()
 {
-    // 工厂 create() 返回 nullptr 的类型（RamdiskSu 未实现）→ 明确失败且不落产物
+    // 工厂 create() 返回 nullptr 的类型（ModuleInstall 未实现）→ 明确失败且不落产物
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString bootPath = dir.path() + "/boot.img";
@@ -1895,7 +1949,7 @@ void TestPatcher::patchFileUnimplementedTypeFails()
     bf.close();
 
     patcher::PatchConfig cfg;
-    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.type = patcher::RootType::ModuleInstall;
     QString outPath;
     QString err;
     QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
@@ -1975,8 +2029,505 @@ void TestPatcher::patchFileNullArgsNoCrash()
     QVERIFY(bf2.open(QIODevice::WriteOnly));
     bf2.write(buildBootV0(buildCpio({})));
     bf2.close();
-    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.type = patcher::RootType::ModuleInstall;
     QVERIFY(!patcher::patchFile(bootPath, cfg, nullptr, nullptr));
+}
+
+// ================= C7: SuperSU 老设备 ramdisk 注入 =================
+// 机制（联网验证 2026-08-05）：SuperSU 刷入包内 su 与 daemonsu 为同一
+// 文件（update-binary cp_perm 同一 $BIN/su 到 /system/xbin/su、
+// /system/bin/.ext/.su、/system/xbin/daemonsu）；boot 侧注入为 dkp 内核
+// 包 rd/ 目录同款做法 —— ramdisk 放入 init.superuser.rc（service daemonsu
+// /system/xbin/daemonsu --auto-daemon）+ init.rc 追加 import /init.superuser.rc。
+
+void TestPatcher::suInjectHappyPath()
+{
+    // 完整注入链：ZIP 提取 su → ramdisk 加入 sbin/su + init.superuser.rc
+    // → init.rc 追加 import。断言：sbin/su 内容与模式（0755）、
+    // init.superuser.rc 服务模板（0750）、init.rc import 行、原 init 不动。
+    const QByteArray suBytes("\x7f"
+                             "ELF" "fake-superuser-su-binary-0123456789");
+    const QByteArray initPayload("original init payload for supersu");
+    const QByteArray initRc("on boot\n    class_start core\n");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    const QByteArray ramdisk = buildCpio({{"init", kRegMode | 0750, initPayload},
+                                          {"init.rc", kRegMode | 0644, initRc}});
+    QVERIFY2(p.patch(buildBootV0(ramdisk), cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+
+    // sbin/su：提取的 su 二进制（0755 常规文件，early boot 可执行副本）
+    const TestCpioEntry *su = findEntry(entries, "sbin/su");
+    QVERIFY(su);
+    QCOMPARE(su->data, suBytes);
+    QCOMPARE(su->mode & 0170000, kRegMode);
+    QCOMPARE(su->mode & 0777, 0755u);
+
+    // init.superuser.rc：daemonsu 服务模板（dkp 内核 rd/ 同款，联网验证）
+    const TestCpioEntry *rc = findEntry(entries, "init.superuser.rc");
+    QVERIFY(rc);
+    QCOMPARE(rc->mode & 0170000, kRegMode);
+    QCOMPARE(rc->mode & 0777, 0750u); // sukernel --cpio-add 750 同款
+    QVERIFY(rc->data.contains("service daemonsu /system/xbin/daemonsu --auto-daemon"));
+    QVERIFY(rc->data.contains("class core"));
+    QVERIFY(rc->data.contains("user root"));
+    QVERIFY(rc->data.contains("oneshot"));
+
+    // init.rc：原内容保留 + 末尾追加 import 行（仅一行）
+    const TestCpioEntry *initRcE = findEntry(entries, "init.rc");
+    QVERIFY(initRcE);
+    QCOMPARE(initRcE->mode & 0170000, kRegMode);
+    QCOMPARE(initRcE->mode & 0777, 0644u); // 原模式保留
+    QVERIFY(initRcE->data.startsWith("on boot\n    class_start core\n"));
+    QVERIFY(initRcE->data.endsWith("import /init.superuser.rc\n"));
+    QCOMPARE(initRcE->data.count("import /init.superuser.rc"), 1);
+
+    // 原 init 未被改动；注入条目恰好 3 个新条目（含 init.rc 替换）
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, initPayload);
+    QCOMPARE(entries.size(), 4);
+}
+
+void TestPatcher::suInjectGzipRamdisk()
+{
+    // gzip 压缩 ramdisk：重压保持原格式，注入内容一致
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-bytes-for-gzip-ramdisk");
+    const QByteArray cpio = buildCpio({{"init", kRegMode | 0750, "init-data"},
+                                       {"init.rc", kRegMode | 0644, "on boot\n"}});
+    const QByteArray ramdiskComp = patcher::compressRamdisk(cpio, "gzip");
+    QVERIFY(!ramdiskComp.isEmpty());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(ramdiskComp), cfg, out, &err), qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QString outFmt;
+    QVERIFY(patcher::detectRamdiskFormat(info.ramdisk, outFmt));
+    QCOMPARE(outFmt, "gzip");
+    QByteArray raw;
+    QString rErr;
+    QVERIFY(patcher::decompressRamdisk(info.ramdisk, raw, &rErr));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(raw, &entries));
+    const TestCpioEntry *su = findEntry(entries, "sbin/su");
+    QVERIFY(su);
+    QCOMPARE(su->data, suBytes);
+    QVERIFY(findEntry(entries, "init.superuser.rc"));
+    const TestCpioEntry *rc = findEntry(entries, "init.rc");
+    QVERIFY(rc);
+    QVERIFY(rc->data.endsWith("import /init.superuser.rc\n"));
+}
+
+void TestPatcher::suInjectFallsBackAbi()
+{
+    // 无 arm64/su 时回退到 arm/su（真实 2.82 zip 各 ABI 目录形态）
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-bytes-from-arm-only-zip");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/UPDATE-SuperSU.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"arm/su", suBytes, 0},
+                      {"common/Superuser.apk", "mock apk", 0}}));
+    f.close();
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"},
+                                            {"init.rc", kRegMode | 0644, "on boot\n"}})),
+                     cfg, out, &err),
+             qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *su = findEntry(entries, "sbin/su");
+    QVERIFY(su);
+    QCOMPARE(su->data, suBytes);
+}
+
+void TestPatcher::suInjectDeflatedSu()
+{
+    // 真实 SuperSU zip 内条目为 DEFLATE（2.82 产物 arm64/su 10.4KB）
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-extracted-from-deflated-entry");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes, 8); // method=8
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"},
+                                            {"init.rc", kRegMode | 0644, "on boot\n"}})),
+                     cfg, out, &err),
+             qPrintable(err));
+
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(out, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *su = findEntry(entries, "sbin/su");
+    QVERIFY(su);
+    QCOMPARE(su->data, suBytes);
+}
+
+void TestPatcher::suMissingZipFails()
+{
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu; // suZipPath 未指定
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init.rc", kRegMode | 0644, "on boot\n"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("suZipPath", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::suNonexistentZipFails()
+{
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = "/nonexistent/UPDATE-SuperSU.zip";
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init.rc", kRegMode | 0644, "on boot\n"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::suZipNotZipFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/fake.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("not a zip archive at all");
+    f.close();
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init.rc", kRegMode | 0644, "on boot\n"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("ZIP", Qt::CaseInsensitive));
+}
+
+void TestPatcher::suZipWithoutSuFails()
+{
+    // 合法 zip 但无 <abi>/su 条目（诚实边界：明确报错而非注入任意内容）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/UPDATE-SuperSU.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildZip({{"META-INF/com/google/android/update-binary", "#!/sbin/sh\n", 0},
+                      {"common/Superuser.apk", "mock apk", 0}}));
+    f.close();
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init.rc", kRegMode | 0644, "on boot\n"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("su", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::suNotElfFails()
+{
+    // 条目名符合 <abi>/su 但内容非 ELF：拒绝注入（防恶意/损坏包写入
+    // 不可执行文件冒充 su）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), QByteArray("plain text not an elf"));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init.rc", kRegMode | 0644, "on boot\n"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("ELF", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::suInvalidBootFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(
+        dir.path(), QByteArray("\x7f" "ELF" "su-bytes"));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray("not a boot image at all"), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("boot", Qt::CaseInsensitive));
+}
+
+void TestPatcher::suNoRamdiskFails()
+{
+    // SAR/ramdiskless：诚实边界 —— 明确错误 + 提示改用 Magisk
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(
+        dir.path(), QByteArray("\x7f" "ELF" "su-bytes"));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(QByteArray()), cfg, out, &err)); // 空 ramdisk
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("Magisk", Qt::CaseInsensitive));
+}
+
+void TestPatcher::suNoInitRcFails()
+{
+    // ramdisk 无 /init.rc（老设备 ramdisk 约定包含）：路径不符 → 明确错误
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(
+        dir.path(), QByteArray("\x7f" "ELF" "su-bytes"));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})), cfg,
+                     out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("init.rc", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::suRepatchFails()
+{
+    // 重复修补防护（sukernel --patch-test "Already patched, aborting" 同款）：
+    // 已含 init.superuser.rc 标记的镜像再次注入必须拒绝，防止 import 重复追加
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-for-repatch-guard");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray patched;
+    QString err;
+    const QByteArray ramdisk = buildCpio({{"init", kRegMode | 0750, "init"},
+                                          {"init.rc", kRegMode | 0644, "on boot\n"}});
+    QVERIFY2(p.patch(buildBootV0(ramdisk), cfg, patched, &err), qPrintable(err));
+    // 对已修补产物再次注入：必须失败并提示还原；失败时输出不得残留
+    QByteArray out2;
+    QString err2;
+    QVERIFY(!p.patch(patched, cfg, out2, &err2));
+    QVERIFY(!err2.isEmpty());
+    QVERIFY(err2.contains("还原", Qt::CaseInsensitive));
+    QVERIFY(out2.isEmpty());
+}
+
+void TestPatcher::suMagiskPatchedFails()
+{
+    // Magisk 修补产物（.backup 链）：init 已被 magiskinit 接管，叠加
+    // SuperSU import 会破坏 init 链 → 拒绝（与 C3/C4 防护一致）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(
+        dir.path(), QByteArray("\x7f" "ELF" "su-bytes"));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    const QByteArray ramdisk =
+        buildCpio({{".backup", kDirMode, QByteArray()},
+                   {"init", kRegMode | 0750, "magiskinit"},
+                   {"init.rc", kRegMode | 0644, "on boot\n"}});
+    QVERIFY(!p.patch(buildBootV0(ramdisk), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("Magisk", Qt::CaseInsensitive));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::suNullErrorNoCrash()
+{
+    // error=nullptr 契约（全局）：全部失败分支与成功路径均不得解引用 error
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-bytes");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+    const QByteArray goodBoot = buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"},
+                                                       {"init.rc", kRegMode | 0644, "on boot\n"}}));
+
+    patcher::RamdiskSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QByteArray out;
+
+    // 失败分支：缺注入物 / 非 zip / 非 boot / 无 ramdisk / 无 init.rc / 重复修补
+    patcher::PatchConfig noZip;
+    noZip.type = patcher::RootType::RamdiskSu;
+    QVERIFY(!p.patch(goodBoot, noZip, out, nullptr));
+    cfg.suZipPath = dir.path() + "/nonexistent.zip";
+    QVERIFY(!p.patch(goodBoot, cfg, out, nullptr));
+    cfg.suZipPath = zipPath;
+    QVERIFY(!p.patch(QByteArray("garbage, not boot"), cfg, out, nullptr));
+    QVERIFY(!p.patch(buildBootV0(QByteArray()), cfg, out, nullptr));
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"}})), cfg, out,
+                     nullptr));
+    // 成功路径同样不得崩溃
+    QVERIFY(p.patch(goodBoot, cfg, out, nullptr));
+}
+
+void TestPatcher::suPatchFileHappyPath()
+{
+    // patchFile 端到端：RamdiskSu 经工厂派发 → _patched.img + .orig.bak，
+    // 产物含 import 行（C6 入口复用）
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-for-patchfile-entry");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"},
+                                    {"init.rc", kRegMode | 0644, "on boot\n"}})));
+    bf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QString outPath;
+    QString err;
+    QVERIFY2(patcher::patchFile(bootPath, cfg, &outPath, &err), qPrintable(err));
+
+    const QString patchedPath = dir.path() + "/boot_patched.img";
+    QCOMPARE(outPath, patchedPath);
+    QVERIFY(QFile::exists(patchedPath));
+    QVERIFY(QFile::exists(bootPath + ".orig.bak"));
+
+    QFile pf(patchedPath);
+    QVERIFY(pf.open(QIODevice::ReadOnly));
+    const QByteArray patchedBytes = pf.readAll();
+    pf.close();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(patchedBytes, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    QVERIFY(findEntry(entries, "sbin/su"));
+    QVERIFY(findEntry(entries, "init.superuser.rc"));
+    const TestCpioEntry *rc = findEntry(entries, "init.rc");
+    QVERIFY(rc);
+    QVERIFY(rc->data.endsWith("import /init.superuser.rc\n"));
+}
+
+void TestPatcher::suPatchFileRollbackNoBackup()
+{
+    // C6 Minor 回滚分支测试：修补产物写失败（boot_patched.img 被同名目录
+    // 占用）→ patchFile 必须移除刚创建的 .orig.bak，保持
+    // "存在 .orig.bak ⟺ 存在产物" 不变式
+    const QByteArray suBytes("\x7f"
+                             "ELF" "su-for-rollback");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString zipPath = writeSupersuZip(dir.path(), suBytes);
+    QVERIFY(!zipPath.isEmpty());
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init"},
+                                    {"init.rc", kRegMode | 0644, "on boot\n"}})));
+    bf.close();
+    // 产物路径被目录占用：writeFile 打开失败（EISDIR）
+    QVERIFY(QDir().mkdir(dir.path() + "/boot_patched.img"));
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    cfg.suZipPath = zipPath;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(outPath.isEmpty());
+    QVERIFY(!QFile::exists(bootPath + ".orig.bak")); // 备份已回滚
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)
