@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QSysInfo>
 #include <QTemporaryDir>
 
 #include <functional>
@@ -148,6 +149,35 @@ int kptoolsRank(const QString &name)
 
 constexpr int kKptoolsTimeoutMs = 120000;
 
+// 宿主 CPU 架构。测试经 APATCH_HOST_ARCH 环境变量模拟非 arm64 宿主
+//（见 tests/test_patcher.cpp apatchApkHostArchGateFails / ScopedHostArch）；
+// 真实环境直接取 QSysInfo（x86_64/arm64/arm/riscv64...）。
+QString hostCpuArch()
+{
+    const QByteArray sim = qgetenv("APATCH_HOST_ARCH");
+    if (!sim.isEmpty())
+        return QString::fromLatin1(sim);
+    return QSysInfo::currentCpuArchitecture();
+}
+
+// APK 内 libkptools.so 为 Android 原生 ELF（APatch 官方 APK 实测仅
+// arm64-v8a），QProcess 直接 exec 要求宿主 OS+ABI 兼容 —— 仅 arm64 Linux
+// 宿主可执行（aarch64 ELF）；x86_64/macOS/Windows 宿主必然 "Exec format
+// error"（审查 Important）。返回当前宿主可执行的 ABI 回退链：arm64 Linux
+// 仅 arm64-v8a；armeabi-v7a（arm32，需 CONFIG_COMPAT + 32 位运行库）与
+// x86 系不可执行 → 自动跳过。空列表 = apkPath 路径不可用（须走 kpatchPath
+// 手动指定 KernelPatch release 的 kptools-linux）。
+QStringList executableApkKptoolsAbis()
+{
+#if defined(Q_OS_LINUX)
+    if (hostCpuArch() == QLatin1String("arm64"))
+        return {QStringLiteral("arm64-v8a")};
+#else
+    (void)hostCpuArch; // 非 Linux 宿主（macOS/Windows）恒无可用 ABI
+#endif
+    return {};
+}
+
 } // namespace
 
 // ============================================================
@@ -196,17 +226,22 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     QString kptoolsPathSrc, kpimgPathSrc;
     QString sErr;
     if (!cfg.apkPath.isEmpty()) {
+        // 宿主架构门禁（审查 Important）：APK 内 libkptools.so 为 Android
+        // arm64 ELF，QProcess 直接 exec 在非 arm64 Linux 宿主必然
+        // "Exec format error" —— 在任何 APK 读取/解包之前提前拒绝并指引
+        // kpatchPath 手动路径（错误文案对用户可操作）
+        const QStringList abiChain = executableApkKptoolsAbis();
+        if (abiChain.isEmpty())
+            return fail(QStringLiteral(
+                "APK 内 libkptools.so 为 arm64 Android 二进制，无法在本机运行："
+                "请下载 KernelPatch release 的 kptools-linux 并以 kpatchPath 指定"));
         QByteArray apk;
         if (!readFile(cfg.apkPath, &apk, &sErr))
             return fail(sErr);
         if (!isZip(apk))
             return fail(QStringLiteral("APK 文件不是 ZIP 归档：%1").arg(cfg.apkPath));
         // APatch 管理器 APK 提取（官方 App prepare() 同款；APatch_11219 实物
-        // 仅 arm64-v8a ABI，ABI 回退链兜底）
-        static const QStringList abiChain = {QStringLiteral("arm64-v8a"),
-                                             QStringLiteral("armeabi-v7a"),
-                                             QStringLiteral("x86_64"),
-                                             QStringLiteral("x86")};
+        // 仅 arm64-v8a ABI，回退链仅含宿主可执行 ABI —— 不可执行 ABI 自动跳过）
         bool found = false;
         for (const auto &abi : abiChain) {
             const QString entry = QStringLiteral("lib/%1/libkptools.so").arg(abi);

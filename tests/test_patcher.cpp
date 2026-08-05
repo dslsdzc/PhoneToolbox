@@ -432,6 +432,17 @@ QByteArray buildKsuPatchedRamdisk()
                       {"kernelsu.ko", kRegMode | 0755, "mock-kernelsu-ko"}});
 }
 
+// 模拟宿主 CPU 架构（审查 Important 的测试钩子）：APatch apkPath 路径在
+// 非 arm64 Linux 宿主被门禁拒绝 —— CI/开发宿主为 x86_64，apkPath 相关测试
+// 须以 arm64 模拟宿主运行；门禁本身由 apatchApkHostArchGateFails 用
+// x86_64 模拟覆盖。RAII 作用域结束后恢复。
+class ScopedHostArch
+{
+public:
+    explicit ScopedHostArch(const char *arch) { qputenv("APATCH_HOST_ARCH", arch); }
+    ~ScopedHostArch() { qunsetenv("APATCH_HOST_ARCH"); }
+};
+
 } // namespace
 
 class TestPatcher : public QObject
@@ -476,6 +487,7 @@ private slots:
 
     // ---- C5: APatch/KernelPatch 系 ----
     void apatchInjectFromApk();
+    void apatchApkHostArchGateFails();
     void apatchInjectFromManualDir();
     void apatchMissingSourceFails();
     void apatchBothSourcesFails();
@@ -1537,6 +1549,7 @@ void TestPatcher::apatchInjectFromApk()
     //      unpack boot.img → -i kernel -f → -p -i kernel.ori -k kpimg
     //      -o kernel → -l -i kernel → repack boot.img
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1563,6 +1576,61 @@ void TestPatcher::apatchInjectFromApk()
     QVERIFY(out.contains("-i kernel -f"));
     QVERIFY(out.contains("-p -i kernel.ori -k kpimg -o kernel"));
     QVERIFY(out.contains("-l -i kernel"));
+}
+
+void TestPatcher::apatchApkHostArchGateFails()
+{
+    // 审查 Important：APK 内 libkptools.so 为 Android arm64 ELF，QProcess
+    // 直接 exec 在非 arm64 Linux 宿主（x86_64/macOS/Windows）必然
+    // "Exec format error"。修复：宿主架构门禁 —— 非 arm64 Linux 在读取
+    // APK 之前提前拒绝，错误明确指引 kpatchPath 手动路径（修复前会执行到
+    // 子进程启动才失败，且错误为平台差异的 exec 失败）。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    {
+        ScopedHostArch x86Host("x86_64"); // 模拟非 arm64 宿主
+        QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+        QVERIFY(!err.isEmpty());
+        QVERIFY(err.contains("arm64", Qt::CaseInsensitive));
+        QVERIFY(err.contains("kpatchPath", Qt::CaseInsensitive));
+        QVERIFY(err.contains("kptools-linux"));
+        QVERIFY(out.isEmpty());
+    }
+    // KernelPatch 类型同样受门禁（同一注入物解析路径）
+    patcher::PatchConfig kpCfg = cfg;
+    kpCfg.type = patcher::RootType::KernelPatch;
+    err.clear();
+    {
+        ScopedHostArch x86Host("x86_64");
+        QVERIFY(!p.patch(buildApatchBoot(), kpCfg, out, &err));
+        QVERIFY(!err.isEmpty());
+    }
+    // 门禁错误不依赖 APK 内容（指向不存在路径同样报门禁而非文件错误）
+    // —— 门禁在任何 APK 读取之前
+    patcher::PatchConfig badApk = cfg;
+    badApk.apkPath = "/nonexistent/apatch.apk";
+    err.clear();
+    {
+        ScopedHostArch x86Host("x86_64");
+        QVERIFY(!p.patch(buildApatchBoot(), badApk, out, &err));
+        QVERIFY(err.contains("arm64", Qt::CaseInsensitive));
+    }
+    // 门禁放行路径（arm64 模拟）由 apatchInjectFromApk 等覆盖；此处再验证
+    // 真实宿主未设置模拟时（如 arm64 构建机）行为由 QSysInfo 决定 ——
+    // 无 env 时门禁按真实架构判定，不崩溃
+    QVERIFY(!p.patch(buildApatchBoot(), badApk, out, nullptr)); // nullptr 契约
 }
 
 void TestPatcher::apatchInjectFromManualDir()
@@ -1628,6 +1696,7 @@ void TestPatcher::apatchBothSourcesFails()
 void TestPatcher::apatchApkMissingEntryFails()
 {
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1649,6 +1718,7 @@ void TestPatcher::apatchApkMissingEntryFails()
 void TestPatcher::apatchApkNotZipFails()
 {
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1813,6 +1883,7 @@ void TestPatcher::apatchNoKallsymsFails()
     // CONFIG_KALLSYMS 门禁（官方 boot_patch.sh: kptools -i kernel -f |
     // grep CONFIG_KALLSYMS=y）：内核未启用 → 明确报错，不得继续
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1836,6 +1907,7 @@ void TestPatcher::apatchFlagFailFails()
     // kptools -f 自身失败（rc≠0，如内核解析异常）→ 门禁 rc≠0 分支：
     // 必须走"IKCONFIG 解析失败"错误路径而非继续
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1857,6 +1929,7 @@ void TestPatcher::apatchFlagFailFails()
 void TestPatcher::apatchUnpackFailFails()
 {
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1877,6 +1950,7 @@ void TestPatcher::apatchUnpackFailFails()
 void TestPatcher::apatchPatchFailFails()
 {
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1899,6 +1973,7 @@ void TestPatcher::apatchNotPatchedFails()
     // -p 成功但 -l 未检测到 patched=true（如 kpimg 无效被 kptools 拒绝
     // 或布局不符）→ 必须拒绝交付，不得把未成功修补的镜像当成功
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1919,6 +1994,7 @@ void TestPatcher::apatchNotPatchedFails()
 void TestPatcher::apatchRepackFailFails()
 {
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);
@@ -1941,6 +2017,7 @@ void TestPatcher::apatchNullErrorNoCrash()
     // error=nullptr 契约（审查修复回归护栏）：全部失败分支不得解引用 error。
     // 各开关内核触发对应失败分支，error 传 nullptr —— 仅断言不崩溃且返回 false。
     QTemporaryDir dir;
+    ScopedHostArch arm64Host("arm64"); // 模拟 arm64 Linux 宿主（门禁放行）
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
     QFile f(apkPath);

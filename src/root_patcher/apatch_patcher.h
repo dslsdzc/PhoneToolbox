@@ -31,8 +31,12 @@ namespace patcher {
 // 注入物来源（诚实边界，与官方 APatch 修补流程逐命令对齐）：
 //   a) cfg.apkPath —— APatch 管理器 APK（官方 release 单资产，联网验证
 //      APatch_11219 仅 arm64-v8a ABI）。按官方 App prepare() 同款提取：
-//      lib/<abi>/libkptools.so → kptools（ABI 回退链 arm64-v8a→armeabi-v7a
-//      →x86_64→x86 兜底）+ assets/kpimg → kpimg。
+//      lib/<abi>/libkptools.so → kptools（回退链仅含宿主可执行 ABI——
+//      arm64 Linux 宿主为 arm64-v8a，不可执行 ABI 自动跳过）+
+//      assets/kpimg → kpimg。
+//      **宿主架构门禁**：APK 内 libkptools.so 为 Android arm64 ELF，仅
+//      arm64 Linux 宿主可执行（QProcess exec）；x86_64/macOS/Windows 宿主
+//      提前拒绝并提示改用 kpatchPath 手动指定 kptools-linux。
 //   b) cfg.kpatchPath —— 用户手动提供的**目录**，须含 kptools* 与 kpimg*
 //      文件（KernelPatch release 预编译资产解包形态：kptools-linux/
 //      kptools-mac/kpimg-android 等，文件名前缀匹配）。多平台候选共存时按
