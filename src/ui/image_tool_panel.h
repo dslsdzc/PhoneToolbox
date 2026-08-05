@@ -14,8 +14,9 @@
 // D2 范围：面板骨架 + 拖放识别。整个面板 setAcceptDrops(true)：拖入文件即
 // 调 ImageWorker::runDetect（工作线程执行，UI 线程不阻塞）；detectFinished
 // 信号回来更新顶部信息卡（格式/详情）并按 detected.format 动态启用动作按钮。
-// 解包/打包/转换/修补按钮当前按 D1 契约投递到 worker，由 worker 返回
-// "尚未实现" 错误（D3/D4/D6 分别接线）。
+// D3：解包/转换已接线（解包弹目录选择框、转换弹目标类型菜单 + 输出文件框）；
+// 打包（D6）/修补（D4）按钮按 D1 契约投递到 worker，仍由 worker 返回
+// "尚未实现" 错误。
 class ImageToolPanel : public QWidget
 {
     Q_OBJECT

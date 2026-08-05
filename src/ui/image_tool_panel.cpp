@@ -11,6 +11,9 @@
 #include <QUrl>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QMenu>
+#include <QAction>
+#include <QPoint>
 
 namespace {
 
@@ -164,10 +167,10 @@ void ImageToolPanel::setupConnections()
 
 void ImageToolPanel::dragEnterEvent(QDragEnterEvent *event)
 {
-    // 接受带本地文件 URL 的拖入（至少 1 个本地路径）
+    // 接受带本地文件 URL 的拖入（至少 1 个本地路径；isLocalFile 规范判定）
     if (event->mimeData()->hasUrls()) {
         for (const QUrl &url : event->mimeData()->urls()) {
-            if (!url.toLocalFile().isEmpty()) {
+            if (url.isLocalFile()) {
                 event->acceptProposedAction();
                 return;
             }
@@ -184,6 +187,8 @@ void ImageToolPanel::dropEvent(QDropEvent *event)
     }
     // 取第一个本地文件路径
     for (const QUrl &url : event->mimeData()->urls()) {
+        if (!url.isLocalFile())
+            continue;
         const QString path = url.toLocalFile();
         if (!path.isEmpty()) {
             event->acceptProposedAction();
@@ -217,6 +222,7 @@ void ImageToolPanel::startDetect(const QString &path)
     m_convertBtn->setEnabled(false);
     m_patchBtn->setEnabled(false);
     m_progressBar->setValue(0);
+    m_progressBar->setFormat(QString()); // 清理上次操作的 format 残留
     m_progressBar->setVisible(true);
     appendLog(QStringLiteral("开始识别: %1").arg(path));
 
@@ -244,7 +250,7 @@ void ImageToolPanel::onDetectFinished(const QString &path, const imgreg::Detecte
 void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
 {
     const imgreg::Format f = detected.format;
-    // 解包：容器/分区类镜像（纯压缩流不直接解包）
+    // 解包：容器/分区类镜像（纯压缩流不直接解包；Raw 本身即已解包格式）
     m_unpackBtn->setEnabled(f == imgreg::Format::Payload || f == imgreg::Format::Zip ||
                             f == imgreg::Format::Tar || f == imgreg::Format::TarMd5 ||
                             f == imgreg::Format::Sparse || f == imgreg::Format::Super ||
@@ -254,8 +260,7 @@ void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
                             f == imgreg::Format::Kdz || f == imgreg::Format::UpdateApp ||
                             f == imgreg::Format::UpdateBin || f == imgreg::Format::Sin ||
                             f == imgreg::Format::DiskGpt || f == imgreg::Format::TwrpWin ||
-                            f == imgreg::Format::Erofs || f == imgreg::Format::Ext4 ||
-                            f == imgreg::Format::RawImage);
+                            f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
     // 打包（D6 接线）：sparse→raw、镜像集→tar、payload 全量等
     m_packBtn->setEnabled(f == imgreg::Format::Sparse || f == imgreg::Format::RawImage ||
                           f == imgreg::Format::Tar || f == imgreg::Format::Payload);
@@ -271,17 +276,26 @@ void ImageToolPanel::onWorkerProgress(int percent, const QString &stage)
         m_progressBar->setVisible(true);
     m_progressBar->setValue(percent);
     m_progressBar->setFormat(QStringLiteral("%1 %2%").arg(stage).arg(percent));
-    if (percent >= 100)
+    if (percent >= 100) {
         m_progressBar->setVisible(false);
+        m_progressBar->setFormat(QString()); // 清理 format 残留，下次操作从默认格式开始
+    }
 }
 
 void ImageToolPanel::onUnpackClicked()
 {
     if (m_currentFile.isEmpty() || m_detected.format == imgreg::Format::Unknown)
         return;
-    appendLog(QStringLiteral("开始解包: %1").arg(m_currentFile));
-    // D3 接线：输出目录由后续任务提供；当前为占位参数，worker 按契约返回未实现错误
-    m_worker.runUnpack(m_currentFile, m_currentFile + QStringLiteral(".out"), m_detected);
+    // D3 接线：弹目录选择框选输出目录（默认源文件所在目录）
+    const QString outDir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("选择解包输出目录"),
+        QFileInfo(m_currentFile).absolutePath());
+    if (outDir.isEmpty()) {
+        appendLog(QStringLiteral("已取消解包（未选择输出目录）"));
+        return;
+    }
+    appendLog(QStringLiteral("开始解包: %1 → %2").arg(m_currentFile, outDir));
+    m_worker.runUnpack(m_currentFile, outDir, m_detected);
 }
 
 void ImageToolPanel::onPackClicked()
@@ -298,11 +312,31 @@ void ImageToolPanel::onConvertClicked()
 {
     if (m_currentFile.isEmpty() || m_detected.format == imgreg::Format::Unknown)
         return;
-    appendLog(QStringLiteral("开始转换: %1").arg(m_currentFile));
-    // D3 接线：方向与输出路径由后续任务提供；当前为占位参数
-    const QString outPath = (m_detected.format == imgreg::Format::Sparse)
-        ? m_currentFile + QStringLiteral(".raw")
-        : m_currentFile + QStringLiteral(".sparse");
+
+    // D3 接线：目标类型选择（当前仅 sparse↔raw 两向，菜单内单选）
+    const bool toSparse = (m_detected.format == imgreg::Format::RawImage);
+    QMenu menu(this);
+    menu.addAction(toSparse ? QStringLiteral("转换为 Sparse 镜像 (img2simg)")
+                            : QStringLiteral("转换为 Raw 镜像 (simg2img)"));
+    QAction *chosen = menu.exec(m_convertBtn->mapToGlobal(QPoint(0, m_convertBtn->height() + 2)));
+    if (!chosen) {
+        appendLog(QStringLiteral("已取消转换（未选择目标类型）"));
+        return;
+    }
+
+    const QString base = QFileInfo(m_currentFile).completeBaseName();
+    const QString suggested = QFileInfo(m_currentFile).absolutePath() + QLatin1Char('/')
+        + base + (toSparse ? QStringLiteral(".sparse") : QStringLiteral(".raw"));
+    const QString outPath = QFileDialog::getSaveFileName(
+        this, toSparse ? QStringLiteral("选择 Sparse 输出文件")
+                       : QStringLiteral("选择 Raw 输出文件"),
+        suggested);
+    if (outPath.isEmpty()) {
+        appendLog(QStringLiteral("已取消转换（未选择输出文件）"));
+        return;
+    }
+
+    appendLog(QStringLiteral("开始转换: %1 → %2").arg(m_currentFile, outPath));
     m_worker.runConvert(m_currentFile, outPath, m_detected);
 }
 
@@ -318,15 +352,25 @@ void ImageToolPanel::onPatchClicked()
 
 void ImageToolPanel::onUnpackFinished(bool ok, const QStringList &outputs, const QString &error)
 {
-    Q_UNUSED(outputs);
-    if (ok)
-        appendLog(QStringLiteral("解包完成"));
-    else
+    // D2 吸收：收尾清理进度条（含失败路径，防卡 0%）
+    m_progressBar->setVisible(false);
+    m_progressBar->setFormat(QString());
+    if (!ok) {
         appendLog(QStringLiteral("解包失败: %1").arg(error), true);
+        return;
+    }
+    appendLog(QStringLiteral("解包完成: 共 %1 个产物").arg(outputs.size()));
+    const int shown = qMin(outputs.size(), 50);
+    for (int i = 0; i < shown; ++i)
+        appendLog(QStringLiteral("  ✔ %1").arg(outputs.at(i)));
+    if (outputs.size() > shown)
+        appendLog(QStringLiteral("  ... 其余 %1 项未列出").arg(outputs.size() - shown));
 }
 
 void ImageToolPanel::onPackFinished(bool ok, const QString &output, const QString &error)
 {
+    m_progressBar->setVisible(false);
+    m_progressBar->setFormat(QString());
     if (ok)
         appendLog(QStringLiteral("打包完成: %1").arg(output));
     else
@@ -335,6 +379,8 @@ void ImageToolPanel::onPackFinished(bool ok, const QString &output, const QStrin
 
 void ImageToolPanel::onConvertFinished(bool ok, const QString &output, const QString &error)
 {
+    m_progressBar->setVisible(false);
+    m_progressBar->setFormat(QString());
     if (ok)
         appendLog(QStringLiteral("转换完成: %1").arg(output));
     else
@@ -343,6 +389,8 @@ void ImageToolPanel::onConvertFinished(bool ok, const QString &output, const QSt
 
 void ImageToolPanel::onPatchFinished(bool ok, const QString &output, const QString &error)
 {
+    m_progressBar->setVisible(false);
+    m_progressBar->setFormat(QString());
     if (ok)
         appendLog(QStringLiteral("修补完成: %1").arg(output));
     else
