@@ -1,4 +1,4 @@
-PhoneToolbox - Android 设备多功能工具箱 v2.0.0
+PhoneToolbox - Android 设备多功能工具箱 v0.0.1-beta03
 ================================================
 开源 / GPLv3 / Qt6 C++17 / 跨平台 (Linux + Windows)
 

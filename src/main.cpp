@@ -30,7 +30,7 @@ int main(int argc, char *argv[])
 
     // 设置应用信息
     app.setApplicationName("Phone Toolbox");
-    app.setApplicationVersion("2.0.0");
+    app.setApplicationVersion("0.0.1-beta03");
     app.setOrganizationName("PhoneToolbox");
 
     // 设置应用程序样式
