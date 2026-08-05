@@ -432,10 +432,12 @@ QByteArray buildKsuPatchedRamdisk()
                       {"kernelsu.ko", kRegMode | 0755, "mock-kernelsu-ko"}});
 }
 
-// 模拟宿主 CPU 架构（审查 Important 的测试钩子）：APatch apkPath 路径在
-// 非 arm64 Linux 宿主被门禁拒绝 —— CI/开发宿主为 x86_64，apkPath 相关测试
-// 须以 arm64 模拟宿主运行；门禁本身由 apatchApkHostArchGateFails 用
-// x86_64 模拟覆盖。RAII 作用域结束后恢复。
+// 模拟宿主 CPU 架构（审查 Important 的测试钩子）：真实宿主（无 env）下
+// APatch apkPath 一律被门禁拒绝（含 arm64 Linux —— kptools-android 为
+// bionic PIE），APATCH_HOST_ARCH=arm64 是唯一放行路径 → apkPath 提取/流程
+// 测试须以此模拟宿主运行；门禁的拒绝路径由 apatchApkHostArchGateFails
+//（x86_64 模拟）与 apatchApkHostArchGateNoEnv（无 env，真实宿主）覆盖。
+// RAII 作用域结束后恢复。
 class ScopedHostArch
 {
 public:
@@ -488,6 +490,7 @@ private slots:
     // ---- C5: APatch/KernelPatch 系 ----
     void apatchInjectFromApk();
     void apatchApkHostArchGateFails();
+    void apatchApkHostArchGateNoEnv();
     void apatchInjectFromManualDir();
     void apatchMissingSourceFails();
     void apatchBothSourcesFails();
@@ -1580,11 +1583,13 @@ void TestPatcher::apatchInjectFromApk()
 
 void TestPatcher::apatchApkHostArchGateFails()
 {
-    // 审查 Important：APK 内 libkptools.so 为 Android arm64 ELF，QProcess
-    // 直接 exec 在非 arm64 Linux 宿主（x86_64/macOS/Windows）必然
-    // "Exec format error"。修复：宿主架构门禁 —— 非 arm64 Linux 在读取
-    // APK 之前提前拒绝，错误明确指引 kpatchPath 手动路径（修复前会执行到
-    // 子进程启动才失败，且错误为平台差异的 exec 失败）。
+    // 审查 Important：APK 内 libkptools.so 为 Android arm64 ELF（bionic
+    // 动态链接 PIE，interpreter /system/bin/linker64），QProcess 直接 exec
+    // 在任何 PC 宿主（x86_64/macOS/Windows/arm64 Linux）都必然失败。修复：
+    // 宿主架构门禁 —— 在读取 APK 之前提前拒绝，错误明确指引 kpatchPath
+    // 手动路径（修复前会执行到子进程启动才失败，且错误为平台差异的 exec
+    // 失败）。本槽以 x86_64 模拟宿主验证门禁；无 env 的真实宿主一律拒绝
+    // 见 apatchApkHostArchGateNoEnv。
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString apkPath = dir.path() + "/apatch.apk";
@@ -1627,10 +1632,43 @@ void TestPatcher::apatchApkHostArchGateFails()
         QVERIFY(!p.patch(buildApatchBoot(), badApk, out, &err));
         QVERIFY(err.contains("arm64", Qt::CaseInsensitive));
     }
-    // 门禁放行路径（arm64 模拟）由 apatchInjectFromApk 等覆盖；此处再验证
-    // 真实宿主未设置模拟时（如 arm64 构建机）行为由 QSysInfo 决定 ——
-    // 无 env 时门禁按真实架构判定，不崩溃
+    // 门禁放行路径（arm64 模拟）由 apatchInjectFromApk 等覆盖；
+    // 真实宿主无 env 一律拒绝（含 arm64 Linux）见 apatchApkHostArchGateNoEnv
     QVERIFY(!p.patch(buildApatchBoot(), badApk, out, nullptr)); // nullptr 契约
+}
+
+void TestPatcher::apatchApkHostArchGateNoEnv()
+{
+    // 复核修复（Important）：真实 kptools-android（= APK 内 libkptools.so
+    // 同一资产）为 bionic 动态链接 PIE（interpreter /system/bin/linker64），
+    // arm64 Linux 同样无法 exec —— 原"arm64 放行"假设被实物证伪。无模拟
+    // env 时 apkPath 必须一律拒绝（各宿主确定性：CI x86_64 / arm64 构建机
+    // 均拒绝，不再按真实架构放行）。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString apkPath = dir.path() + "/apatch.apk";
+    QFile f(apkPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(buildApatchApk(apatchMockKptoolsScript()));
+    f.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.apkPath = apkPath;
+    QByteArray out;
+    QString err;
+    qunsetenv("APATCH_HOST_ARCH"); // 显式兜底：无模拟 env
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("arm64", Qt::CaseInsensitive));
+    QVERIFY(err.contains("kpatchPath", Qt::CaseInsensitive));
+    QVERIFY(err.contains("kptools-linux"));
+    QVERIFY(out.isEmpty());
+    // KernelPatch 类型同样拒绝；nullptr error 契约（不崩溃）
+    patcher::PatchConfig kpCfg = cfg;
+    kpCfg.type = patcher::RootType::KernelPatch;
+    QVERIFY(!p.patch(buildApatchBoot(), kpCfg, out, nullptr));
 }
 
 void TestPatcher::apatchInjectFromManualDir()

@@ -131,6 +131,10 @@ int plainRank(const QString &)
 // 修复前按字母序取首个，macOS/Windows 宿主会选到 kptools-linux 而非本平台
 // 二进制。按 Q_OS_* 宿主平台匹配：含本平台名（linux/mac/win）→ 2；其余
 // 前缀候选 → 1；.7z 压缩包（不可执行）→ -1 跳过。
+// **Windows 复核修复**：kptools-linux/mac 为其他平台 ELF，Windows 上必然
+// 无法执行 —— 仅放行含 "win" 候选（不匹配 → -1 跳过），无 win 候选时
+// 调用侧报"未找到 kptools（请先解压 kptools-msys2-win.7z）"，不再按字母序
+// 选中 kptools-linux 后 exec 失败。
 int kptoolsRank(const QString &name)
 {
     if (name.endsWith(QLatin1String(".7z"), Qt::CaseInsensitive))
@@ -141,6 +145,8 @@ int kptoolsRank(const QString &name)
     const bool hostMatch = name.contains(QLatin1String("mac"));
 #elif defined(Q_OS_WIN)
     const bool hostMatch = name.contains(QLatin1String("win"));
+    if (!hostMatch)
+        return -1; // 其他平台 ELF（linux/mac）在 Windows 不可执行
 #else
     const bool hostMatch = false;
 #endif
@@ -149,9 +155,9 @@ int kptoolsRank(const QString &name)
 
 constexpr int kKptoolsTimeoutMs = 120000;
 
-// 宿主 CPU 架构。测试经 APATCH_HOST_ARCH 环境变量模拟非 arm64 宿主
-//（见 tests/test_patcher.cpp apatchApkHostArchGateFails / ScopedHostArch）；
-// 真实环境直接取 QSysInfo（x86_64/arm64/arm/riscv64...）。
+// 宿主 CPU 架构。测试经 APATCH_HOST_ARCH 环境变量模拟 arm64 宿主
+//（见 tests/test_patcher.cpp ScopedHostArch —— 真实宿主一律拒绝 apkPath，
+// 仅测试钩子可放行）；真实环境直接取 QSysInfo（x86_64/arm64/arm/riscv64...）。
 QString hostCpuArch()
 {
     const QByteArray sim = qgetenv("APATCH_HOST_ARCH");
@@ -160,21 +166,20 @@ QString hostCpuArch()
     return QSysInfo::currentCpuArchitecture();
 }
 
-// APK 内 libkptools.so 为 Android 原生 ELF（APatch 官方 APK 实测仅
-// arm64-v8a），QProcess 直接 exec 要求宿主 OS+ABI 兼容 —— 仅 arm64 Linux
-// 宿主可执行（aarch64 ELF）；x86_64/macOS/Windows 宿主必然 "Exec format
-// error"（审查 Important）。返回当前宿主可执行的 ABI 回退链：arm64 Linux
-// 仅 arm64-v8a；armeabi-v7a（arm32，需 CONFIG_COMPAT + 32 位运行库）与
-// x86 系不可执行 → 自动跳过。空列表 = apkPath 路径不可用（须走 kpatchPath
-// 手动指定 KernelPatch release 的 kptools-linux）。
+// APK 内 libkptools.so 为 Android arm64 ELF（APatch 官方 APK 实测仅
+// arm64-v8a，即 KernelPatch release 的 kptools-android 同一资产）——
+// **bionic 动态链接 PIE（interpreter /system/bin/linker64）**，任何 PC
+// 宿主（含 arm64 Linux）都无法 QProcess exec（复核实证证伪"arm64 放行"
+// 假设）。→ apkPath 路径全宿主门禁拒绝，指引 kpatchPath 手动指定宿主
+// 原生 kptools-linux（Q_OS_* 平台匹配）。空列表 = apkPath 不可用。
+// arm64 放行仅保留为 APATCH_HOST_ARCH=arm64 测试钩子（模拟宿主，供
+// apkPath 提取/流程测试覆盖）。
 QStringList executableApkKptoolsAbis()
 {
-#if defined(Q_OS_LINUX)
-    if (hostCpuArch() == QLatin1String("arm64"))
+    // 仅测试钩子（ScopedHostArch("arm64")）模拟放行；真实宿主一律空链
+    if (qEnvironmentVariableIsSet("APATCH_HOST_ARCH") &&
+        hostCpuArch() == QLatin1String("arm64"))
         return {QStringLiteral("arm64-v8a")};
-#else
-    (void)hostCpuArch; // 非 Linux 宿主（macOS/Windows）恒无可用 ABI
-#endif
     return {};
 }
 
@@ -227,9 +232,9 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     QString sErr;
     if (!cfg.apkPath.isEmpty()) {
         // 宿主架构门禁（审查 Important）：APK 内 libkptools.so 为 Android
-        // arm64 ELF，QProcess 直接 exec 在非 arm64 Linux 宿主必然
-        // "Exec format error" —— 在任何 APK 读取/解包之前提前拒绝并指引
-        // kpatchPath 手动路径（错误文案对用户可操作）
+        // arm64 ELF（bionic 动态链接 PIE，interpreter /system/bin/linker64），
+        // QProcess 直接 exec 在任何 PC 宿主（含 arm64 Linux）都必然失败 ——
+        // 在任何 APK 读取/解包之前提前拒绝并指引 kpatchPath 手动路径
         const QStringList abiChain = executableApkKptoolsAbis();
         if (abiChain.isEmpty())
             return fail(QStringLiteral(
@@ -263,11 +268,20 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         if (!di.isDir())
             return fail(QStringLiteral("kpatchPath 不是目录（应为含 kptools/kpimg "
                                        "文件的目录）：%1").arg(cfg.kpatchPath));
-        // kptools 按宿主平台匹配（kptools-linux/mac/win，跳过 .7z）；
-        // kpimg 无平台区分（kpimg-android），任意候选取字母序首个
+        // kptools 按宿主平台匹配（kptools-linux/mac/win，跳过 .7z；
+        // Windows 仅放行含 "win" 候选）；kpimg 无平台区分（kpimg-android），
+        // 任意候选取字母序首个
         if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kptools"), kptoolsRank,
-                               &kptoolsPathSrc, &sErr))
+                               &kptoolsPathSrc, &sErr)) {
+#if defined(Q_OS_WIN)
+            // release 的 Windows 资产本身是 .7z（kptools-msys2-win.7z）——
+            // 无 win 候选时给出解压指引而非按字母序选中 linux/mac 二进制
+            return fail(QStringLiteral("未找到 kptools（请先解压 "
+                                       "kptools-msys2-win.7z）：%1").arg(sErr));
+#else
             return fail(sErr);
+#endif
+        }
         if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kpimg"), plainRank,
                                &kpimgPathSrc, &sErr))
             return fail(sErr);
