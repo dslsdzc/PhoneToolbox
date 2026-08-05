@@ -13,9 +13,10 @@
 - C++17，成员变量 `m_` 前缀；面板类 `Q_OBJECT`（AUTOMOC 处理）
 - 面板信号：`outputMessage(const QString &text, bool isError)`（现有约定）、`switchToDeviceInfo()` 不用
 - 拖放：整个面板 `setAcceptDrops(true)` + `dragEnterEvent/dropEvent`；文件路径列表从 `event->mimeData()->urls()` 取
-- 后台执行一律 `QtConcurrent::run` + `QFutureWatcher`，禁止在工作线程触碰 QWidget
+- 后台执行一律 worker 线程（D1 已定：QThread + moveToThread + invokeMethod），禁止在工作线程触碰 QWidget
 - 修补/重打包操作前 UI 明确提示「仅适用于已解锁 Bootloader 的设备」
 - 每个任务独立 commit，前缀 `feat:`
+- **前端隔离硬约束（2026-08-05 用户要求）**：本计划**只允许改前端代码**（src/ui/ 及必要的构建接线）；后端 `src/image_engine/` 与 `src/root_patcher/` **冻结，禁止任何改动**（包括顺手的 bug 修复）。若实现发现后端接口缺失/缺陷：记录为"后端扩展待办"（独立于本计划），UI 侧以现有接口适配或优雅降级，不得改后端绕过
 
 ---
 
