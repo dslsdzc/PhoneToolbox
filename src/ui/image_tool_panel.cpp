@@ -36,6 +36,7 @@
 #include "root_patcher/magisk_patcher.h"
 #include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/assets_downloader.h"
+#include "fs_browser_dialog.h"
 
 namespace {
 
@@ -73,6 +74,21 @@ QString formatName(imgreg::Format f)
     case imgreg::Format::Unknown:    return QStringLiteral("未知格式");
     }
     return QStringLiteral("未知格式");
+}
+
+// 文件大小人类可读（D5 大镜像提示用；与 fs_browser_dialog 的 formatSize 同款实现）
+QString formatSize(quint64 bytes)
+{
+    if (bytes < 1024ull)
+        return QStringLiteral("%1 B").arg(bytes);
+    const char *units[] = { "KB", "MB", "GB", "TB" };
+    double v = double(bytes);
+    int u = -1;
+    do {
+        v /= 1024.0;
+        ++u;
+    } while (v >= 1024.0 && u < 3);
+    return QStringLiteral("%1 %2").arg(v, 0, 'f', u ? 1 : 0).arg(QLatin1String(units[u]));
 }
 
 // RootType → 展示名（与 root_patcher.cpp rootTypeName 文案一致）
@@ -839,6 +855,7 @@ ImageToolPanel::ImageToolPanel(QWidget *parent)
     , m_packBtn(nullptr)
     , m_convertBtn(nullptr)
     , m_patchBtn(nullptr)
+    , m_fsBrowseBtn(nullptr)
     , m_browseBtn(nullptr)
     , m_progressBar(nullptr)
     , m_logOutput(nullptr)
@@ -888,15 +905,19 @@ void ImageToolPanel::setupUI()
     m_packBtn = new QPushButton(QStringLiteral("打包"), this);
     m_convertBtn = new QPushButton(QStringLiteral("转换"), this);
     m_patchBtn = new QPushButton(QStringLiteral("修补"), this);
+    // D5：文件系统浏览（EROFS/ext4 识别后 enable；区别于右侧"浏览..."文件选择）
+    m_fsBrowseBtn = new QPushButton(QStringLiteral("文件浏览"), this);
     m_browseBtn = new QPushButton(QStringLiteral("浏览..."), this);
     m_unpackBtn->setEnabled(false);
     m_packBtn->setEnabled(false);
     m_convertBtn->setEnabled(false);
     m_patchBtn->setEnabled(false);
+    m_fsBrowseBtn->setEnabled(false);
     actionLayout->addWidget(m_unpackBtn);
     actionLayout->addWidget(m_packBtn);
     actionLayout->addWidget(m_convertBtn);
     actionLayout->addWidget(m_patchBtn);
+    actionLayout->addWidget(m_fsBrowseBtn);
     actionLayout->addStretch();
     actionLayout->addWidget(m_browseBtn);
     mainLayout->addWidget(actionGroup);
@@ -923,6 +944,7 @@ void ImageToolPanel::setupConnections()
     connect(m_packBtn, &QPushButton::clicked, this, &ImageToolPanel::onPackClicked);
     connect(m_convertBtn, &QPushButton::clicked, this, &ImageToolPanel::onConvertClicked);
     connect(m_patchBtn, &QPushButton::clicked, this, &ImageToolPanel::onPatchClicked);
+    connect(m_fsBrowseBtn, &QPushButton::clicked, this, &ImageToolPanel::onFsBrowseClicked);
 
     // worker（工作线程）→ 面板（UI 线程），跨线程自动 QueuedConnection
     connect(&m_worker, &ImageWorker::detectFinished,
@@ -995,6 +1017,7 @@ void ImageToolPanel::startDetect(const QString &path)
     m_packBtn->setEnabled(false);
     m_convertBtn->setEnabled(false);
     m_patchBtn->setEnabled(false);
+    m_fsBrowseBtn->setEnabled(false);
     m_progressBar->setValue(0);
     m_progressBar->setFormat(QString()); // 清理上次操作的 format 残留
     m_progressBar->setVisible(true);
@@ -1042,6 +1065,9 @@ void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
     m_convertBtn->setEnabled(f == imgreg::Format::Sparse || f == imgreg::Format::RawImage);
     // 修补（D4 接线）：boot 类镜像
     m_patchBtn->setEnabled(f == imgreg::Format::Boot || f == imgreg::Format::VendorBoot);
+    // 文件系统浏览（D5 接线）：imgfs::openFsImage 仅支持 EROFS/ext4
+    //（registry detect 已覆盖 E2 E1 F5 E0@1024 / 0xEF53@1080）
+    m_fsBrowseBtn->setEnabled(f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
 }
 
 void ImageToolPanel::onWorkerProgress(int percent, const QString &stage)
@@ -1143,6 +1169,38 @@ void ImageToolPanel::onPatchClicked()
                   ? QStringLiteral("  KMI: 自动检测（修补时从 boot 镜像读取）")
                   : QStringLiteral("  KMI: %1").arg(config.deviceKmi));
     m_worker.runPatch(m_currentFile, config);
+}
+
+void ImageToolPanel::onFsBrowseClicked()
+{
+    if (m_currentFile.isEmpty() || m_detected.format == imgreg::Format::Unknown)
+        return;
+    const imgreg::Format f = m_detected.format;
+    if (f != imgreg::Format::Erofs && f != imgreg::Format::Ext4)
+        return; // 防御：按钮 enable 与识别结果同步，失效时静默忽略
+
+    // D5 接线：文件系统浏览对话框（FsImage 全内存操作 —— 镜像整体读入并持
+    // 副本，内存占用≈镜像大小）。>1GiB 时先提示，用户确认后才继续（大镜像
+    // 读取/遍历耗时由 worker 线程承担，UI 不阻塞；对话框内为不定进度条）。
+    const qint64 size = QFileInfo(m_currentFile).size();
+    if (size > (1LL << 30)) {
+        const QMessageBox::StandardButton ret = QMessageBox::question(
+            this, QStringLiteral("大镜像提示"),
+            QStringLiteral("镜像大小 %1，将整体读入内存浏览（内存占用约等于镜像大小，"
+                           "可能较慢）。是否继续？")
+                .arg(formatSize(quint64(size))),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ret != QMessageBox::Yes) {
+            appendLog(QStringLiteral("已取消文件系统浏览（大镜像提示）"));
+            return;
+        }
+    }
+
+    appendLog(QStringLiteral("打开文件系统浏览器: %1（%2）")
+                  .arg(m_currentFile, formatName(f)));
+    FsBrowserDialog dlg(m_currentFile, f, &m_worker, this);
+    connect(&dlg, &FsBrowserDialog::outputMessage, this, &ImageToolPanel::appendLog);
+    dlg.exec(); // 模态：worker 信号由对话框事件循环派发（D4 同款模式）
 }
 
 void ImageToolPanel::onUnpackFinished(bool ok, const QStringList &outputs, const QString &error)

@@ -42,6 +42,7 @@ private slots:
     void onPackClicked();
     void onConvertClicked();
     void onPatchClicked();
+    void onFsBrowseClicked();
     void onUnpackFinished(bool ok, const QStringList &outputs, const QString &error);
     void onPackFinished(bool ok, const QString &output, const QString &error);
     void onConvertFinished(bool ok, const QString &output, const QString &error);
@@ -65,7 +66,8 @@ private:
     QPushButton *m_packBtn;
     QPushButton *m_convertBtn;
     QPushButton *m_patchBtn;
-    QPushButton *m_browseBtn;
+    QPushButton *m_fsBrowseBtn;  // D5 文件系统浏览（EROFS/ext4 才 enable）
+    QPushButton *m_browseBtn;    // 文件选择（始终可用）
 
     // 进度条 + 日志
     QProgressBar *m_progressBar;

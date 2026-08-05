@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QTemporaryFile>
 
 #include "image_engine/sparse_image.h"
 #include "image_engine/payload_image.h"
@@ -95,6 +96,7 @@ ImageWorker::ImageWorker(QObject *parent)
     // 生成的 qt_metatype_id() 首次使用即自动注册；此处显式调用双保险）
     qRegisterMetaType<imgreg::Detected>("imgreg::Detected");
     qRegisterMetaType<patcher::PatchConfig>("patcher::PatchConfig");
+    qRegisterMetaType<QList<imgfs::FsEntry>>("QList<imgfs::FsEntry>"); // D5 整树投递
 
     // 工作对象迁移到专用线程：runXxx 投递的 QueuedConnection 事件在此线程
     // 的事件循环中按提交顺序串行处理。先迁移后启动，事件队列已就绪。
@@ -668,4 +670,256 @@ void ImageWorker::doPatch(const QString &path, const patcher::PatchConfig &confi
 
     emit progress(100, QStringLiteral("修补"));
     emit patchFinished(true, outPath, QString());
+}
+
+// ==================== D5 文件系统浏览（会话型） ====================
+//
+// 后端接口核实（2026-08-05，以 src/image_engine/fs 实际实现为准，非计划文档）：
+//   • imgfs::FsImage（fs_image.h L17-24）：list(dir,out)/extract(path,data)/
+//     replace(path,data)/repack() —— list/extract/replace 均只有 bool 返回值，
+//     无 error 参数；底层 listTree/extractFile/replaceFile 的 QString *error
+//     在 FsImage 包装层被吞掉（fs_image.cpp ErofsImage/Ext4Image）。
+//   • imgfs::openFsImage(image,error)（fs_image.cpp L98）：按 imgreg::detect
+//     分派 EROFS/ext4；其余格式返回 nullptr + error"不是文件系统镜像"。
+//   • ErofsImage：replace() 恒 false（fs_image.cpp L55，EROFS 只读）→
+//     UI 侧 EROFS 禁用替换/保存；repack() 原样返回。
+//   • Ext4Image：replace() 走 imgext4::replaceFile —— metadata_csum 镜像显式
+//     拒绝（ext4_reader.cpp L1016-1021）、legacy block map/目录/符号链接拒绝；
+//     均因 FsImage::replace 无 error 参数而无法上抛明细 → 本层拼通用文案。
+//   • FsEntry.data：listTree 不填充（erofs_reader.cpp L400-406 / ext4 同），
+//     跨线程投递整树无大载荷。
+// 本层职责：全内存会话管理（读文件 → openFsImage → 全树 list 一次 → 持 FsImage
+// 副本），extract/replace/repack 全部在工作线程执行，UI 线程不接触镜像数据。
+
+imgfs::FsImage *ImageWorker::session(const QString &path) const
+{
+    if (m_fsSession && m_fsSessionPath == path)
+        return m_fsSession.get();
+    return nullptr;
+}
+
+void ImageWorker::closeSession()
+{
+    m_fsSession.reset();
+    m_fsSessionPath.clear();
+}
+
+void ImageWorker::runFsOpen(const QString &path)
+{
+    QMetaObject::invokeMethod(this, [this, path] { doFsOpen(path); },
+                              Qt::QueuedConnection);
+}
+
+void ImageWorker::runFsExtractTo(const QString &path, const QString &innerPath,
+                                 const QString &outPath)
+{
+    QMetaObject::invokeMethod(this,
+                              [this, path, innerPath, outPath] {
+                                  doFsExtractTo(path, innerPath, outPath);
+                              },
+                              Qt::QueuedConnection);
+}
+
+void ImageWorker::runFsReplace(const QString &path, const QString &innerPath,
+                               const QString &hostFile)
+{
+    QMetaObject::invokeMethod(this,
+                              [this, path, innerPath, hostFile] {
+                                  doFsReplace(path, innerPath, hostFile);
+                              },
+                              Qt::QueuedConnection);
+}
+
+void ImageWorker::runFsRepack(const QString &path, const QString &outPath)
+{
+    QMetaObject::invokeMethod(this, [this, path, outPath] { doFsRepack(path, outPath); },
+                              Qt::QueuedConnection);
+}
+
+void ImageWorker::runFsClose(const QString &path)
+{
+    QMetaObject::invokeMethod(this, [this, path] { doFsClose(path); },
+                              Qt::QueuedConnection);
+}
+
+void ImageWorker::doFsOpen(const QString &path)
+{
+    emit progress(0, QStringLiteral("文件浏览"));
+
+    QString error;
+    const QByteArray data = readFile(path, &error);
+    if (data.isEmpty()) {
+        closeSession();
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsOpened(path, false, QList<imgfs::FsEntry>(), error);
+        return;
+    }
+    imgfs::FsImage *fs = imgfs::openFsImage(data, &error);
+    if (!fs) {
+        closeSession();
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsOpened(path, false, QList<imgfs::FsEntry>(), error);
+        return;
+    }
+    // 全树一次遍历（list(dir="") 即整树，FsImage 无增量接口；目录深度由引擎
+    // 限 128，失败不崩溃，契约返回 false）
+    QList<imgfs::FsEntry> entries;
+    if (!fs->list(QString(), entries)) {
+        error = QStringLiteral("文件系统遍历失败（镜像损坏或不受支持的特性）");
+        delete fs;
+        closeSession();
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsOpened(path, false, QList<imgfs::FsEntry>(), error);
+        return;
+    }
+    closeSession();              // 替换上一会话（同 path 重新打开也重建会话）
+    m_fsSession.reset(fs);
+    m_fsSessionPath = path;
+    emit progress(100, QStringLiteral("文件浏览"));
+    emit fsOpened(path, true, entries, QString());
+}
+
+void ImageWorker::doFsExtractTo(const QString &path, const QString &innerPath,
+                                const QString &outPath)
+{
+    emit progress(0, QStringLiteral("文件浏览"));
+
+    imgfs::FsImage *fs = session(path);
+    if (!fs) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsExtracted(path, innerPath, QString(), false,
+                         QStringLiteral("会话已关闭（请重新打开镜像）"));
+        return;
+    }
+    QByteArray data;
+    if (!fs->extract(innerPath, data)) {
+        // FsImage::extract 无 error 参数：erofs 压缩（LZ4）/目录/特殊文件均
+        // 返回 false，无法区分（后端扩展待办：错误上抛）→ 按已知语义拼文案
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsExtracted(path, innerPath, QString(), false,
+                         QStringLiteral("提取失败：文件可能为 LZ4 压缩、目录或特殊文件"));
+        return;
+    }
+
+    QString dest = outPath;
+    QString error;
+    if (dest.isEmpty()) {
+        // 外部打开：写系统临时目录（保留原文件名与扩展名，供系统程序识别类型）
+        const QString base = sanitizeName(innerPath);
+        const QFileInfo bfi(base);
+        QString tmpl = QDir::tempPath() + QStringLiteral("/PhoneToolbox-")
+                       + bfi.completeBaseName() + QStringLiteral("-XXXXXX");
+        if (!bfi.suffix().isEmpty())
+            tmpl += QLatin1Char('.') + bfi.suffix();
+        QTemporaryFile tmp(tmpl);
+        tmp.setAutoRemove(false); // 外部程序打开期间文件须保留（OS 临时目录自清理）
+        if (!tmp.open()) {
+            emit progress(100, QStringLiteral("文件浏览"));
+            emit fsExtracted(path, innerPath, QString(), false,
+                             QStringLiteral("无法创建临时文件: ") + tmp.errorString());
+            return;
+        }
+        if (tmp.write(data) != data.size()) {
+            emit progress(100, QStringLiteral("文件浏览"));
+            emit fsExtracted(path, innerPath, QString(), false,
+                             QStringLiteral("写入临时文件不完整"));
+            return;
+        }
+        tmp.close();
+        dest = tmp.fileName();
+    } else {
+        if (!QDir().mkpath(QFileInfo(outPath).absolutePath())) {
+            emit progress(100, QStringLiteral("文件浏览"));
+            emit fsExtracted(path, innerPath, QString(), false,
+                             QStringLiteral("无法创建目标目录: ")
+                                 + QFileInfo(outPath).absolutePath());
+            return;
+        }
+        if (!writeFile(dest, data, &error)) {
+            emit progress(100, QStringLiteral("文件浏览"));
+            emit fsExtracted(path, innerPath, QString(), false, error);
+            return;
+        }
+    }
+
+    emit progress(100, QStringLiteral("文件浏览"));
+    emit fsExtracted(path, innerPath, dest, true, QString());
+}
+
+void ImageWorker::doFsReplace(const QString &path, const QString &innerPath,
+                              const QString &hostFile)
+{
+    emit progress(0, QStringLiteral("文件浏览"));
+
+    imgfs::FsImage *fs = session(path);
+    if (!fs) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsReplaced(path, innerPath, hostFile, false,
+                        QStringLiteral("会话已关闭（请重新打开镜像）"));
+        return;
+    }
+    if (hostFile.isEmpty()) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsReplaced(path, innerPath, hostFile, false,
+                        QStringLiteral("替换文件路径为空"));
+        return;
+    }
+    QString error;
+    const QByteArray data = readFile(hostFile, &error);
+    if (data.isEmpty()) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsReplaced(path, innerPath, hostFile, false, error);
+        return;
+    }
+    if (!fs->replace(innerPath, data)) {
+        // FsImage::replace 无 error 参数：ErofsImage 恒 false；Ext4Image 对
+        // metadata_csum/legacy block map/目录/符号链接拒绝（明细无法上抛）→
+        // UI 侧按已禁用 EROFS 按钮，此处文案合并已知 ext4 拒绝原因
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsReplaced(path, innerPath, hostFile, false,
+                        QStringLiteral("替换失败（ext4 校验和/metadata_csum 镜像、"
+                                       "目录/符号链接或 legacy block map 布局暂不支持）"));
+        return;
+    }
+    emit progress(100, QStringLiteral("文件浏览"));
+    emit fsReplaced(path, innerPath, hostFile, true, QString());
+}
+
+void ImageWorker::doFsRepack(const QString &path, const QString &outPath)
+{
+    emit progress(0, QStringLiteral("文件浏览"));
+
+    imgfs::FsImage *fs = session(path);
+    if (!fs) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsRepacked(path, outPath, false,
+                        QStringLiteral("会话已关闭（请重新打开镜像）"));
+        return;
+    }
+    if (outPath.isEmpty()) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsRepacked(path, outPath, false, QStringLiteral("输出路径为空"));
+        return;
+    }
+    const QByteArray packed = fs->repack();
+    if (packed.isEmpty()) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsRepacked(path, outPath, false,
+                        QStringLiteral("重打包失败（后端返回空镜像）"));
+        return;
+    }
+    QString error;
+    if (!writeFile(outPath, packed, &error)) {
+        emit progress(100, QStringLiteral("文件浏览"));
+        emit fsRepacked(path, outPath, false, error);
+        return;
+    }
+    emit progress(100, QStringLiteral("文件浏览"));
+    emit fsRepacked(path, outPath, true, QString());
+}
+
+void ImageWorker::doFsClose(const QString &path)
+{
+    if (m_fsSessionPath == path)
+        closeSession();
 }
