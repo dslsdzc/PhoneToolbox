@@ -126,30 +126,56 @@ int plainRank(const QString &)
     return 1;
 }
 
+// 宿主平台（linux/mac/win，Q_OS_* 编译期判定）。测试经 APATCH_PLATFORM
+// 环境变量注入模拟平台（同 APATCH_HOST_ARCH 模式，见 test_patcher.cpp
+// ScopedPlatform —— 使 Windows 分支可在 Linux CI 上测试）；非法注入值
+// 回退真实平台。
+QString hostPlatform()
+{
+    const QByteArray sim = qgetenv("APATCH_PLATFORM");
+    if (!sim.isEmpty()) {
+        const QString s = QString::fromLatin1(sim).toLower();
+        if (s == QLatin1String("win") || s == QLatin1String("linux") ||
+            s == QLatin1String("mac"))
+            return s;
+    }
+#if defined(Q_OS_WIN)
+    return QStringLiteral("win");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral("mac");
+#else
+    return QStringLiteral("linux");
+#endif
+}
+
 // kptools 候选评分（审查 Minor）：KernelPatch release 预编译资产多平台共存
 //（kptools-linux / kptools-mac / kptools-msys2-win.7z，联网验证 0.13.3）——
 // 修复前按字母序取首个，macOS/Windows 宿主会选到 kptools-linux 而非本平台
-// 二进制。按 Q_OS_* 宿主平台匹配：含本平台名（linux/mac/win）→ 2；其余
-// 前缀候选 → 1；.7z 压缩包（不可执行）→ -1 跳过。
-// **Windows 复核修复**：kptools-linux/mac 为其他平台 ELF，Windows 上必然
-// 无法执行 —— 仅放行含 "win" 候选（不匹配 → -1 跳过），无 win 候选时
-// 调用侧报"未找到 kptools（请先解压 kptools-msys2-win.7z）"，不再按字母序
-// 选中 kptools-linux 后 exec 失败。
+// 二进制。按宿主平台匹配（hostPlatform，测试可注入）：含本平台名
+//（linux/mac/win）→ 2；其余前缀候选 → 1；.7z 压缩包（不可执行）→ -1。
+// **Windows 复核修复（2 轮）**：官方 kptools-msys2-win.7z 解压后是
+// win/kptools.exe（"win" 是目录名，文件名不含 "win"）—— 仅 contains("win")
+// 会把解压产物也跳过，Windows 手动路径全场景不可用；现放行
+// contains("win") || endsWith(".exe")。kptools-linux/mac 为其他平台 ELF，
+// Windows 上必然无法执行 → -1 跳过；无候选时调用侧报解压指引（含
+// win/kptools.exe 与 msys-2.0.dll），不再按字母序选中 linux/mac 后 exec
+// 失败。
 int kptoolsRank(const QString &name)
 {
     if (name.endsWith(QLatin1String(".7z"), Qt::CaseInsensitive))
         return -1;
-#if defined(Q_OS_LINUX)
-    const bool hostMatch = name.contains(QLatin1String("linux"));
-#elif defined(Q_OS_MACOS)
-    const bool hostMatch = name.contains(QLatin1String("mac"));
-#elif defined(Q_OS_WIN)
-    const bool hostMatch = name.contains(QLatin1String("win"));
-    if (!hostMatch)
-        return -1; // 其他平台 ELF（linux/mac）在 Windows 不可执行
-#else
-    const bool hostMatch = false;
-#endif
+    const QString platform = hostPlatform();
+    bool hostMatch = false;
+    if (platform == QLatin1String("linux")) {
+        hostMatch = name.contains(QLatin1String("linux"));
+    } else if (platform == QLatin1String("mac")) {
+        hostMatch = name.contains(QLatin1String("mac"));
+    } else { // win
+        hostMatch = name.contains(QLatin1String("win")) ||
+                    name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive);
+        if (!hostMatch)
+            return -1; // 其他平台 ELF（linux/mac）在 Windows 不可执行
+    }
     return hostMatch ? 2 : 1;
 }
 
@@ -269,18 +295,18 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             return fail(QStringLiteral("kpatchPath 不是目录（应为含 kptools/kpimg "
                                        "文件的目录）：%1").arg(cfg.kpatchPath));
         // kptools 按宿主平台匹配（kptools-linux/mac/win，跳过 .7z；
-        // Windows 仅放行含 "win" 候选）；kpimg 无平台区分（kpimg-android），
-        // 任意候选取字母序首个
+        // Windows 仅放行含 "win" 或 .exe 后缀候选）；kpimg 无平台区分
+        //（kpimg-android），任意候选取字母序首个
         if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kptools"), kptoolsRank,
                                &kptoolsPathSrc, &sErr)) {
-#if defined(Q_OS_WIN)
-            // release 的 Windows 资产本身是 .7z（kptools-msys2-win.7z）——
-            // 无 win 候选时给出解压指引而非按字母序选中 linux/mac 二进制
-            return fail(QStringLiteral("未找到 kptools（请先解压 "
-                                       "kptools-msys2-win.7z）：%1").arg(sErr));
-#else
+            if (hostPlatform() == QLatin1String("win"))
+                // release 的 Windows 资产本身是 .7z（kptools-msys2-win.7z，
+                // 解压后为 win/kptools.exe + msys-2.0.dll）—— 无 win/.exe
+                // 候选时给出解压指引而非按字母序选中 linux/mac 二进制
+                return fail(QStringLiteral("未找到 kptools（请先解压 "
+                                           "kptools-msys2-win.7z，含 win/kptools.exe "
+                                           "与 msys-2.0.dll）：%1").arg(sErr));
             return fail(sErr);
-#endif
         }
         if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kpimg"), plainRank,
                                &kpimgPathSrc, &sErr))

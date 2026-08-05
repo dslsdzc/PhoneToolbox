@@ -445,6 +445,17 @@ public:
     ~ScopedHostArch() { qunsetenv("APATCH_HOST_ARCH"); }
 };
 
+// 注入宿主平台（复核建议的测试钩子）：Windows 分支原为编译期 Q_OS_*
+// 判定，Linux CI 无法执行 —— APATCH_PLATFORM=win/linux/mac 注入后
+// kptoolsRank 与 Windows 错误文案按 hostPlatform() 运行时判定，Windows
+// 分支可在任意 CI 上测试。
+class ScopedPlatform
+{
+public:
+    explicit ScopedPlatform(const char *platform) { qputenv("APATCH_PLATFORM", platform); }
+    ~ScopedPlatform() { qunsetenv("APATCH_PLATFORM"); }
+};
+
 } // namespace
 
 class TestPatcher : public QObject
@@ -500,6 +511,7 @@ private slots:
     void apatchKpatchPathNotDirFails();
     void apatchManualDirPrefersHostPlatform();
     void apatchManualDirSkips7zArchive();
+    void apatchManualDirWindowsExtractedAsset();
     void apatchInvalidBootFails();
     void apatchNoKallsymsFails();
     void apatchFlagFailFails();
@@ -1892,6 +1904,77 @@ void TestPatcher::apatchManualDirSkips7zArchive()
     // 新行为：候选全部被跳过 → 目录扫描报"未找到"（修复前会把 .7z 当
     // 二进制 exec，错误来自 kptools 无法启动而非扫描层）
     QVERIFY(err.contains("未找到"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::apatchManualDirWindowsExtractedAsset()
+{
+    // 复核修复（Important）：官方 kptools-msys2-win.7z 解压后是
+    // win/kptools.exe（"win" 是目录名，文件名不含 "win"）—— 上一轮仅
+    // contains("win") 会把解压产物也跳过，Windows 手动路径全场景不可用。
+    // 修复：Windows 分支放行 contains("win") || endsWith(".exe")。
+    // 本测试经 APATCH_PLATFORM=win 注入模拟 Windows 平台（Linux CI 可执行，
+    // 原编译期 Q_OS_WIN 分支无法在 CI 上测试）。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // kptools.exe（解压产物）：好脚本 + SEL 标记；linux/mac 候选恒失败；
+    // .7z 压缩包跳过
+    QByteArray good = apatchMockKptoolsScript();
+    QVERIFY(good.contains("printf 'MOCKREPACK' >> new-boot.img"));
+    good.replace("printf 'MOCKREPACK' >> new-boot.img",
+                 "printf 'MOCKREPACK' >> new-boot.img\n"
+                 "printf 'SEL=exe' >> new-boot.img");
+    const QByteArray bad = QByteArray("#!/bin/sh\nexit 3\n");
+    auto writeFile = [&dir](const QString &name, const QByteArray &data) -> bool {
+        QFile f(dir.path() + QLatin1Char('/') + name);
+        if (!f.open(QIODevice::WriteOnly))
+            return false;
+        f.write(data);
+        f.close();
+        return true;
+    };
+    QVERIFY(writeFile(QStringLiteral("kptools.exe"), good));
+    QVERIFY(writeFile(QStringLiteral("kptools-linux"), bad));
+    QVERIFY(writeFile(QStringLiteral("kptools-mac"), bad));
+    QVERIFY(writeFile(QStringLiteral("kptools-msys2-win.7z"), QByteArray("7z-archive")));
+    QVERIFY(writeFile(QStringLiteral("kpimg-android"), QByteArray("mock-kpimg-data")));
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    {
+        ScopedPlatform winHost("win"); // 注入 Windows 平台
+        QVERIFY2(p.patch(buildApatchBoot(), cfg, out, &err), qPrintable(err));
+    }
+    QVERIFY(err.isEmpty());
+    QVERIFY(out.contains("SEL=exe")); // 选中解压后的 kptools.exe
+    QVERIFY(out.contains("KP1158"));
+
+    // Windows 平台无 win/.exe 候选 → 解压指引错误（含 win/kptools.exe 与
+    // msys-2.0.dll），不再按字母序选中 linux 二进制
+    QTemporaryDir noWin;
+    QVERIFY(noWin.isValid());
+    QFile nk(noWin.path() + "/kptools-linux");
+    QVERIFY(nk.open(QIODevice::WriteOnly));
+    nk.write(bad);
+    nk.close();
+    QFile nki(noWin.path() + "/kpimg-android");
+    QVERIFY(nki.open(QIODevice::WriteOnly));
+    nki.write("mock-kpimg-data");
+    nki.close();
+    patcher::PatchConfig noWinCfg = cfg;
+    noWinCfg.kpatchPath = noWin.path();
+    err.clear();
+    {
+        ScopedPlatform winHost("win");
+        QVERIFY(!p.patch(buildApatchBoot(), noWinCfg, out, &err));
+    }
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("win/kptools.exe"));
+    QVERIFY(err.contains("msys-2.0.dll"));
     QVERIFY(out.isEmpty());
 }
 
