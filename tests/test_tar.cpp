@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QDir>
 #include <QFile>
+#include <QCryptographicHash>
 #include <QTemporaryDir>
 #include "image_engine/tar_image.h"
 
@@ -19,6 +20,7 @@ private slots:
     void streamBuildMatchesOld();       // buildTarStream 与 buildTar 逐字节一致
     void streamExtractMatchesOld();     // extractTarStream 与 extractTar 结果一致 + 穿越/符号链接防护
     void streamMd5Footer();             // appendMd5FooterStream/verifyMd5FooterStream + 解包自动校验
+    void streamLegacyFooterRecognized(); // 遗留格式（>4KB 归档 + 无尾 \n 校验行）正确识别
     void streamBadInputs();             // 坏 size/截断/重名/空归档 → 不崩溃且按契约报错
 };
 
@@ -250,6 +252,10 @@ void TestTar::streamExtractMatchesOld()
     entries.append(evil2);
     imgtar::TarEntry evil3; evil3.name = QStringLiteral("a/../../escape"); evil3.data = QByteArray("z");
     entries.append(evil3);
+    imgtar::TarEntry evil4; evil4.name = QStringLiteral("a\\..\\evil.bin"); evil4.data = QByteArray("w");
+    entries.append(evil4);
+    imgtar::TarEntry evil5; evil5.name = QStringLiteral("C:/evil.bin"); evil5.data = QByteArray("v");
+    entries.append(evil5);
     const QByteArray tar = imgtar::buildTar(entries);
 
     QTemporaryDir dir;
@@ -276,8 +282,11 @@ void TestTar::streamExtractMatchesOld()
     QVERIFY(!QFileInfo::exists(QStringLiteral("/abs.bin")));
     QVERIFY(!QFileInfo::exists(outDir + QStringLiteral("/escape")));
     QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/escape")));
+    // 反斜杠（Windows 分隔符，a\..\ 向量）与驱动器前缀（C:/，Windows 绝对路径）条目不落盘
+    QVERIFY(!QFileInfo::exists(outDir + QStringLiteral("/a\\..\\evil.bin")));
+    QVERIFY(!QFileInfo::exists(outDir + QStringLiteral("/C:")));
     // 与旧接口结果一致：旧接口返回的条目名/数据与落盘文件对应
-    QCOMPARE(oldOut.size(), 6);
+    QCOMPARE(oldOut.size(), 8);
     QCOMPARE(oldOut[1].name, QStringLiteral("sub/file.bin"));
     QCOMPARE(oldOut[1].data, pattern(1234, 3));
     // 进度：首 0、末 = 归档总字节（无校验行 → 全文件）、单调
@@ -338,7 +347,35 @@ void TestTar::streamMd5Footer()
     QVERIFY(err.contains(QStringLiteral("MD5")));
 }
 
-// 不可信输入：坏 size / 数据截断（部分产物删除）/ 空归档 / 重名与不存在输入 → 均 false + error，不崩溃
+// 遗留 appendMd5Footer 产物形态（>4KB 归档 + 无尾 '\n'）: [tar]\n[32hex]  name@EOF
+// —— 校验行名称延续到窗口外且无 '\n'，必须靠有界行尾确认识别，不得误判为无校验行
+void TestTar::streamLegacyFooterRecognized()
+{
+    QList<imgtar::TarEntry> entries;
+    imgtar::TarEntry f; f.name = QStringLiteral("legacy.bin"); f.data = pattern(6000, 7);
+    entries.append(f);
+    const QByteArray tar = imgtar::buildTar(entries);
+    QVERIFY(tar.size() > 4096); // 尾部扫描窗口不覆盖全文件
+    const QByteArray legacy = tar + '\n'
+        + QCryptographicHash::hash(tar, QCryptographicHash::Md5).toHex()
+        + QByteArray("  firmware.tar.md5"); // 无尾 '\n'
+    QTemporaryDir dir;
+    const QString p = dir.path() + QStringLiteral("/legacy.tar.md5");
+    QVERIFY(writeFileBytes(p, legacy));
+
+    bool hasFooter = false;
+    QString err;
+    QVERIFY2(imgtar::verifyMd5FooterStream(p, &hasFooter, &err), qPrintable(err));
+    QVERIFY(hasFooter);
+    QVERIFY(imgtar::verifyMd5Footer(legacy)); // 与整读接口识别一致
+    // 解包自动识别校验行并校验通过（校验行不被当 tar 条目解析）
+    const QString outDir = dir.path() + QStringLiteral("/out");
+    QVERIFY(QDir().mkpath(outDir));
+    QVERIFY2(imgtar::extractTarStream(p, outDir, {}, &err), qPrintable(err));
+    QCOMPARE(readFileBytes(outDir + QStringLiteral("/legacy.bin")), pattern(6000, 7));
+}
+
+// 不可信输入：坏 size / 数据截断（越界拒绝，无部分产物）/ 空归档 / 重名与不存在输入 → 均 false + error，不崩溃
 void TestTar::streamBadInputs()
 {
     QTemporaryDir dir;
@@ -350,7 +387,8 @@ void TestTar::streamBadInputs()
     QVERIFY(!imgtar::extractTarStream(badSize, dir.path(), {}, &e));
     QVERIFY(!e.isEmpty());
 
-    // 数据截断：归档在条目数据中部被切断 → false，且正在写入的部分产物被删除
+    // 数据截断（条目数据中部）：越界检查在打开输出文件前即拒绝 → 不产生部分产物文件。
+    // （"部分产物删除"防御针对写盘中途 IO 失败：磁盘满/文件被并发修改，稳定文件下不可构造）
     QList<imgtar::TarEntry> entries;
     imgtar::TarEntry f; f.name = QStringLiteral("big.bin"); f.data = pattern(100000, 5);
     entries.append(f);
@@ -359,8 +397,8 @@ void TestTar::streamBadInputs()
     QVERIFY(writeFileBytes(truncated, tar.left(tar.size() - 60000))); // 截掉大半数据
     e.clear();
     QVERIFY(!imgtar::extractTarStream(truncated, dir.path(), {}, &e));
-    QVERIFY(!e.isEmpty());
-    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/big.bin"))); // 部分产物已删除
+    QVERIFY(e.contains(QStringLiteral("截断")));
+    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/big.bin"))); // 拒绝先于写盘，无部分产物
 
     // 空归档（1024 零块）：成功解包、无产物；进度末 = 1024
     const QString emptyTar = dir.path() + QStringLiteral("/empty.tar");

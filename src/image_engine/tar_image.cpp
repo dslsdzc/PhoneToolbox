@@ -14,6 +14,8 @@ namespace {
 constexpr qint64 kIoChunk = 1024 * 1024;
 // 尾部 MD5 校验行扫描窗口（校验行 ≤ 200B：32hex + 2 空格 + 名称 + \n，取 4KB 足够）
 constexpr qint64 kFooterScanTail = 4096;
+// 校验行名称有界读取上限（窗口截断时的行尾确认；真实三星名称 16B，256B 足够）
+constexpr qint64 kFooterNameMax = 256;
 
 void setErr(QString *error, const QString &msg)
 {
@@ -68,11 +70,24 @@ bool allocFixed(qint64 size, QByteArray &out, QString *error)
     return true;
 }
 
-// 条目名穿越防护（对齐 worker safeJoin 语义的加强版）：前导 '/' 或含 ".." 成分 → 拒绝
+// 条目名穿越防护（对齐 worker safeJoin 语义的加强版，跨平台一致）:
+//   - 前导 '/'（绝对路径）→ 拒绝
+//   - 含 '\\' → 拒绝（Windows 下 '\' 是路径分隔符，`a\..\evil.bin`、`..\evil` 可逃逸 outDir；
+//     Linux 上无害但跨平台一致防护）
+//   - 驱动器前缀（"C:/x"，Windows 下为绝对路径）→ 拒绝
+//   - 含 ".." 成分 → 拒绝
 bool safeTarName(const QString &name)
 {
     if (name.isEmpty() || name.startsWith(QLatin1Char('/')))
         return false;
+    if (name.contains(QLatin1Char('\\')))
+        return false;
+    if (name.size() >= 2 && name.at(1) == QLatin1Char(':')) {
+        const QChar c0 = name.at(0);
+        if ((c0 >= QLatin1Char('A') && c0 <= QLatin1Char('Z')) ||
+            (c0 >= QLatin1Char('a') && c0 <= QLatin1Char('z')))
+            return false;
+    }
     const QStringList comps = name.split(QLatin1Char('/'));
     for (const QString &c : comps)
         if (c == QLatin1String(".."))
@@ -114,21 +129,55 @@ int scanMd5Footer(QFile &f, qint64 fileSize, qint64 &tarEnd, QString *error)
             if (!kHexChars.contains(tail.at(int(k)))) { hex = false; break; }
         if (!hex)
             continue;
-        // 校验行名称部分：可打印 ASCII，以 '\n' 或 EOF 结束
-        qint64 j = i + 34;
-        for (; j < tailLen; ++j)
-            if (tail.at(int(j)) == '\n')
-                break;
-        if (j == i + 34) // 名称为空
-            continue;
-        bool printable = true;
-        for (qint64 k = i + 34; k < j; ++k) {
+        // 校验行名称部分：可打印 ASCII，以 '\n' 或 EOF 结束。
+        // 窗口内未遇 '\n' 且文件大于窗口（名称可能延续到窗口外，如遗留格式无尾 '\n'）：
+        // seek 到名称起点做有界读取（≤ kFooterNameMax）确认行尾，不因窗口截断误判为无校验行。
+        qint64 nameEnd = -1; // 名称区结束（不含 '\n'）在 tail 内的下标；-1 = 未遇 '\n'；-2 = 不可打印
+        for (qint64 k = i + 34; k < tailLen; ++k) {
             const char c = tail.at(int(k));
-            if (c < 0x20 || c > 0x7e) { printable = false; break; }
+            if (c == '\n') { nameEnd = k; break; }
+            if (c < 0x20 || c > 0x7e) { nameEnd = -2; break; }
         }
-        if (!printable)
+        if (nameEnd == -2)
             continue;
-        if (j >= tailLen && tailLen < fileSize) // 名称可能被窗口截断，无法确认
+        qint64 nameLen;
+        if (nameEnd >= 0) {
+            nameLen = nameEnd - (i + 34);
+        } else if (tailLen < fileSize) {
+            const qint64 nameAbs = fileSize - tailLen + (i + 34);
+            if (nameAbs >= fileSize)
+                continue; // 名称起点越界（不应发生）
+            if (!f.seek(nameAbs)) {
+                setErr(error, QStringLiteral("无法读取文件"));
+                return -2;
+            }
+            QByteArray nameBuf;
+            if (!allocFixed(kFooterNameMax, nameBuf, error))
+                return -2;
+            const qint64 want = qMin(kFooterNameMax, fileSize - nameAbs);
+            if (!readExact(&f, nameBuf.data(), want)) {
+                setErr(error, QStringLiteral("无法读取文件"));
+                return -2;
+            }
+            qint64 jj = 0;
+            for (; jj < want; ++jj) {
+                const char c = nameBuf.at(int(jj));
+                if (c == '\n') { nameEnd = jj; break; }
+                if (c < 0x20 || c > 0x7e) { nameEnd = -2; break; }
+            }
+            if (nameEnd == -2)
+                continue;
+            if (nameEnd >= 0) {
+                nameLen = nameEnd; // 扩展缓冲自名称起点读起（与窗口内部分重叠），jj 即名称长度
+            } else {
+                if (want >= kFooterNameMax)
+                    continue; // 读到上限仍无行尾 → 名称过长，无法确认，拒绝判定
+                nameLen = want; // 到 EOF（遗留格式：无尾 '\n'）
+            }
+        } else {
+            nameLen = tailLen - (i + 34); // 窗口即全文件 → 到 EOF
+        }
+        if (nameLen <= 0) // 名称为空
             continue;
         const qint64 hashStart = fileSize - (tailLen - i);
         // 兼容旧 appendMd5Footer 变体：校验行前缀 '\n'（分隔符）不计入归档
