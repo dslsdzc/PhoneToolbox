@@ -10,19 +10,23 @@ constexpr quint16 kChunkRaw = 0xCAC1, kChunkFill = 0xCAC2, kChunkDontCare = 0xCA
 constexpr int kSparseHeaderSize = 28, kChunkHeaderSize = 12;
 
 struct SparseHeader {
-    quint32 magic, fileHdrSz, chunkHdrSz, blkSz, totalBlks, totalChunks;
+    quint32 magic, blkSz, totalBlks, totalChunks;
+    quint16 fileHdrSz, chunkHdrSz;
 };
 struct ChunkHeader { quint16 type; quint32 chunkSz, totalSz; };
 
 bool parseHeader(const QByteArray &d, SparseHeader &h)
 {
     if (d.size() < kSparseHeaderSize) return false;
+    // AOSP sparse_format.h: magic(u32@0) major(u16@4) minor(u16@6)
+    // file_hdr_sz(u16@8) chunk_hdr_sz(u16@10) blk_sz(u32@12)
+    // total_blks(u32@16) total_chunks(u32@20) image_checksum(u32@24)
     h.magic = qFromLittleEndian<quint32>(d.constData());
-    h.fileHdrSz = qFromLittleEndian<quint32>(d.constData() + 8);
-    h.chunkHdrSz = qFromLittleEndian<quint32>(d.constData() + 12);
-    h.blkSz = qFromLittleEndian<quint32>(d.constData() + 16);
-    h.totalBlks = qFromLittleEndian<quint32>(d.constData() + 20);
-    h.totalChunks = qFromLittleEndian<quint32>(d.constData() + 24);
+    h.fileHdrSz = qFromLittleEndian<quint16>(d.constData() + 8);
+    h.chunkHdrSz = qFromLittleEndian<quint16>(d.constData() + 10);
+    h.blkSz = qFromLittleEndian<quint32>(d.constData() + 12);
+    h.totalBlks = qFromLittleEndian<quint32>(d.constData() + 16);
+    h.totalChunks = qFromLittleEndian<quint32>(d.constData() + 20);
     return h.magic == kSparseMagic && h.blkSz > 0 && h.chunkHdrSz >= 12;
 }
 } // namespace
@@ -94,6 +98,9 @@ QByteArray img2simg(const QByteArray &raw, quint32 blockSize)
     QByteArray out;
     out.reserve(static_cast<int>(raw.size() + 32 + totalBlks * 16));
     QByteArray hdr(28, Qt::Uninitialized);
+    auto put16 = [&](QByteArray &d, int off, quint16 v) {
+        d[off] = char(v); d[off + 1] = char(v >> 8);
+    };
     auto put32 = [&](QByteArray &d, int off, quint32 v) {
         d[off] = char(v); d[off + 1] = char(v >> 8); d[off + 2] = char(v >> 16); d[off + 3] = char(v >> 24);
     };
@@ -134,10 +141,11 @@ QByteArray img2simg(const QByteArray &raw, quint32 blockSize)
     }
     put32(hdr, 0, kSparseMagic);
     hdr[4] = 1; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;
-    put32(hdr, 8, 28); put32(hdr, 12, 12);
-    put32(hdr, 16, blockSize);
-    put32(hdr, 20, static_cast<quint32>(totalBlks));
-    put32(hdr, 24, static_cast<quint32>(chunks.size()));
+    // AOSP 布局: file_hdr_sz/chunk_hdr_sz 为 u16（偏移 8/10），blk_sz 等从偏移 12 起
+    put16(hdr, 8, 28); put16(hdr, 10, 12);
+    put32(hdr, 12, blockSize);
+    put32(hdr, 16, static_cast<quint32>(totalBlks));
+    put32(hdr, 20, static_cast<quint32>(chunks.size()));
     out.append(hdr);
     for (const C &c : chunks) {
         QByteArray ch(12, Qt::Uninitialized);

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QtEndian>
 #include "image_engine/sparse_image.h"
 
 class TestSparse : public QObject
@@ -15,23 +16,26 @@ private slots:
     void simg2imgRejectsTruncated();
     void simg2imgRejectsZeroTotalSz();
     void simg2imgFillPattern();
+    void aospHeaderU16Layout();
+    void img2simgWritesAospHeader();
 };
 
 static QByteArray buildSparseHeader(quint32 totalBlks, quint32 totalChunks)
 {
+    // 严格按 AOSP sparse_format.h 布局：file_hdr_sz/chunk_hdr_sz 为 u16（偏移 8/10）
     QByteArray h(28, Qt::Uninitialized);
+    auto put16 = [&](int off, quint16 v) { h[off] = char(v); h[off + 1] = char(v >> 8); };
     auto put32 = [&](int off, quint32 v) {
         h[off] = char(v); h[off + 1] = char(v >> 8);
         h[off + 2] = char(v >> 16); h[off + 3] = char(v >> 24);
     };
     put32(0, 0xED26FF3A);
-    h[4] = 1; h[5] = 0;   // major 1
-    h[6] = 0; h[7] = 0;   // minor 0
-    put32(8, 28);         // file header size
-    put32(12, 12);        // chunk header size
-    put32(16, 4096);      // block size
-    put32(20, totalBlks);
-    put32(24, totalChunks);
+    put16(4, 1); put16(6, 0);   // major 1, minor 0
+    put16(8, 28);               // file header size (u16)
+    put16(10, 12);              // chunk header size (u16)
+    put32(12, 4096);            // block size
+    put32(16, totalBlks);
+    put32(20, totalChunks);
     return h;
 }
 
@@ -174,6 +178,60 @@ void TestSparse::simg2imgFillPattern()
     for (int i = 0; i < expect.size(); ++i)
         expect[i] = pattern[i % 4];
     QCOMPARE(imgsparse::simg2img(sparse), expect);
+}
+
+void TestSparse::aospHeaderU16Layout()
+{
+    // G0 发现的真实 bug 回归：file_hdr_sz/chunk_hdr_sz 是 u16（偏移 8/10）。
+    // 用字面字节构造 AOSP 标准头（偏移 8-11 == 1c 00 0c 00），按 u16 解析必须成功；
+    // 若被误读为 u32（偏移 8/12），fileHdrSz=786460、blkSz=4096 会被读成 totalBlks，
+    // chunk 起点错位 → 必然失败/输出错误。
+    QByteArray h(28, 0);
+    auto put32 = [&](int off, quint32 v) {
+        h[off] = char(v); h[off + 1] = char(v >> 8);
+        h[off + 2] = char(v >> 16); h[off + 3] = char(v >> 24);
+    };
+    put32(0, 0xED26FF3A);
+    h[4] = 1; h[5] = 0;    // major 1 (u16)
+    h[6] = 0; h[7] = 0;    // minor 0 (u16)
+    h[8] = 28; h[9] = 0;   // file_hdr_sz = 28 (u16) → 字节 1c 00
+    h[10] = 12; h[11] = 0; // chunk_hdr_sz = 12 (u16) → 字节 0c 00
+    put32(12, 4096);       // blk_sz
+    put32(16, 2);          // total_blks
+    put32(20, 1);          // total_chunks
+    QByteArray payload(8192, '\xAB'); // 2 blocks RAW
+    QByteArray c(12, Qt::Uninitialized);
+    c[0] = 0xC1; c[1] = 0xCA; // 0xCAC1 RAW (u16 LE)
+    c[2] = 0; c[3] = 0;
+    c[4] = 2; c[5] = 0; c[6] = 0; c[7] = 0;                 // chunk_sz = 2
+    c[8] = char(12 + 8192); c[9] = char((12 + 8192) >> 8);
+    c[10] = char((12 + 8192) >> 16); c[11] = char((12 + 8192) >> 24);
+    QByteArray sparse = h + c + payload;
+    QCOMPARE(imgsparse::simg2img(sparse), payload);
+}
+
+void TestSparse::img2simgWritesAospHeader()
+{
+    // img2simg 产物头必须为 AOSP u16 布局，否则系统 simg2img 读 chunk_hdr_sz(u16@10)=0 而拒绝
+    QByteArray raw(4096 * 2, '\x42');
+    QByteArray s = imgsparse::img2simg(raw);
+    QVERIFY(s.size() >= 44);
+    // file_hdr_sz = 28 u16 @8, chunk_hdr_sz = 12 u16 @10 → 字节 1c 00 0c 00
+    QCOMPARE(quint8(s[8]), quint8(28));
+    QCOMPARE(quint8(s[9]), quint8(0));
+    QCOMPARE(quint8(s[10]), quint8(12));
+    QCOMPARE(quint8(s[11]), quint8(0));
+    // major/minor (u16@4/6)
+    QCOMPARE(quint8(s[4]), quint8(1));
+    QCOMPARE(quint8(s[5]), quint8(0));
+    // blk_sz@12 / total_blks@16 / total_chunks@20
+    QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 12), 4096u);
+    QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 16), 2u);
+    QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 20), 1u);
+    // 首个 chunk 头：type u16@0=0xCAC2(FILL), chunk_sz u32@4=2, total_sz u32@8=16
+    QCOMPARE(qFromLittleEndian<quint16>(s.constData() + 28), quint16(0xCAC2));
+    QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 32), 2u);
+    QCOMPARE(qFromLittleEndian<quint32>(s.constData() + 36), 16u);
 }
 
 QTEST_APPLESS_MAIN(TestSparse)
