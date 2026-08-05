@@ -1,4 +1,7 @@
 #include <QtTest>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include "image_engine/tar_image.h"
 
 class TestTar : public QObject
@@ -12,6 +15,51 @@ private slots:
     void md5FooterWithTrailingNewline(); // 真实三星 .tar.md5 带尾 \n
     void extractDirSymlink();           // dir/symlink 分支 + linkTarget
     void badSizeRejected();             // 坏 size → false
+    // ---- Task G3: 流式接口 ----
+    void streamBuildMatchesOld();       // buildTarStream 与 buildTar 逐字节一致
+    void streamExtractMatchesOld();     // extractTarStream 与 extractTar 结果一致 + 穿越/符号链接防护
+    void streamMd5Footer();             // appendMd5FooterStream/verifyMd5FooterStream + 解包自动校验
+    void streamBadInputs();             // 坏 size/截断/重名/空归档 → 不崩溃且按契约报错
+};
+
+static bool writeFileBytes(const QString &path, const QByteArray &data)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+    return f.write(data) == data.size();
+}
+
+static QByteArray readFileBytes(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    return f.readAll();
+}
+
+// 伪随机（确定性）数据
+static QByteArray pattern(int size, int seed)
+{
+    QByteArray d(size, Qt::Uninitialized);
+    quint32 x = quint32(seed) * 2654435761u;
+    for (int i = 0; i < size; ++i) {
+        x = x * 1664525u + 1013904223u;
+        d[i] = char(x >> 24);
+    }
+    return d;
+}
+
+// 进度回调收集器：校验单调 + 首 0 + 末 total
+struct ProgressProbe {
+    QList<quint64> values;
+    bool monotonic = true;
+    void cb(quint64 v)
+    {
+        if (!values.isEmpty() && v < values.last())
+            monotonic = false;
+        values.append(v);
+    }
 };
 
 static QByteArray octalField(int size, int fieldLen)
@@ -138,6 +186,208 @@ void TestTar::badSizeRejected()
 {
     QList<imgtar::TarEntry> entries;
     QVERIFY(!imgtar::extractTar(buildTarBadSize(), entries));
+}
+
+// ---- Task G3: 流式接口 ----
+
+// buildTarStream 产物与旧接口 buildTar 逐字节一致（文件/目录/符号链接输入，含进度契约）
+void TestTar::streamBuildMatchesOld()
+{
+    QTemporaryDir dir;
+    const QString aPath = dir.path() + QStringLiteral("/a.bin");
+    const QString bPath = dir.path() + QStringLiteral("/b.bin");
+    const QString subPath = dir.path() + QStringLiteral("/sub");
+    const QString lnPath = dir.path() + QStringLiteral("/ln");
+    QVERIFY(writeFileBytes(aPath, pattern(3000, 1))); // 非 512 倍数
+    QVERIFY(writeFileBytes(bPath, pattern(4096, 2))); // 512 倍数
+    QVERIFY(QDir().mkpath(subPath));
+    QVERIFY(QFile::link(aPath, lnPath));
+
+    const QStringList files = {aPath, bPath, subPath, lnPath};
+    // 旧接口对照条目（同顺序、同名、同数据）
+    QList<imgtar::TarEntry> entries;
+    imgtar::TarEntry a; a.name = QStringLiteral("a.bin"); a.data = pattern(3000, 1);
+    entries.append(a);
+    imgtar::TarEntry b; b.name = QStringLiteral("b.bin"); b.data = pattern(4096, 2);
+    entries.append(b);
+    imgtar::TarEntry d; d.name = QStringLiteral("sub"); d.isDir = true;
+    entries.append(d);
+    imgtar::TarEntry l; l.name = QStringLiteral("ln"); l.isSymlink = true;
+    l.linkTarget = QFileInfo(lnPath).symLinkTarget();
+    entries.append(l);
+    const QByteArray oldTar = imgtar::buildTar(entries);
+
+    ProgressProbe p;
+    QString err;
+    const QString outPath = dir.path() + QStringLiteral("/out.tar");
+    QVERIFY2(imgtar::buildTarStream(files, outPath,
+                                    [&p](quint64 v) { p.cb(v); }, &err),
+             qPrintable(err));
+    QCOMPARE(readFileBytes(outPath), oldTar); // 逐字节一致
+
+    // 进度：首 0、末 3000+4096、单调
+    QVERIFY(!p.values.isEmpty());
+    QCOMPARE(p.values.first(), quint64(0));
+    QCOMPARE(p.values.last(), quint64(7096));
+    QVERIFY(p.monotonic);
+}
+
+// extractTarStream 与旧接口 extractTar 结果一致；穿越条目（.. 成分/前导 /）与符号链接不落盘
+void TestTar::streamExtractMatchesOld()
+{
+    // 构造含各类条目的归档：正常文件（嵌套目录）、目录、符号链接、穿越条目（应跳过）
+    QList<imgtar::TarEntry> entries;
+    imgtar::TarEntry d; d.name = QStringLiteral("sub/dir/"); d.isDir = true;
+    entries.append(d);
+    imgtar::TarEntry f; f.name = QStringLiteral("sub/file.bin"); f.data = pattern(1234, 3);
+    entries.append(f);
+    imgtar::TarEntry l; l.name = QStringLiteral("ln"); l.isSymlink = true;
+    l.linkTarget = QStringLiteral("target");
+    entries.append(l);
+    imgtar::TarEntry evil1; evil1.name = QStringLiteral("../evil.bin"); evil1.data = QByteArray("x");
+    entries.append(evil1);
+    imgtar::TarEntry evil2; evil2.name = QStringLiteral("/abs.bin"); evil2.data = QByteArray("y");
+    entries.append(evil2);
+    imgtar::TarEntry evil3; evil3.name = QStringLiteral("a/../../escape"); evil3.data = QByteArray("z");
+    entries.append(evil3);
+    const QByteArray tar = imgtar::buildTar(entries);
+
+    QTemporaryDir dir;
+    const QString tarPath = dir.path() + QStringLiteral("/arch.tar");
+    const QString outDir = dir.path() + QStringLiteral("/out");
+    QVERIFY(writeFileBytes(tarPath, tar));
+    QVERIFY(QDir().mkpath(outDir));
+
+    // 旧接口对照
+    QList<imgtar::TarEntry> oldOut;
+    QVERIFY(imgtar::extractTar(tar, oldOut));
+
+    ProgressProbe p;
+    QString err;
+    QVERIFY2(imgtar::extractTarStream(tarPath, outDir, [&p](quint64 v) { p.cb(v); }, &err),
+             qPrintable(err));
+    // 正常条目落盘
+    QCOMPARE(readFileBytes(outDir + QStringLiteral("/sub/file.bin")), pattern(1234, 3));
+    QVERIFY(QFileInfo::exists(outDir + QStringLiteral("/sub/dir")));
+    // 符号链接不落盘
+    QVERIFY(!QFileInfo::exists(outDir + QStringLiteral("/ln")));
+    // 穿越条目不落盘（.. 解析到 outDir 外部 / outDir 内均不得出现）
+    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/evil.bin")));
+    QVERIFY(!QFileInfo::exists(QStringLiteral("/abs.bin")));
+    QVERIFY(!QFileInfo::exists(outDir + QStringLiteral("/escape")));
+    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/escape")));
+    // 与旧接口结果一致：旧接口返回的条目名/数据与落盘文件对应
+    QCOMPARE(oldOut.size(), 6);
+    QCOMPARE(oldOut[1].name, QStringLiteral("sub/file.bin"));
+    QCOMPARE(oldOut[1].data, pattern(1234, 3));
+    // 进度：首 0、末 = 归档总字节（无校验行 → 全文件）、单调
+    QVERIFY(!p.values.isEmpty());
+    QCOMPARE(p.values.first(), quint64(0));
+    QCOMPARE(p.values.last(), quint64(tar.size()));
+    QVERIFY(p.monotonic);
+}
+
+// 三星 .tar.md5：追加/校验流式化（与整读接口逐字节一致）；解包自动校验；坏校验拒绝
+void TestTar::streamMd5Footer()
+{
+    QList<imgtar::TarEntry> entries;
+    imgtar::TarEntry f; f.name = QStringLiteral("boot.img"); f.data = pattern(5000, 4);
+    entries.append(f);
+    const QByteArray tar = imgtar::buildTar(entries);
+
+    QTemporaryDir dir;
+    const QString tarPath = dir.path() + QStringLiteral("/arch.tar");
+    QVERIFY(writeFileBytes(tarPath, tar));
+
+    // 无校验行：verify 返回 hasFooter=false + true
+    bool hasFooter = true;
+    QString err;
+    QVERIFY(imgtar::verifyMd5FooterStream(tarPath, &hasFooter, &err));
+    QVERIFY(!hasFooter);
+
+    // 追加：产物与整读接口逐字节一致
+    const QByteArray oldWithFooter = imgtar::appendMd5Footer(tar);
+    QVERIFY(imgtar::appendMd5FooterStream(tarPath, &err));
+    QCOMPARE(readFileBytes(tarPath), oldWithFooter);
+    QVERIFY(imgtar::verifyMd5FooterStream(tarPath, &hasFooter, &err));
+    QVERIFY(hasFooter);
+    QVERIFY(imgtar::verifyMd5Footer(oldWithFooter));
+
+    // 解包自动校验（校验行存在且匹配 → 正常解包）
+    const QString outDir = dir.path() + QStringLiteral("/out");
+    QVERIFY(QDir().mkpath(outDir));
+    ProgressProbe p;
+    QVERIFY2(imgtar::extractTarStream(tarPath, outDir, [&p](quint64 v) { p.cb(v); }, &err),
+             qPrintable(err));
+    QCOMPARE(readFileBytes(outDir + QStringLiteral("/boot.img")), pattern(5000, 4));
+    // 进度范围 [0, 归档字节数]（不含校验行）
+    QCOMPARE(p.values.last(), quint64(tar.size()));
+    QVERIFY(p.monotonic);
+
+    // 篡改归档数据 → 校验失败（解包与独立校验均拒绝）
+    QByteArray tampered = readFileBytes(tarPath);
+    tampered[100] = char(tampered[100] ^ 0x01);
+    const QString badPath = dir.path() + QStringLiteral("/bad.tar.md5");
+    QVERIFY(writeFileBytes(badPath, tampered));
+    QVERIFY(!imgtar::verifyMd5FooterStream(badPath, &hasFooter, &err));
+    QVERIFY(hasFooter);
+    QVERIFY(!imgtar::verifyMd5Footer(tampered)); // 与整读接口一致拒绝
+    const QString badOut = dir.path() + QStringLiteral("/badout");
+    QVERIFY(QDir().mkpath(badOut));
+    QVERIFY(!imgtar::extractTarStream(badPath, badOut, {}, &err));
+    QVERIFY(err.contains(QStringLiteral("MD5")));
+}
+
+// 不可信输入：坏 size / 数据截断（部分产物删除）/ 空归档 / 重名与不存在输入 → 均 false + error，不崩溃
+void TestTar::streamBadInputs()
+{
+    QTemporaryDir dir;
+
+    // 坏 size 字段
+    const QString badSize = dir.path() + QStringLiteral("/bad.tar");
+    QVERIFY(writeFileBytes(badSize, buildTarBadSize()));
+    QString e;
+    QVERIFY(!imgtar::extractTarStream(badSize, dir.path(), {}, &e));
+    QVERIFY(!e.isEmpty());
+
+    // 数据截断：归档在条目数据中部被切断 → false，且正在写入的部分产物被删除
+    QList<imgtar::TarEntry> entries;
+    imgtar::TarEntry f; f.name = QStringLiteral("big.bin"); f.data = pattern(100000, 5);
+    entries.append(f);
+    QByteArray tar = imgtar::buildTar(entries);
+    const QString truncated = dir.path() + QStringLiteral("/trunc.tar");
+    QVERIFY(writeFileBytes(truncated, tar.left(tar.size() - 60000))); // 截掉大半数据
+    e.clear();
+    QVERIFY(!imgtar::extractTarStream(truncated, dir.path(), {}, &e));
+    QVERIFY(!e.isEmpty());
+    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/big.bin"))); // 部分产物已删除
+
+    // 空归档（1024 零块）：成功解包、无产物；进度末 = 1024
+    const QString emptyTar = dir.path() + QStringLiteral("/empty.tar");
+    QVERIFY(writeFileBytes(emptyTar, QByteArray(1024, 0)));
+    ProgressProbe p;
+    e.clear();
+    QVERIFY2(imgtar::extractTarStream(emptyTar, dir.path(), [&p](quint64 v) { p.cb(v); }, &e),
+             qPrintable(e));
+    QCOMPARE(p.values.last(), quint64(1024));
+
+    // buildTarStream 重名条目拒绝
+    QVERIFY(QDir().mkpath(dir.path() + QStringLiteral("/x")));
+    QVERIFY(QDir().mkpath(dir.path() + QStringLiteral("/y")));
+    QVERIFY(writeFileBytes(dir.path() + QStringLiteral("/x/dup.bin"), QByteArray("a")));
+    QVERIFY(writeFileBytes(dir.path() + QStringLiteral("/y/dup.bin"), QByteArray("b")));
+    e.clear();
+    QVERIFY(!imgtar::buildTarStream({dir.path() + QStringLiteral("/x/dup.bin"),
+                                     dir.path() + QStringLiteral("/y/dup.bin")},
+                                    dir.path() + QStringLiteral("/dup.tar"), {}, &e));
+    QVERIFY(!e.isEmpty());
+    QVERIFY(!QFileInfo::exists(dir.path() + QStringLiteral("/dup.tar")));
+
+    // 输入不存在
+    e.clear();
+    QVERIFY(!imgtar::buildTarStream({dir.path() + QStringLiteral("/nope.bin")},
+                                    dir.path() + QStringLiteral("/nope.tar"), {}, &e));
+    QVERIFY(!e.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestTar)
