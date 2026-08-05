@@ -648,10 +648,24 @@ void ImageWorker::doConvert(const QString &path, const QString &outPath,
 
 void ImageWorker::doPatch(const QString &path, const patcher::PatchConfig &config)
 {
-    Q_UNUSED(path);
-    Q_UNUSED(config);
     emit progress(0, QStringLiteral("修补"));
-    // D4 实现：调 patcher::patchFile(path, config, &outPath, &error)
-    emit patchFinished(false, QString(),
-                       QStringLiteral("修补尚未实现（Task D4 接线）"));
+
+    // D4 接线：patcher::patchFile —— 读 boot 文件 → create() 工厂派发 →
+    // 自动备份 "<源文件>.orig.bak" + 产物 "<基名>_patched.img"；失败不落
+    // 任何产物（契约见 root_patcher.h：失败返回 false + error，绝不崩溃）。
+    // 全部在工作线程执行，UI 线程不阻塞。
+    QString error;
+    QString outPath;
+    const bool ok = patcher::patchFile(path, config, &outPath, &error);
+    if (!ok) {
+        // 防御：契约要求失败时 error 非空，仍兜底避免空错误日志
+        if (error.isEmpty())
+            error = QStringLiteral("修补失败（未知错误）");
+        emit progress(100, QStringLiteral("修补"));
+        emit patchFinished(false, QString(), error);
+        return;
+    }
+
+    emit progress(100, QStringLiteral("修补"));
+    emit patchFinished(true, outPath, QString());
 }
