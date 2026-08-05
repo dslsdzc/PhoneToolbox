@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `system_tool_panel` 新增"维修诊断"分类，实现**「打开工程模式」按钮** —— 识别设备品牌/芯片 → 启动对应厂商工程模式（自检流程由厂商模块承担）。2026-08-05 用户决策：不做 12 项自研测试，厂商工程模式覆盖屏幕/触摸/传感器/音频/相机/按键/电池自检。
+**Goal:** `system_tool_panel` 的**「开发调试」分类下新增"维修诊断"子分组**（2026-08-05 用户决策：非独立分类，挂现有分类），实现**「打开工程模式」按钮** —— 识别设备品牌/芯片 → 启动对应厂商工程模式（自检流程由厂商模块承担）。2026-08-05 用户决策：不做 12 项自研测试，厂商工程模式覆盖屏幕/触摸/传感器/音频/相机/按键/电池自检。
 
-**Architecture:** 入口映射做成纯函数模块 `src/core/engineer_mode.h/.cpp`（品牌/芯片 → 拨号码/Activity，无 UI 依赖可 Qt Test），面板侧 `SystemToolPanel` 新增"维修诊断"分类页复用现有 ADB QProcess 执行模式。
+**Architecture:** 入口映射做成纯函数模块 `src/core/engineer_mode.h/.cpp`（品牌/芯片 → 拨号码/Activity，无 UI 依赖可 Qt Test），面板侧 `SystemToolPanel` 在"开发调试"分类页内新增"维修诊断"子分组（复用现有分类页/子分组创建模式 `addCategoryPage`/`addHint`/`addRow`）复用现有 ADB QProcess 执行模式。
 
 **Tech Stack:** C++17, Qt6, 现有 `AdbEmbedded`/`FlashTool::executeAdb` 模式。
 
@@ -67,10 +67,10 @@ git commit -m "feat: 工程模式入口映射模块 (TDD)"
 
 ---
 
-### Task E2: SystemToolPanel 维修诊断页 + 打开工程模式接线
+### Task E2: 开发调试分类下"维修诊断"子分组 + 打开工程模式接线
 
 **Files:**
-- Modify: `src/ui/system_tool_panel.cpp/h`（新增"维修诊断"分类页：一个「打开工程模式」按钮 + 说明文案）
+- Modify: `src/ui/system_tool_panel.cpp/h`（在"开发调试"分类页内新增"维修诊断"子分组：一个「打开工程模式」按钮 + 说明文案 —— 先看现有分类页/子分组的实际创建模式再改，保持风格一致）
 
 **Interfaces:**
 - Consumes: `engmode::detectBrand/lookup`（E1）、现有 `executeAdb`/`runShell` 槽模式
