@@ -159,7 +159,8 @@ private:
     void setNote(const QString &text);
     QString defaultNote(patcher::RootType type) const;
     QString variantFor(patcher::RootType type) const;
-    QString ksuDownloadKey(patcher::RootType type, const QString &suffix) const;
+    QString ksuDownloadKey(patcher::RootType type, const QString &suffix,
+                           const QString &kmi = QString()) const;
     static bool isMagiskFamily(patcher::RootType t);
     static bool isKsuFamily(patcher::RootType t);
     patcher::RootType currentType() const;
@@ -241,13 +242,24 @@ QString RootPatchDialog::variantFor(patcher::RootType type) const
     }
 }
 
-// KernelSU 系下载缓存 key：assetKey(variant) + 用途 + "-latest"（URL 为
-// releases/latest/download，无版本号可辨 → "latest" 即诚实版本令牌；
-// ko 与 ksuinit 不同 URL → 必须分开 key）
-QString RootPatchDialog::ksuDownloadKey(patcher::RootType type, const QString &suffix) const
+// KernelSU 系下载缓存 key：assetKey(variant) + 用途 [+ KMI] + "-latest"
+//（URL 为 releases/latest/download，无版本号可辨 → "latest" 即诚实版本令牌；
+// ko 资产按 {kmi}_kernelsu.ko 命名、URL 随 KMI 变化 → **key 必须含 KMI**：
+// 否则跨会话换 KMI 时缓存命中会静默返回旧 KMI 模块（GKI 模块加载失败，
+// 最坏无法开机且无报错，审查 Important-1）；ko 与 ksuinit 不同 URL → 分 key，
+// ksuinit 不随 KMI 变化 → 不传 kmi）
+QString RootPatchDialog::ksuDownloadKey(patcher::RootType type, const QString &suffix,
+                                        const QString &kmi) const
 {
-    return patcher::KernelSuPatcher::assetKey(variantFor(type))
-        + QLatin1Char('-') + suffix + QStringLiteral("-latest");
+    QString key = patcher::KernelSuPatcher::assetKey(variantFor(type))
+        + QLatin1Char('-') + suffix;
+    if (!kmi.isEmpty())
+        key += QLatin1Char('-') + kmi;
+    key += QStringLiteral("-latest");
+    // key 禁止路径分隔符（AssetsDownloader validKey），自定义 KMI 异常时兜底
+    key.replace(QLatin1Char('/'), QLatin1Char('-'));
+    key.replace(QLatin1Char('\\'), QLatin1Char('-'));
+    return key;
 }
 
 RootPatchDialog::RootPatchDialog(const QString &bootPath, QWidget *parent)
@@ -602,7 +614,7 @@ void RootPatchDialog::startFieldDownload(const QString &field)
                     return;
                 m_kmiCombo->setCurrentText(kmi); // 回填：修补时作 deviceKmi 兜底
             }
-            startDownload(ksuDownloadKey(type, QStringLiteral("ko")), field,
+            startDownload(ksuDownloadKey(type, QStringLiteral("ko"), kmi), field,
                           patcher::KernelSuPatcher::koUrl(variant, kmi));
         }
         return;
@@ -630,6 +642,9 @@ void RootPatchDialog::startGithubResolve(const QString &repo,
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "PhoneToolbox");
+    // 传输超时 30s（Qt 默认无限等待，审查 Minor-2）：超时后走失败路径
+    // （错误提示 + 引导手动指定注入物）
+    req.setTransferTimeout(30000);
     QNetworkReply *reply = m_nam->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, assetPattern, baseKey]() {
         reply->deleteLater();
