@@ -457,6 +457,7 @@ private slots:
     void ksuDetectKmiNone();
     void ksuMissingKoFails();
     void ksuMissingWrapperFails();
+    void ksuMissingWrapperNextAnnotatesFallback();
     void ksuNonGkiNoKoFails();
     void ksuKmiUnsupportedFails();
     void ksuUnknownVariantFails();
@@ -957,6 +958,40 @@ void TestPatcher::ksuMissingWrapperFails()
                      &err));
     QVERIFY(!err.isEmpty());
     QVERIFY(err.contains("ksuinit", Qt::CaseInsensitive));
+}
+
+void TestPatcher::ksuMissingWrapperNextAnnotatesFallback()
+{
+    // 审查 Minor：next/suki 不发布独立 ksuinit 资产 → 回退官方 KernelSU
+    // ksuinit。缺 wrapper 的错误文案必须标注该来源与"fork 定制行为不保证"
+    //（修复前文案无来源标注，用户误以为下载的是 Next 定制版）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    QFile f(koPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("fake kernelsu.ko module bytes");
+    f.close();
+
+    patcher::KernelSuPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU_Next;
+    cfg.koPath = koPath; // apkPath 未指定
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})), cfg, out,
+                     &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("ksuinit", Qt::CaseInsensitive));
+    QVERIFY(err.contains("官方", Qt::CaseInsensitive));
+    QVERIFY(err.contains("不保证"));
+    // official 变体（无回退语义）不附加该标注
+    patcher::PatchConfig officialCfg = cfg;
+    officialCfg.type = patcher::RootType::KernelSU;
+    err.clear();
+    QVERIFY(!p.patch(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})),
+                     officialCfg, out, &err));
+    QVERIFY(!err.contains("不保证"));
 }
 
 void TestPatcher::ksuNonGkiNoKoFails()

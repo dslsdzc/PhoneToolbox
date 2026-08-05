@@ -215,9 +215,18 @@ bool KernelSuPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
 
     if (!koIsZip && !ko.isEmpty()) {
         // ---- LKM 注入（ksud boot-patch LKM 机制，见头文件注释）----
-        if (wrapper.isEmpty())
+        if (wrapper.isEmpty()) {
+            // next/suki 的 ksuinitUrl 回退官方 KernelSU 资产 —— 错误文案
+            // 标注该来源与不保证声明（fork 定制行为可能不兼容）
+            const bool officialFallback =
+                variant == QLatin1String("next") || variant == QLatin1String("suki");
             return fail(QStringLiteral("缺少 ksuinit init wrapper：请经 ksuinitUrl(variant) "
-                                       "下载后填入 apkPath"));
+                                       "下载后填入 apkPath%1")
+                            .arg(officialFallback
+                                     ? QStringLiteral("（next/suki 回退的 ksuinit 为官方 "
+                                                      "KernelSU 版本，fork 定制行为不保证）")
+                                     : QString()));
+        }
         QString fmt = QStringLiteral("raw"); // 空 ramdisk 时 detect 返回 false，显式归 raw
         patcher::detectRamdiskFormat(info.ramdisk, fmt);
         QByteArray ramdiskRaw;
@@ -375,7 +384,9 @@ QUrl KernelSuPatcher::ksuinitUrl(const QString &variant)
     if (v == QLatin1String("next") || v == QLatin1String("suki"))
         // KernelSU-Next / SukiSU-Ultra 不发布独立 ksuinit 资产（仅内嵌于
         // ksud 二进制，API 404 验证）→ 回退官方 KernelSU ksuinit：wrapper
-        // 为 KernelSU 通用 init 链（fork 差异在 .ko 与管理器），可混用
+        // 为 KernelSU 通用 init 链（fork 差异在 .ko 与管理器），可混用。
+        // 标注：ksuinit 为官方 KernelSU 版本，fork 定制行为不保证
+        //（如 Next 的自定义 init 参数/钩子），文档与错误文案须同步说明。
         return QUrl(QStringLiteral("https://github.com/tiann/KernelSU/releases/latest/"
                                    "download/ksuinit"));
     return QUrl();

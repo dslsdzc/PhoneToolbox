@@ -79,6 +79,7 @@ public:
     // apkPath）；next/suki：release 不发布独立 ksuinit 资产（仅内嵌于
     // ksud 二进制，API 404 验证）→ 回退官方 KernelSU ksuinit URL ——
     // wrapper 为 KernelSU 通用 init 链，fork 差异均在 .ko 与管理器。
+    // 标注：回退的 ksuinit 为官方 KernelSU 版本，fork 定制行为不保证。
     static QUrl ksuinitUrl(const QString &variant);
 
     // 版本化缓存 key 前缀（完整 key 由调用方追加版本，如 "ksu-official-3.2.5"）。
