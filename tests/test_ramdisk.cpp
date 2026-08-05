@@ -20,6 +20,7 @@ private slots:
     void detectXz();
     void xzRoundTrip();
     void detectLzma();
+    void detectLzmaDeclaredSize();
     void lzmaRoundTrip();
     void detectUnknown();
     void rawPassthrough();
@@ -210,6 +211,27 @@ void TestRamdisk::detectLzma()
     QString fmt;
     QVERIFY(patcher::detectRamdiskFormat(head, fmt));
     QCOMPARE(fmt, "lzma");
+}
+
+void TestRamdisk::detectLzmaDeclaredSize()
+{
+    // 审查 Minor：声明未压缩大小的合法 lzma-alone。magiskboot v25.2 判据
+    //（属性 0x5D + 大小字段 MSB ∈ {0xFF, 0x00}）应识别 —— 修复前要求大小
+    // 恒为 8×FF，声明大小流被误判 raw，ramdisk 被当未压缩原样处理而损坏。
+    QByteArray data("ramdisk with declared-size lzma-alone header");
+    QByteArray comp = patcher::compressRamdisk(data, "lzma");
+    QVERIFY(comp.size() >= 13);
+    // 改写 8B LE 未压缩大小字段为实际大小（<2^56 → MSB=0x00）
+    const quint64 sz = static_cast<quint64>(data.size());
+    for (int i = 0; i < 8; ++i)
+        comp[5 + i] = char((sz >> (8 * i)) & 0xFF);
+    QString fmt;
+    QVERIFY(patcher::detectRamdiskFormat(comp, fmt));
+    QCOMPARE(fmt, "lzma");
+    QByteArray out;
+    QString err;
+    QVERIFY(patcher::decompressRamdisk(comp, out, &err));
+    QCOMPARE(out, data);
 }
 
 void TestRamdisk::lzmaRoundTrip()

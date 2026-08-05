@@ -197,15 +197,18 @@ bool detectRamdiskFormat(const QByteArray &head, QString &format)
         format = QStringLiteral("xz"); // XZ 规范: FD 37 7A 58 5A 00
         return true;
     }
-    if (head.size() >= 14 && static_cast<uchar>(head[0]) == 0x5d) {
-        // lzma-alone：1B 属性(0x5D=lc3/lp0/pb2) + 4B LE 字典大小 + 8B LE 未压缩大小。
-        // 采用 magiskboot guess_lzma 严格判据（字典须为非零 2 的幂、大小须为未知
-        // 0xFFFFFFFFFFFFFFFF），降低对任意二进制的误报。
-        quint32 dict = 0;
-        for (int i = 0; i < 4; ++i)
-            dict |= static_cast<quint32>(static_cast<uchar>(head[1 + i])) << (i * 8);
-        if (dict != 0 && (dict & (dict - 1)) == 0 &&
-            head.mid(5, 8) == QByteArray("\xff\xff\xff\xff\xff\xff\xff\xff", 8)) {
+    if (head.size() >= 13 && static_cast<uchar>(head[0]) == 0x5d &&
+        static_cast<uchar>(head[1]) == 0x00 && static_cast<uchar>(head[2]) == 0x00) {
+        // lzma-alone：1B 属性(0x5D=lc3/lp0/pb2) + 4B LE 字典大小 + 8B LE
+        // 未压缩大小（0xFFFFFFFFFFFFFFFF=未知）。
+        // 判据 = magiskboot v25.2 check_fmt（native/jni/boot/format.cpp）：
+        // 属性 0x5D 且大小字段 MSB ∈ {0xFF（未知大小）, 0x00（声明大小 <2^56）}。
+        // 旧实现（字典须为 2 的幂 + 大小恒 0xFF×8）会把声明大小的合法
+        // lzma-alone 误判为 raw（ramdisk 被当未压缩原样处理而损坏）—— 少兼容
+        // 一类；字典不再校验：非法字典由 lzma_alone_decoder 初始化时拒绝
+        //（512MiB 限额），与 magiskboot 一致由解压层兜底。
+        const uchar sizeMsb = static_cast<uchar>(head[12]);
+        if (sizeMsb == 0xff || sizeMsb == 0x00) {
             format = QStringLiteral("lzma");
             return true;
         }

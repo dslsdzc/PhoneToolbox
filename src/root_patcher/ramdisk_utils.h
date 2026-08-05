@@ -10,7 +10,7 @@ namespace patcher {
 // 格式依据（联网验证）：lz4 legacy 魔数 0x184C2102（liblz4 legacy/lz4io.c、
 // magiskboot）、lz4 frame 魔数 0x184D2204/0x184C2103（LZ4 frame 规范、magiskboot）、
 // xz 魔数 FD 37 7A 58 5A 00（XZ 规范）、lzma-alone 头（liblzma alone_decoder.c、
-// magiskboot guess_lzma）。
+// magiskboot v25.2 check_fmt：属性 0x5D 且大小字段 MSB ∈ {0xFF, 0x00}）。
 bool detectRamdiskFormat(const QByteArray &head, QString &format);
 
 // 按检测结果解压：gzip/lz4(legacy 或 frame)/lzma(alone)/xz。
