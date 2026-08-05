@@ -512,6 +512,7 @@ private slots:
     void apatchManualDirPrefersHostPlatform();
     void apatchManualDirSkips7zArchive();
     void apatchManualDirWindowsExtractedAsset();
+    void apatchKpatchInPlaceExec();
     void apatchInvalidBootFails();
     void apatchNoKallsymsFails();
     void apatchFlagFailFails();
@@ -1975,6 +1976,71 @@ void TestPatcher::apatchManualDirWindowsExtractedAsset()
     QVERIFY(!err.isEmpty());
     QVERIFY(err.contains("win/kptools.exe"));
     QVERIFY(err.contains("msys-2.0.dll"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::apatchKpatchInPlaceExec()
+{
+    // 复核修复（Important）：官方 kptools-msys2-win.7z 内 kptools.exe 为
+    // MSYS2 动态链接（依赖 msys-2.0.dll + msys-z.dll）—— 旧实现
+    // QFile::copy 只拷单个 exe 到 QTemporaryDir 后执行，Windows 上 DLL
+    // 搜索必然失败。修复：kpatchPath 分支原地执行（源路径绝对路径、
+    // cwd 仍为 tmp、chmod 作用于源路径），DLL 随 exe 所在目录被加载器
+    // 找到。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // mock 脚本开头写执行位置标记到脚本自身所在目录：原地执行时标记落在
+    // kpatchPath 目录（被拷贝执行时标记落在 tmp 目录或被跳过）
+    QByteArray script = apatchMockKptoolsScript();
+    const int nl = script.indexOf('\n');
+    QVERIFY(nl >= 0);
+    script.insert(nl + 1, "printf 'INPLACE' >> \"$(dirname \"$0\")/inplace.flag\"\n");
+    QFile kp(dir.path() + "/kptools-linux");
+    QVERIFY(kp.open(QIODevice::WriteOnly));
+    kp.write(script);
+    kp.close();
+    QFile ki(dir.path() + "/kpimg-android");
+    QVERIFY(ki.open(QIODevice::WriteOnly));
+    ki.write("mock-kpimg-data");
+    ki.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildApatchBoot(), cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+    QVERIFY(out.contains("KP1158"));
+    // 原地执行证明：执行位置标记落在 kpatchPath 目录（旧拷贝行为下
+    // 标记落在 tmp，此处不存在）
+    QVERIFY2(QFile::exists(dir.path() + "/inplace.flag"),
+             "kptools 未原地执行：执行位置标记不在 kpatchPath 目录");
+
+    // Windows 场景：kptools.exe 启动失败（DLL 缺失形态）→ 可操作提示
+    //（依赖 msys-2.0.dll/msys-z.dll 须与 exe 同目录）
+    QTemporaryDir dll;
+    QVERIFY(dll.isValid());
+    QFile exe(dll.path() + "/kptools.exe");
+    QVERIFY(exe.open(QIODevice::WriteOnly));
+    exe.write("not an executable at all"); // 启动必然失败
+    exe.close();
+    QFile dki(dll.path() + "/kpimg-android");
+    QVERIFY(dki.open(QIODevice::WriteOnly));
+    dki.write("mock-kpimg-data");
+    dki.close();
+    patcher::PatchConfig dllCfg = cfg;
+    dllCfg.kpatchPath = dll.path();
+    err.clear();
+    {
+        ScopedPlatform winHost("win"); // 注入 Windows 平台
+        QVERIFY(!p.patch(buildApatchBoot(), dllCfg, out, &err));
+    }
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("msys-2.0.dll"));
+    QVERIFY(err.contains("msys-z.dll"));
+    QVERIFY(err.contains("kpatchPath", Qt::CaseInsensitive));
     QVERIFY(out.isEmpty());
 }
 

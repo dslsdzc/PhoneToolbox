@@ -44,7 +44,10 @@ namespace patcher {
 //      宿主平台匹配（kptools-linux/mac/win；Windows 另放行 .exe 后缀 ——
 //      官方 kptools-msys2-win.7z 解压后为 win/kptools.exe，"win" 是目录名，
 //      用户将 kpatchPath 指向该解压目录即可），.7z 压缩包跳过。kptools
-//      无执行位时 patcher 负责 chmod +x。
+//      无执行位时 patcher 负责 chmod +x（作用于源路径）。**原地执行**：
+//      kptools 不拷贝到临时目录，直接在源路径执行（cwd 仍为工作目录）——
+//      Windows 上 MSYS2 动态链接的 kptools.exe 依赖随行的 msys-2.0.dll /
+//      msys-z.dll，须与 exe 同目录才能被加载器找到。
 //   a/b 互斥（同时指定 → 明确报错，防 kptools/kpimg 跨版本混配）。
 //
 // 流程（与官方 boot_patch.sh 逐命令对齐；superkey 用官方默认 —— 不传

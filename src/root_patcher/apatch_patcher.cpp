@@ -50,6 +50,28 @@ bool writeFile(const QString &path, const QByteArray &data, QString *err)
     return true;
 }
 
+// 宿主平台（linux/mac/win，Q_OS_* 编译期判定）。测试经 APATCH_PLATFORM
+// 环境变量注入模拟平台（同 APATCH_HOST_ARCH 模式，见 test_patcher.cpp
+// ScopedPlatform —— 使 Windows 分支可在 Linux CI 上测试）；非法注入值
+// 回退真实平台。
+QString hostPlatform()
+{
+    const QByteArray sim = qgetenv("APATCH_PLATFORM");
+    if (!sim.isEmpty()) {
+        const QString s = QString::fromLatin1(sim).toLower();
+        if (s == QLatin1String("win") || s == QLatin1String("linux") ||
+            s == QLatin1String("mac"))
+            return s;
+    }
+#if defined(Q_OS_WIN)
+    return QStringLiteral("win");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral("mac");
+#else
+    return QStringLiteral("linux");
+#endif
+}
+
 // 运行 kptools 子进程。cwd 为工作目录，args 为参数；timeoutMs 超时即杀。
 // 成功返回 true 并回填输出（stdout+stderr），失败写 error。
 bool runKptools(const QString &kptoolsPath, const QString &cwd, const QStringList &args,
@@ -65,8 +87,19 @@ bool runKptools(const QString &kptoolsPath, const QString &cwd, const QStringLis
     proc.setArguments(args);
     proc.setWorkingDirectory(cwd);
     proc.start();
-    if (!proc.waitForStarted(10000))
+    if (!proc.waitForStarted(10000)) {
+        // Windows：官方 kptools-msys2-win.7z 的 kptools.exe 为 MSYS2 动态
+        // 链接（依赖 msys-2.0.dll + msys-z.dll）—— 启动失败多为 DLL 缺失，
+        // 给出可操作提示（原地执行路径下 DLL 随 exe 目录被加载器找到，
+        // 仍失败说明解压目录不完整）。hostPlatform 运行时判定可注入测试。
+        if (hostPlatform() == QLatin1String("win"))
+            return fail(QStringLiteral("kptools 无法启动：%1（Windows 下 "
+                                       "kptools.exe 为 MSYS2 动态链接，依赖同目录 "
+                                       "msys-2.0.dll/msys-z.dll：请确认 kpatchPath "
+                                       "为完整解压目录，DLL 与 kptools.exe 同处）")
+                            .arg(proc.errorString()));
         return fail(QStringLiteral("kptools 无法启动：%1").arg(proc.errorString()));
+    }
     if (!proc.waitForFinished(timeoutMs)) {
         proc.kill();
         proc.waitForFinished(2000);
@@ -124,28 +157,6 @@ bool findInDirByPrefix(const QString &dirPath, const QString &prefix,
 int plainRank(const QString &)
 {
     return 1;
-}
-
-// 宿主平台（linux/mac/win，Q_OS_* 编译期判定）。测试经 APATCH_PLATFORM
-// 环境变量注入模拟平台（同 APATCH_HOST_ARCH 模式，见 test_patcher.cpp
-// ScopedPlatform —— 使 Windows 分支可在 Linux CI 上测试）；非法注入值
-// 回退真实平台。
-QString hostPlatform()
-{
-    const QByteArray sim = qgetenv("APATCH_PLATFORM");
-    if (!sim.isEmpty()) {
-        const QString s = QString::fromLatin1(sim).toLower();
-        if (s == QLatin1String("win") || s == QLatin1String("linux") ||
-            s == QLatin1String("mac"))
-            return s;
-    }
-#if defined(Q_OS_WIN)
-    return QStringLiteral("win");
-#elif defined(Q_OS_MACOS)
-    return QStringLiteral("mac");
-#else
-    return QStringLiteral("linux");
-#endif
 }
 
 // kptools 候选评分（审查 Minor）：KernelPatch release 预编译资产多平台共存
@@ -313,13 +324,22 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
             return fail(sErr);
     }
 
-    const QString kptools = tmp.path() + QStringLiteral("/kptools");
     const QString kpimg = tmp.path() + QStringLiteral("/kpimg");
+    // kptools 执行路径（R4 复核修复）：
+    //  - kpatchPath 分支（kptoolsPathSrc 非空）：**原地执行** —— 官方
+    //    kptools-msys2-win.7z 的 kptools.exe 为 MSYS2 动态链接（依赖
+    //    msys-2.0.dll + msys-z.dll），旧实现 QFile::copy 只拷单个 exe 到
+    //    QTemporaryDir 后执行，Windows 上 DLL 搜索必然失败；原地执行
+    //    （setProgram 源路径绝对路径、cwd 仍为 tmp 使产物写入工作目录、
+    //    chmod 作用于源路径）使 DLL 随 exe 所在目录被 Windows 加载器找到。
+    //  - apkPath 分支（kptoolsData 非空）：提取产物写入 tmp/kptools。
+    QString kptools;
     if (!kptoolsPathSrc.isEmpty()) {
-        if (!QFile::copy(kptoolsPathSrc, kptools))
-            return fail(QStringLiteral("无法复制 kptools 到工作目录：%1").arg(kptoolsPathSrc));
-    } else if (!writeFile(kptools, kptoolsData, &sErr)) {
-        return fail(sErr);
+        kptools = kptoolsPathSrc;
+    } else {
+        kptools = tmp.path() + QStringLiteral("/kptools");
+        if (!writeFile(kptools, kptoolsData, &sErr))
+            return fail(sErr);
     }
     if (!kpimgPathSrc.isEmpty()) {
         if (!QFile::copy(kpimgPathSrc, kpimg))
@@ -327,7 +347,8 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
     } else if (!writeFile(kpimg, kpimgData, &sErr)) {
         return fail(sErr);
     }
-    // kptools 需要执行位（APK 提取/zip 解压后通常丢失）
+    // kptools 需要执行位（APK 提取/zip 解压后通常丢失；kpatchPath 原地
+    // 执行时作用于源路径 —— Windows 上 setPermissions 为 no-op）
     QFile kpFile(kptools);
     if (!kpFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                                QFileDevice::ExeOwner | QFileDevice::ReadGroup |
