@@ -1058,9 +1058,14 @@ void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
                             f == imgreg::Format::UpdateBin || f == imgreg::Format::Sin ||
                             f == imgreg::Format::DiskGpt || f == imgreg::Format::TwrpWin ||
                             f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
-    // 打包（D6 接线）：sparse→raw、镜像集→tar、payload 全量等
+    // 打包（D6 接线）：按"后端可用打包接口"enable —— sparse→raw（simg2img 逆向）、
+    // raw→sparse（img2simg）、Tar/TarMd5→.img 集合打 tar/tar.md5（appendMd5Footer）。
+    // Payload 不 enable：imgpayload 无打包接口（buildFullPayload 不存在，后端待办，
+    // 核实见 image_worker.cpp doPack 顶部注释）；UpdateApp 的 buildUpdateAppWithData
+    // 需逐文件数据+AppFile 元数据，单文件流不可达（UI 待办：文件表编辑器）。
+    // （TarMd5 纳入 tar 系集合打包：与 Tar 同一条目标格式流程）
     m_packBtn->setEnabled(f == imgreg::Format::Sparse || f == imgreg::Format::RawImage ||
-                          f == imgreg::Format::Tar || f == imgreg::Format::Payload);
+                          f == imgreg::Format::Tar || f == imgreg::Format::TarMd5);
     // 转换（D3 接线）：sparse↔raw
     m_convertBtn->setEnabled(f == imgreg::Format::Sparse || f == imgreg::Format::RawImage);
     // 修补（D4 接线）：boot 类镜像
@@ -1102,10 +1107,76 @@ void ImageToolPanel::onPackClicked()
 {
     if (m_currentFile.isEmpty() || m_detected.format == imgreg::Format::Unknown)
         return;
-    appendLog(QStringLiteral("开始打包: %1").arg(m_currentFile));
-    // D6 接线：输出路径/输入清单由后续任务提供；当前为占位参数
-    m_worker.runPack(m_currentFile + QStringLiteral(".tar"),
-                     QStringList{m_currentFile}, m_detected);
+
+    // D6 接线：目标格式菜单 →（tar 系）输入集合多选 → 输出文件对话框 → runPack。
+    // 打包目标按当前格式 + 后端可用打包接口（核实见 image_worker.cpp doPack）：
+    //   Sparse    → Raw 镜像（simg2img 逆向）
+    //   RawImage  → Sparse 镜像（img2simg）
+    //   Tar/TarMd5 → tar / tar.md5（三星 Odin 校验尾；输入为 .img 文件集合）
+    //   Payload/UpdateApp 等 → 按钮不 enable，此处防御返回（不崩溃、日志说明）
+    const imgreg::Format f = m_detected.format;
+    const bool isTarFamily = (f == imgreg::Format::Tar || f == imgreg::Format::TarMd5);
+    if (f != imgreg::Format::Sparse && f != imgreg::Format::RawImage && !isTarFamily) {
+        appendLog(QStringLiteral("打包: 该格式后端无可用打包接口（按钮已禁用，防御返回）"), true);
+        return;
+    }
+
+    // ---- 目标格式选择（tar 系二选一；sparse/raw 单方向固定）----
+    QString targetName;  // 日志用
+    QString suffix;      // 输出文件默认后缀（tar 系的 ".md5" 另参与打包尾判定）
+    if (isTarFamily) {
+        QMenu menu(this);
+        menu.addAction(QStringLiteral("Tar 归档 (.tar)"));
+        menu.addAction(QStringLiteral("Tar.md5 校验归档 (.tar.md5，三星 Odin)"));
+        QAction *chosen = menu.exec(
+            m_packBtn->mapToGlobal(QPoint(0, m_packBtn->height() + 2)));
+        if (!chosen) {
+            appendLog(QStringLiteral("已取消打包（未选择目标格式）"));
+            return;
+        }
+        targetName = chosen->text();
+        suffix = (menu.actions().indexOf(chosen) == 1) ? QStringLiteral("tar.md5")
+                                                       : QStringLiteral("tar");
+    } else {
+        targetName = (f == imgreg::Format::RawImage)
+            ? QStringLiteral("Sparse 镜像 (img2simg)")
+            : QStringLiteral("Raw 镜像 (simg2img)");
+        suffix = (f == imgreg::Format::RawImage) ? QStringLiteral("sparse")
+                                                 : QStringLiteral("raw");
+    }
+
+    // ---- 输入清单：单文件格式用当前文件；tar 系多选 .img 集合（默认当前目录）----
+    QStringList inputs;
+    if (isTarFamily) {
+        inputs = QFileDialog::getOpenFileNames(
+            this, QStringLiteral("选择要打包的镜像文件（tar 条目，条目名=文件名）"),
+            QFileInfo(m_currentFile).absolutePath(),
+            QStringLiteral("镜像文件 (*.img *.dat *.raw *.sin *.win);;所有文件 (*)"));
+        if (inputs.isEmpty()) {
+            appendLog(QStringLiteral("已取消打包（未选择输入文件）"));
+            return;
+        }
+    } else {
+        inputs << m_currentFile;
+    }
+
+    // ---- 输出文件对话框（默认同目录 <基名>.<后缀>）----
+    // "firmware.tar.md5" → completeBaseName 去最后后缀 = "firmware.tar" → 再剥 ".tar"
+    QString base = QFileInfo(m_currentFile).completeBaseName();
+    if (base.endsWith(QLatin1String(".tar")))
+        base.chop(4);
+    const QString suggested = QFileInfo(m_currentFile).absolutePath() + QLatin1Char('/')
+        + base + QLatin1Char('.') + suffix;
+    const QString outPath = QFileDialog::getSaveFileName(
+        this, QStringLiteral("选择打包输出文件"), suggested);
+    if (outPath.isEmpty()) {
+        appendLog(QStringLiteral("已取消打包（未选择输出文件）"));
+        return;
+    }
+
+    appendLog(QStringLiteral("开始打包: %1 → %2（目标 %3）")
+                  .arg(inputs.join(QLatin1String(", ")), outPath, targetName));
+    m_worker.runPack(outPath, inputs, m_detected);
 }
 
 void ImageToolPanel::onConvertClicked()

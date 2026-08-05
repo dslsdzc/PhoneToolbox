@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSet>
 #include <QTemporaryFile>
 
 #include "image_engine/sparse_image.h"
@@ -597,13 +598,123 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
 void ImageWorker::doPack(const QString &outPath, const QStringList &inputs,
                          const imgreg::Detected &detected)
 {
-    Q_UNUSED(outPath);
-    Q_UNUSED(inputs);
-    Q_UNUSED(detected);
     emit progress(0, QStringLiteral("打包"));
-    // D6 实现
-    emit packFinished(false, QString(),
-                      QStringLiteral("打包尚未实现（Task D6 接线）"));
+
+    // 后端打包接口核实（2026-08-05，以 src/image_engine 头文件为准，非计划文档记忆）：
+    //   • imgsparse::img2simg(raw, blockSize=4096)（sparse_image.h L7）→ raw→sparse
+    //   • imgsparse::simg2img(sparse)（sparse_image.h L6）→ sparse→raw 逆向
+    //   • imgtar::buildTar(entries)（tar_image.h L17）+ imgtar::appendMd5Footer(tar)
+    //     （tar_image.h L18，三星 Odin 校验尾: [tar][32hex]  firmware.tar.md5\n）
+    //     → .img 集合 → tar / tar.md5（目标格式按输出路径后缀判定）
+    //   • imghw::buildUpdateAppWithData(QList<QPair<AppFile,QByteArray>>, SignConfig*)
+    //     （huawei_image.h L45-46）：需 AppFile 元数据 + 逐文件数据 —— 面板单文件流
+    //     无法提供 → 不接入（UI 待办：update.app 文件表编辑器）
+    //   • imgpayload：**无任何打包接口**（payload_image.h 仅 isPayload/parseManifest/
+    //     extractPartition，buildFullPayload 不存在）→ 后端待办
+    //   • imgboot::repackBootImage(BootInfo)（boot_image.h L21）存在，但需 BootInfo
+    //     全量部件（kernel/ramdisk/dtb），面板无编辑流 → 不接入（记录备选，见报告）
+    //   • imgkdz（仅 mergeChunks 属解包侧）/imgsuper/imgdat/imgsin/imgpac/imgdisk/
+    //     imgtwrp：均无打包接口
+    // 打包按钮按"后端可用打包接口"enable（image_tool_panel::updateButtonsFor）；
+    // 此处对禁用格式仍防御性返回错误（全局契约：失败 ok=false + error，绝不崩溃）。
+
+    QString error;
+    if (outPath.isEmpty()) {
+        emit progress(100, QStringLiteral("打包"));
+        emit packFinished(false, QString(), QStringLiteral("输出路径为空"));
+        return;
+    }
+    if (inputs.isEmpty()) {
+        emit progress(100, QStringLiteral("打包"));
+        emit packFinished(false, QString(), QStringLiteral("输入文件列表为空"));
+        return;
+    }
+    // 保存对话框一般落在已存在目录，仍防御性创建父目录（writeFile 不建父目录）
+    if (!QDir().mkpath(QFileInfo(outPath).absolutePath())) {
+        emit progress(100, QStringLiteral("打包"));
+        emit packFinished(false, QString(),
+                          QStringLiteral("无法创建输出目录: ")
+                              + QFileInfo(outPath).absolutePath());
+        return;
+    }
+
+    QByteArray out;
+    switch (detected.format) {
+    // ---- sparse → raw（逆向解包，与转换同向；单文件输入取首个）----
+    case imgreg::Format::Sparse: {
+        const QByteArray data = readFile(inputs.first(), &error);
+        if (!data.isEmpty())
+            out = imgsparse::simg2img(data);
+        if (out.isEmpty() && error.isEmpty())
+            error = QStringLiteral("sparse→raw 打包失败（数据损坏或不受支持）");
+        break;
+    }
+
+    // ---- raw → sparse ----
+    case imgreg::Format::RawImage: {
+        const QByteArray data = readFile(inputs.first(), &error);
+        if (!data.isEmpty())
+            out = imgsparse::img2simg(data);
+        if (out.isEmpty() && error.isEmpty())
+            error = QStringLiteral("raw→sparse 打包失败");
+        break;
+    }
+
+    // ---- .img 集合 → tar / tar.md5 ----
+    // 输入为多选文件集合，条目名 = 文件名（扁平；重名会互相覆盖 → 拒绝）。
+    // 目标格式按输出路径后缀判定: *.md5（含 *.tar.md5）→ appendMd5Footer，
+    // 其余 → 纯 tar（允许 tar.md5 源重打为纯 tar 的逆向路径）。
+    case imgreg::Format::Tar:
+    case imgreg::Format::TarMd5: {
+        QList<imgtar::TarEntry> entries;
+        entries.reserve(inputs.size());
+        QSet<QString> seen;
+        for (const QString &in : inputs) {
+            const QByteArray data = readFile(in, &error);
+            if (data.isEmpty())
+                break;
+            const QString name = QFileInfo(in).fileName();
+            if (seen.contains(name)) {
+                error = QStringLiteral("输入文件包含重名条目: %1（tar 内条目名须唯一）")
+                            .arg(name);
+                break;
+            }
+            seen.insert(name);
+            imgtar::TarEntry e;
+            e.name = name;
+            e.data = data;
+            entries.append(e);
+        }
+        if (error.isEmpty()) {
+            out = imgtar::buildTar(entries);
+            if (out.isEmpty())
+                error = QStringLiteral("tar 打包失败（buildTar 返回空）");
+        }
+        if (error.isEmpty() && QFileInfo(outPath).suffix() == QLatin1String("md5"))
+            out = imgtar::appendMd5Footer(out);
+        break;
+    }
+
+    // ---- 后端缺口（按钮已禁用，防御性返回明确错误，不崩溃）----
+    case imgreg::Format::Payload:
+        error = QStringLiteral("payload 全量打包未实现（imgpayload 无打包接口，"
+                               "buildFullPayload 不存在，后端扩展待办）");
+        break;
+    case imgreg::Format::UpdateApp:
+        error = QStringLiteral("update.app 重打包需逐文件数据与 AppFile 元数据"
+                               "（buildUpdateAppWithData 存在），当前面板单文件流"
+                               "无法提供（UI 文件表编辑器待办）");
+        break;
+    default:
+        error = QStringLiteral("该格式后端无打包接口（后端扩展待办）");
+        break;
+    }
+
+    if (error.isEmpty() && !writeFile(outPath, out, &error))
+        out.clear();
+
+    emit progress(100, QStringLiteral("打包"));
+    emit packFinished(error.isEmpty(), outPath, error);
 }
 
 void ImageWorker::doConvert(const QString &path, const QString &outPath,

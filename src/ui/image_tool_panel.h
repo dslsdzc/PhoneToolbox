@@ -17,7 +17,9 @@
 // D3：解包/转换已接线（解包弹目录选择框、转换弹目标类型菜单 + 输出文件框）。
 // D4：修补已接线（修补按钮 → RootPatchDialog 方案选择对话框 → worker.runPatch
 // → patcher::patchFile：自动备份 <源>.orig.bak + 产物 <基名>_patched.img）。
-// 打包（D6）仍为占位。
+// D6：打包已接线（打包按钮 → 目标格式菜单 →（tar 系）输入集合多选 → 输出文件
+// 对话框 → worker.runPack；按钮按后端可用打包接口 enable，Payload 无打包接口不
+// enable，详见 image_worker.cpp doPack 顶部核实记录）。
 class ImageToolPanel : public QWidget
 {
     Q_OBJECT

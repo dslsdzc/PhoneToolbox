@@ -51,7 +51,10 @@ public:
     void runUnpack(const QString &path, const QString &outDir,
                    const imgreg::Detected &detected);
 
-    // 打包（D6 实现：sparse→raw / .img 集合→tar / payload 全量等）
+    // 打包（D6 实现，按 detected.format 分派）：Sparse→Raw（simg2img 逆向）、
+    // RawImage→Sparse（img2simg）、Tar/TarMd5→.img 集合打成 tar/tar.md5
+    // （目标格式按 outPath 后缀 ".md5" 判定 → appendMd5Footer）。
+    // 无打包接口的格式（Payload/UpdateApp 等）防御性返回错误（按钮已禁用）。
     void runPack(const QString &outPath, const QStringList &inputs,
                  const imgreg::Detected &detected);
 
@@ -102,6 +105,7 @@ private:
     void doDetect(const QString &path);
     void doUnpack(const QString &path, const QString &outDir,
                   const imgreg::Detected &detected);
+    // doPack 分派（打包接口核实记录见 image_worker.cpp doPack 顶部注释）
     void doPack(const QString &outPath, const QStringList &inputs,
                 const imgreg::Detected &detected);
     void doConvert(const QString &path, const QString &outPath,
