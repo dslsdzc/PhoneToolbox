@@ -483,6 +483,8 @@ private slots:
     void apatchApkNotZipFails();
     void apatchKpatchDirMissingFilesFails();
     void apatchKpatchPathNotDirFails();
+    void apatchManualDirPrefersHostPlatform();
+    void apatchManualDirSkips7zArchive();
     void apatchInvalidBootFails();
     void apatchNoKallsymsFails();
     void apatchFlagFailFails();
@@ -1694,6 +1696,95 @@ void TestPatcher::apatchKpatchPathNotDirFails()
     QString err;
     QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
     QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::apatchManualDirPrefersHostPlatform()
+{
+    // 审查 Minor：手动目录含多平台 kptools 候选（kptools-linux/mac/win +
+    // kptools-msys2-win.7z）时按 Q_OS_* 选宿主平台二进制 —— 修复前按字母序
+    // 取首个（macOS/Windows 宿主会选到 kptools-linux 而非本平台二进制）。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QString hostTag;
+#if defined(Q_OS_LINUX)
+    hostTag = QStringLiteral("linux");
+#elif defined(Q_OS_MACOS)
+    hostTag = QStringLiteral("mac");
+#elif defined(Q_OS_WIN)
+    hostTag = QStringLiteral("win");
+#else
+    hostTag = QStringLiteral("linux"); // 未知平台：退化为常见名
+#endif
+    // 宿主平台候选：基 mock + repack 时补打选中标记（断言用）
+    QByteArray good = apatchMockKptoolsScript();
+    QVERIFY(good.contains("printf 'MOCKREPACK' >> new-boot.img"));
+    good.replace("printf 'MOCKREPACK' >> new-boot.img",
+                 "printf 'MOCKREPACK' >> new-boot.img\n"
+                 "printf 'SEL=" + hostTag.toLatin1() + "' >> new-boot.img");
+    // 其余平台候选：恒失败脚本（若被选中 → 修补失败）。另加按字母序排最前
+    // 的无关前缀候选 kptools-abc —— 修复前按字母序取首个会选中它而失败；
+    // 修复后按平台排名选中宿主平台候选（该 decoy 使测试在 Linux 宿主也能
+    // 复现旧缺陷，不依赖 linux/mac/win 字母序恰好与宿主一致的巧合）
+    const QByteArray bad = QByteArray("#!/bin/sh\nexit 3\n");
+
+    auto writeFile = [&dir](const QString &name, const QByteArray &data) -> bool {
+        QFile f(dir.path() + QLatin1Char('/') + name);
+        if (!f.open(QIODevice::WriteOnly))
+            return false;
+        f.write(data);
+        f.close();
+        return true;
+    };
+    QVERIFY(writeFile(QStringLiteral("kptools-") + hostTag, good));
+    QVERIFY(writeFile(QStringLiteral("kptools-abc"), bad)); // 字母序 decoy
+    for (const QString &o : {QStringLiteral("linux"), QStringLiteral("mac"),
+                             QStringLiteral("win")}) {
+        if (o != hostTag)
+            QVERIFY(writeFile(QStringLiteral("kptools-") + o, bad));
+    }
+    QVERIFY(writeFile(QStringLiteral("kptools-msys2-win.7z"),
+                      QByteArray("7z-archive-garbage-not-an-elf")));
+    QVERIFY(writeFile(QStringLiteral("kpimg-android"), QByteArray("mock-kpimg-data")));
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelPatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildApatchBoot(), cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+    QVERIFY(out.contains("SEL=" + hostTag.toLatin1())); // 选中宿主平台候选
+    QVERIFY(out.contains("KP1158"));
+}
+
+void TestPatcher::apatchManualDirSkips7zArchive()
+{
+    // 审查 Minor 负例：目录仅含 kptools-msys2-win.7z（压缩包不可执行）→
+    // 明确报错而非把 .7z 当二进制 exec（修复前 .7z 会被按前缀选中）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile kp(dir.path() + "/kptools-msys2-win.7z");
+    QVERIFY(kp.open(QIODevice::WriteOnly));
+    kp.write("7z-compressed-archive-bytes-not-an-elf");
+    kp.close();
+    QFile ki(dir.path() + "/kpimg-android");
+    QVERIFY(ki.open(QIODevice::WriteOnly));
+    ki.write("mock-kpimg-data");
+    ki.close();
+
+    patcher::APatchPatcher p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::APatch;
+    cfg.kpatchPath = dir.path();
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(buildApatchBoot(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    // 新行为：候选全部被跳过 → 目录扫描报"未找到"（修复前会把 .7z 当
+    // 二进制 exec，错误来自 kptools 无法启动而非扫描层）
+    QVERIFY(err.contains("未找到"));
+    QVERIFY(out.isEmpty());
 }
 
 void TestPatcher::apatchInvalidBootFails()

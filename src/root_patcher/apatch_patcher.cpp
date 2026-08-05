@@ -7,6 +7,8 @@
 #include <QProcess>
 #include <QTemporaryDir>
 
+#include <functional>
+
 namespace patcher {
 namespace {
 
@@ -80,10 +82,13 @@ bool runKptools(const QString &kptoolsPath, const QString &cwd, const QStringLis
     return true;
 }
 
-// 目录内按前缀找唯一文件（kptools*/kpimg* 形态，KernelPatch release 资产）。
-// 精确名优先（C8 吸收的 C7 Minor：手动目录同时含 "kpimg" 与 "kpimg-*" 时取
-// 精确名，与 zip_util extractZipEntryByPrefix 语义一致）。
-bool findInDirByPrefix(const QString &dirPath, const QString &prefix, QString *found,
+// 目录内按前缀找文件（kptools*/kpimg* 形态，KernelPatch release 资产）。
+// rank(name) 打分：负值候选跳过（如 .7z 压缩包），正分按高者优先，同分按
+// entryList 字母序（首个）。精确名优先（C8 吸收的 C7 Minor：手动目录同时
+// 含 "kpimg" 与 "kpimg-*" 时取精确名，与 zip_util extractZipEntryByPrefix
+// 语义一致）。无可用候选时写 err。
+bool findInDirByPrefix(const QString &dirPath, const QString &prefix,
+                       const std::function<int(const QString &)> &rank, QString *found,
                        QString *err)
 {
     QDir dir(dirPath);
@@ -92,15 +97,53 @@ bool findInDirByPrefix(const QString &dirPath, const QString &prefix, QString *f
         *found = dir.filePath(prefix);
         return true;
     }
+    int best = -1; // 负分候选视为不可用（.7z 等不可执行压缩包）
+    QString picked;
     for (const auto &e : entries) {
-        if (e.startsWith(prefix)) {
-            *found = dir.filePath(e);
-            return true;
+        if (!e.startsWith(prefix))
+            continue;
+        const int r = rank(e);
+        if (r < 0)
+            continue;
+        if (r > best) {
+            best = r;
+            picked = e;
         }
     }
-    if (err)
-        *err = QStringLiteral("目录 %1 中未找到 %2 文件").arg(dirPath, prefix);
-    return false;
+    if (picked.isEmpty()) {
+        if (err)
+            *err = QStringLiteral("目录 %1 中未找到 %2 文件").arg(dirPath, prefix);
+        return false;
+    }
+    *found = dir.filePath(picked);
+    return true;
+}
+
+// 默认评分：任意前缀候选同权（kpimg* 形态，字母序首个）。
+int plainRank(const QString &)
+{
+    return 1;
+}
+
+// kptools 候选评分（审查 Minor）：KernelPatch release 预编译资产多平台共存
+//（kptools-linux / kptools-mac / kptools-msys2-win.7z，联网验证 0.13.3）——
+// 修复前按字母序取首个，macOS/Windows 宿主会选到 kptools-linux 而非本平台
+// 二进制。按 Q_OS_* 宿主平台匹配：含本平台名（linux/mac/win）→ 2；其余
+// 前缀候选 → 1；.7z 压缩包（不可执行）→ -1 跳过。
+int kptoolsRank(const QString &name)
+{
+    if (name.endsWith(QLatin1String(".7z"), Qt::CaseInsensitive))
+        return -1;
+#if defined(Q_OS_LINUX)
+    const bool hostMatch = name.contains(QLatin1String("linux"));
+#elif defined(Q_OS_MACOS)
+    const bool hostMatch = name.contains(QLatin1String("mac"));
+#elif defined(Q_OS_WIN)
+    const bool hostMatch = name.contains(QLatin1String("win"));
+#else
+    const bool hostMatch = false;
+#endif
+    return hostMatch ? 2 : 1;
 }
 
 constexpr int kKptoolsTimeoutMs = 120000;
@@ -185,10 +228,13 @@ bool APatchPatcher::patch(const QByteArray &bootImage, const PatchConfig &cfg,
         if (!di.isDir())
             return fail(QStringLiteral("kpatchPath 不是目录（应为含 kptools/kpimg "
                                        "文件的目录）：%1").arg(cfg.kpatchPath));
-        if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kptools"), &kptoolsPathSrc,
-                               &sErr))
+        // kptools 按宿主平台匹配（kptools-linux/mac/win，跳过 .7z）；
+        // kpimg 无平台区分（kpimg-android），任意候选取字母序首个
+        if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kptools"), kptoolsRank,
+                               &kptoolsPathSrc, &sErr))
             return fail(sErr);
-        if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kpimg"), &kpimgPathSrc, &sErr))
+        if (!findInDirByPrefix(cfg.kpatchPath, QStringLiteral("kpimg"), plainRank,
+                               &kpimgPathSrc, &sErr))
             return fail(sErr);
     }
 

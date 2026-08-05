@@ -35,8 +35,9 @@ namespace patcher {
 //      →x86_64→x86 兜底）+ assets/kpimg → kpimg。
 //   b) cfg.kpatchPath —— 用户手动提供的**目录**，须含 kptools* 与 kpimg*
 //      文件（KernelPatch release 预编译资产解包形态：kptools-linux/
-//      kptools-mac/kpimg-android 等，文件名前缀匹配）。kptools 无执行位时
-//      patcher 负责 chmod +x。
+//      kptools-mac/kpimg-android 等，文件名前缀匹配）。多平台候选共存时按
+//      Q_OS_* 匹配本宿主平台（kptools-linux/mac/win），.7z 压缩包跳过。
+//      kptools 无执行位时 patcher 负责 chmod +x。
 //   a/b 互斥（同时指定 → 明确报错，防 kptools/kpimg 跨版本混配）。
 //
 // 流程（与官方 boot_patch.sh 逐命令对齐；superkey 用官方默认 —— 不传
