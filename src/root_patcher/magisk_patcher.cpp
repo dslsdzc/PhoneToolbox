@@ -2,6 +2,7 @@
 #include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/apatch_patcher.h"
 #include "root_patcher/ramdisk_su_patcher.h"
+#include "root_patcher/module_installer.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "root_patcher/zip_util.h"
 #include "root_patcher/cpio_util.h"
@@ -159,7 +160,8 @@ QString MagiskPatcher::assetKey(const QString &variant)
 // 工厂：C3 实现 Magisk 系；C4 登记 KernelSU 系（KernelSuPatcher，见
 // kernelsu_patcher.h）；C5 登记 APatch/KernelPatch 系（APatchPatcher，见
 // apatch_patcher.h）；C7 登记 RamdiskSu 系（RamdiskSuPatcher，见
-// ramdisk_su_patcher.h）；其余类型由 C8 在实现中扩展。
+// ramdisk_su_patcher.h）；C8 登记 ModuleInstall 系（ModuleInstaller，见
+// module_installer.h —— 模块框架安装，与 boot 修补解耦）。
 RootPatcher *RootPatcher::create(RootType type)
 {
     switch (type) {
@@ -177,6 +179,8 @@ RootPatcher *RootPatcher::create(RootType type)
         return new APatchPatcher;
     case RootType::RamdiskSu:
         return new RamdiskSuPatcher;
+    case RootType::ModuleInstall:
+        return new ModuleInstaller;
     default:
         return nullptr;
     }

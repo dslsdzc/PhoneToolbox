@@ -86,6 +86,14 @@ bool patchFile(const QString &bootPath, const PatchConfig &cfg,
     if (bootPath.isEmpty())
         return fail(error, QStringLiteral("boot 镜像路径为空"));
 
+    // 模块框架安装与 boot 修补解耦（C8）：patchFile 面向 boot 镜像产物（备份 /
+    // "_patched.img" 命名不适配模块包，产物会误导为镜像）→ 明确拒绝，UI 应
+    // 直接使用 ModuleInstaller（输出模块包而非镜像）
+    if (cfg.type == RootType::ModuleInstall)
+        return fail(error,
+                    QStringLiteral("模块框架安装不适用 patchFile（其输出为模块包而非 boot "
+                                   "镜像）：请直接使用 ModuleInstaller"));
+
     const QFileInfo srcInfo(bootPath);
     if (!srcInfo.exists() || !srcInfo.isFile())
         return fail(error, QStringLiteral("boot 镜像不存在：%1").arg(bootPath));

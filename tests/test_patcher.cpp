@@ -6,6 +6,8 @@
 #include "root_patcher/kernelsu_patcher.h"
 #include "root_patcher/apatch_patcher.h"
 #include "root_patcher/ramdisk_su_patcher.h"
+#include "root_patcher/module_installer.h"
+#include "root_patcher/zip_util.h"
 #include "root_patcher/ramdisk_utils.h"
 #include "image_engine/boot_image.h"
 
@@ -373,6 +375,63 @@ QString writeSupersuZip(const QString &dirPath, const QByteArray &suBytes, int s
     return path;
 }
 
+// ---- C8 测试工具：最小 Magisk 模块 zip（官方规范，联网验证 2026-08）----
+// 结构对齐 topjohnwu/Magisk docs/guides.md：根级 module.prop（Magisk v28+ 静态
+// 读取位置）+ 文件树 + META-INF/com/google/android/{update-binary,updater-script}
+//（updater-script 须为 "#MAGISK"，recovery 刷入标识）。字段序为官方严格格式：
+// id/name/version/versionCode/author/description/updateJson，LF 行尾。
+const QByteArray kModuleProp =
+    QByteArray("id=zygisk_lsposed\n"
+               "name=LSPosed\n"
+               "version=v1.9.2\n"
+               "versionCode=7024\n"
+               "author=LSPosed Developers\n"
+               "description=Enhanced Xposed Framework\n"
+               "updateJson=https://example.com/lsposed/update.json\n");
+
+QByteArray buildModuleZip(const QByteArray &prop = kModuleProp,
+                          const QByteArray &hosts = QByteArray("127.0.0.1 localhost\n"))
+{
+    return buildZip({{"module.prop", prop, 0},
+                     {"system/etc/hosts", hosts, 0},
+                     {"zygisk/arm64-v8a.so", QByteArray("\x7f"
+                                                        "ELF" "mock-zygisk-lib"),
+                      8}, // DEFLATE（真实模块条目压缩形态）
+                     {"service.sh", QByteArray("#!/system/bin/sh\n"), 0},
+                     {"META-INF/com/google/android/update-binary",
+                      QByteArray("#MAGISK module installer\n"), 0},
+                     {"META-INF/com/google/android/updater-script", QByteArray("#MAGISK\n"), 0}});
+}
+
+// 写模块 zip 到临时目录，返回路径（空表示失败）。
+QString writeModuleZip(const QString &dirPath, const QByteArray &zip)
+{
+    const QString path = dirPath + "/module.zip";
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return QString();
+    f.write(zip);
+    f.close();
+    return path;
+}
+
+// 已 Magisk 修补 ramdisk（C3 注入产物形态：.backup 链标记 → magiskd 运行时加载器）
+QByteArray buildMagiskPatchedRamdisk()
+{
+    return buildCpio({{"init", kRegMode | 0750, "magiskinit-mock"},
+                      {".backup", kDirMode, {}},
+                      {".backup/init", kRegMode | 0750, "original-init"}});
+}
+
+// 已 KernelSU 修补 ramdisk（ksud boot-patch 形态，联网验证：原 init 改名
+// init.real + 新 init 包装 + kernelsu.ko）
+QByteArray buildKsuPatchedRamdisk()
+{
+    return buildCpio({{"init", kRegMode | 0755, "ksuinit-wrapper-mock"},
+                      {"init.real", kRegMode | 0755, "original-init"},
+                      {"kernelsu.ko", kRegMode | 0755, "mock-kernelsu-ko"}});
+}
+
 } // namespace
 
 class TestPatcher : public QObject
@@ -461,6 +520,23 @@ private slots:
     void suNullErrorNoCrash();
     void suPatchFileHappyPath();
     void suPatchFileRollbackNoBackup();
+    void moduleFactoryCreate();
+    void moduleInjectHappyPath();
+    void moduleInjectGzipFrameworkGate();
+    void moduleKsuFrameworkGate();
+    void moduleNoBootImageOk();
+    void moduleMissingZipFails();
+    void moduleNonexistentZipFails();
+    void moduleZipNotZipFails();
+    void moduleWithoutPropFails();
+    void moduleBadIdFails();
+    void moduleBadVersionCodeFails();
+    void moduleInstallShFails();
+    void moduleUpdaterScriptNotMagiskFails();
+    void moduleUnpatchedImageFails();
+    void moduleInvalidBootFails();
+    void moduleNullErrorNoCrash();
+    void modulePatchFileRejectsModuleType();
 };
 
 void TestPatcher::factoryCreate()
@@ -487,15 +563,13 @@ void TestPatcher::factoryCreate()
         QVERIFY2(p.get(), "create() 返回 nullptr");
         QVERIFY(dynamic_cast<patcher::APatchPatcher *>(p.get()));
     }
-    // C7：RamdiskSu 映射到 RamdiskSuPatcher；未实现类型返回 nullptr（不崩溃），
-    // 由 C8 模块框架在实现中扩展
+    // C7：RamdiskSu 映射到 RamdiskSuPatcher；未实现类型返回 nullptr（不崩溃）
     {
         std::unique_ptr<patcher::RootPatcher> p(patcher::RootPatcher::create(
             patcher::RootType::RamdiskSu));
         QVERIFY2(p.get(), "create() 返回 nullptr");
         QVERIFY(dynamic_cast<patcher::RamdiskSuPatcher *>(p.get()));
     }
-    QVERIFY(patcher::RootPatcher::create(patcher::RootType::ModuleInstall) == nullptr);
 }
 
 void TestPatcher::missingApkFails()
@@ -2528,6 +2602,384 @@ void TestPatcher::suPatchFileRollbackNoBackup()
     QVERIFY(!err.isEmpty());
     QVERIFY(outPath.isEmpty());
     QVERIFY(!QFile::exists(bootPath + ".orig.bak")); // 备份已回滚
+}
+
+// ============================================================
+// C8: ModuleInstaller（模块框架安装）
+// ============================================================
+
+void TestPatcher::moduleFactoryCreate()
+{
+    // 工厂登记：ModuleInstall → ModuleInstaller；既有类型派发不受影响
+    std::unique_ptr<patcher::RootPatcher> p(
+        patcher::RootPatcher::create(patcher::RootType::ModuleInstall));
+    QVERIFY(p);
+    QVERIFY(dynamic_cast<patcher::ModuleInstaller *>(p.get()));
+    std::unique_ptr<patcher::RootPatcher> m(patcher::RootPatcher::create(patcher::RootType::Magisk));
+    QVERIFY(dynamic_cast<patcher::MagiskPatcher *>(m.get()));
+}
+
+void TestPatcher::moduleInjectHappyPath()
+{
+    // 完整安装链（诚实边界内）：模块 zip 校验（module.prop 官方字段/正则）→
+    // 解包文件树（剔除 META-INF 安装脚手架）→ 已修补镜像框架门禁 → 重打包
+    // 干净模块 zip。断言：根级 module.prop 规范化位置、文件树、META-INF 剥离、
+    // meta()/tree() 访问器。
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildMagiskPatchedRamdisk()), cfg, out, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+
+    // out = 干净模块 zip：根级 module.prop（官方字段序规范化重写）
+    QStringList names;
+    QString zErr;
+    QVERIFY(patcher::zipEntryNames(out, &names, &zErr));
+    QVERIFY(names.contains("module.prop"));
+    for (const QString &n : names)
+        QVERIFY2(!n.startsWith("META-INF/"), qPrintable(n)); // 安装脚手架已剥离
+    QByteArray prop;
+    QVERIFY(patcher::extractZipEntry(out, "module.prop", prop, &zErr));
+    QCOMPARE(prop, kModuleProp);
+
+    // 文件树完整（DEFLATE 条目解包正确）
+    QByteArray hosts;
+    QVERIFY(patcher::extractZipEntry(out, "system/etc/hosts", hosts, &zErr));
+    QCOMPARE(hosts, QByteArray("127.0.0.1 localhost\n"));
+    QByteArray lib;
+    QVERIFY(patcher::extractZipEntry(out, "zygisk/arm64-v8a.so", lib, &zErr));
+    QCOMPARE(lib, QByteArray("\x7f"
+                             "ELF" "mock-zygisk-lib"));
+    QByteArray svc;
+    QVERIFY(patcher::extractZipEntry(out, "service.sh", svc, &zErr));
+    QCOMPARE(svc, QByteArray("#!/system/bin/sh\n"));
+
+    // 访问器：meta 解析 + 树内容（UI 经 tree() 直推 /data/adb/modules/<id>/）
+    QCOMPARE(p.meta().id, QStringLiteral("zygisk_lsposed"));
+    QCOMPARE(p.meta().name, QStringLiteral("LSPosed"));
+    QCOMPARE(p.meta().version, QStringLiteral("v1.9.2"));
+    QCOMPARE(p.meta().versionCode, 7024);
+    QCOMPARE(p.meta().author, QStringLiteral("LSPosed Developers"));
+    QCOMPARE(p.meta().description, QStringLiteral("Enhanced Xposed Framework"));
+    QCOMPARE(p.meta().updateJson, QStringLiteral("https://example.com/lsposed/update.json"));
+    QCOMPARE(p.tree().value("system/etc/hosts"), QByteArray("127.0.0.1 localhost\n"));
+    QVERIFY(p.tree().contains("zygisk/arm64-v8a.so"));
+    QVERIFY(p.tree().contains("service.sh"));
+    QVERIFY(!p.tree().contains("module.prop")); // 元数据不入树
+    QVERIFY(!p.tree().contains("META-INF/com/google/android/updater-script"));
+}
+
+void TestPatcher::moduleInjectGzipFrameworkGate()
+{
+    // gzip 压缩的已 Magisk 修补 ramdisk：门禁经解压后识别框架标记
+    const QByteArray ramdiskComp = patcher::compressRamdisk(buildMagiskPatchedRamdisk(), "gzip");
+    QVERIFY(!ramdiskComp.isEmpty());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(ramdiskComp), cfg, out, &err), qPrintable(err));
+
+    QStringList names;
+    QString zErr;
+    QVERIFY(patcher::zipEntryNames(out, &names, &zErr));
+    QVERIFY(names.contains("module.prop"));
+}
+
+void TestPatcher::moduleKsuFrameworkGate()
+{
+    // KernelSU 修补形态（init.real + kernelsu.ko，ksud boot-patch 产物）门禁通过
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(buildBootV0(buildKsuPatchedRamdisk()), cfg, out, &err), qPrintable(err));
+}
+
+void TestPatcher::moduleNoBootImageOk()
+{
+    // 已 root 设备路径：bootImage 留空跳过框架门禁（模块树经 tree() 供 UI 直推
+    // /data/adb/modules/<id>/，官方手动安装流程：push → 重启生效）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY2(p.patch(QByteArray(), cfg, out, &err), qPrintable(err));
+
+    QCOMPARE(p.meta().id, QStringLiteral("zygisk_lsposed"));
+    QVERIFY(p.tree().contains("system/etc/hosts"));
+    QStringList names;
+    QString zErr;
+    QVERIFY(patcher::zipEntryNames(out, &names, &zErr));
+    QVERIFY(names.contains("module.prop"));
+}
+
+void TestPatcher::moduleMissingZipFails()
+{
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall; // moduleZipPath 未指定
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("moduleZipPath"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::moduleNonexistentZipFails()
+{
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = "/nonexistent/module.zip";
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::moduleZipNotZipFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = dir.path() + "/module.zip";
+    QFile f(zipPath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("this is not a zip archive at all");
+    f.close();
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("ZIP"));
+}
+
+void TestPatcher::moduleWithoutPropFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(
+        dir.path(), buildZip({{"system/etc/hosts", QByteArray("x"), 0}}));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("module.prop"));
+}
+
+void TestPatcher::moduleBadIdFails()
+{
+    // id 含 '/'（路径穿越向量）→ 官方正则 ^[a-zA-Z][a-zA-Z0-9._-]+$ 拒绝
+    const QByteArray prop = QByteArray(
+        "id=a/b\n"
+        "name=LSPosed\n"
+        "version=v1.9.2\n"
+        "versionCode=7024\n"
+        "author=dev\n"
+        "description=desc\n");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip(prop));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("id"));
+}
+
+void TestPatcher::moduleBadVersionCodeFails()
+{
+    const QByteArray prop = QByteArray(
+        "id=zygisk_lsposed\n"
+        "name=LSPosed\n"
+        "version=v1.9.2\n"
+        "versionCode=abc\n" // 规范要求整数
+        "author=dev\n"
+        "description=desc\n");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip(prop));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("versionCode"));
+}
+
+void TestPatcher::moduleInstallShFails()
+{
+    // 官方规范明令禁止 install.sh 条目（Magisk 会拒绝安装）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(
+        dir.path(), buildZip({{"module.prop", kModuleProp, 0},
+                              {"install.sh", QByteArray("#!/system/bin/sh\n"), 0}}));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("install.sh"));
+}
+
+void TestPatcher::moduleUpdaterScriptNotMagiskFails()
+{
+    // updater-script 存在但非 "#MAGISK" → 是普通 recovery 刷入包而非 Magisk 模块
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(
+        dir.path(),
+        buildZip({{"module.prop", kModuleProp, 0},
+                  {"META-INF/com/google/android/updater-script",
+                   QByteArray("assert(getprop('ro.product.device') == 'foo');\n"), 0}}));
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray(), cfg, out, &err));
+    QVERIFY(err.contains("MAGISK"));
+}
+
+void TestPatcher::moduleUnpatchedImageFails()
+{
+    // 未修补镜像（原厂 ramdisk 无框架标记）→ 门禁拒绝：模块运行时依赖
+    // magiskd/ksud，须先修补 boot 或在已 root 设备上安装
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    const QByteArray stockRamdisk = buildCpio({{"init", kRegMode | 0750, "original-init"},
+                                               {"init.rc", kRegMode | 0644, "on boot\n"}});
+    QVERIFY(!p.patch(buildBootV0(stockRamdisk), cfg, out, &err));
+    QVERIFY(err.contains("框架"));
+    QVERIFY(out.isEmpty());
+}
+
+void TestPatcher::moduleInvalidBootFails()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QString err;
+    QVERIFY(!p.patch(QByteArray("not a boot image at all"), cfg, out, &err));
+    QVERIFY(err.contains("boot 镜像"));
+}
+
+void TestPatcher::moduleNullErrorNoCrash()
+{
+    // 全局契约：error=nullptr 时成功/失败路径均不崩溃
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+
+    patcher::ModuleInstaller p;
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QByteArray out;
+    QVERIFY(p.patch(QByteArray(), cfg, out, nullptr)); // 成功路径
+
+    patcher::PatchConfig bad = cfg;
+    bad.moduleZipPath.clear();
+    QVERIFY(!p.patch(QByteArray(), bad, out, nullptr)); // 失败路径
+}
+
+void TestPatcher::modulePatchFileRejectsModuleType()
+{
+    // patchFile 面向 boot 镜像产物（备份/"_patched.img" 命名不适配模块包）→
+    // 明确拒绝而非产出误导产物
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString zipPath = writeModuleZip(dir.path(), buildModuleZip());
+    QVERIFY(!zipPath.isEmpty());
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildMagiskPatchedRamdisk()));
+    bf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::ModuleInstall;
+    cfg.moduleZipPath = zipPath;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(err.contains("ModuleInstaller"));
+    QVERIFY(outPath.isEmpty());
+    QVERIFY(!QFile::exists(bootPath + ".orig.bak")); // 不落任何产物
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)
