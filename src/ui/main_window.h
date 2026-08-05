@@ -13,6 +13,7 @@
 #include "ui/flash_panel.h"
 #include "ui/system_tool_panel.h"
 #include "ui/vuln_panel.h"
+#include "ui/image_tool_panel.h"
 #include "ui/output_panel.h"
 
 class MainWindow : public QMainWindow
@@ -50,6 +51,7 @@ private:
     FlashPanel *m_flashPanel;
     SystemToolPanel *m_systemToolPanel;
     VulnPanel *m_vulnPanel;
+    ImageToolPanel *m_imageToolPanel;
     OutputPanel *m_outputPanel;
 
     DeviceDetector m_deviceDetector;

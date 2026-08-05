@@ -14,6 +14,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_flashPanel(nullptr)
     , m_systemToolPanel(nullptr)
     , m_vulnPanel(nullptr)
+    , m_imageToolPanel(nullptr)
     , m_outputPanel(nullptr)
 {
     setupUI();
@@ -53,14 +54,17 @@ void MainWindow::setupUI()
     m_flashPanel = new FlashPanel(this);
     m_systemToolPanel = new SystemToolPanel(this);
     m_vulnPanel = new VulnPanel(this);
+    m_imageToolPanel = new ImageToolPanel(this);
     m_outputPanel = new OutputPanel(this);
 
-    // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools, index 3 = vuln panel
+    // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools,
+    //        index 3 = vuln panel, index 4 = image tool panel
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_deviceInfoPanel);
     m_stack->addWidget(m_flashPanel);
     m_stack->addWidget(m_systemToolPanel);
     m_stack->addWidget(m_vulnPanel);
+    m_stack->addWidget(m_imageToolPanel);
     m_stack->setCurrentIndex(0);
 
     m_rightSplitter->addWidget(m_stack);
@@ -122,6 +126,15 @@ void MainWindow::setupConnections()
 
     // vuln panel back button -> switch to device info
     connect(m_vulnPanel, &VulnPanel::switchToDeviceInfo, this, [this]() {
+        m_toolPanel->selectToolByIndex(0);
+    });
+
+    // image tool panel -> output
+    connect(m_imageToolPanel, &ImageToolPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
+
+    // image tool panel back button -> switch to device info
+    connect(m_imageToolPanel, &ImageToolPanel::switchToDeviceInfo, this, [this]() {
         m_toolPanel->selectToolByIndex(0);
     });
 }
