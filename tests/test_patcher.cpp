@@ -408,6 +408,16 @@ private slots:
     void apatchRepackFailFails();
     void apatchNullErrorNoCrash();
     void apatchFactoryAndSources();
+
+    // ---- C6: 文件级入口 patchFile + 自动备份 ----
+    void patchFileMagiskHappyPath();
+    void patchFileNonexistentFails();
+    void patchFileInvalidBootFails();
+    void patchFileExistingBackupFails();
+    void patchFileKitsuneMissingApkHintsManual();
+    void patchFileUnimplementedTypeFails();
+    void patchFileFactoryDispatchKernelSu();
+    void patchFileNullArgsNoCrash();
 };
 
 void TestPatcher::factoryCreate()
@@ -1718,6 +1728,255 @@ void TestPatcher::apatchFactoryAndSources()
                 .toString()
                 .contains("bmax121/APatch"));
     QCOMPARE(patcher::APatchPatcher::assetKey(), QStringLiteral("apatch"));
+}
+
+// ================= C6: 文件级入口 patchFile + 自动备份 =================
+
+void TestPatcher::patchFileMagiskHappyPath()
+{
+    // C6 契约：读 boot 文件 → 工厂派发 Magisk 系 → 写 "<基名>_patched.img"
+    // 与 "<源文件>.orig.bak"（备份为原文件字节原样）。断言：outPath 指向
+    // _patched.img、备份 == 原文件、产物可解析为合法 boot 且注入生效。
+    const QByteArray initPayload("original init for patchFile");
+    const QByteArray fakeMagiskinit("magiskinit-for-patchfile-entry");
+    const QByteArray bootBytes =
+        buildBootV0(buildCpio({{"init", kRegMode | 0750, initPayload}}));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString apkPath = dir.path() + "/magisk.apk";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(bootBytes);
+    bf.close();
+    QFile af(apkPath);
+    QVERIFY(af.open(QIODevice::WriteOnly));
+    af.write(buildZip({{"lib/arm64-v8a/libmagiskinit.so", fakeMagiskinit, 0}}));
+    af.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    cfg.apkPath = apkPath;
+    QString outPath;
+    QString err;
+    QVERIFY2(patcher::patchFile(bootPath, cfg, &outPath, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+
+    const QString patchedPath = dir.path() + "/boot_patched.img";
+    const QString backupPath = bootPath + ".orig.bak";
+    QCOMPARE(outPath, patchedPath);
+    QVERIFY(QFile::exists(patchedPath));
+    QVERIFY(QFile::exists(backupPath));
+
+    QFile bak(backupPath);
+    QVERIFY(bak.open(QIODevice::ReadOnly));
+    QCOMPARE(bak.readAll(), bootBytes); // 备份 = 原文件原样
+    bak.close();
+
+    QFile pf(patchedPath);
+    QVERIFY(pf.open(QIODevice::ReadOnly));
+    const QByteArray patchedBytes = pf.readAll();
+    pf.close();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(patchedBytes, info)); // 产物可解析
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, fakeMagiskinit); // 注入生效
+}
+
+void TestPatcher::patchFileNonexistentFails()
+{
+    // 路径不存在 / 空路径 / 目录：明确失败且 outPath 置空，不崩溃
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile("/nonexistent/boot.img", cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(outPath.isEmpty());
+
+    err.clear();
+    QVERIFY(!patcher::patchFile(QString(), cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    err.clear();
+    QVERIFY(!patcher::patchFile(dir.path(), cfg, &outPath, &err)); // 目录而非文件
+    QVERIFY(!err.isEmpty());
+}
+
+void TestPatcher::patchFileInvalidBootFails()
+{
+    // 垃圾 boot 内容：失败且不得留下 _patched.img / .orig.bak（失败不落产物）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString apkPath = dir.path() + "/magisk.apk";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write("not a boot image at all");
+    bf.close();
+    QFile af(apkPath);
+    QVERIFY(af.open(QIODevice::WriteOnly));
+    af.write(buildZip({{"lib/arm64-v8a/libmagiskinit.so", "fake magiskinit bytes", 0}}));
+    af.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    cfg.apkPath = apkPath;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("boot", Qt::CaseInsensitive));
+    QVERIFY(outPath.isEmpty());
+    QVERIFY(!QFile::exists(dir.path() + "/boot_patched.img"));
+    QVERIFY(!QFile::exists(bootPath + ".orig.bak"));
+}
+
+void TestPatcher::patchFileExistingBackupFails()
+{
+    // 已存在 .orig.bak（上次修补痕迹）→ 拒绝覆盖备份，防止原厂镜像不可再生
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({})));
+    bf.close();
+    QFile bak(bootPath + ".orig.bak");
+    QVERIFY(bak.open(QIODevice::WriteOnly));
+    bak.write("previous backup");
+    bak.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("orig.bak", Qt::CaseInsensitive));
+}
+
+void TestPatcher::patchFileKitsuneMissingApkHintsManual()
+{
+    // 遗留吸收（C3 concern）：Kitsune 无官方下载源 → 错误须提示手动指定 APK
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({})));
+    bf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Kitsune; // apkPath 未指定
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains("手动", Qt::CaseInsensitive));
+    QVERIFY(outPath.isEmpty());
+}
+
+void TestPatcher::patchFileUnimplementedTypeFails()
+{
+    // 工厂 create() 返回 nullptr 的类型（RamdiskSu 未实现）→ 明确失败且不落产物
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({})));
+    bf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::RamdiskSu;
+    QString outPath;
+    QString err;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, &outPath, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(outPath.isEmpty());
+    QVERIFY(!QFile::exists(bootPath + ".orig.bak"));
+    QVERIFY(!QFile::exists(dir.path() + "/boot_patched.img"));
+}
+
+void TestPatcher::patchFileFactoryDispatchKernelSu()
+{
+    // 工厂派发证明：KernelSU 系经同一入口走 KernelSuPatcher（LKM 注入）
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    const QString koPath = dir.path() + "/kernelsu.ko";
+    const QString initPath = dir.path() + "/ksuinit";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write(buildBootV0(buildCpio({{"init", kRegMode | 0750, "init-data"}})));
+    bf.close();
+    QFile kf(koPath);
+    QVERIFY(kf.open(QIODevice::WriteOnly));
+    kf.write("ko-bytes-for-patchfile");
+    kf.close();
+    QFile wf(initPath);
+    QVERIFY(wf.open(QIODevice::WriteOnly));
+    wf.write("ksuinit-bytes-for-patchfile");
+    wf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::KernelSU;
+    cfg.koPath = koPath;
+    cfg.apkPath = initPath;
+    QString outPath;
+    QString err;
+    QVERIFY2(patcher::patchFile(bootPath, cfg, &outPath, &err), qPrintable(err));
+
+    const QString patchedPath = dir.path() + "/boot_patched.img";
+    QCOMPARE(outPath, patchedPath);
+    QVERIFY(QFile::exists(patchedPath));
+    QVERIFY(QFile::exists(bootPath + ".orig.bak"));
+
+    QFile pf(patchedPath);
+    QVERIFY(pf.open(QIODevice::ReadOnly));
+    const QByteArray patchedBytes = pf.readAll();
+    pf.close();
+    imgboot::BootInfo info;
+    QVERIFY(imgboot::parseBootImage(patchedBytes, info));
+    QList<TestCpioEntry> entries;
+    QVERIFY(parseCpio(info.ramdisk, &entries));
+    const TestCpioEntry *init = findEntry(entries, "init");
+    QVERIFY(init);
+    QCOMPARE(init->data, QByteArray("ksuinit-bytes-for-patchfile"));
+    const TestCpioEntry *ko = findEntry(entries, "kernelsu.ko");
+    QVERIFY(ko);
+    QCOMPARE(ko->data, QByteArray("ko-bytes-for-patchfile"));
+}
+
+void TestPatcher::patchFileNullArgsNoCrash()
+{
+    // error/outPath 可传 nullptr（全局契约）：全部失败分支不得崩溃
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString bootPath = dir.path() + "/boot.img";
+    QFile bf(bootPath);
+    QVERIFY(bf.open(QIODevice::WriteOnly));
+    bf.write("garbage bytes");
+    bf.close();
+
+    patcher::PatchConfig cfg;
+    cfg.type = patcher::RootType::Magisk;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, nullptr, nullptr));
+    QVERIFY(!patcher::patchFile(bootPath, cfg, nullptr, nullptr));
+    // 有效 boot + 未实现类型：同样不得崩溃
+    QFile bf2(bootPath);
+    QVERIFY(bf2.open(QIODevice::WriteOnly));
+    bf2.write(buildBootV0(buildCpio({})));
+    bf2.close();
+    cfg.type = patcher::RootType::RamdiskSu;
+    QVERIFY(!patcher::patchFile(bootPath, cfg, nullptr, nullptr));
 }
 
 QTEST_APPLESS_MAIN(TestPatcher)

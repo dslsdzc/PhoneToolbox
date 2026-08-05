@@ -55,4 +55,12 @@ public:
     static RootPatcher *create(RootType type);
 };
 
+// 文件级修补入口（C6，供 UI 层调用）：读入 bootPath 的 boot 镜像字节 →
+// create() 工厂按 cfg.type 派发到对应 patcher → 成功后把原镜像原样备份到
+// "<源文件>.orig.bak"，并写 "<基名>_patched.img"（基名 = 去掉扩展名的文件名）。
+// 失败返回 false 并写 error，且不落任何产物；已存在 .orig.bak 时拒绝修补
+// （防止覆盖不可再生的原厂备份）。error / outPath 可传 nullptr（绝不崩溃）。
+bool patchFile(const QString &bootPath, const PatchConfig &cfg,
+               QString *outPath, QString *error);
+
 } // namespace patcher
