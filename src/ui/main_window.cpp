@@ -1,5 +1,6 @@
 #include "main_window.h"
 #include "core/adb_embedded.h"
+#include "core/resource_monitor.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileInfo>
@@ -26,6 +27,10 @@ MainWindow::MainWindow(QWidget *parent)
     } else {
         m_outputPanel->appendOutput("Failed to initialize ADB tools", true);
     }
+
+    // H1：启动整体 CPU 采样（各面板已在 setupUI 中构造并连接 cpuHigh 信号，
+    // 首个采样仅建立基准；>80% 时自动降级各监听模块，<70% 恢复）
+    ResourceMonitor::instance().start();
 
     m_outputPanel->appendOutput("Phone Toolbox started");
 }

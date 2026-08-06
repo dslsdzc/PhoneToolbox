@@ -108,14 +108,23 @@ ImageWorker::ImageWorker(QObject *parent)
 
     // H1 降级接入：整体 CPU 使用率 >80% 时工作线程降为 IdlePriority（仅系统
     // 空闲时被调度，解包/打包这类 CPU 密集任务让位给前台），恢复（<70%）后
-    // 回到 NormalPriority。context 为本对象（已 moveToThread）→ lambda 在
-    // 工作线程事件循环执行，setPriority 作用于当前运行线程自身（Linux 上即
-    // pthread_setschedparam），且随本对象析构自动断开。
+    // 回到 NormalPriority（恢复逻辑同此 lambda，未单独分派）。
+    //
+    // 审查修正（Important）：本对象已在上面 moveToThread(&m_thread)，若沿用
+    // 默认 AutoConnection，lambda 会以 QueuedConnection 投递到工作线程事件
+    // 循环 —— 长任务（解包/打包）期间工作线程忙于执行、不处理事件，降级在
+    // 任务进行中永远不生效。故显式指定 Qt::DirectConnection：cpuHigh 由主
+    // 线程的 ResourceMonitor（QTimer 在主线程）发射，lambda 在发射线程（主
+    // 线程）内立即执行，直接调用 m_thread.setPriority()。Qt 5.7+ 起
+    // QThread::setPriority 线程安全（Qt 6.11 按 QThread 存储的线程 ID 跨线程
+    // 生效，内部 pthread_setschedparam），无需切到工作线程执行。context 仍为
+    // 本对象 → 析构时自动断开（发射方为单例，生命周期长于本对象，无悬挂）。
     connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
             [this](bool high, int) {
                 m_thread.setPriority(high ? QThread::IdlePriority
                                           : QThread::NormalPriority);
-            });
+            },
+            Qt::DirectConnection);
 }
 
 ImageWorker::~ImageWorker()
