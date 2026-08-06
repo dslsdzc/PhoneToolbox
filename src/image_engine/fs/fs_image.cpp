@@ -2,6 +2,7 @@
 #include "image_engine/fs/erofs_reader.h"
 #include "image_engine/fs/ext4_reader.h"
 #include "image_engine/registry.h"
+#include <limits>
 
 // B13: FsImage 抽象接线 —— 按 imgreg::detect 结果把镜像分派到 imgerofs / imgext4
 // 实现。openFsImage 返回堆上 FsImage（调用方负责 delete）；非法/不支持输入返回
@@ -149,6 +150,13 @@ bool FsFile::readAt(qint64 off, qint64 len, QByteArray &out, QString *error)
     const qint64 sz = m_f.size();
     if (off > sz || len > sz - off) {
         if (error) *error = QStringLiteral("读取范围超出镜像大小");
+        return false;
+    }
+    // G4 审查 Minor 吸收：QByteArray::resize 长度参数为 int，len > INT_MAX 时
+    // int(len) 截断 → 分配小于实际读入量 → 越界写。显式拒绝（调用方均为
+    // 块大小级读取，正常路径永不触达）。
+    if (len > std::numeric_limits<int>::max()) {
+        if (error) *error = QStringLiteral("读取长度超过上限（%1 字节）").arg(len);
         return false;
     }
     if (len == 0)

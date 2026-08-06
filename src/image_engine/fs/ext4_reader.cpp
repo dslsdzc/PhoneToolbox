@@ -540,32 +540,39 @@ bool readInlineData(const Src &src, const SuperBlock &sb,
         setErr(error, QStringLiteral("内存分配失败"));
         return false;
     }
-    const quint64 part1 = qMin<quint64>(ino.size, quint64(kMinInlineDataSize));
-    if (!src.have(ino.offset + kInBlock, qint64(part1))) {
-        setErr(error, QStringLiteral("inline 数据区越界"));
-        return false;
-    }
-    QByteArray chunk;
-    if (!src.fetch(ino.offset + kInBlock, qint64(part1), chunk, error))
-        return false;
-    out.append(chunk);
-    if (ino.size > quint64(kMinInlineDataSize)) {
-        qint64 vOff;
-        quint32 vSize;
-        if (!readSystemData(src, sb, ino, vOff, vSize, error))
-            return false;
-        const quint64 rest = ino.size - quint64(kMinInlineDataSize);
-        if (quint64(vSize) < rest) {
-            setErr(error, QStringLiteral("system.data 值小于文件剩余长度"));
+    // G4 审查 Minor 吸收：append 增长与 src.fetch 的 chunk 分配可能抛
+    // bad_alloc（reserve 上限 64MB 不保证后续追加不重分配）→ 整体包 try/catch。
+    try {
+        const quint64 part1 = qMin<quint64>(ino.size, quint64(kMinInlineDataSize));
+        if (!src.have(ino.offset + kInBlock, qint64(part1))) {
+            setErr(error, QStringLiteral("inline 数据区越界"));
             return false;
         }
-        if (!src.have(vOff, qint64(rest))) {
-            setErr(error, QStringLiteral("system.data 值越界"));
-            return false;
-        }
-        if (!src.fetch(vOff, qint64(rest), chunk, error))
+        QByteArray chunk;
+        if (!src.fetch(ino.offset + kInBlock, qint64(part1), chunk, error))
             return false;
         out.append(chunk);
+        if (ino.size > quint64(kMinInlineDataSize)) {
+            qint64 vOff;
+            quint32 vSize;
+            if (!readSystemData(src, sb, ino, vOff, vSize, error))
+                return false;
+            const quint64 rest = ino.size - quint64(kMinInlineDataSize);
+            if (quint64(vSize) < rest) {
+                setErr(error, QStringLiteral("system.data 值小于文件剩余长度"));
+                return false;
+            }
+            if (!src.have(vOff, qint64(rest))) {
+                setErr(error, QStringLiteral("system.data 值越界"));
+                return false;
+            }
+            if (!src.fetch(vOff, qint64(rest), chunk, error))
+                return false;
+            out.append(chunk);
+        }
+    } catch (const std::bad_alloc &) {
+        setErr(error, QStringLiteral("内存分配失败"));
+        return false;
     }
     return true;
 }
@@ -587,22 +594,29 @@ bool readExtentData(const Src &src, const SuperBlock &sb,
         setErr(error, QStringLiteral("内存分配失败"));
         return false;
     }
+    // G4 审查 Minor 吸收：append 增长与 src.fetch 的 chunk 分配可能抛
+    // bad_alloc → 整体包 try/catch，失败返回 false + error 不崩溃。
     quint64 need = ino.size;
-    for (const Extent &ex : extents) {
-        if (need == 0)
-            break;
-        const quint64 avail = quint64(ex.len) * sb.blockSize;
-        const quint64 take = qMin(avail, need);
-        const qint64 off = qint64(ex.pblock * sb.blockSize);
-        if (!src.have(off, qint64(take))) {
-            setErr(error, QStringLiteral("文件数据区超出镜像范围"));
-            return false;
+    try {
+        for (const Extent &ex : extents) {
+            if (need == 0)
+                break;
+            const quint64 avail = quint64(ex.len) * sb.blockSize;
+            const quint64 take = qMin(avail, need);
+            const qint64 off = qint64(ex.pblock * sb.blockSize);
+            if (!src.have(off, qint64(take))) {
+                setErr(error, QStringLiteral("文件数据区超出镜像范围"));
+                return false;
+            }
+            QByteArray chunk;
+            if (!src.fetch(off, qint64(take), chunk, error))
+                return false;
+            out.append(chunk);
+            need -= take;
         }
-        QByteArray chunk;
-        if (!src.fetch(off, qint64(take), chunk, error))
-            return false;
-        out.append(chunk);
-        need -= take;
+    } catch (const std::bad_alloc &) {
+        setErr(error, QStringLiteral("内存分配失败"));
+        return false;
     }
     if (need != 0) {
         // 稀疏文件空洞（逻辑块未被 extent 覆盖）被保守拒绝：不补零返回，

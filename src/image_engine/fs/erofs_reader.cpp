@@ -335,11 +335,19 @@ bool readFlatData(const Src &src, const SuperBlock &sb,
         setErr(error, QStringLiteral("内存分配失败"));
         return false;
     }
-    for (const Range &r : ranges) {
-        QByteArray chunk;
-        if (!src.fetch(r.off, r.len, chunk, error))
-            return false;
-        out.append(chunk);
+    // G4 审查 Minor 吸收：reserve 仅覆盖预分配，append 增长（Qt 6 容器按
+    // 增长策略重分配）与 src.fetch 的 chunk 分配同样可能抛 bad_alloc →
+    // 整体包 try/catch 兜底，失败返回 false + error 不崩溃。
+    try {
+        for (const Range &r : ranges) {
+            QByteArray chunk;
+            if (!src.fetch(r.off, r.len, chunk, error))
+                return false;
+            out.append(chunk);
+        }
+    } catch (const std::bad_alloc &) {
+        setErr(error, QStringLiteral("内存分配失败"));
+        return false;
     }
     return true;
 }
