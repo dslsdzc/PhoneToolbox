@@ -1,8 +1,10 @@
 #include "image_engine/fs/ext4_reader.h"
 
+#include <QFile>
 #include <QtEndian>
 #include <QMap>
 #include <QSet>
+#include <new>
 
 // 布局对照（均经本机 e2fsprogs mke2fs 真实镜像 xxd 与内核/e2fsprogs 源码核实）：
 //
@@ -35,6 +37,11 @@
 //    e_name_len 在前的布局，本实现已按内核修正 brief 描述）。
 // 7. inline 目录：数据区 = [父 inode u32 @0][真实目录项 @4..]（"."/".." 隐式）。
 // 8. 快速符号链接（i_size<60，无 EXTENTS 标志）：目标在 i_block@40。
+//
+// G4：读路径解析核心全部基于 Src（内存 QByteArray 或文件句柄 FsFile）局部读取 ——
+//   superblock/组描述符/inode/extent 头/目录块按需读取（内存 O(块大小)），
+//   文件数据按 1MB chunk 流式写盘（extractFileStream 内存 O(chunk)），
+//   不再整镜像读入。replaceFile/repack（写回路径）仍为整内存接口。
 
 namespace imgext4 {
 
@@ -106,11 +113,44 @@ constexpr quint32 kXattrMagic = 0xEA020000;
 constexpr quint8 kXattrIndexSystem = 7;
 constexpr quint32 kXattrEntryHdr = 16;  // 条目头到 name 的长度
 
+// G4 防护上限（G2 分层防护：分配上限为主，try/catch 兜底 bad_alloc）
+constexpr quint64 kMaxFileAlloc    = 1ull << 30;   // 内存提取单文件上限（对齐 payload 1GiB）
+constexpr quint64 kMaxDirData      = 64ull << 20;  // 目录数据读入上限（真实目录远小于此）
+constexpr quint64 kMaxInlineData   = 64ull << 20;  // inline 文件上限
+constexpr qint64  kStreamChunk     = 1 << 20;      // 流式提取 chunk = 1MB（内存 O(chunk)）
+
 void setErr(QString *error, const QString &msg)
 {
     if (error)
         *error = msg;
 }
+
+// ---- G4 读取源抽象：内存 QByteArray（旧接口）或镜像文件句柄（流式接口）----
+struct Src {
+    const QByteArray *mem = nullptr;   // 非空 = 内存模式
+    imgfs::FsFile *file = nullptr;     // 非空 = 文件模式
+
+    bool have(qint64 off, qint64 len) const
+    {
+        if (off < 0 || len < 0)
+            return false;
+        qint64 sz = -1;
+        if (mem)
+            sz = mem->size();
+        else if (file)
+            sz = file->size();
+        return sz >= 0 && off <= sz && len <= sz - off;
+    }
+    // 读 [off, off+len)（调用方已 have 校验；内存模式 mid 不可能短）；失败置 error
+    bool fetch(qint64 off, qint64 len, QByteArray &out, QString *error) const
+    {
+        if (mem) {
+            out = mem->mid(qsizetype(off), qsizetype(len));
+            return out.size() == len;
+        }
+        return file->readAt(off, len, out, error);
+    }
+};
 
 bool inBounds(const QByteArray &img, qint64 off, qint64 len)
 {
@@ -192,7 +232,7 @@ struct GroupDesc {
     quint64 freeBlocks = 0;
 };
 
-bool groupDesc(const QByteArray &img, const SuperBlock &sb, quint64 group,
+bool groupDesc(const Src &src, const SuperBlock &sb, quint64 group,
                GroupDesc &out, QString *error)
 {
     if (!validSuper(sb, error))
@@ -208,11 +248,14 @@ bool groupDesc(const QByteArray &img, const SuperBlock &sb, quint64 group,
                               group * quint64(sb.descSize));
     // 读取终点：非 64BIT 到 free_blocks(+14)；64BIT 到 free_blocks_hi(+46)
     const qint64 need = (sb.featureIncompat & kIncompat64Bit) ? 46 : 14;
-    if (!inBounds(img, off, need)) {
+    if (!src.have(off, need)) {
         setErr(error, QStringLiteral("块组描述符 %1 超出镜像范围").arg(group));
         return false;
     }
-    const uchar *p = reinterpret_cast<const uchar *>(img.constData()) + off;
+    QByteArray buf;
+    if (!src.fetch(off, need, buf, error))
+        return false;
+    const uchar *p = reinterpret_cast<const uchar *>(buf.constData());
     out.blockBitmap = le32p(p + 0);
     out.inodeBitmap = le32p(p + 4);
     out.inodeTable = le32p(p + 8);
@@ -237,7 +280,7 @@ struct Inode {
     qint64 offset = 0;         // 镜像内 inode 起点
 };
 
-bool inodeLocation(const QByteArray &img, const SuperBlock &sb, quint64 nid,
+bool inodeLocation(const Src &src, const SuperBlock &sb, quint64 nid,
                    qint64 &off, QString *error)
 {
     if (nid == 0) {
@@ -247,7 +290,7 @@ bool inodeLocation(const QByteArray &img, const SuperBlock &sb, quint64 nid,
     const quint64 group = (nid - 1) / sb.inodesPerGroup;
     const quint64 idx = (nid - 1) % sb.inodesPerGroup;
     GroupDesc gd;
-    if (!groupDesc(img, sb, group, gd, error))
+    if (!groupDesc(src, sb, group, gd, error))
         return false;
     // 组内 inode 表可能不足一个整块（末组），逐 inode 定位：
     // offset = bg_inode_table * blockSize + idx * inodeSize
@@ -257,7 +300,7 @@ bool inodeLocation(const QByteArray &img, const SuperBlock &sb, quint64 nid,
         return false;
     }
     const qint64 base = qint64(gd.inodeTable * sb.blockSize + idx * sb.inodeSize);
-    if (!inBounds(img, base, qint64(sb.inodeSize))) {
+    if (!src.have(base, qint64(sb.inodeSize))) {
         setErr(error, QStringLiteral("inode %1 超出镜像范围").arg(nid));
         return false;
     }
@@ -265,13 +308,16 @@ bool inodeLocation(const QByteArray &img, const SuperBlock &sb, quint64 nid,
     return true;
 }
 
-bool readInode(const QByteArray &img, const SuperBlock &sb, quint64 nid,
+bool readInode(const Src &src, const SuperBlock &sb, quint64 nid,
                Inode &ino, QString *error)
 {
     qint64 off;
-    if (!inodeLocation(img, sb, nid, off, error))
+    if (!inodeLocation(src, sb, nid, off, error))
         return false;
-    const uchar *p = reinterpret_cast<const uchar *>(img.constData()) + off;
+    QByteArray buf;
+    if (!src.fetch(off, qint64(sb.inodeSize), buf, error))
+        return false;
+    const uchar *p = reinterpret_cast<const uchar *>(buf.constData());
     ino.offset = off;
     ino.mode = le16p(p + kInMode);
     ino.flags = le32p(p + kInFlags);
@@ -293,7 +339,7 @@ struct Extent {
 };
 
 // 递归读 extent 树（root 在 inode i_block@40；索引块指向更深层块）
-bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
+bool readExtentsRec(const Src &src, const SuperBlock &sb,
                     const Inode &ino, qint64 headerOff, int depth,
                     QList<Extent> &out, QString *error)
 {
@@ -301,34 +347,42 @@ bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
         setErr(error, QStringLiteral("extent 树深度超限"));
         return false;
     }
-    if (!inBounds(img, headerOff, 12)) {
+    if (!src.have(headerOff, 12)) {
         setErr(error, QStringLiteral("extent 头超出镜像范围"));
         return false;
     }
-    const uchar *p = reinterpret_cast<const uchar *>(img.constData()) + headerOff;
-    if (le16p(p) != kExtMagic) {
+    QByteArray hdr;
+    if (!src.fetch(headerOff, 12, hdr, error))
+        return false;
+    const uchar *hp = reinterpret_cast<const uchar *>(hdr.constData());
+    if (le16p(hp) != kExtMagic) {
         setErr(error, QStringLiteral("extent 头魔数无效"));
         return false;
     }
-    const quint16 entries = le16p(p + 2);
-    const quint16 max = le16p(p + 4);
-    const quint8 ehDepth = p[6];
+    const quint16 entries = le16p(hp + 2);
+    const quint16 max = le16p(hp + 4);
+    const quint8 ehDepth = hp[6];
     if (entries > max || entries > 340) {   // 340 = 4096/12 上限
         setErr(error, QStringLiteral("extent 条目数无效（%1/%2）").arg(entries).arg(max));
         return false;
     }
     const qint64 maxSpace = (depth == 0) ? 60 : qint64(sb.blockSize);
-    if (qint64(12) + qint64(entries) * 12 > maxSpace) {
+    const qint64 regionLen = 12 + qint64(entries) * 12;
+    if (regionLen > maxSpace) {
         setErr(error, QStringLiteral("extent 条目超出所在区域"));
         return false;
     }
+    if (!src.have(headerOff, regionLen)) {
+        setErr(error, QStringLiteral("extent 条目越界"));
+        return false;
+    }
+    QByteArray region;
+    if (!src.fetch(headerOff, regionLen, region, error))
+        return false;
     for (quint16 i = 0; i < entries; ++i) {
-        const qint64 e = headerOff + 12 + qint64(i) * 12;
-        if (!inBounds(img, e, 12)) {
-            setErr(error, QStringLiteral("extent 条目越界"));
-            return false;
-        }
-        const uchar *ep = reinterpret_cast<const uchar *>(img.constData()) + e;
+        // 条目从 12B 头之后开始（region = 头 + entries*12 条目区）
+        const uchar *ep = reinterpret_cast<const uchar *>(region.constData())
+                          + 12 + qint64(i) * 12;
         if (ehDepth == 0) {
             Extent ex;
             ex.lblock = le32p(ep);
@@ -349,7 +403,7 @@ bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
                 return false;
             }
             const qint64 dataOff = qint64(ex.pblock * sb.blockSize);
-            if (!inBounds(img, dataOff, qint64(ex.len) * sb.blockSize)) {
+            if (!src.have(dataOff, qint64(ex.len) * sb.blockSize)) {
                 setErr(error, QStringLiteral("extent 数据区超出镜像范围"));
                 return false;
             }
@@ -362,7 +416,7 @@ bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
             }
             // 递归 depth+1（根=0）：守卫 depth > kMaxExtentDepth 才能拦下环状
             // 索引块（A→B→A）——旧实现传 depth-1 使守卫恒不成立 → 无限递归栈溢出
-            if (!readExtentsRec(img, sb, ino, qint64(leaf * sb.blockSize),
+            if (!readExtentsRec(src, sb, ino, qint64(leaf * sb.blockSize),
                                 depth + 1, out, error))
                 return false;
         }
@@ -370,14 +424,14 @@ bool readExtentsRec(const QByteArray &img, const SuperBlock &sb,
     return true;
 }
 
-bool readExtents(const QByteArray &img, const SuperBlock &sb, const Inode &ino,
+bool readExtents(const Src &src, const SuperBlock &sb, const Inode &ino,
                  QList<Extent> &out, QString *error)
 {
     if (!(ino.flags & kFlExtents)) {
         setErr(error, QStringLiteral("inode 未使用 extent（legacy block map 暂不支持）"));
         return false;
     }
-    if (!readExtentsRec(img, sb, ino, ino.offset + kInBlock, 0, out, error))
+    if (!readExtentsRec(src, sb, ino, ino.offset + kInBlock, 0, out, error))
         return false;
     // 按逻辑块号排序（内核保证按序；防御性排序便于提取/容量计算）
     std::sort(out.begin(), out.end(),
@@ -386,7 +440,7 @@ bool readExtents(const QByteArray &img, const SuperBlock &sb, const Inode &ino,
 }
 
 // 读 "system.data" xattr 值（inline data 的 60B 之后部分）
-bool readSystemData(const QByteArray &img, const SuperBlock &sb,
+bool readSystemData(const Src &src, const SuperBlock &sb,
                     const Inode &ino, qint64 &valueOff, quint32 &valueSize,
                     QString *error)
 {
@@ -394,14 +448,23 @@ bool readSystemData(const QByteArray &img, const SuperBlock &sb,
         setErr(error, QStringLiteral("inline 文件需要 inodeSize>128 的 xattr 空间"));
         return false;
     }
-    quint16 extraIsize;
-    if (!readU16(img, ino.offset + kInExtraIsize, extraIsize) || extraIsize < 4) {
+    if (!src.have(ino.offset + kInExtraIsize, 2)) {
+        setErr(error, QStringLiteral("inode extra_isize 越界"));
+        return false;
+    }
+    QByteArray b;
+    if (!src.fetch(ino.offset + kInExtraIsize, 2, b, error))
+        return false;
+    const quint16 extraIsize = le16p(reinterpret_cast<const uchar *>(b.constData()));
+    if (extraIsize < 4) {
         setErr(error, QStringLiteral("inode extra_isize 无效"));
         return false;
     }
     const qint64 base = ino.offset + kGoodOldInodeSize + extraIsize;
-    quint32 magic;
-    if (!readU32(img, base, magic) || magic != kXattrMagic) {
+    if (!src.fetch(base, 4, b, error))
+        return false;
+    const quint32 magic = le32p(reinterpret_cast<const uchar *>(b.constData()));
+    if (magic != kXattrMagic) {
         setErr(error, QStringLiteral("inline inode xattr 魔数无效"));
         return false;
     }
@@ -409,20 +472,22 @@ bool readSystemData(const QByteArray &img, const SuperBlock &sb,
     qint64 entryOff = base + 4;
     const qint64 end = ino.offset + qint64(sb.inodeSize);
     for (;;) {
-        if (!inBounds(img, entryOff, 4)) {
+        if (!src.have(entryOff, 4)) {
             setErr(error, QStringLiteral("xattr 条目越界"));
             return false;
         }
-        quint32 first;
-        if (!readU32(img, entryOff, first))
+        if (!src.fetch(entryOff, 4, b, error))
             return false;
+        const quint32 first = le32p(reinterpret_cast<const uchar *>(b.constData()));
         if (first == 0)
             break;                              // IS_LAST_ENTRY
-        if (!inBounds(img, entryOff, kXattrEntryHdr)) {
+        if (!src.have(entryOff, kXattrEntryHdr)) {
             setErr(error, QStringLiteral("xattr 条目头越界"));
             return false;
         }
-        const uchar *ep = reinterpret_cast<const uchar *>(img.constData()) + entryOff;
+        if (!src.fetch(entryOff, kXattrEntryHdr, b, error))
+            return false;
+        const uchar *ep = reinterpret_cast<const uchar *>(b.constData());
         const quint8 nameLen = ep[0];
         const quint8 nameIndex = ep[1];
         const quint16 valueOffs = le16p(ep + 2);
@@ -430,19 +495,24 @@ bool readSystemData(const QByteArray &img, const SuperBlock &sb,
         const quint32 vSize = le32p(ep + 8);
         // 条目实际长度（4 对齐）
         const qint64 entryLen = qint64((nameLen + kXattrEntryHdr + 3) & ~3);
-        if (!inBounds(img, entryOff, entryLen) || entryLen < kXattrEntryHdr) {
+        if (!src.have(entryOff, entryLen) || entryLen < kXattrEntryHdr) {
             setErr(error, QStringLiteral("xattr 条目长度无效"));
             return false;
         }
-        if (nameLen == 4 && nameIndex == kXattrIndexSystem && valueInum == 0 &&
-            !memcmp(ep + kXattrEntryHdr, "data", 4)) {
-            if (!inBounds(img, base + 4 + valueOffs, vSize)) {
-                setErr(error, QStringLiteral("system.data 值越界"));
+        if (nameLen == 4 && nameIndex == kXattrIndexSystem && valueInum == 0) {
+            // "data" 名单独取 4 字节比较（条目头缓冲 16B 不含 name 区）
+            QByteArray nb;
+            if (!src.fetch(entryOff + kXattrEntryHdr, 4, nb, error))
                 return false;
+            if (!memcmp(nb.constData(), "data", 4)) {
+                if (!src.have(base + 4 + valueOffs, vSize)) {
+                    setErr(error, QStringLiteral("system.data 值越界"));
+                    return false;
+                }
+                valueOff = base + 4 + valueOffs;
+                valueSize = vSize;
+                return true;
             }
-            valueOff = base + 4 + valueOffs;
-            valueSize = vSize;
-            return true;
         }
         entryOff += entryLen;
         if (entryOff > end) {
@@ -455,43 +525,68 @@ bool readSystemData(const QByteArray &img, const SuperBlock &sb,
 }
 
 // 读 inline 数据：前 60B 在 i_block@40，其余在 system.data 值
-bool readInlineData(const QByteArray &img, const SuperBlock &sb,
+// （inline 文件实际 ≤ 数 KB；上限 kMaxInlineData 防伪造大 i_size）
+bool readInlineData(const Src &src, const SuperBlock &sb,
                     const Inode &ino, QByteArray &out, QString *error)
 {
     out.clear();
-    out.reserve(int(qMin<quint64>(ino.size, 64 * 1024 * 1024)));
+    if (ino.size > kMaxInlineData) {
+        setErr(error, QStringLiteral("inline 文件大小超限（%1 字节）").arg(ino.size));
+        return false;
+    }
+    try {
+        out.reserve(int(qMin<quint64>(ino.size, 64 * 1024 * 1024)));
+    } catch (const std::bad_alloc &) {
+        setErr(error, QStringLiteral("内存分配失败"));
+        return false;
+    }
     const quint64 part1 = qMin<quint64>(ino.size, quint64(kMinInlineDataSize));
-    if (!inBounds(img, ino.offset + kInBlock, qint64(part1))) {
+    if (!src.have(ino.offset + kInBlock, qint64(part1))) {
         setErr(error, QStringLiteral("inline 数据区越界"));
         return false;
     }
-    out.append(img.mid(ino.offset + kInBlock, qint64(part1)));
+    QByteArray chunk;
+    if (!src.fetch(ino.offset + kInBlock, qint64(part1), chunk, error))
+        return false;
+    out.append(chunk);
     if (ino.size > quint64(kMinInlineDataSize)) {
         qint64 vOff;
         quint32 vSize;
-        if (!readSystemData(img, sb, ino, vOff, vSize, error))
+        if (!readSystemData(src, sb, ino, vOff, vSize, error))
             return false;
         const quint64 rest = ino.size - quint64(kMinInlineDataSize);
         if (quint64(vSize) < rest) {
             setErr(error, QStringLiteral("system.data 值小于文件剩余长度"));
             return false;
         }
-        if (!inBounds(img, vOff, qint64(rest))) {
+        if (!src.have(vOff, qint64(rest))) {
             setErr(error, QStringLiteral("system.data 值越界"));
             return false;
         }
-        out.append(img.mid(vOff, qint64(rest)));
+        if (!src.fetch(vOff, qint64(rest), chunk, error))
+            return false;
+        out.append(chunk);
     }
     return true;
 }
 
-// 读普通文件数据（extent 文件）：按 extent 顺序拼接前 i_size 字节
-bool readExtentData(const QByteArray &img, const SuperBlock &sb,
+// 读普通文件数据（extent 文件）：按 extent 顺序拼接前 i_size 字节（整内存路径）
+bool readExtentData(const Src &src, const SuperBlock &sb,
                     const Inode &ino, QList<Extent> &extents,
                     QByteArray &out, QString *error)
 {
     out.clear();
-    out.reserve(int(qMin<quint64>(ino.size, 64 * 1024 * 1024)));
+    if (ino.size > kMaxFileAlloc) {
+        setErr(error, QStringLiteral("文件过大（%1 字节），超出内存提取上限")
+                       .arg(ino.size));
+        return false;
+    }
+    try {
+        out.reserve(int(qMin<quint64>(ino.size, 64 * 1024 * 1024)));
+    } catch (const std::bad_alloc &) {
+        setErr(error, QStringLiteral("内存分配失败"));
+        return false;
+    }
     quint64 need = ino.size;
     for (const Extent &ex : extents) {
         if (need == 0)
@@ -499,11 +594,14 @@ bool readExtentData(const QByteArray &img, const SuperBlock &sb,
         const quint64 avail = quint64(ex.len) * sb.blockSize;
         const quint64 take = qMin(avail, need);
         const qint64 off = qint64(ex.pblock * sb.blockSize);
-        if (!inBounds(img, off, qint64(take))) {
+        if (!src.have(off, qint64(take))) {
             setErr(error, QStringLiteral("文件数据区超出镜像范围"));
             return false;
         }
-        out.append(img.mid(off, qint64(take)));
+        QByteArray chunk;
+        if (!src.fetch(off, qint64(take), chunk, error))
+            return false;
+        out.append(chunk);
         need -= take;
     }
     if (need != 0) {
@@ -515,15 +613,58 @@ bool readExtentData(const QByteArray &img, const SuperBlock &sb,
     return true;
 }
 
-bool readFileData(const QByteArray &img, const SuperBlock &sb,
+// 流式写 extent 文件数据（内存 O(chunk)）；written 累计已写字节，progress 每
+// chunk 后回调。空洞（extent 不足覆盖 i_size）照旧拒绝（与旧接口一致）。
+bool streamExtentData(const Src &src, const SuperBlock &sb,
+                      const Inode &ino, QList<Extent> &extents, QFile &out,
+                      const std::function<void(quint64)> &progress,
+                      quint64 &written, QString *error)
+{
+    written = 0;
+    quint64 need = ino.size;
+    for (const Extent &ex : extents) {
+        if (need == 0)
+            break;
+        const quint64 avail = quint64(ex.len) * sb.blockSize;
+        const quint64 take = qMin(avail, need);
+        const qint64 off = qint64(ex.pblock * sb.blockSize);
+        if (!src.have(off, qint64(take))) {
+            setErr(error, QStringLiteral("文件数据区超出镜像范围"));
+            return false;
+        }
+        qint64 pos = 0;
+        while (pos < qint64(take)) {
+            const int c = int(qMin<qint64>(qint64(take) - pos, kStreamChunk));
+            QByteArray chunk;
+            if (!src.fetch(off + pos, c, chunk, error))
+                return false;
+            if (out.write(chunk) != c) {
+                setErr(error, QStringLiteral("写入输出文件失败: %1").arg(out.errorString()));
+                return false;
+            }
+            written += quint64(c);
+            pos += c;
+            need -= quint64(c);
+            if (progress)
+                progress(written);
+        }
+    }
+    if (need != 0) {
+        setErr(error, QStringLiteral("extent 不足以覆盖文件大小"));
+        return false;
+    }
+    return true;
+}
+
+bool readFileData(const Src &src, const SuperBlock &sb,
                   const Inode &ino, QByteArray &out, QString *error)
 {
     if (ino.flags & kFlInlineData)
-        return readInlineData(img, sb, ino, out, error);
+        return readInlineData(src, sb, ino, out, error);
     QList<Extent> extents;
-    if (!readExtents(img, sb, ino, extents, error))
+    if (!readExtents(src, sb, ino, extents, error))
         return false;
-    return readExtentData(img, sb, ino, extents, out, error);
+    return readExtentData(src, sb, ino, extents, out, error);
 }
 
 // ---- 目录项 ----
@@ -535,20 +676,20 @@ struct Dirent {
 
 // 解析一个目录缓冲（线性目录项链；htree 的 dx 根块同样适用——dot/dotdot 的
 // rec_len 覆盖索引区，天然跳过；metadata_csum 的目录尾项 inode==0 跳过）。
-// blockLen 为块长（目录块或 inline 剩余区）；filetype 特性关闭时按老格式
+// len 为块长（目录块或 inline 剩余区）；filetype 特性关闭时按老格式
 // ext2_dir_entry（name_len u16@6，无 file_type）解析。
-bool parseDirBuffer(const QByteArray &img, qint64 blockOff, qint64 blockLen,
+bool parseDirBuffer(const QByteArray &buf, qint64 start, qint64 len,
                     bool filetype, quint32 blockSize, QList<Dirent> &out,
                     QString *error)
 {
     qint64 pos = 0;
-    while (pos + kMinRecLen <= blockLen) {
-        const uchar *p = reinterpret_cast<const uchar *>(img.constData()) + blockOff + pos;
+    while (pos + kMinRecLen <= len) {
+        const uchar *p = reinterpret_cast<const uchar *>(buf.constData()) + start + pos;
         quint32 rlen = le16p(p + 4);
         // 65536B 块时 rec_len 65535/0 表示整块（ext4_rec_len_from_disk）
         if (blockSize == 65536 && (rlen == 65535 || rlen == 0))
             rlen = blockSize;
-        if (rlen < kMinRecLen || (rlen % 4) != 0 || pos + qint64(rlen) > blockLen) {
+        if (rlen < kMinRecLen || (rlen % 4) != 0 || pos + qint64(rlen) > len) {
             setErr(error, QStringLiteral("目录项 rec_len 无效"));
             return false;
         }
@@ -579,25 +720,29 @@ bool parseDirBuffer(const QByteArray &img, qint64 blockOff, qint64 blockLen,
 
 // 读目录的条目列表（inline 目录：数据区 = [父 inode u32][目录项 @4..]；
 // 块目录：按 extent 逐块线性解析）
-bool readDirEntries(const QByteArray &img, const SuperBlock &sb,
+bool readDirEntries(const Src &src, const SuperBlock &sb,
                     const Inode &dirIno, QList<Dirent> &out, QString *error)
 {
     out.clear();
+    if (dirIno.size > kMaxDirData) {
+        setErr(error, QStringLiteral("目录数据过大（%1 字节）").arg(dirIno.size));
+        return false;
+    }
+    const bool filetype = (sb.featureIncompat & kIncompatFiletype) != 0;
     if (dirIno.flags & kFlInlineData) {
         QByteArray data;
-        if (!readInlineData(img, sb, dirIno, data, error))
+        if (!readInlineData(src, sb, dirIno, data, error))
             return false;
         if (data.size() < 4) {
             setErr(error, QStringLiteral("inline 目录数据过短"));
             return false;
         }
         // 前 4B 为父目录 inode（"."/".." 隐式，不枚举）；条目从 @4 起
-        return parseDirBuffer(data, 4, data.size() - 4,
-                              (sb.featureIncompat & kIncompatFiletype) != 0,
+        return parseDirBuffer(data, 4, data.size() - 4, filetype,
                               sb.blockSize, out, error);
     }
     QList<Extent> extents;
-    if (!readExtents(img, sb, dirIno, extents, error))
+    if (!readExtents(src, sb, dirIno, extents, error))
         return false;
     if (extents.isEmpty()) {
         setErr(error, QStringLiteral("目录没有数据块"));
@@ -606,12 +751,14 @@ bool readDirEntries(const QByteArray &img, const SuperBlock &sb,
     for (const Extent &ex : extents) {
         for (quint32 i = 0; i < ex.len; ++i) {
             const qint64 off = qint64((ex.pblock + i) * sb.blockSize);
-            if (!inBounds(img, off, qint64(sb.blockSize))) {
+            if (!src.have(off, qint64(sb.blockSize))) {
                 setErr(error, QStringLiteral("目录块超出镜像范围"));
                 return false;
             }
-            if (!parseDirBuffer(img, off, qint64(sb.blockSize),
-                                (sb.featureIncompat & kIncompatFiletype) != 0,
+            QByteArray blk;
+            if (!src.fetch(off, qint64(sb.blockSize), blk, error))
+                return false;
+            if (!parseDirBuffer(blk, 0, qint64(sb.blockSize), filetype,
                                 sb.blockSize, out, error))
                 return false;
         }
@@ -619,7 +766,46 @@ bool readDirEntries(const QByteArray &img, const SuperBlock &sb,
     return true;
 }
 
-bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
+// 列出一个目录的直接子项（path 前缀 prefix；无递归，供 listTreeLazy 用）。
+// 条目 path 为相对根的完整路径；isDir/size 来自子 inode；data 不填充。
+bool readDirChildren(const Src &src, const SuperBlock &sb, quint64 nid,
+                     const QString &prefix, QList<imgfs::FsEntry> &out,
+                     QString *error)
+{
+    Inode ino;
+    if (!readInode(src, sb, nid, ino, error))
+        return false;
+    if ((ino.mode & kModeDir) != kModeDir) {
+        setErr(error, QStringLiteral("inode %1 不是目录").arg(nid));
+        return false;
+    }
+
+    QList<Dirent> entries;
+    if (!readDirEntries(src, sb, ino, entries, error))
+        return false;
+
+    for (const Dirent &e : entries) {
+        if (e.name == "." || e.name == "..")
+            continue;
+        const QString path = prefix.isEmpty()
+                ? QString::fromUtf8(e.name.constData(), e.name.size())
+                : prefix + QLatin1Char('/') +
+                  QString::fromUtf8(e.name.constData(), e.name.size());
+
+        Inode child;
+        if (!readInode(src, sb, e.nid, child, error))
+            return false;
+
+        imgfs::FsEntry fe;
+        fe.path = path;
+        fe.isDir = (child.mode & kModeDir) == kModeDir;
+        fe.size = child.size;
+        out.append(fe);
+    }
+    return true;
+}
+
+bool listDirRec(const Src &src, const SuperBlock &sb, quint64 nid,
                 const QString &prefix, int depth, QSet<quint64> &visitedDirs,
                 QList<imgfs::FsEntry> &out, QString *error)
 {
@@ -634,7 +820,7 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
     visitedDirs.insert(nid);
 
     Inode ino;
-    if (!readInode(img, sb, nid, ino, error))
+    if (!readInode(src, sb, nid, ino, error))
         return false;
     if ((ino.mode & kModeDir) != kModeDir) {
         setErr(error, QStringLiteral("根 inode %1 不是目录").arg(nid));
@@ -642,7 +828,7 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
     }
 
     QList<Dirent> entries;
-    if (!readDirEntries(img, sb, ino, entries, error))
+    if (!readDirEntries(src, sb, ino, entries, error))
         return false;
 
     for (const Dirent &e : entries) {
@@ -654,7 +840,7 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
                   QString::fromUtf8(e.name.constData(), e.name.size());
 
         Inode child;
-        if (!readInode(img, sb, e.nid, child, error))
+        if (!readInode(src, sb, e.nid, child, error))
             return false;
 
         imgfs::FsEntry fe;
@@ -664,7 +850,7 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
         out.append(fe);
 
         if (fe.isDir) {
-            if (!listDirRec(img, sb, e.nid, path, depth + 1, visitedDirs,
+            if (!listDirRec(src, sb, e.nid, path, depth + 1, visitedDirs,
                             out, error))
                 return false;
         }
@@ -673,7 +859,7 @@ bool listDirRec(const QByteArray &img, const SuperBlock &sb, quint64 nid,
 }
 
 // 按路径找到目标 inode（中间组件必须是目录）
-bool walkPath(const QByteArray &img, const SuperBlock &sb, const QString &path,
+bool walkPath(const Src &src, const SuperBlock &sb, const QString &path,
               quint64 &nid, QString *error)
 {
     const QStringList parts = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
@@ -691,14 +877,14 @@ bool walkPath(const QByteArray &img, const SuperBlock &sb, const QString &path,
         const QByteArray name = part.toUtf8();
 
         Inode ino;
-        if (!readInode(img, sb, nid, ino, error))
+        if (!readInode(src, sb, nid, ino, error))
             return false;
         if ((ino.mode & kModeDir) != kModeDir) {
             setErr(error, QStringLiteral("路径 '%1' 的中间组件不是目录").arg(path));
             return false;
         }
         QList<Dirent> entries;
-        if (!readDirEntries(img, sb, ino, entries, error))
+        if (!readDirEntries(src, sb, ino, entries, error))
             return false;
 
         bool found = false;
@@ -736,10 +922,11 @@ bool findFreeRuns(const QByteArray &img, const SuperBlock &sb, quint32 needBlock
 {
     const quint64 groups = (sb.inodeCount + sb.inodesPerGroup - 1) / sb.inodesPerGroup;
     const bool is64 = (sb.featureIncompat & kIncompat64Bit) != 0;
+    const Src src{&img, nullptr};
     quint32 remaining = needBlocks;
     for (quint64 g = 0; g < groups && remaining > 0; ++g) {
         GroupDesc gd;
-        if (!groupDesc(img, sb, g, gd, error))
+        if (!groupDesc(src, sb, g, gd, error))
             return false;
         if (gd.blockBitmap > (Q_UINT64_C(0x7FFFFFFF) / sb.blockSize)) {
             setErr(error, QStringLiteral("块位图块号过大"));
@@ -802,8 +989,9 @@ bool setBitmapBit(QByteArray &img, const SuperBlock &sb, quint64 group,
         setErr(error, QStringLiteral("块号 %1 越界").arg(block));
         return false;
     }
+    const Src src{&img, nullptr};
     GroupDesc gd;
-    if (!groupDesc(img, sb, group, gd, error))
+    if (!groupDesc(src, sb, group, gd, error))
         return false;
     if (gd.blockBitmap > (Q_UINT64_C(0x7FFFFFFF) / sb.blockSize)) {
         setErr(error, QStringLiteral("块位图块号过大"));
@@ -943,6 +1131,20 @@ bool parseSuper(const QByteArray &image, SuperBlock &out)
     return true;
 }
 
+bool parseSuperFile(imgfs::FsFile &f, SuperBlock &out, QString *error)
+{
+    if (error)
+        error->clear();
+    QByteArray buf;
+    if (!f.readAt(0, qMin(kSuperMinLen, f.size()), buf, error))
+        return false;
+    if (!parseSuper(buf, out)) {
+        setErr(error, QStringLiteral("ext4 superblock 解析失败"));
+        return false;
+    }
+    return true;
+}
+
 bool listTree(const QByteArray &image, const SuperBlock &sb,
               QList<imgfs::FsEntry> &out, QString *error)
 {
@@ -951,8 +1153,38 @@ bool listTree(const QByteArray &image, const SuperBlock &sb,
     out.clear();
     if (!validSuper(sb, error))
         return false;
+    const Src src{&image, nullptr};
     QSet<quint64> visitedDirs;
-    return listDirRec(image, sb, sb.rootInode, QString(), 0, visitedDirs, out, error);
+    return listDirRec(src, sb, sb.rootInode, QString(), 0, visitedDirs, out, error);
+}
+
+bool listTreeLazy(imgfs::FsFile &f, const SuperBlock &sb, const QString &dir,
+                  QList<imgfs::FsEntry> &out, QString *error)
+{
+    if (error)
+        error->clear();
+    out.clear();
+    if (!validSuper(sb, error))
+        return false;
+    const Src src{nullptr, &f};
+
+    // 规范化 dir："" / "/" / "." = 根（列根直接子项）；去除首尾 '/' 作为路径前缀
+    QString prefix = dir;
+    if (prefix == QLatin1String("/") || prefix == QLatin1String("."))
+        prefix.clear();
+    while (prefix.startsWith(QLatin1Char('/')))
+        prefix.remove(0, 1);
+    while (prefix.endsWith(QLatin1Char('/')))
+        prefix.chop(1);
+
+    quint64 nid;
+    if (prefix.isEmpty()) {
+        nid = sb.rootInode;
+    } else {
+        if (!walkPath(src, sb, prefix, nid, error))
+            return false;
+    }
+    return readDirChildren(src, sb, nid, prefix, out, error);
 }
 
 bool extractFile(const QByteArray &image, const SuperBlock &sb,
@@ -963,12 +1195,13 @@ bool extractFile(const QByteArray &image, const SuperBlock &sb,
     data.clear();
     if (!validSuper(sb, error))
         return false;
+    const Src src{&image, nullptr};
 
     quint64 nid;
-    if (!walkPath(image, sb, path, nid, error))
+    if (!walkPath(src, sb, path, nid, error))
         return false;
     Inode ino;
-    if (!readInode(image, sb, nid, ino, error))
+    if (!readInode(src, sb, nid, ino, error))
         return false;
     if ((ino.mode & kModeDir) == kModeDir) {
         setErr(error, QStringLiteral("'%1' 是一个目录").arg(path));
@@ -977,20 +1210,132 @@ bool extractFile(const QByteArray &image, const SuperBlock &sb,
     if ((ino.mode & kModeSymlink) == kModeSymlink) {
         // 快速符号链接（<60B）：目标在 i_block@40；否则按数据块读
         if (ino.size < quint64(kMinInlineDataSize) && !(ino.flags & kFlInlineData)) {
-            if (!inBounds(image, ino.offset + kInBlock, qint64(ino.size))) {
+            if (!src.have(ino.offset + kInBlock, qint64(ino.size))) {
                 setErr(error, QStringLiteral("符号链接目标越界"));
                 return false;
             }
-            data = image.mid(ino.offset + kInBlock, qint64(ino.size));
+            QByteArray chunk;
+            if (!src.fetch(ino.offset + kInBlock, qint64(ino.size), chunk, error))
+                return false;
+            data = chunk;
             return true;
         }
-        return readFileData(image, sb, ino, data, error);
+        return readFileData(src, sb, ino, data, error);
     }
     if ((ino.mode & kModeReg) != kModeReg) {
         setErr(error, QStringLiteral("'%1' 不是普通文件").arg(path));
         return false;
     }
-    return readFileData(image, sb, ino, data, error);
+    return readFileData(src, sb, ino, data, error);
+}
+
+bool extractFileStream(imgfs::FsFile &f, const SuperBlock &sb,
+                       const QString &path, const QString &outPath,
+                       const std::function<void(quint64)> &progress, QString *error)
+{
+    if (error)
+        error->clear();
+    if (!validSuper(sb, error))
+        return false;
+    const Src src{nullptr, &f};
+
+    quint64 nid;
+    if (!walkPath(src, sb, path, nid, error))
+        return false;
+    Inode ino;
+    if (!readInode(src, sb, nid, ino, error))
+        return false;
+    if ((ino.mode & kModeDir) == kModeDir) {
+        setErr(error, QStringLiteral("'%1' 是一个目录").arg(path));
+        return false;
+    }
+
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        setErr(error, QStringLiteral("无法打开输出文件 %1: %2")
+                       .arg(outPath, out.errorString()));
+        return false;
+    }
+    quint64 written = 0;
+    if (progress)
+        progress(0);
+    bool ok = false;
+
+    if ((ino.mode & kModeSymlink) == kModeSymlink) {
+        // 与 extractFile 语义一致：提取出的内容是链接目标文本
+        if (ino.size < quint64(kMinInlineDataSize) && !(ino.flags & kFlInlineData)) {
+            if (!src.have(ino.offset + kInBlock, qint64(ino.size))) {
+                setErr(error, QStringLiteral("符号链接目标越界"));
+            } else {
+                QByteArray chunk;
+                if (src.fetch(ino.offset + kInBlock, qint64(ino.size), chunk, error)) {
+                    if (out.write(chunk) == qint64(ino.size)) {
+                        ok = true;
+                        written = ino.size;
+                        if (progress)
+                            progress(written);
+                    } else {
+                        setErr(error, QStringLiteral("写入输出文件失败: %1")
+                                       .arg(out.errorString()));
+                    }
+                }
+            }
+        } else if (ino.flags & kFlInlineData) {
+            QByteArray chunk;
+            if (readInlineData(src, sb, ino, chunk, error)) {
+                if (out.write(chunk) == chunk.size()) {
+                    ok = true;
+                    written = quint64(chunk.size());
+                    if (progress)
+                        progress(written);
+                } else {
+                    setErr(error, QStringLiteral("写入输出文件失败: %1")
+                                   .arg(out.errorString()));
+                }
+            }
+        } else {
+            QList<Extent> extents;
+            if (readExtents(src, sb, ino, extents, error))
+                ok = streamExtentData(src, sb, ino, extents, out, progress,
+                                      written, error);
+        }
+    } else if (ino.flags & kFlInlineData) {
+        QByteArray chunk;
+        if (readInlineData(src, sb, ino, chunk, error)) {
+            if (out.write(chunk) == chunk.size()) {
+                ok = true;
+                written = quint64(chunk.size());
+                if (progress)
+                    progress(written);
+            } else {
+                setErr(error, QStringLiteral("写入输出文件失败: %1")
+                               .arg(out.errorString()));
+            }
+        }
+    } else {
+        if ((ino.mode & kModeReg) != kModeReg) {
+            setErr(error, QStringLiteral("'%1' 不是普通文件").arg(path));
+        } else {
+            QList<Extent> extents;
+            if (readExtents(src, sb, ino, extents, error))
+                ok = streamExtentData(src, sb, ino, extents, out, progress,
+                                      written, error);
+        }
+    }
+    out.close();
+    if (!ok) {
+        QFile::remove(outPath);
+        return false;
+    }
+    if (written != ino.size) {
+        setErr(error, QStringLiteral("内部错误: 写入 %1 字节，文件大小为 %2 字节")
+                       .arg(written).arg(ino.size));
+        QFile::remove(outPath);
+        return false;
+    }
+    if (progress)
+        progress(ino.size);
+    return true;
 }
 
 bool replaceFile(QByteArray &image, const SuperBlock &sb,
@@ -1015,11 +1360,12 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         return false;
     }
 
+    const Src src{&image, nullptr};
     quint64 nid;
-    if (!walkPath(image, sb, path, nid, error))
+    if (!walkPath(src, sb, path, nid, error))
         return false;
     Inode ino;
-    if (!readInode(image, sb, nid, ino, error))
+    if (!readInode(src, sb, nid, ino, error))
         return false;
     if ((ino.mode & kModeDir) == kModeDir) {
         setErr(error, QStringLiteral("'%1' 是目录，不能替换").arg(path));
@@ -1038,7 +1384,7 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
     QList<Extent> extents;
     quint64 capacity = 0;
     if (!(ino.flags & kFlInlineData)) {
-        if (!readExtents(image, sb, ino, extents, error))
+        if (!readExtents(src, sb, ino, extents, error))
             return false;
         for (const Extent &ex : extents)
             capacity += quint64(ex.len) * sb.blockSize;
@@ -1108,10 +1454,10 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
             put32(image, ino.offset + kInSizeHigh, quint32(newSize >> 32));
         // 自校验：重新读 inode（i_size 已更新）并重新解析比较
         Inode fresh;
-        if (!readInode(image, sb, nid, fresh, error))
+        if (!readInode(src, sb, nid, fresh, error))
             return false;
         QByteArray check;
-        if (!readFileData(image, sb, fresh, check, error))
+        if (!readFileData(src, sb, fresh, check, error))
             return false;
         if (check != data) {
             setErr(error, QStringLiteral("替换后自校验失败"));
@@ -1223,10 +1569,10 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
 
     // 6) 自校验：重新读 inode（i_size/flags 已更新）并重新解析比较
     Inode fresh;
-    if (!readInode(image, sb, nid, fresh, error))
+    if (!readInode(src, sb, nid, fresh, error))
         return false;
     QByteArray check;
-    if (!readFileData(image, sb, fresh, check, error))
+    if (!readFileData(src, sb, fresh, check, error))
         return false;
     if (check != data) {
         setErr(error, QStringLiteral("替换后自校验失败"));

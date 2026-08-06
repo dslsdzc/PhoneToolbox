@@ -95,6 +95,145 @@ private:
 
 } // namespace
 
+namespace {
+
+// 检测/解析 superblock 需要的最小前缀长度（EROFS 1144 / ext4 1384，取大者）
+constexpr qint64 kDetectRead = 1384;
+
+// 打开镜像文件并读检测前缀；返回 false + error（error 可为空则仅 false）
+bool openAndPeek(const QString &imagePath, FsFile &f, QByteArray &peek, QString *error)
+{
+    if (!f.open(imagePath, error))
+        return false;
+    const qint64 sz = f.size();
+    const qint64 len = qMin<qint64>(sz, kDetectRead);
+    if (len < 0 || !f.readAt(0, len, peek, error))
+        return false;
+    return true;
+}
+
+} // namespace
+
+bool FsFile::open(const QString &path, QString *error)
+{
+    if (error)
+        error->clear();
+    m_f.setFileName(path);
+    if (!m_f.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = QStringLiteral("无法打开镜像文件 %1: %2").arg(path, m_f.errorString());
+        return false;
+    }
+    return true;
+}
+
+void FsFile::close()
+{
+    if (m_f.isOpen())
+        m_f.close();
+}
+
+bool FsFile::readAt(qint64 off, qint64 len, QByteArray &out, QString *error)
+{
+    if (error)
+        error->clear();
+    out.clear();
+    if (!m_f.isOpen()) {
+        if (error) *error = QStringLiteral("镜像文件未打开");
+        return false;
+    }
+    if (off < 0 || len < 0) {
+        if (error) *error = QStringLiteral("读取偏移/长度无效");
+        return false;
+    }
+    const qint64 sz = m_f.size();
+    if (off > sz || len > sz - off) {
+        if (error) *error = QStringLiteral("读取范围超出镜像大小");
+        return false;
+    }
+    if (len == 0)
+        return true;
+    out.resize(int(len));
+    if (m_f.seek(off) && m_f.read(out.data(), len) == len)
+        return true;
+    const QString es = m_f.errorString();
+    out.clear();
+    if (error) *error = QStringLiteral("读取镜像失败: %1").arg(es);
+    return false;
+}
+
+bool extractFileStream(const QString &imagePath, const QString &inPath,
+                       const QString &outPath,
+                       const std::function<void(quint64)> &progress, QString *error)
+{
+    if (error)
+        error->clear();
+    FsFile f;
+    QByteArray peek;
+    if (!openAndPeek(imagePath, f, peek, error))
+        return false;
+    const imgreg::Detected d = imgreg::detect(peek, QString());
+    switch (d.format) {
+    case imgreg::Format::Erofs: {
+        imgerofs::SuperBlock sb;
+        if (!imgerofs::parseSuperFile(f, sb, error)) {
+            if (error && error->isEmpty())
+                *error = QStringLiteral("EROFS superblock 解析失败");
+            return false;
+        }
+        return imgerofs::extractFileStream(f, sb, inPath, outPath, progress, error);
+    }
+    case imgreg::Format::Ext4: {
+        imgext4::SuperBlock sb;
+        if (!imgext4::parseSuperFile(f, sb, error)) {
+            if (error && error->isEmpty())
+                *error = QStringLiteral("ext4 superblock 解析失败");
+            return false;
+        }
+        return imgext4::extractFileStream(f, sb, inPath, outPath, progress, error);
+    }
+    default:
+        if (error) *error = QStringLiteral("不是文件系统镜像（支持 EROFS / ext4）");
+        return false;
+    }
+}
+
+bool listTreeLazy(const QString &imagePath, const QString &dir, QList<FsEntry> &out,
+                  QString *error)
+{
+    if (error)
+        error->clear();
+    out.clear();
+    FsFile f;
+    QByteArray peek;
+    if (!openAndPeek(imagePath, f, peek, error))
+        return false;
+    const imgreg::Detected d = imgreg::detect(peek, QString());
+    switch (d.format) {
+    case imgreg::Format::Erofs: {
+        imgerofs::SuperBlock sb;
+        if (!imgerofs::parseSuperFile(f, sb, error)) {
+            if (error && error->isEmpty())
+                *error = QStringLiteral("EROFS superblock 解析失败");
+            return false;
+        }
+        return imgerofs::listTreeLazy(f, sb, dir, out, error);
+    }
+    case imgreg::Format::Ext4: {
+        imgext4::SuperBlock sb;
+        if (!imgext4::parseSuperFile(f, sb, error)) {
+            if (error && error->isEmpty())
+                *error = QStringLiteral("ext4 superblock 解析失败");
+            return false;
+        }
+        return imgext4::listTreeLazy(f, sb, dir, out, error);
+    }
+    default:
+        if (error) *error = QStringLiteral("不是文件系统镜像（支持 EROFS / ext4）");
+        return false;
+    }
+}
+
 FsImage *openFsImage(const QByteArray &image, QString *error)
 {
     if (error)
