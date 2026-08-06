@@ -1,6 +1,7 @@
 #include "system_tool_panel.h"
 #include "core/adb_embedded.h"
 #include "core/engineer_mode.h"
+#include "core/resource_monitor.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -33,6 +34,13 @@ SystemToolPanel::SystemToolPanel(QWidget *parent)
     m_perfTimer = new QTimer(this);
     m_perfTimer->setInterval(500);
     connect(m_perfTimer, &QTimer::timeout, this, &SystemToolPanel::onPerformancePoll);
+
+    // H1 降级接入：整体 CPU 使用率 >80% 时性能采样放慢为 2s（减少 adb shell
+    // 高频采样本身的开销），恢复（<70%）后回到 500ms。context 为本对象自动断开。
+    connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
+            [this](bool high, int) {
+                m_perfTimer->setInterval(high ? 2000 : 500);
+            });
 }
 
 // ==================== 辅助方法 ====================

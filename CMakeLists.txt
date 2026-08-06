@@ -278,7 +278,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pac.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_erofs.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_ext4.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_engineer_mode.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_engineer_mode.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_monitor.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -299,6 +300,8 @@ if(ENABLE_IMAGE_TESTS)
                 set(_test_extra_sources "")
                 if(_test_stem STREQUAL "test_engineer_mode")
                     set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/engineer_mode.cpp)
+                elseif(_test_stem STREQUAL "test_resource_monitor")
+                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)

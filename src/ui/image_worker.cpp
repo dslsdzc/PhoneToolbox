@@ -1,4 +1,5 @@
 #include "ui/image_worker.h"
+#include "core/resource_monitor.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -104,6 +105,17 @@ ImageWorker::ImageWorker(QObject *parent)
     moveToThread(&m_thread);
     m_thread.setObjectName(QStringLiteral("image-worker"));
     m_thread.start();
+
+    // H1 降级接入：整体 CPU 使用率 >80% 时工作线程降为 IdlePriority（仅系统
+    // 空闲时被调度，解包/打包这类 CPU 密集任务让位给前台），恢复（<70%）后
+    // 回到 NormalPriority。context 为本对象（已 moveToThread）→ lambda 在
+    // 工作线程事件循环执行，setPriority 作用于当前运行线程自身（Linux 上即
+    // pthread_setschedparam），且随本对象析构自动断开。
+    connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
+            [this](bool high, int) {
+                m_thread.setPriority(high ? QThread::IdlePriority
+                                          : QThread::NormalPriority);
+            });
 }
 
 ImageWorker::~ImageWorker()
