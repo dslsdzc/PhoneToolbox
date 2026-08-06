@@ -43,6 +43,18 @@ public:
 
     // ---- 公开入口（任意线程调用安全；实际工作在工作线程串行执行）----
 
+    // G5 流式路径判定（供 UI 日志与冒烟测试复用）：输入大小 > kStreamThreshold
+    // 时走流式接口（内存 O(chunk)，字节级进度回调）；小文件保持旧内存接口。
+    // 文件不存在/不可读返回 false（走旧接口 → 读取失败错误，不崩溃）。
+    static bool useStreamPath(const QString &path);
+    // 格式感知判定：大小达标且该格式存在流式接口才返回 true（Super/Boot/Dat/
+    // Kdz/UpdateApp/Sin/Pac/DiskGpt/TwrpWin 等无流式接口 → 恒 false，worker
+    // 内分派回退旧路径）。日志文案用（避免"流式处理"标注与实际路径不符）。
+    static bool useStreamPath(const QString &path, imgreg::Format format);
+    // 流式阈值：64MB。该量级下内存路径峰值 ≈ 2×镜像大小（读入 + 产物），
+    // 流式路径几乎不占额外内存（G4 基准：~14MB）。
+    static constexpr qint64 kStreamThreshold = 64LL * 1024 * 1024;
+
     // 识别镜像格式（读文件头魔数 + 扩展名兜底，见 imgreg::detect）。
     // 完成时发 detectFinished；读取失败时 detail 以"读取失败"开头。
     void runDetect(const QString &path);
@@ -96,8 +108,11 @@ signals:
                     const QString &hostFile, bool ok, const QString &error);
     void fsRepacked(const QString &path, const QString &outPath,
                     bool ok, const QString &error);
-    // percent: 0=开始, 100=完成；stage: 阶段名（识别/解包/打包/转换/修补）。
-    // 引擎暂不支持逐块回调，先按"开始/结束"两档发射。
+    // percent: 0=开始, 100=完成；stage: 阶段名（识别中/解包中/打包中/转换中/
+    // 修补中/文件浏览中）。
+    // G5 细化：大文件（> kStreamThreshold）走流式接口，引擎逐 chunk/块回调
+    // 字节进度 → 按"已处理/总量"百分比发射（任务中途封顶 99，100 仅在完成/
+    // 失败路径发射，防面板提前隐藏进度条）；小文件保持"开始/结束"两档。
     void progress(int percent, const QString &stage);
 
 private:
