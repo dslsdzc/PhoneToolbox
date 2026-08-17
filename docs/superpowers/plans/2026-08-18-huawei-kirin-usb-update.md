@@ -2,16 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 自研华为 Kirin 芯片 USB Update（VCOM）刷写通道：连接与帧层（F2-1）→ 命令层与刷写流程（F2-2）→ 集成（F2-3），协议事实经行为观察核实，mock 传输层单测，不依赖真实设备。
+**Goal:** 引入 Qt 插件系统，华为 Kirin USB Update（VCOM）刷写通道作为第一个可选插件：插件框架（F2-P）→ 华为插件协议层（F2-1 连接与帧层 / F2-2 命令层与刷写 / F2-3 集成），协议事实经行为观察核实，mock 传输层单测，不依赖真实设备。
 
-**Architecture:** 三层分离：① `hisi::IUsbChannel` 抽象传输通道（libusb 生产实现 + mock 测试实现）——协议层只依赖抽象接口；② `hisi::HisiSession` 帧层（0x7E HDLC 帧/转义/CRC16-X25/握手/响应解析）；③ `hisi::HisiFlasher` 命令层（HEAD/DATA/TAIL/UNLOCK/REBOOT + 逐分区刷写 + zlib 压缩）。F2-3 用 `runHisiFlash` 串联：imghw 解包（B5/B6 复用）→ 会话 → 逐分区刷写。
+**Architecture:** 双层：① 主项目插件框架（`src/plugins/`）——`ProtocolPlugin` 接口（Q_DECLARE_INTERFACE）+ `PluginManager`（QPluginLoader 扫描 `plugins/` 目录运行时加载）+ UI 集成；主程序**不编译链接**任何插件。② 华为刷机插件（`plugins/huawei_flash/` 独立目录、独立 CMake、独立 .so）——`hisi::IUsbChannel` 抽象传输通道（libusb 生产 + mock 测试）→ `hisi::HisiSession` 帧层（0x7E HDLC 帧/转义/CRC16-X25/握手/响应解析）→ `hisi::HisiFlasher` 命令层（HEAD/DATA/TAIL/UNLOCK/REBOOT + 逐分区刷写 + zlib 压缩）→ `runHisiFlash` 集成（update.app 解析在插件内自包含，不依赖主项目 image_engine）。法务隔离：删除 `plugins/huawei_flash/` 目录 + 移除发布包插件文件，主程序零残留。
 
-**Tech Stack:** C++17, Qt6 Core, libusb-1.0（现有依赖）, ZLIB（现有依赖）, image_engine imghw（update.app 解包，B5/B6 交付）。
+**Tech Stack:** C++17, Qt6 Core（QPluginLoader）, libusb-1.0（现有依赖）, ZLIB（现有依赖）。
 
 ## Global Constraints
 
 - C++17；成员变量 `m_` 前缀；协议常量/结构进 `namespace hisi`
 - **合规纪律（用户强制，2026-08-18）**：华为法务风险高 + 参照实现为 BSL 1.1 许可（源可用≠可自由使用）——
+  - **插件隔离（用户强制）**：华为实现整体放 `plugins/huawei_flash/` 独立目录，编译为独立 .so，主程序不编译链接；删除目录即完整移除（法务应对）
   - 只参照**协议行为事实**（帧格式/命令字/CRC/时序，不受版权保护）；**绝不复制参照实现的代码表达**（结构/命名/注释/实现方式），实现完全自写
   - 代码注释**不引用参照实现源码函数名**，来源标注用协议事实描述（"对照 HiSilicon USB Update 协议行为观察"）
   - **Xloader 漏洞载荷二进制不内置、不下载、不复制**——诚实边界：仅提供接口与提示，载荷需用户自行准备
@@ -19,7 +20,7 @@
 - **默认信息不可信原则**：协议细节以本计划核实的字节序列为准（核实结论已写入各任务代码），实现时不得自行更改帧结构
 - 诚实边界（不假装）：无解锁码时 UNLOCK 跳过（失败不假装）；Xloader 修补不可用（无载荷）时返回明确错误；机型范围标注（Kirin 系芯片，实测前不承诺）
 - 每个任务独立 commit，前缀 `feat:`；协议层单测 mock 传输通道（`IUsbChannel` 注入），不依赖真实设备
-- 后端冻结例外：允许新增 `src/core/modes/` 文件与修改 `CMakeLists.txt`；不改 `src/image_engine/`、`src/root_patcher/`（imghw 只读复用）
+- 插件框架是主项目通用能力（与华为无关）；华为插件内容全部在 `plugins/huawei_flash/` 内自包含
 
 ## 协议核实记录（行为观察，2026-08-18）
 
@@ -55,24 +56,350 @@
 ## 文件结构
 
 ```
-src/core/modes/
+src/plugins/
+  plugin_interface.h     # F2-P: ProtocolPlugin 接口（Q_DECLARE_INTERFACE）
+  plugin_manager.h/.cpp  # F2-P: QPluginLoader 扫描加载 plugins/ + 能力查询
+  plugin_tool_panel.h/.cpp  # F2-P: UI 集成（插件列表面板，协议插件入口）
+plugins/huawei_flash/    # 华为插件（独立目录、独立 CMake、独立 .so）
+  CMakeLists.txt         # F2-P 建骨架（空插件编译通过），F2-1/2/3 填充
   hisi_update.h/.cpp     # F2-1: IUsbChannel + libusb + 帧层（CRC16-X25/转义/握手/响应）
   hisi_flash.h/.cpp      # F2-2: 命令层（HEAD/DATA/TAIL/UNLOCK/REBOOT）+ 刷写流程 + zlib
-  mtk_handler 不动；集成入口放 hisi_flash（runHisiFlash 骨架）
-tests/
-  test_hisi_update.cpp   # F2-1+F2-2 单测（MockUsbChannel 注入 + CRC 向量 + 帧断言）
-CMakeLists.txt           # 三任务各改一次：测试注册 + libusb 链接
+  update_app.h/.cpp      # F2-3: update.app 解析（插件内自包含，不依赖主项目 image_engine）
+  huawei_flash_plugin.h/.cpp  # F2-3: ProtocolPlugin 实现（插件入口）
+  tests/test_hisi_update.cpp  # F2-1+F2-2 单测（MockUsbChannel 注入 + CRC 向量 + 帧断言）
+CMakeLists.txt           # 主项目：add_subdirectory(src/plugins)；plugins/huawei_flash 条件引入
 ```
 
 ---
 
-### Task F2-1: 连接与帧层
+### Task F2-P: 插件系统框架（主项目）
 
 **Files:**
-- Create: `src/core/modes/hisi_update.h`
-- Create: `src/core/modes/hisi_update.cpp`
-- Create: `tests/test_hisi_update.cpp`
-- Modify: `CMakeLists.txt`（测试注册 + libusb 链接）
+- Create: `src/plugins/plugin_interface.h`
+- Create: `src/plugins/plugin_manager.h/.cpp`
+- Create: `src/plugins/plugin_tool_panel.h/.cpp`
+- Create: `plugins/huawei_flash/CMakeLists.txt`（空插件骨架，验证插件系统可用）
+- Create: `plugins/huawei_flash/huawei_flash_plugin.h/.cpp`（最小实现：仅名称/描述/能力）
+- Modify: `CMakeLists.txt`（主程序 + add_subdirectory + 输出目录设置）
+- Modify: `src/ui/tool_panel.cpp/h`（工具列表加"插件"项）、`src/ui/main_window.cpp/h`（页面）
+
+**Interfaces:**
+- Produces:
+  - `class ProtocolPlugin : public QObject`（Q_DECLARE_INTERFACE，`ProtocolPlugin_iid`）：`virtual QString name() const = 0; virtual QString description() const = 0; virtual QStringList capabilities() const = 0; virtual bool execute(const QString &capability, const QVariantMap &params, QString *error) = 0;`
+  - `class PluginManager : public QObject`（单例 `instance()`）：`void scanPlugins(const QString &dir); QList<ProtocolPlugin*> plugins() const; QList<ProtocolPlugin*> byCapability(const QString&) const;`
+  - `class PluginToolPanel : public QWidget`（插件面板：插件列表 + 能力按钮 + 输出）
+
+- [ ] **Step 1: 定义接口 `src/plugins/plugin_interface.h`**
+
+```cpp
+#pragma once
+
+// 插件系统接口（计划 F2-P）—— 主项目通用能力
+// 协议类插件（如华为刷写）以独立 .so 实现本接口，主程序运行时加载，
+// 不编译链接插件代码（法务/许可隔离：删除插件文件即完整移除）。
+
+#include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QVariantMap>
+
+#define ProtocolPlugin_iid "com.phonetoolbox.ProtocolPlugin/1.0"
+Q_DECLARE_INTERFACE(ProtocolPlugin, ProtocolPlugin_iid)
+
+class ProtocolPlugin : public QObject {
+    Q_OBJECT
+public:
+    explicit ProtocolPlugin(QObject *parent = nullptr) : QObject(parent) {}
+    ~ProtocolPlugin() override = default;
+
+    virtual QString name() const = 0;
+    virtual QString description() const = 0;
+    // 能力列表（如 "huawei-usb-update.flash"）
+    virtual QStringList capabilities() const = 0;
+    // 执行能力；成功返回 true；失败返回 false 并填 error（契约：失败不崩溃）
+    virtual bool execute(const QString &capability, const QVariantMap &params,
+                         QString *error) = 0;
+};
+```
+
+- [ ] **Step 2: 实现 `plugin_manager.h/.cpp`**（QPluginLoader 扫描加载）
+
+```cpp
+#pragma once
+
+#include <QList>
+#include <QObject>
+#include <QString>
+
+#include "src/plugins/plugin_interface.h"
+
+// 插件管理器：扫描目录加载 ProtocolPlugin 插件（QPluginLoader）。
+// 加载失败/接口不符的插件记录错误并跳过（不崩溃）。
+class PluginManager : public QObject {
+    Q_OBJECT
+public:
+    static PluginManager &instance();
+
+    // 扫描 dir 下全部 .so/.dll（仅 ProtocolPlugin 接口）
+    void scanPlugins(const QString &dir);
+    QList<ProtocolPlugin *> plugins() const { return m_plugins; }
+    QList<ProtocolPlugin *> byCapability(const QString &capability) const;
+    QStringList loadErrors() const { return m_errors; }
+    void clear(); // 卸载全部（析构/重扫用）
+
+private:
+    explicit PluginManager(QObject *parent = nullptr);
+    QList<ProtocolPlugin *> m_plugins;
+    QStringList m_errors;
+};
+```
+
+- [ ] **Step 3: 实现 `plugin_manager.cpp`**
+
+```cpp
+#include "src/plugins/plugin_manager.h"
+
+#include <QDir>
+#include <QPluginLoader>
+
+PluginManager &PluginManager::instance()
+{
+    static PluginManager mgr;
+    return mgr;
+}
+
+PluginManager::PluginManager(QObject *parent)
+    : QObject(parent)
+{
+}
+
+void PluginManager::scanPlugins(const QString &dir)
+{
+    clear();
+    QDir d(dir);
+    const QStringList entries = d.entryList(QDir::Files);
+    for (const QString &entry : entries) {
+        if (!entry.endsWith(QStringLiteral(".so")) && !entry.endsWith(QStringLiteral(".dll"))
+            && !entry.endsWith(QStringLiteral(".dylib")))
+            continue;
+        QPluginLoader loader(d.absoluteFilePath(entry));
+        QObject *obj = loader.instance();
+        if (!obj) {
+            m_errors << QStringLiteral("%1: %2").arg(entry, loader.errorString());
+            continue;
+        }
+        ProtocolPlugin *plugin = qobject_cast<ProtocolPlugin *>(obj);
+        if (!plugin) {
+            m_errors << QStringLiteral("%1: 不是 ProtocolPlugin 插件").arg(entry);
+            loader.unload();
+            continue;
+        }
+        m_plugins.append(plugin);
+    }
+}
+
+QList<ProtocolPlugin *> PluginManager::byCapability(const QString &capability) const
+{
+    QList<ProtocolPlugin *> out;
+    for (ProtocolPlugin *p : m_plugins) {
+        if (p->capabilities().contains(capability))
+            out.append(p);
+    }
+    return out;
+}
+
+void PluginManager::clear()
+{
+    // QPluginLoader 实例生命周期：直接删除 QObject（插件库保持加载）
+    for (ProtocolPlugin *p : m_plugins)
+        delete p;
+    m_plugins.clear();
+    m_errors.clear();
+}
+```
+
+- [ ] **Step 4: UI 集成 `plugin_tool_panel.h/.cpp`**（面板：插件列表 + 能力按钮 + 输出信号）
+
+```cpp
+#pragma once
+
+#include <QList>
+#include <QWidget>
+
+class ProtocolPlugin;
+
+// 插件面板：列出已加载插件及其能力，点击执行（参数为空）。
+// 复用现有面板信号模式：outputMessage(QString, bool) 发到 OutputPanel。
+class PluginToolPanel : public QWidget {
+    Q_OBJECT
+public:
+    explicit PluginToolPanel(QWidget *parent = nullptr);
+    void setPlugins(const QList<ProtocolPlugin *> &plugins);
+
+signals:
+    void outputMessage(const QString &text, bool isError);
+
+private slots:
+    void onExecuteClicked();
+
+private:
+    class QListWidget *m_list;
+    class QPushButton *m_executeBtn;
+    QList<ProtocolPlugin *> m_plugins;
+};
+```
+
+```cpp
+#include "src/plugins/plugin_tool_panel.h"
+
+#include <QHBoxLayout>
+#include <QListWidget>
+#include <QPushButton>
+#include <QVBoxLayout>
+
+#include "src/plugins/plugin_interface.h"
+
+PluginToolPanel::PluginToolPanel(QWidget *parent)
+    : QWidget(parent)
+{
+    auto *layout = new QVBoxLayout(this);
+    m_list = new QListWidget(this);
+    m_executeBtn = new QPushButton(QStringLiteral("执行"), this);
+    m_executeBtn->setEnabled(false);
+    layout->addWidget(m_list, 1);
+    layout->addWidget(m_executeBtn);
+    connect(m_executeBtn, &QPushButton::clicked, this, &PluginToolPanel::onExecuteClicked);
+    connect(m_list, &QListWidget::itemSelectionChanged, this, [this] {
+        m_executeBtn->setEnabled(m_list->currentRow() >= 0);
+    });
+}
+
+void PluginToolPanel::setPlugins(const QList<ProtocolPlugin *> &plugins)
+{
+    m_plugins = plugins;
+    m_list->clear();
+    for (ProtocolPlugin *p : m_plugins) {
+        for (const QString &cap : p->capabilities())
+            m_list->addItem(QStringLiteral("%1 — %2").arg(p->name(), cap));
+    }
+}
+
+void PluginToolPanel::onExecuteClicked()
+{
+    const int row = m_list->currentRow();
+    if (row < 0 || row >= m_plugins.size())
+        return;
+    ProtocolPlugin *p = m_plugins.at(row);
+    if (!p)
+        return;
+    QString error;
+    if (!p->execute(p->capabilities().value(0), QVariantMap(), &error))
+        emit outputMessage(QStringLiteral("[插件] %1 执行失败: %2").arg(p->name(), error), true);
+    else
+        emit outputMessage(QStringLiteral("[插件] %1 执行完成").arg(p->name()), false);
+}
+```
+
+- [ ] **Step 5: 插件骨架 `plugins/huawei_flash/`**
+
+`plugins/huawei_flash/huawei_flash_plugin.h`：
+```cpp
+#pragma once
+
+#include <QObject>
+
+#include "src/plugins/plugin_interface.h"
+
+// 华为刷写插件入口（协议层在 F2-1/2/3 填充；本任务仅骨架验证插件系统）
+class HuaweiFlashPlugin : public ProtocolPlugin {
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID ProtocolPlugin_iid)
+    Q_INTERFACES(ProtocolPlugin)
+public:
+    explicit HuaweiFlashPlugin(QObject *parent = nullptr) : ProtocolPlugin(parent) {}
+
+    QString name() const override { return QStringLiteral("华为刷写"); }
+    QString description() const override
+    {
+        return QStringLiteral("华为 Kirin USB Update 刷写通道（协议层后续任务填充）");
+    }
+    QStringList capabilities() const override
+    {
+        return { QStringLiteral("huawei-usb-update.flash") };
+    }
+    bool execute(const QString &capability, const QVariantMap &params, QString *error) override
+    {
+        Q_UNUSED(capability) Q_UNUSED(params)
+        if (error) *error = QStringLiteral("协议层未实现（F2-1/2/3）");
+        return false;
+    }
+};
+```
+
+`plugins/huawei_flash/CMakeLists.txt`：
+```cmake
+# 华为刷写插件：独立 .so，主程序不链接（法务/许可隔离）
+find_package(Qt6 REQUIRED COMPONENTS Core)
+add_library(huawei_flash_plugin MODULE
+    huawei_flash_plugin.h)
+target_include_directories(huawei_flash_plugin PRIVATE
+    ${CMAKE_SOURCE_DIR})  # 引用 src/plugins/plugin_interface.h
+target_link_libraries(huawei_flash_plugin PRIVATE Qt6::Core)
+set_target_properties(huawei_flash_plugin PROPERTIES
+    AUTOMOC ON
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
+```
+
+- [ ] **Step 6: 主 CMakeLists 接线**
+
+```cmake
+# 插件系统（主项目通用）
+add_subdirectory(src/plugins)
+# 可选插件：默认构建（华为刷写），删除目录/关闭选项即完整移除
+option(BUILD_HUAWEI_FLASH_PLUGIN "Build Huawei flash plugin" ON)
+if(BUILD_HUAWEI_FLASH_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/plugins/huawei_flash/CMakeLists.txt)
+    add_subdirectory(plugins/huawei_flash)
+endif()
+```
+
+`src/plugins/CMakeLists.txt`：
+```cmake
+# 插件框架（主项目通用，无 Q_OBJECT 头不涉及 AUTOMOC 冲突）
+set(PLUGIN_SOURCES
+    plugin_manager.cpp
+    plugin_tool_panel.cpp)
+add_library(phone_plugins STATIC ${PLUGIN_SOURCES})
+target_include_directories(phone_plugins PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(phone_plugins PUBLIC Qt6::Core Qt6::Widgets)
+set_target_properties(phone_plugins PROPERTIES AUTOMOC ON)
+```
+
+主程序 `target_link_libraries(PhoneToolbox ... phone_plugins)`。
+
+- [ ] **Step 7: 工具面板与主窗口接线**
+
+`src/ui/tool_panel.cpp/h`：工具按钮组加「插件」按钮（与现有 5 个工具并列），发出 `pluginPanelRequested()` 信号。
+`src/ui/main_window.cpp/h`：`m_tools`（QStackedWidget）加一页 `PluginToolPanel`；构造时 `PluginManager::instance().scanPlugins(QCoreApplication::applicationDirPath() + "/plugins")`，把 `plugins()` 填入面板，并转发 `outputMessage` 到 OutputPanel。
+
+- [ ] **Step 8: 验证 + Commit**
+
+Run: `cmake -B build -G Ninja && cmake --build build -j$(nproc)`
+Expected: 编译通过；`build/plugins/libhuawei_flash_plugin.so` 生成。冒烟：`./build/PhoneToolbox` 启动不崩溃（无显示环境时跳过 UI 冒烟，以编译 + 插件 .so 生成为准）。
+
+```bash
+git add src/plugins/ CMakeLists.txt src/ui/tool_panel.* src/ui/main_window.* plugins/huawei_flash/
+git commit -m "feat: 插件系统框架 — ProtocolPlugin 接口 + QPluginLoader + 华为插件骨架 (F2-P)"
+```
+
+---
+
+### Task F2-1: 连接与帧层（插件内）
+
+**Files:**
+- Create: `plugins/huawei_flash/hisi_update.h`
+- Create: `plugins/huawei_flash/hisi_update.cpp`
+- Create: `plugins/huawei_flash/tests/test_hisi_update.cpp`
+- Modify: `plugins/huawei_flash/CMakeLists.txt`（协议层源 + 测试注册 + libusb 链接）
 
 **Interfaces:**
 - Consumes: 无（libusb-1.0 + ZLIB 现有依赖）
@@ -265,7 +592,7 @@ QTEST_APPLESS_MAIN(TestHisiUpdate)
 
 Run: `cmake --build build` → Expected: 编译失败（`hisi_update.h` 不存在）。先实现再注册 CMake（同 F1-1 模式）。
 
-- [ ] **Step 3: 实现 `src/core/modes/hisi_update.h`**
+- [ ] **Step 3: 实现 `plugins/huawei_flash/hisi_update.h`**
 
 ```cpp
 #pragma once
@@ -371,7 +698,7 @@ private:
 } // namespace hisi
 ```
 
-- [ ] **Step 4: 实现 `src/core/modes/hisi_update.cpp`**
+- [ ] **Step 4: 实现 `plugins/huawei_flash/hisi_update.cpp`**
 
 ```cpp
 #include "core/modes/hisi_update.h"
@@ -754,22 +1081,24 @@ bool HisiSession::close(QString *error)
 
 （注：`readFrame` 使用 `QDateTime`——在 cpp 头部补 `#include <QDateTime>`。）
 
-- [ ] **Step 5: CMake 注册测试 + libusb 链接**
+- [ ] **Step 5: CMake 注册测试 + libusb 链接（插件内）**
 
-`CMakeLists.txt`：
-1. `IMAGE_TEST_SOURCES` 追加 `${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hisi_update.cpp`
-2. `_test_extra_sources` 追加分支：
+`plugins/huawei_flash/CMakeLists.txt` 追加（LIBUSB_INCLUDE_DIRS/LIBUSB_LIBRARIES 为主 CMakeLists 顶部已求值变量，子目录可见）：
 ```cmake
-                elseif(_test_stem STREQUAL "test_hisi_update")
-                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/hisi_update.cpp)
-```
-3. libusb 链接条件扩展（在 foreach 内已有块中追加）：
-```cmake
-            if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
-               OR _test_stem STREQUAL "test_hisi_update")
-                target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
-                target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
-            endif()
+# 协议层测试（插件内独立注册，不进入主项目测试列表）
+find_package(Qt6 QUIET COMPONENTS Test)
+if(Qt6Test_FOUND AND ENABLE_IMAGE_TESTS)
+    enable_testing()
+    add_executable(test_hisi_update
+        tests/test_hisi_update.cpp
+        hisi_update.cpp)
+    target_include_directories(test_hisi_update PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${LIBUSB_INCLUDE_DIRS})
+    target_link_libraries(test_hisi_update PRIVATE Qt6::Test ${LIBUSB_LIBRARIES})
+    set_target_properties(test_hisi_update PROPERTIES AUTOMOC ON)
+    add_test(NAME test_hisi_update COMMAND test_hisi_update)
+endif()
 ```
 
 - [ ] **Step 6: 跑测试验证通过**
@@ -787,7 +1116,8 @@ Expected: 25/25 PASS（24 原有 + test_hisi_update）。
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/core/modes/hisi_update.h src/core/modes/hisi_update.cpp tests/test_hisi_update.cpp CMakeLists.txt
+git add plugins/huawei_flash/hisi_update.h plugins/huawei_flash/hisi_update.cpp \
+        plugins/huawei_flash/tests/test_hisi_update.cpp plugins/huawei_flash/CMakeLists.txt
 git commit -m "feat: 华为 Kirin USB Update 连接与帧层 — CRC16-X25/0x7E 帧/握手 (F2-1)
 
 - 独立实现：协议事实（帧格式/命令字/CRC）为公共领域行为观察，实现自写
@@ -801,10 +1131,10 @@ git commit -m "feat: 华为 Kirin USB Update 连接与帧层 — CRC16-X25/0x7E 
 ### Task F2-2: 命令层与刷写流程
 
 **Files:**
-- Create: `src/core/modes/hisi_flash.h`
-- Create: `src/core/modes/hisi_flash.cpp`
-- Modify: `tests/test_hisi_update.cpp`（追加命令/刷写用例）
-- Modify: `CMakeLists.txt`（test_hisi_update 的 extra sources 追加 hisi_flash.cpp）
+- Create: `plugins/huawei_flash/hisi_flash.h`
+- Create: `plugins/huawei_flash/hisi_flash.cpp`
+- Modify: `plugins/huawei_flash/tests/test_hisi_update.cpp`（追加命令/刷写用例）
+- Modify: `plugins/huawei_flash/CMakeLists.txt`（测试源追加 hisi_flash.cpp）
 
 **Interfaces:**
 - Consumes: `hisi::HisiSession`（F2-1）、ZLIB（现有）
@@ -904,7 +1234,7 @@ void TestHisiUpdate::rebootCommands()
 
 Run: `cmake --build build` → Expected: 编译失败（`hisi_flash.h` 不存在）。
 
-- [ ] **Step 3: 实现 `src/core/modes/hisi_flash.h`**
+- [ ] **Step 3: 实现 `plugins/huawei_flash/hisi_flash.h`**
 
 ```cpp
 #pragma once
@@ -961,7 +1291,7 @@ private:
 } // namespace hisi
 ```
 
-- [ ] **Step 4: 实现 `src/core/modes/hisi_flash.cpp`**
+- [ ] **Step 4: 实现 `plugins/huawei_flash/hisi_flash.cpp`**
 
 ```cpp
 #include "core/modes/hisi_flash.h"
@@ -1088,16 +1418,18 @@ bool HisiFlasher::reboot(QString *error)
 } // namespace hisi
 ```
 
-- [ ] **Step 5: CMake 更新**
+- [ ] **Step 5: CMake 更新（插件内）**
 
-`CMakeLists.txt`：`test_hisi_update` 的 `_test_extra_sources` 追加 `hisi_flash.cpp`：
+`plugins/huawei_flash/CMakeLists.txt`：测试可执行文件源追加 `hisi_flash.cpp`，并链接 ZLIB：
 ```cmake
-                elseif(_test_stem STREQUAL "test_hisi_update")
-                    set(_test_extra_sources
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/hisi_update.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/hisi_flash.cpp)
+    add_executable(test_hisi_update
+        tests/test_hisi_update.cpp
+        hisi_update.cpp
+        hisi_flash.cpp)
+    ...
+    target_link_libraries(test_hisi_update PRIVATE Qt6::Test ${LIBUSB_LIBRARIES} ${ZLIB_LIBRARY})
 ```
-（测试目标还需链接 ZLIB——检查 `target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)`：image_engine PUBLIC 链 ZLIB ✓ 已传递，无需追加。）
+（ZLIB_LIBRARY 为主 CMakeLists 顶部已求值变量，子目录可见。）
 
 - [ ] **Step 6: 跑测试验证通过**
 
@@ -1109,7 +1441,8 @@ Expected: 14 个用例全部 PASS（10 + 新增 4）。
 Run: `ctest --test-dir build` → Expected 25/25 PASS。
 
 ```bash
-git add src/core/modes/hisi_flash.h src/core/modes/hisi_flash.cpp tests/test_hisi_update.cpp CMakeLists.txt
+git add plugins/huawei_flash/hisi_flash.h plugins/huawei_flash/hisi_flash.cpp \
+        plugins/huawei_flash/tests/test_hisi_update.cpp plugins/huawei_flash/CMakeLists.txt
 git commit -m "feat: 华为 Kirin USB Update 命令层与刷写流程 (F2-2)
 
 - HEAD/DATA/TAIL 逐分区刷写（0x20000 块 zlib 0x78 01 压缩 + Adler32）
@@ -1120,63 +1453,195 @@ git commit -m "feat: 华为 Kirin USB Update 命令层与刷写流程 (F2-2)
 
 ---
 
-### Task F2-3: 集成（update.app 复用 + 刷写路由）
+### Task F2-3: 集成（插件内 update.app 解析 + 刷写路由 + 插件入口）
 
 **Files:**
-- Create: `src/core/modes/hisi_flash.cpp` 追加 `runHisiFlash`
-- Modify: `tests/test_hisi_update.cpp`（追加路由用例）
-- Modify: `CMakeLists.txt`（如需）
+- Create: `plugins/huawei_flash/update_app.h/.cpp`（插件内 update.app 解析，自包含）
+- Modify: `plugins/huawei_flash/hisi_flash.h/.cpp`（追加 `runHisiFlash`）
+- Modify: `plugins/huawei_flash/huawei_flash_plugin.h/.cpp`（ProtocolPlugin 实现：execute 接 runHisiFlash）
+- Modify: `plugins/huawei_flash/tests/test_hisi_update.cpp`（追加路由/解析用例）
+- Modify: `plugins/huawei_flash/CMakeLists.txt`（update_app.cpp + 插件源）
 
 **Interfaces:**
-- Consumes: `hisi::HisiFlasher`（F2-2）、`imghw`（B5/B6 update.app 解包——`imghw::parseUpdateApp` + `extractFile`）
+- Consumes: `hisi::HisiFlasher`（F2-2）
 - Produces:
-  - `bool hisi::runHisiFlash(const QString &updateAppPath, const QString &dloadDir, std::function<void(const QString&, int)> progress, QString *error)`：
-    1. `imghw::parseUpdateApp` 解析 update.app 分区列表
-    2. 枚举 USB（`enumerateUsb`）→ `openLibusbUsb` → `HisiSession::connect`
-    3. 解包各分区（`imghw::extractFile`）写 `dloadDir/<name>.img` + 保存分区头 `<name>.img.header`
-    4. `HisiFlasher::unlock`（有解锁码时——从 update.app 提取或跳过，诚实边界：无解锁码时跳过并标注）
-    5. 逐分区 `flashPartition`（跳过 xloader——诚实边界：Xloader 修补载荷不内置，遇到 xloader 分区返回明确错误提示）
-    6. `reboot`
-
+  - `struct hisi::AppPartition { QString name; QByteArray header; QByteArray data; }`（update.app 条目：头 + 数据）
+  - `bool hisi::parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *error)`（插件内自包含解析：magic `55 AA 5A A5` + headerLength LE32 + dataLength LE32 + 32B 分区名；头 = 98 + 剩余字节；不依赖主项目 image_engine）
+  - `bool hisi::runHisiFlash(const QString &updateAppPath, std::function<void(const QString&, int)> progress, QString *error)`
 **诚实边界（硬约束）**：
 - Xloader 分区：刷写遇到 `xloader`/`preloader` 分区名时**拒绝并提示**"Xloader 修补载荷未内置，需用户自行准备"（不假装支持）
-- 解锁码：从 update.app 可提取则用（参照 B6 FindUnlockCode 逻辑或标注不可得）；无解锁码时跳过 UNLOCK 并日志标注"未解锁可能失败"
+- 解锁码：无解锁码时跳过 UNLOCK 并日志标注"未解锁可能失败"
 - 机型范围：Kirin 系（实测前不承诺具体型号）
 
-- [ ] **Step 1: 追加失败测试**
+- [ ] **Step 1: 实现插件内 update.app 解析 `plugins/huawei_flash/update_app.h/.cpp`**
 
 ```cpp
-    // ---- F2-3: 集成路由 ----
-    void runHisiFlashRejectsXloaderWithoutPayload();
-    void runHisiFlashNoDeviceFails();
+// update_app.h
+#pragma once
 
-void TestHisiUpdate::runHisiFlashRejectsXloaderWithoutPayload()
+// 插件内自包含的 update.app 解析（不依赖主项目 image_engine）。
+// 独立实现声明：条目布局（magic/头长/数据长/分区名）为公共领域协议行为
+// 观察所得；实现自写。
+//
+// 布局（行为观察）：条目 magic 55 AA 5A A5 + headerLength(LE32) + 4B + 8B
+// + 4B + dataLength(LE32) + 16B + 16B + 32B 分区名(UTF-8, NUL 结尾) + 6B
+// + (headerLength - 98) 剩余字节；头总长 = headerLength。
+
+#include <QByteArray>
+#include <QList>
+#include <QString>
+#include <QtGlobal>
+
+namespace hisi {
+
+struct AppPartition {
+    QString name;
+    QByteArray header; // 分区头（含 fileSeq@20..24 大端）
+    QByteArray data;   // 分区数据
+};
+
+// 解析 update.app 条目表；失败返回 false 并填 error
+bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *error);
+
+} // namespace hisi
+```
+
+```cpp
+// update_app.cpp
+#include "update_app.h"
+
+namespace hisi {
+
+namespace {
+constexpr quint8 kMagic[4] = { 0x55, 0xAA, 0x5A, 0xA5 };
+constexpr int kHeaderFixed = 98; // magic(4)+len(4)+4+8+4+dlen(4)+16+16+name(32)+6
+
+quint32 le32(const QByteArray &b, int off)
 {
-    // 诚实边界：xloader 分区无载荷 → 明确错误
-    // （构造：mock enumerateUsb 返回设备 + 模拟分区列表含 xloader ——
-    //  路由实现依赖 imghw 解包，此处只验证 xloader 拒绝逻辑需真实 update.app；
-    //  简化为单测 runHisiFlash 的 xloader 检查分支不可行 → 该用例标注
-    //  "依赖 imghw 集成，冒烟级验证"，由 F2-3 集成测试覆盖，此处 QSKIP）
-    QSKIP("xloader 拒绝逻辑随 imghw 集成冒烟验证（需真实 update.app）");
+    return quint32(quint8(b[off])) | (quint32(quint8(b[off + 1])) << 8)
+         | (quint32(quint8(b[off + 2])) << 16) | (quint32(quint8(b[off + 3])) << 24);
+}
+
+} // namespace
+
+bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *error)
+{
+    out.clear();
+    int pos = 0;
+    while (pos + 4 <= data.size()) {
+        if (memcmp(data.constData() + pos, kMagic, 4) != 0) {
+            if (error) *error = QStringLiteral("update.app 条目 magic 不符 @0x%1")
+                                    .arg(pos, 0, 16);
+            return false;
+        }
+        const int headerLen = int(le32(data, pos + 4));
+        if (headerLen < kHeaderFixed || pos + headerLen > data.size()) {
+            if (error) *error = QStringLiteral("update.app 条目头长非法 @0x%1")
+                                    .arg(pos, 0, 16);
+            return false;
+        }
+        const quint32 dataLen = le32(data, pos + 24); // magic+4+4+8+4 = 偏移 24
+        AppPartition p;
+        p.header = data.mid(pos, headerLen);
+        // 分区名：头内偏移 56（magic 4 + headerLen 4 + 4 + 8 + 4 + dataLen 4 + 16 + 16）
+        const QByteArray nameRaw = p.header.mid(56, 32);
+        const int nul = nameRaw.indexOf('\0');
+        p.name = QString::fromUtf8(nul >= 0 ? nameRaw.left(nul) : nameRaw);
+        if (p.name.isEmpty()) {
+            if (error) *error = QStringLiteral("update.app 条目名为空 @0x%1").arg(pos, 0, 16);
+            return false;
+        }
+        const int dataOff = pos + headerLen;
+        if (dataOff + int(dataLen) > data.size()) {
+            if (error) *error = QStringLiteral("update.app 分区数据越界: %1").arg(p.name);
+            return false;
+        }
+        p.data = data.mid(dataOff, int(dataLen));
+        out.append(p);
+        pos = dataOff + int(dataLen);
+    }
+    if (out.isEmpty()) {
+        if (error) *error = QStringLiteral("update.app 无分区条目");
+        return false;
+    }
+    return true;
+}
+
+} // namespace hisi
+```
+
+- [ ] **Step 2: 追加测试（`tests/test_hisi_update.cpp`）**
+
+```cpp
+    // ---- F2-3: update.app 解析 ----
+    void parseUpdateAppEntries();
+    void parseUpdateAppBadMagicFails();
+    // ---- F2-3: xloader 边界 ----
+    void isXloaderPartitionNames();
+
+void TestHisiUpdate::parseUpdateAppEntries()
+{
+    // 构造 2 条条目：boot（0x10000 数据）+ system（0x20000 数据）
+    QByteArray app;
+    for (const char *name : {"boot", "system"}) {
+        const quint32 headerLen = 98 + 8; // 98 固定 + 8 剩余
+        QByteArray h(headerLen, '\0');
+        h[0] = 0x55; h[1] = 0xAA; h[2] = 0x5A; h[3] = 0xA5;
+        const quint32 len = headerLen;
+        h[4] = char(len & 0xFF); h[5] = char((len >> 8) & 0xFF);
+        h[6] = char((len >> 16) & 0xFF); h[7] = char((len >> 24) & 0xFF);
+        // dataLength @24（magic 4 + headerLen 4 + 4 + 8 + 4）
+        const quint32 dlen = QByteArray(name).size() == 4 ? 0x10000u : 0x20000u;
+        h[24] = char(dlen & 0xFF); h[25] = char((dlen >> 8) & 0xFF);
+        h[26] = char((dlen >> 16) & 0xFF); h[27] = char((dlen >> 24) & 0xFF);
+        // 分区名 @56（32B NUL 结尾）
+        memcpy(h.data() + 56, name, qMin<qsizetype>(strlen(name), 32));
+        // fileSeq @20（大端）：boot=1, system=2
+        h[20] = char(QByteArray(name).size() == 4 ? 0 : 1);
+        app += h;
+        app += QByteArray(int(dlen), char(0xAB));
+    }
+    QList<hisi::AppPartition> parts;
+    QVERIFY(hisi::parseUpdateApp(app, parts, nullptr));
+    QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].name, QStringLiteral("boot"));
+    QCOMPARE(parts[0].data.size(), 0x10000);
+    QCOMPARE(parts[1].name, QStringLiteral("system"));
+    QCOMPARE(parts[1].data.size(), 0x20000);
+}
+
+void TestHisiUpdate::parseUpdateAppBadMagicFails()
+{
+    QByteArray app(200, '\x00');
+    QString err;
+    QVERIFY(!hisi::parseUpdateApp(app, parts, &err));
+    QVERIFY(err.contains("magic"));
+}
+
+void TestHisiUpdate::isXloaderPartitionNames()
+{
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("xloader")));
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("preloader")));
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("xloader_a")));
+    QVERIFY(!hisi::isXloaderPartition(QStringLiteral("boot")));
+    QVERIFY(!hisi::isXloaderPartition(QStringLiteral("system")));
 }
 ```
 
-（说明：F2-3 的集成逻辑依赖真实 update.app 与 imghw 解析——单测以冒烟为主。`runHisiFlash` 的纯逻辑（xloader 名检查、枚举失败路径）拆出纯函数便于单测：`bool isXloaderPartition(const QString&)` + 枚举失败路径测试。）
+- [ ] **Step 3: 实现 `runHisiFlash` + 插件入口**
 
-- [ ] **Step 2: 实现追加（`hisi_flash.h/.cpp`）**
-
+`hisi_flash.h` 追加：
 ```cpp
-// hisi_flash.h 追加：
 // 集成路由：update.app → 枚举 → 会话 → 逐分区刷写（诚实边界见 cpp）
-bool runHisiFlash(const QString &updateAppPath, const QString &dloadDir,
+bool runHisiFlash(const QString &updateAppPath,
                   std::function<void(const QString &name, int percent)> progress,
                   QString *error = nullptr);
 // 纯函数（单测）：xloader/preloader 分区名判定（诚实边界用）
 bool isXloaderPartition(const QString &partitionName);
 ```
 
+`hisi_flash.cpp` 追加：
 ```cpp
-// hisi_flash.cpp 追加：
 bool isXloaderPartition(const QString &partitionName)
 {
     const QString n = partitionName.toLower();
@@ -1184,71 +1649,58 @@ bool isXloaderPartition(const QString &partitionName)
         || n.startsWith(QStringLiteral("xloader_")) || n.startsWith(QStringLiteral("preloader_"));
 }
 
-bool runHisiFlash(const QString &updateAppPath, const QString &dloadDir,
+bool runHisiFlash(const QString &updateAppPath,
                   std::function<void(const QString &, int)> progress, QString *error)
 {
-    // 1. 解析 update.app（B5/B6 imghw 复用）
+    // 1. 解析 update.app（插件内自包含）
     QFile appFile(updateAppPath);
     if (!appFile.open(QIODevice::ReadOnly)) {
         if (error) *error = QStringLiteral("无法打开 update.app: %1").arg(updateAppPath);
         return false;
     }
     const QByteArray appData = appFile.readAll();
-    QList<imghw::AppFile> files;
-    if (!imghw::parseUpdateApp(appData, files, error))
+    QList<AppPartition> parts;
+    if (!parseUpdateApp(appData, parts, error))
         return false;
-    if (files.isEmpty()) {
-        if (error) *error = QStringLiteral("update.app 无文件表");
-        return false;
-    }
 
     // 2. 枚举 + 打开会话
-    QList<hisi::HisiDevice> devs;
-    if (!hisi::enumerateUsb(devs, error))
+    QList<HisiDevice> devs;
+    if (!enumerateUsb(devs, error))
         return false;
     if (devs.isEmpty()) {
         if (error) *error = QStringLiteral("未检测到华为 USB Update 设备（VID 0x12D1）");
         return false;
     }
-    std::unique_ptr<hisi::IUsbChannel> usb;
-    if (!hisi::openLibusbUsb(devs.first(), usb, error))
+    std::unique_ptr<IUsbChannel> usb;
+    if (!openLibusbUsb(devs.first(), usb, error))
         return false;
-    hisi::HisiSession session(std::move(usb), devs.first());
+    HisiSession session(std::move(usb), devs.first());
     if (!session.connect(error))
         return false;
-    hisi::HisiFlasher flasher(session);
+    HisiFlasher flasher(session);
 
-    // 3. 解包分区 + 逐分区刷写（xloader 诚实边界）
-    if (!QDir().mkpath(dloadDir)) {
-        if (error) *error = QStringLiteral("无法创建输出目录: %1").arg(dloadDir);
-        return false;
-    }
+    // 3. 逐分区刷写（xloader 诚实边界）
     int done = 0;
-    for (const imghw::AppFile &af : files) {
-        if (progress) progress(af.name, 100 * done / files.size());
-        if (isXloaderPartition(af.name)) {
-            if (error) *error = QStringLiteral("分区 %1 为 Xloader：修补载荷未内置（需用户自行准备），已跳过")
-                                    .arg(af.name);
+    for (const AppPartition &p : parts) {
+        if (progress) progress(p.name, 100 * done / parts.size());
+        if (isXloaderPartition(p.name)) {
+            if (error) *error = QStringLiteral("分区 %1 为 Xloader：修补载荷未内置（需用户自行准备）")
+                                    .arg(p.name);
             return false; // 诚实边界：不假装支持
         }
-        const QByteArray img = imghw::extractFile(appData, af, nullptr);
-        if (img.isEmpty()) {
-            if (error) *error = QStringLiteral("分区 %1 提取失败").arg(af.name);
-            return false;
-        }
-        const QString imgPath = QDir(dloadDir).filePath(af.name + QStringLiteral(".img"));
+        // 分区数据落临时文件后流式刷写（大分区避免整载内存）
+        const QString imgPath = QDir::temp().filePath(
+            QStringLiteral("huawei_flash_%1.img").arg(p.name));
         QFile out(imgPath);
         if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            if (error) *error = QStringLiteral("无法写入 %1").arg(imgPath);
+            if (error) *error = QStringLiteral("无法写入临时文件 %1").arg(imgPath);
             return false;
         }
-        out.write(img);
+        out.write(p.data);
         out.close();
-        // 分区头：B6 的 AppFile 是否承载 header——若仅 data，则按 imghw 内部
-        // 头布局重建（magic 55 AA 5A A5 + 字段）——实现时以 imghw.h 实际接口为准
-        const QByteArray header = buildPartitionHeader(af);
-        if (!flasher.flashPartition(af.name, header, imgPath, nullptr, error))
+        if (!flasher.flashPartition(p.name, p.header, imgPath, nullptr, error))
             return false;
+        QFile::remove(imgPath);
         ++done;
     }
     if (progress) progress(QString(), 100);
@@ -1256,24 +1708,48 @@ bool runHisiFlash(const QString &updateAppPath, const QString &dloadDir,
 }
 ```
 
-（注：`buildPartitionHeader` 为内部辅助——若 `imghw::AppFile` 已含头字节则直接使用；实现时以 `src/image_engine/huawei_image.h` 的实际结构为准，本任务允许读该头文件适配。）
+`huawei_flash_plugin.cpp`（F2-P 骨架填充）：
+```cpp
+#include "huawei_flash_plugin.h"
 
-- [ ] **Step 3: CMake 更新**
+#include "hisi_flash.h"
+#include "update_app.h"
 
-`CMakeLists.txt`：`test_hisi_update` 的 `_test_extra_sources` 追加 `src/core/modes/hisi_flash.cpp` 已含（F2-2 已加）；测试目标已链 image_engine（imghw 在 image_engine 内）✓。无需改。
+bool HuaweiFlashPlugin::execute(const QString &capability, const QVariantMap &params,
+                                QString *error)
+{
+    if (capability != QStringLiteral("huawei-usb-update.flash")) {
+        if (error) *error = QStringLiteral("未知能力: %1").arg(capability);
+        return false;
+    }
+    const QString updateApp = params.value(QStringLiteral("updateApp")).toString();
+    if (updateApp.isEmpty()) {
+        if (error) *error = QStringLiteral("缺少 updateApp 参数（update.app 路径）");
+        return false;
+    }
+    return hisi::runHisiFlash(updateApp, nullptr, error);
+}
+```
 
-- [ ] **Step 4: 跑测试验证**
+- [ ] **Step 4: CMake 更新（插件内）**
+
+`plugins/huawei_flash/CMakeLists.txt`：
+- 测试可执行文件源追加 `update_app.cpp`（`hisi_flash.cpp` 已含）
+- 插件库源追加 `update_app.cpp` + `hisi_flash.cpp` + `hisi_update.cpp`，链接 Qt6::Core + libusb + zlib
+
+- [ ] **Step 5: 跑测试验证**
 
 Run: `cmake --build build -j$(nproc) && ctest --test-dir build -R test_hisi_update --output-on-failure`
-Expected: 15 个用例（含 1 个 QSKIP 的 xloader 集成标注）PASS；全量 25/25。
+Expected: 18 个用例 PASS；全量 25/25；`build/plugins/libhuawei_flash_plugin.so` 重新生成。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/modes/hisi_flash.h src/core/modes/hisi_flash.cpp tests/test_hisi_update.cpp
-git commit -m "feat: 华为 Kirin USB Update 集成路由 (F2-3)
+git add plugins/huawei_flash/
+git commit -m "feat: 华为 Kirin USB Update 集成 — 插件内 update.app 解析 + runHisiFlash + 插件入口 (F2-3)
 
-- runHisiFlash：imghw 解包（B5/B6 复用）→ 枚举 → 会话 → 逐分区刷写 → reboot
+- parseUpdateApp：插件内自包含（不依赖主项目 image_engine）
+- runHisiFlash：解析 → 枚举 → 会话 → 逐分区刷写 → reboot
 - 诚实边界：Xloader 分区拒绝（载荷不内置，用户自备）；无解锁码跳过 UNLOCK
 - 机型范围标注：Kirin 系，实测前不承诺具体型号"
 ```
@@ -1282,8 +1758,8 @@ git commit -m "feat: 华为 Kirin USB Update 集成路由 (F2-3)
 
 ## Self-Review 记录
 
-- **Spec 覆盖**（对照计划 F 文档 F2 段 + 用户重定向决策）：华为刷机通道 → Kirin USB Update（VCOM）全链路（连接/帧/命令/刷写/集成）✓；update.app 解包复用 B5/B6 ✓；诚实边界（Xloader 载荷不内置、无解锁码标注、机型范围）✓
-- **合规纪律**（用户强制）：独立实现声明 + 不复制参照实现表达 + 注释不引用参照源码函数名 + Xloader 载荷不内置 —— 写入 Global Constraints 与各任务代码注释 ✓
-- **占位符扫描**：`buildPartitionHeader` 标注"实现时以 imghw.h 实际接口为准"——允许读现有头适配（接口适配非占位）；xloader 测试 QSKIP 有明确说明 ✓
-- **类型一致性**：`HisiSession`/`HisiFlasher`/`runHisiFlash` 跨任务签名一致；`zlibCompress` 输入输出类型一致 ✓
-- **依赖顺序**：F2-1 → F2-2 → F2-3 串行；每任务结束是可独立测试的绿态（25/25 递增）✓
+- **Spec 覆盖**（对照计划 F 文档 F2 段 + 用户重定向 + 插件化决策）：插件系统框架（F2-P）→ 华为插件协议层全链路（连接/帧/命令/刷写/集成）✓；update.app 解析插件内自包含（不依赖主项目 image_engine）✓；诚实边界（Xloader 载荷不内置、无解锁码标注、机型范围）✓
+- **合规纪律**（用户强制）：插件隔离（plugins/huawei_flash/ 独立 .so，删除即移除）+ 独立实现声明 + 不复制参照实现表达 + 注释不引用参照源码函数名 + Xloader 载荷不内置 —— 写入 Global Constraints 与各任务代码注释 ✓
+- **占位符扫描**：无 TBD/TODO；update_app 解析布局为行为观察核实值；测试构造含完整字节 ✓
+- **类型一致性**：`HisiSession`/`HisiFlasher`/`parseUpdateApp`/`runHisiFlash` 跨任务签名一致；`zlibCompress` 输入输出类型一致 ✓
+- **依赖顺序**：F2-P → F2-1 → F2-2 → F2-3 串行；每任务结束是可独立测试的绿态（25/25 递增）✓
