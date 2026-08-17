@@ -8,6 +8,11 @@
 #include <QJsonValue>
 #include <QResource>
 #include <QTemporaryDir>
+#include <memory>
+
+#include "core/modes/mtk_brom.h"
+#include "core/modes/mtk_emmc.h"
+#include "core/modes/mtk_payload.h"
 
 // JSON-RPC timeout defaults
 static const int BRIDGE_START_TIMEOUT = 5000;
@@ -554,4 +559,43 @@ bool MtkHandler::resetDevice()
     QString err = resp["error"].toObject()["message"].toString();
     emit outputMessage("MTK: 重置失败 - " + err, true);
     return false;
+}
+
+// ==================== F1-3: BROM 直刷路由（骨架） ====================
+
+// F1-3 集成点：BROM 直刷路由（骨架）。枚举 → libusb 打开 → BromSession →
+// sendPayload（DA 二进制由调用方提供）→ DaStorage 逐分区刷写。
+// 诚实边界：SLA/DAA 设备返回明确错误；V6 修补平台标注不支持。
+// 不改动现有 mtk_bridge JSON-RPC 主路径（上方 MtkHandler 成员方法保持原行为）。
+bool runBromFlash(const QByteArray &daBinary,
+                  const QList<QPair<QString, QByteArray>> &partitions,
+                  QString *error)
+{
+    QList<mtkbrom::BromDevice> devs;
+    if (!mtkbrom::enumerateUsb(devs, error))
+        return false;
+    if (devs.isEmpty()) {
+        if (error) *error = QStringLiteral("未检测到 MTK BROM 设备（VID 0x0E8D:0x0003 等）");
+        return false;
+    }
+    std::unique_ptr<mtkbrom::IBromUsb> usb;
+    if (!mtkbrom::openLibusbUsb(devs.first(), usb, error))
+        return false;
+    mtkbrom::BromSession session(std::move(usb), devs.first());
+    if (!session.connect(error))
+        return false;
+    mtkbrom::TargetConfig cfg;
+    if (session.getTargetConfig(cfg, nullptr) && (cfg.sla || cfg.daa)) {
+        if (error) *error = QStringLiteral("设备启用 SLA/DAA 认证，暂不支持（RSA 响应自研为后续任务）");
+        return false;
+    }
+    if (!mtkbrom::sendPayload(session, daBinary, error))
+        return false;
+    mtkbrom::DaStorage st(session);
+    st.setDaActive(true);
+    for (const auto &p : partitions) {
+        if (!mtkbrom::flashPartition(session, st, p.first, p.second, error))
+            return false;
+    }
+    return true;
 }

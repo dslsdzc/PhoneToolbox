@@ -2,8 +2,11 @@
 #define MTK_HANDLER_H
 
 #include <QObject>
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
+#include <QList>
+#include <QPair>
 #include <QProcess>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -16,6 +19,12 @@ struct MtkPartition {
     quint64 offset;
     quint64 length;
 };
+
+// F1-3 集成点：BROM 直刷路由（骨架，绕开 mtk_bridge JSON-RPC 主路径）。
+// 枚举 → libusb 打开 → BromSession → sendPayload（DA 二进制由调用方提供）→ DaStorage 逐分区刷写。
+bool runBromFlash(const QByteArray &daBinary,
+                  const QList<QPair<QString, QByteArray>> &partitions,
+                  QString *error = nullptr);
 
 class MtkHandler : public QObject
 {
