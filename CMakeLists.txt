@@ -279,7 +279,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_erofs.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_ext4.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_engineer_mode.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_monitor.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_monitor.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_brom.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -302,12 +303,19 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/engineer_mode.cpp)
                 elseif(_test_stem STREQUAL "test_resource_monitor")
                     set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_brom")
+                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
                 set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
                 add_test(NAME ${_test_target} COMMAND ${_test_target})
             endforeach()
+            # BROM 协议测试需要 libusb（image_engine 不传递）
+            if(_test_stem STREQUAL "test_mtk_brom")
+                target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
+                target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
+            endif()
         endif()
     endif()
 endif()
