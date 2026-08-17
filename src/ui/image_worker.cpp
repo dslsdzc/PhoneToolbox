@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QSet>
 #include <QTemporaryFile>
+#include <limits>
 
 #include "image_engine/sparse_image.h"
 #include "image_engine/payload_image.h"
@@ -115,9 +116,10 @@ bool sameFile(const QString &a, const QString &b)
     return !ca.isEmpty() && ca == cb;
 }
 
-// 分区 blob 消费字节（与 imgpayload 引擎 processOps 的 blobTotal 公式一致：
-// ZERO/DISCARD 不计；diff 系仅 SOURCE_BSDIFF 消费 blob）。多分区解包的
-// 总进度分母 = 各分区该值之和。
+// 分区 blob 消费字节（与 imgpayload 引擎 processOps 的 blobTotal 公式逐字
+// 一致：ZERO/DISCARD 不计；diff 系仅 SOURCE_BSDIFF 消费 blob；累计用引擎同款
+// 饱和加法 —— 恶意超大 manifest 下保持单调不溢出）。多分区解包的总进度分母
+// = 各分区该值之和。
 quint64 partitionBlobTotal(const imgpayload::Partition &part)
 {
     quint64 t = 0;
@@ -131,7 +133,9 @@ quint64 partitionBlobTotal(const imgpayload::Partition &part)
                           op.type == imgpayload::OP_BROTLI_BSDIFF ||
                           op.type == imgpayload::OP_ZUCCHINI;
         if (!diff || op.type == imgpayload::OP_SOURCE_BSDIFF)
-            t += op.dataLength;
+            t = (op.dataLength > std::numeric_limits<quint64>::max() - t)
+                ? std::numeric_limits<quint64>::max()
+                : t + op.dataLength;
     }
     return t;
 }
@@ -332,16 +336,23 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
     // G5：大文件（> kStreamThreshold）走流式接口 —— 引擎逐 chunk/块回调字节
     // 进度 → 按"已处理/总量"百分比真实推进进度条（任务中途封顶 99，100 仅由
     // 本函数收尾路径发射，防面板提前隐藏）；小文件保持旧内存接口（两者输出
-    // 逐字节一致，G1-G4 测试回归保障）。无流式接口的格式（Super/Boot/Dat/
-    // Kdz/UpdateApp/Sin/Pac/DiskGpt/TwrpWin）保持旧路径。
-    const bool stream = ImageWorker::useStreamPath(path);
+    // 逐字节一致，G1-G4 测试回归保障）。格式感知判定（审查修复）：仅对有
+    // 流式解包接口的格式（Sparse/Payload/Tar/TarMd5/Erofs/Ext4）走流式；
+    // 无流式接口的格式（Super/Boot/Dat/Kdz/UpdateApp/Sin/Pac/DiskGpt/
+    // TwrpWin）无论大小保持旧内存路径。
+    const bool stream = ImageWorker::useStreamPath(path, detected.format);
 
     QString error;
-    const QByteArray data = readFile(path, &error);
-    if (data.isEmpty()) {
-        emit progress(100, QStringLiteral("解包中"));
-        emit unpackFinished(false, QStringList(), error);
-        return;
+    QByteArray data;
+    if (!stream) {
+        // 仅旧内存路径整文件读入 —— 流式路径各引擎随机读/分块读，避免
+        // 64MB+ 文件双读 + 峰值内存≈文件大小（G1-G5 内存 O(chunk) 目标）
+        data = readFile(path, &error);
+        if (data.isEmpty()) {
+            emit progress(100, QStringLiteral("解包中"));
+            emit unpackFinished(false, QStringList(), error);
+            return;
+        }
     }
     if (!QDir().mkpath(outDir)) {
         emit progress(100, QStringLiteral("解包中"));
@@ -953,12 +964,11 @@ void ImageWorker::doPack(const QString &outPath, const QStringList &inputs,
         case imgreg::Format::Tar:
         case imgreg::Format::TarMd5: {
             ok = imgtar::buildTarStream(inputs, outPath, cb, &serr);
-            // 三星 Odin 校验尾：无逐块进度回调（增量读算 MD5）→ 标识进入收尾，
-            // 进度条停驻 95% 后由收尾发射 100
-            if (ok && QFileInfo(outPath).suffix() == QLatin1String("md5")) {
-                emit progress(95, QStringLiteral("打包中"));
+            // 三星 Odin 校验尾：无逐块进度回调（增量读算 MD5）→ 进度自然停驻
+            // 在 pct 封顶值 99，收尾完成后由下方统一发射 100（审查修复：不再
+            // 回跳 95，避免进度条可见倒退）
+            if (ok && QFileInfo(outPath).suffix() == QLatin1String("md5"))
                 ok = imgtar::appendMd5FooterStream(outPath, &serr);
-            }
             break;
         }
         default:
@@ -1062,17 +1072,18 @@ void ImageWorker::doConvert(const QString &path, const QString &outPath,
         emit convertFinished(false, QString(), QStringLiteral("输出路径为空"));
         return;
     }
-    // G1 Minor 吸收（流式路径守卫）：输入输出同路径时流式接口先截断输出 →
-    // 输入被破坏（旧整读路径是先读后写，语义不同）；统一显式拒绝
-    if (sameFile(path, outPath)) {
-        emit progress(100, QStringLiteral("转换中"));
-        emit convertFinished(false, outPath,
-                             QStringLiteral("输入输出路径相同，请选择其他输出文件"));
-        return;
-    }
     // G5：大文件走流式接口（内存 O(chunk)，进度 = 已消费输入字节 / 输入大小）
     const bool stream = ImageWorker::useStreamPath(path);
     if (stream) {
+        // G1 Minor 吸收（流式路径守卫）：输入输出同路径时流式接口先截断输出 →
+        // 输入被破坏。仅流式路径拒绝 —— 旧整读路径是先读后写，小文件 in-place
+        // 安全（审查修复：保持"小文件保持旧接口行为"约束）
+        if (sameFile(path, outPath)) {
+            emit progress(100, QStringLiteral("转换中"));
+            emit convertFinished(false, outPath,
+                                 QStringLiteral("输入输出路径相同，请选择其他输出文件"));
+            return;
+        }
         const quint64 total = quint64(qMax<qint64>(QFileInfo(path).size(), 1));
         const auto cb = [this, total](quint64 done) {
             emit progress(pct(done, total), QStringLiteral("转换中"));
