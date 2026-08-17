@@ -279,28 +279,46 @@ bool BromSession::connect(QString *error)
 bool BromSession::handshake(QString *error)
 {
     // 对照 Port.py run_handshake()：非 BROM PID 预发 0xA0；逐字节发 A0 0A 50 05，
-    // 每字节读回显须 == 取反
+    // 每字节读回显须 == 取反；任一字节不符回到开头重试（源码 5 次，本实现 3 次），
+    // 重试前读清残留输入
     const QByteArray start("\xA0\x0A\x50\x05", 4);
-    if (!isBromPid(quint16(m_dev.pid))) {
-        if (!m_usb->write(QByteArray(1, '\xA0'), error))
-            return false;
-    }
-    for (quint8 b : start) {
-        const QByteArray out(1, char(b));
-        if (!m_usb->write(out, error))
-            return false;
-        QByteArray echo;
-        if (!m_usb->read(echo, 1, 500, error))
-            return false;
-        if (echo.size() != 1 || quint8(echo[0]) != quint8(~b)) {
-            if (error) *error = QStringLiteral("握手回显不符（期望 0x%1 收到 0x%2）")
-                                    .arg(quint8(~b), 2, 16, QLatin1Char('0'))
-                                    .arg(echo.isEmpty() ? QStringLiteral("--")
-                                                        : QStringLiteral("%1").arg(quint8(echo[0]), 2, 16, QLatin1Char('0')));
-            return false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        bool ok = true;
+        if (!isBromPid(quint16(m_dev.pid))) {
+            if (!m_usb->write(QByteArray(1, '\xA0'), error))
+                ok = false;
+        }
+        if (ok) {
+            for (quint8 b : start) {
+                const QByteArray out(1, char(b));
+                if (!m_usb->write(out, error)) {
+                    ok = false;
+                    break;
+                }
+                QByteArray echo;
+                if (!m_usb->read(echo, 1, 500, error)) {
+                    ok = false;
+                    break;
+                }
+                if (echo.size() != 1 || quint8(echo[0]) != quint8(~b)) {
+                    if (error) *error = QStringLiteral("握手回显不符（期望 0x%1 收到 0x%2）")
+                                            .arg(quint8(~b), 2, 16, QLatin1Char('0'))
+                                            .arg(echo.isEmpty() ? QStringLiteral("--")
+                                                                : QStringLiteral("%1").arg(quint8(echo[0]), 2, 16, QLatin1Char('0')));
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (ok)
+            return true;
+        if (attempt + 1 < 3) {
+            // 残留输入清空：失败后重试前，短超时读一次（结果忽略）
+            QByteArray stale;
+            m_usb->read(stale, 0x400, 50, nullptr);
         }
     }
-    return true;
+    return false;
 }
 
 bool BromSession::echoCmd(quint8 cmd, QString *error)
