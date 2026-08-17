@@ -2,6 +2,7 @@
 #include <memory>
 
 #include "core/modes/mtk_brom.h"
+#include "core/modes/mtk_emmc.h"
 
 // ---- MockUsbChannel：记录写入序列、预置读取队列（IBromUsb 注入）----
 class MockUsbChannel : public mtkbrom::IBromUsb {
@@ -70,6 +71,14 @@ private slots:
     void jumpDa64SendsOneByte();
     // ---- 失败路径 ----
     void connectOpenFailure();
+    // ---- F1-2: 内存协议 ----
+    void readMemoryFrame();
+    void writeMemoryFrame();
+    // ---- F1-2: DA 存储 ----
+    void daStorageRequiresActiveDa();
+    void emmcReadFrameAndDataLoop();
+    void emmcWriteFrameAndDataLoop();
+    void listPartitionsParses60ByteEntries();
 };
 
 void TestMtkBrom::checksumXorsLittleEndianU16()
@@ -313,6 +322,149 @@ void TestMtkBrom::connectOpenFailure()
     QString err;
     QVERIFY(!s.connect(&err));
     QVERIFY(err.contains("无权限"));
+}
+
+void TestMtkBrom::readMemoryFrame()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    // 对照 read()：echo 0xD1 → echo addr → echo dwords → status(2B) → 数据(8B) → status2(2B)
+    m->reads << QByteArray(1, char(0xD1))
+             << QByteArray("\x00\x10\x00\x00", 4)
+             << QByteArray("\x00\x00\x00\x02", 4)
+             << QByteArray("\x00\x00", 2)
+             << QByteArray("\xDE\xAD\xBE\xEF\x01\x02\x03\x04", 8)
+             << QByteArray("\x00\x00", 2);
+    QByteArray out;
+    QVERIFY(s.readMemory(0x00100000, 2, out, nullptr));
+    QCOMPARE(out.size(), 8);
+    QCOMPARE(out, QByteArray("\xDE\xAD\xBE\xEF\x01\x02\x03\x04", 8));
+    QCOMPARE(m->writes,
+             QByteArray("\xD1\x00\x10\x00\x00\x00\x00\x00\x02", 9));
+}
+
+void TestMtkBrom::writeMemoryFrame()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    // 对照 write()：echo 0xD4 → echo addr → echo count → status(2B,<=3) → 逐值 echo → status2(2B)
+    m->reads << QByteArray(1, char(0xD4))
+             << QByteArray("\x00\x10\x00\x00", 4)
+             << QByteArray("\x00\x00\x00\x02", 4)
+             << QByteArray("\x00\x00", 2)           // status <= 3
+             << QByteArray("\x00\x00\x00\x01", 4)   // 值1 回显
+             << QByteArray("\x00\x00\x00\x02", 4)   // 值2 回显
+             << QByteArray("\x00\x00", 2);          // status2
+    const QByteArray data("\x00\x00\x00\x01\x00\x00\x00\x02", 8);
+    QVERIFY(s.writeMemory(0x00100000, data, nullptr));
+    QCOMPARE(m->writes,
+             QByteArray("\xD4\x00\x10\x00\x00\x00\x00\x00\x02"
+                        "\x00\x00\x00\x01\x00\x00\x00\x02", 17));
+}
+
+void TestMtkBrom::daStorageRequiresActiveDa()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    QByteArray out;
+    QString err;
+    QVERIFY(!st.emmcRead(0, 512, out, 0x08, &err));
+    QVERIFY(err.contains("DA"));
+}
+
+void TestMtkBrom::emmcReadFrameAndDataLoop()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // switch_part: 0x60→ACK, parttype→ACK；读: 0xD6→ACK; 数据块(4B)+checksum(2B)→ACK
+    m->reads << QByteArray(1, char(0x5A)) << QByteArray(1, char(0x5A))
+             << QByteArray(1, char(0x5A))
+             << QByteArray("\xAA\xBB\xCC\xDD", 4)
+             << QByteArray("\x02\x9E", 2); // checksum = AA+BB+CC+DD = 0x29E
+    QByteArray out;
+    QVERIFY(st.emmcRead(0x1000, 4, out, 0x08, nullptr));
+    QCOMPARE(out, QByteArray("\xAA\xBB\xCC\xDD", 4));
+    QVERIFY(m->reads.isEmpty()); // 数据块 + checksum 均经读取队列按序消费
+    // 完整帧布局（读方向数据不写回设备，数据/checksum 经 m->reads 返回）：
+    //   [0] 0x60 [1] 0x08                  switch_part
+    //   [2] 0xD6 [3] 0x0C [4] 0x02         READ_CMD 帧头
+    //   [5..12] addr 8B BE [13..20] len 8B BE [21..24] packetsize 4B BE
+    //   [25] 数据块循环 ACK
+    QCOMPARE(m->writes.mid(0, 2), QByteArray("\x60\x08", 2));
+    QCOMPARE(m->writes.mid(2, 3), QByteArray("\xD6\x0C\x02", 3));
+    QCOMPARE(m->writes.mid(5, 8), QByteArray("\x00\x00\x00\x00\x00\x00\x10\x00", 8));
+    QCOMPARE(m->writes.mid(13, 8), QByteArray("\x00\x00\x00\x00\x00\x00\x00\x04", 8));
+    QCOMPARE(m->writes.mid(21, 4), QByteArray("\x00\x10\x00\x00", 4));
+    QCOMPARE(m->writes.mid(25, 1), QByteArray(1, char(0x5A))); // 循环 ACK
+    QCOMPARE(m->writes.size(), 26); // 帧 25B + 循环 ACK
+}
+
+void TestMtkBrom::emmcWriteFrameAndDataLoop()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // 0x62 → ACK；循环：发 ACK → 块 → checksum → 读 CONT
+    m->reads << QByteArray(1, char(0x5A))
+             << QByteArray(1, char(0x69)); // CONT_CHAR
+    const QByteArray data("\x01\x02", 2);
+    QVERIFY(st.emmcWrite(0x1000, data, 0x08, nullptr));
+    // 帧头：0x62 | 0x02(EMMC) | 0x08 | addr 8B BE | len 8B BE | packetsize 4B BE
+    QCOMPARE(m->writes.mid(0, 1), QByteArray("\x62", 1));
+    QCOMPARE(m->writes.mid(1, 2), QByteArray("\x02\x08", 2));
+    QCOMPARE(m->writes.mid(3, 8), QByteArray("\x00\x00\x00\x00\x00\x00\x10\x00", 8)); // addr
+    QCOMPARE(m->writes.mid(11, 8), QByteArray("\x00\x00\x00\x00\x00\x00\x00\x02", 8)); // len
+    QCOMPARE(m->writes.mid(19, 4), QByteArray("\x00\x10\x00\x00", 4)); // packetsize
+    // 数据循环：前置 ACK(23) | 512B 块(24..535：01 02 + 510 个 00，512 对齐补零)
+    //            | checksum 2B(536..537) = 逐字节和 0x0003
+    QCOMPARE(m->writes.at(23), char(0x5A)); // 前置 ACK
+    QCOMPARE(m->writes.mid(24, 2), data);
+    QCOMPARE(m->writes.size(), 24 + 512 + 2);
+    QCOMPARE(m->writes.mid(536, 2), QByteArray("\x00\x03", 2));
+}
+
+void TestMtkBrom::listPartitionsParses60ByteEntries()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // 构造 partdata：0x60B 条目（partdata[0x48]==0xFF 路径），2 条
+    QByteArray pd(0xC0, '\x00');
+    pd[0x48] = char(0xFF);
+    memcpy(pd.data(), "boot", 4);
+    // 条目1: name="boot" size=0x10000 offset=0；条目2: name="system" size=0x20000 offset=0x10000
+    // 0x60B 条目布局: name[0..0x40), size@0x40 <Q(小端), flags@0x48 <Q, offset@0x50 <Q
+    memcpy(pd.data() + 0x40, "\x00\x00\x01\x00\x00\x00\x00\x00", 8);
+    memcpy(pd.data() + 0x60, "system", 6);
+    memcpy(pd.data() + 0xA0, "\x00\x00\x02\x00\x00\x00\x00\x00", 8);
+    memcpy(pd.data() + 0xB0, "\x00\x00\x01\x00\x00\x00\x00\x00", 8);
+    // read_pmt 协议：写 0xA5 → 读 ack → 读 length → 发 ACK（无读）→ 读数据 → 发 ACK
+    m->reads << QByteArray(1, char(0x5A))
+             << QByteArray("\x00\x00\x00\xC0", 4)
+             << pd;
+    QList<mtkbrom::EmPartition> parts;
+    QVERIFY(st.listPartitions(parts, nullptr));
+    QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].name, QStringLiteral("boot"));
+    QCOMPARE(parts[0].sizeBytes, quint64(0x10000));
+    QCOMPARE(parts[1].name, QStringLiteral("system"));
+    QCOMPARE(parts[1].offsetBytes, quint64(0x10000));
 }
 
 QTEST_APPLESS_MAIN(TestMtkBrom)

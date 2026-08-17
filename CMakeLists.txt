@@ -304,7 +304,9 @@ if(ENABLE_IMAGE_TESTS)
                 elseif(_test_stem STREQUAL "test_resource_monitor")
                     set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_brom")
-                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)

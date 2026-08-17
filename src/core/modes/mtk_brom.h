@@ -102,6 +102,10 @@ public:
     bool jumpDa(quint32 addr, QString *error);
     bool jumpDa64(quint32 addr, QString *error);
 
+    // ---- F1-2: BROM 内存协议（对照 mtk_preloader.py read()/write()）----
+    bool readMemory(quint32 addr, quint32 dwords, QByteArray &out, QString *error);
+    bool writeMemory(quint32 addr, const QByteArray &data, QString *error);
+
     bool close(QString *error);
     bool isClosed() const { return m_closed; }
 
