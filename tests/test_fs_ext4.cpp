@@ -49,6 +49,15 @@ private slots:
     void realReplaceRoundTrip();
     void realReplaceMetaCsumRejected();
     void realInlineData();
+    // ---- G4 流式/懒加载 ----
+    void listTreeLazyFlat();
+    void lazyMatchesTree();
+    void lazyInlineDir();
+    void extractFileStreamMatches();
+    void extractFileStreamErrors();
+    void streamProgress();
+    void imgfsDispatch();
+    void realStreamMatches();
 };
 
 // ===================== 构造辅助 =====================
@@ -1039,6 +1048,462 @@ void TestExt4::replaceMetaCsumRejected()
     QVERIFY2(imgext4::replaceFile(img2, sb, "hello.txt", QByteArray("ok"), &err), qPrintable(err));
     QVERIFY2(imgext4::extractFile(img2, sb, "hello.txt", data, &err), qPrintable(err));
     QCOMPARE(data, QByteArray("ok"));
+}
+
+// ===================== G4 流式/懒加载用例 =====================
+
+// buildRealImage 定义在文件后部（真实 mke2fs 用例节）
+static bool buildRealImage(QTemporaryDir &dir, const QString &srcName,
+                           const QStringList &extraArgs, QByteArray &imageOut,
+                           QString &errMsg);
+
+// 大文件镜像：root(big.bin)，big.bin = 640 块（2.5MB，>1 个流式 chunk）
+static QByteArray buildBigFileImage()
+{
+    const int kFileBlocks = 640;
+    QByteArray img((13 + kFileBlocks) * kBlk, 0);
+    putSuper(img, 16, 2048, 128);
+    putDesc(img, 0, 2, 3, kTableBlock);
+    for (int b = 0; b <= 8; ++b)
+        markUsed(img, b);
+    putInode128(img, 2, 0x41ED, kBlk, 0x80000);                          // root 目录
+    putInode128(img, 11, 0x81A4, quint32(kFileBlocks * kBlk), 0x80000);  // big.bin
+    putExtents(img, inoOff(2), { { 5, 1 } });
+    putExtents(img, inoOff(11), { { 7, quint32(kFileBlocks) } });
+    putDirBlock(img, 5 * kBlk, { de(2, "."), de(2, ".."), de(11, "big.bin", 1) });
+    for (int i = 0; i < kFileBlocks * kBlk; ++i)
+        img[7 * kBlk + i] = char(0x5A);
+    return img;
+}
+
+// 镜像写入临时文件（失败返回空路径）
+static QString writeTempImage(const QByteArray &img, QTemporaryDir &dir, const QString &name)
+{
+    const QString path = dir.path() + QLatin1Char('/') + name;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return QString();
+    if (f.write(img) != img.size())
+        return QString();
+    return path;
+}
+
+void TestExt4::listTreeLazyFlat()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    const QByteArray img = buildFlatImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    const QString path = writeTempImage(img, dir, QStringLiteral("fs.img"));
+    QVERIFY(!path.isEmpty());
+
+    imgfs::FsFile f;
+    QString err;
+    QVERIFY2(f.open(path, &err), qPrintable(err));
+    imgext4::SuperBlock fsb;
+    QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+
+    QList<imgfs::FsEntry> out;
+    // 根：直接子项 = hello.txt + sub（不含 sub 内部）
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QString(), out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 2);
+    QCOMPARE(out[0].path, QString("hello.txt"));
+    QVERIFY(!out[0].isDir);
+    QCOMPARE(out[0].size, 12ull);
+    QCOMPARE(out[1].path, QString("sub"));
+    QVERIFY(out[1].isDir);
+
+    // 子目录：只有直接子项 sub/inner.txt
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QStringLiteral("sub"), out, &err),
+             qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].path, QString("sub/inner.txt"));
+    QCOMPARE(out[0].size, 15ull);
+
+    // "/" 与 "/sub/" 规范化等价
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QStringLiteral("/"), out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 2);
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QStringLiteral("/sub/"), out, &err),
+             qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].path, QString("sub/inner.txt"));
+
+    // 不存在的目录 / 文件路径 → false + error
+    err.clear();
+    QVERIFY(!imgext4::listTreeLazy(f, fsb, QStringLiteral("nope"), out, &err));
+    QVERIFY(!err.isEmpty());
+    err.clear();
+    QVERIFY(!imgext4::listTreeLazy(f, fsb, QStringLiteral("hello.txt"), out, &err));
+    QVERIFY(err.contains("不是目录"));
+}
+
+void TestExt4::lazyMatchesTree()
+{
+    // 增量加载与全树 listTree 条目集合一致
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    const QByteArray img = buildFlatImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    const QString path = writeTempImage(img, dir, QStringLiteral("fs.img"));
+    QVERIFY(!path.isEmpty());
+
+    QList<imgfs::FsEntry> tree;
+    QString err;
+    QVERIFY2(imgext4::listTree(img, sb, tree, &err), qPrintable(err));
+
+    imgfs::FsFile f;
+    QVERIFY2(f.open(path, &err), qPrintable(err));
+    imgext4::SuperBlock fsb;
+    QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+
+    QSet<QString> lazyAll;
+    QList<QString> pending;
+    pending << QString();
+    while (!pending.isEmpty()) {
+        const QString d = pending.takeFirst();
+        QList<imgfs::FsEntry> entries;
+        QVERIFY2(imgext4::listTreeLazy(f, fsb, d, entries, &err), qPrintable(err));
+        for (const imgfs::FsEntry &e : entries) {
+            lazyAll.insert(e.path);
+            if (e.isDir)
+                pending << e.path;
+        }
+    }
+    QCOMPARE(lazyAll.size(), tree.size());
+    for (const imgfs::FsEntry &e : tree)
+        QVERIFY2(lazyAll.contains(e.path), qPrintable(e.path));
+}
+
+void TestExt4::lazyInlineDir()
+{
+    // inline 目录的懒加载（数据区 = [父 inode u32][目录项 @4..]）
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    const QByteArray img = buildInlineDirImage();
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    const QString path = writeTempImage(img, dir, QStringLiteral("fs.img"));
+    QVERIFY(!path.isEmpty());
+    imgfs::FsFile f;
+    QString err;
+    QVERIFY2(f.open(path, &err), qPrintable(err));
+    imgext4::SuperBlock fsb;
+    QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+    QList<imgfs::FsEntry> out;
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QStringLiteral("sub"), out, &err),
+             qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].path, QString("sub/f.txt"));
+    QCOMPARE(out[0].size, 2ull);
+}
+
+// 流式提取结果与内存提取逐字节一致
+static void verifyStreamMatches(const QByteArray &img, const imgext4::SuperBlock &sb,
+                                const QString &imagePath, const QString &inPath,
+                                const QString &outPath, QString &err)
+{
+    imgfs::FsFile f;
+    QVERIFY2(f.open(imagePath, &err), qPrintable(err));
+    imgext4::SuperBlock fsb;
+    QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+    QVERIFY2(imgext4::extractFileStream(f, fsb, inPath, outPath, {}, &err),
+             qPrintable(err));
+    QByteArray memData;
+    QVERIFY2(imgext4::extractFile(img, sb, inPath, memData, &err), qPrintable(err));
+    QFile out(outPath);
+    QVERIFY(out.open(QIODevice::ReadOnly));
+    QCOMPARE(out.readAll(), memData);
+}
+
+void TestExt4::extractFileStreamMatches()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    QString err;
+    const QString outPath = dir.path() + QStringLiteral("/out.bin");
+
+    // flat 文件
+    {
+        const QByteArray img = buildFlatImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("flat.img"));
+        QVERIFY(!path.isEmpty());
+        verifyStreamMatches(img, sb, path, QStringLiteral("hello.txt"), outPath, err);
+    }
+    // inline 文件（纯 i_block 与 system.data xattr 两种）
+    {
+        const QByteArray img1 = buildInlinePlainImage();
+        imgext4::SuperBlock sb1;
+        QVERIFY(imgext4::parseSuper(img1, sb1));
+        const QString p1 = writeTempImage(img1, dir, QStringLiteral("i1.img"));
+        QVERIFY(!p1.isEmpty());
+        verifyStreamMatches(img1, sb1, p1, QStringLiteral("tiny.txt"), outPath, err);
+
+        const QByteArray img2 = buildInlineXattrImage();
+        imgext4::SuperBlock sb2;
+        QVERIFY(imgext4::parseSuper(img2, sb2));
+        const QString p2 = writeTempImage(img2, dir, QStringLiteral("i2.img"));
+        QVERIFY(!p2.isEmpty());
+        verifyStreamMatches(img2, sb2, p2, QStringLiteral("mid.txt"), outPath, err);
+    }
+    // 符号链接（快速 + 慢速）
+    {
+        const QByteArray img = buildSymlinkImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("sym.img"));
+        QVERIFY(!path.isEmpty());
+        verifyStreamMatches(img, sb, path, QStringLiteral("fastlink"), outPath, err);
+        verifyStreamMatches(img, sb, path, QStringLiteral("slowlink"), outPath, err);
+    }
+    // htree 目录（dx 根线性跳过）
+    {
+        const QByteArray img = buildHtreeImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("htree.img"));
+        QVERIFY(!path.isEmpty());
+        verifyStreamMatches(img, sb, path, QStringLiteral("ccc.txt"), outPath, err);
+    }
+    // depth-1 extent 树
+    {
+        const QByteArray img = buildDepth1Image();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("d1.img"));
+        QVERIFY(!path.isEmpty());
+        verifyStreamMatches(img, sb, path, QStringLiteral("big.txt"), outPath, err);
+    }
+    // 大文件（>1 chunk，跨多次流式读写）
+    {
+        const QByteArray img = buildBigFileImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("big.img"));
+        QVERIFY(!path.isEmpty());
+        verifyStreamMatches(img, sb, path, QStringLiteral("big.bin"), outPath, err);
+    }
+}
+
+void TestExt4::extractFileStreamErrors()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    QString err;
+
+    // 目录不能提取，且输出文件不被创建
+    {
+        const QByteArray img = buildFlatImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("flat.img"));
+        QVERIFY(!path.isEmpty());
+        imgfs::FsFile f;
+        QVERIFY2(f.open(path, &err), qPrintable(err));
+        imgext4::SuperBlock fsb;
+        QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+        const QString outPath = dir.path() + QStringLiteral("/dir.out");
+        QVERIFY(!imgext4::extractFileStream(f, fsb, QStringLiteral("sub"), outPath, {}, &err));
+        QVERIFY(err.contains("目录"));
+        QVERIFY(!QFile::exists(outPath));
+        // 不存在的路径
+        err.clear();
+        QVERIFY(!imgext4::extractFileStream(f, fsb, QStringLiteral("nope.txt"), outPath,
+                                            {}, &err));
+        QVERIFY(err.contains("路径不存在"));
+        QVERIFY(!QFile::exists(outPath));
+    }
+    // extent 总量不足 i_size（伪造大文件）→ 与旧接口一致拒绝；输出文件被删除
+    {
+        QByteArray img = buildFlatImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        put32(img, inoOff(11) + 4, 20000);   // hello.txt i_size = 20000（仅 1 块 extent）
+        const QString path = writeTempImage(img, dir, QStringLiteral("s.img"));
+        QVERIFY(!path.isEmpty());
+        imgfs::FsFile f;
+        QVERIFY2(f.open(path, &err), qPrintable(err));
+        imgext4::SuperBlock fsb;
+        QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+        const QString outPath = dir.path() + QStringLiteral("/s.out");
+        QVERIFY(!imgext4::extractFileStream(f, fsb, QStringLiteral("hello.txt"), outPath,
+                                            {}, &err));
+        QVERIFY(err.contains("extent"));
+        QVERIFY(!QFile::exists(outPath));
+        // 旧接口同样拒绝
+        QByteArray memData;
+        QVERIFY(!imgext4::extractFile(img, sb, QStringLiteral("hello.txt"), memData, &err));
+    }
+    // 截断镜像 → 报错，不崩溃
+    {
+        QByteArray img = buildFlatImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img.left(7 * kBlk + 5), dir,
+                                            QStringLiteral("t.img"));
+        QVERIFY(!path.isEmpty());
+        imgfs::FsFile f;
+        QVERIFY2(f.open(path, &err), qPrintable(err));
+        imgext4::SuperBlock fsb;
+        QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+        const QString outPath = dir.path() + QStringLiteral("/t.out");
+        QVERIFY(!imgext4::extractFileStream(f, fsb, QStringLiteral("hello.txt"), outPath,
+                                            {}, &err));
+        QVERIFY(err.contains("超出镜像范围"));
+    }
+}
+
+void TestExt4::streamProgress()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    QString err;
+
+    // 小文件：progress(0) → progress(文件大小)
+    {
+        const QByteArray img = buildFlatImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("flat.img"));
+        QVERIFY(!path.isEmpty());
+        imgfs::FsFile f;
+        QVERIFY2(f.open(path, &err), qPrintable(err));
+        imgext4::SuperBlock fsb;
+        QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+        QList<quint64> calls;
+        const QString outPath = dir.path() + QStringLiteral("/p1.out");
+        QVERIFY2(imgext4::extractFileStream(f, fsb, QStringLiteral("hello.txt"), outPath,
+                                            [&](quint64 b) { calls.append(b); }, &err),
+                 qPrintable(err));
+        QVERIFY(calls.size() >= 2);
+        for (int i = 1; i < calls.size(); ++i)
+            QVERIFY(calls[i] >= calls[i - 1]);
+        QCOMPARE(calls.last(), 12ull);
+    }
+    // 大文件（2.5MB > chunk 1MB）：多次推进，末值 = 文件大小
+    {
+        const QByteArray img = buildBigFileImage();
+        imgext4::SuperBlock sb;
+        QVERIFY(imgext4::parseSuper(img, sb));
+        const QString path = writeTempImage(img, dir, QStringLiteral("big.img"));
+        QVERIFY(!path.isEmpty());
+        imgfs::FsFile f;
+        QVERIFY2(f.open(path, &err), qPrintable(err));
+        imgext4::SuperBlock fsb;
+        QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+        QList<quint64> calls;
+        const QString outPath = dir.path() + QStringLiteral("/p2.out");
+        QVERIFY2(imgext4::extractFileStream(f, fsb, QStringLiteral("big.bin"), outPath,
+                                            [&](quint64 b) { calls.append(b); }, &err),
+                 qPrintable(err));
+        const quint64 fileSize = 640ull * kBlk;
+        QVERIFY(calls.size() >= 4);
+        for (int i = 1; i < calls.size(); ++i)
+            QVERIFY(calls[i] >= calls[i - 1]);
+        QCOMPARE(calls.last(), fileSize);
+    }
+}
+
+void TestExt4::imgfsDispatch()
+{
+    // 顶层 imgfs 接口：打开文件 → 检测 → 分派到 imgext4
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    const QByteArray img = buildFlatImage();
+    const QString path = writeTempImage(img, dir, QStringLiteral("fs.img"));
+    QVERIFY(!path.isEmpty());
+    QString err;
+
+    QList<imgfs::FsEntry> out;
+    QVERIFY2(imgfs::listTreeLazy(path, QStringLiteral("sub"), out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].path, QString("sub/inner.txt"));
+
+    const QString outPath = dir.path() + QStringLiteral("/h.bin");
+    QVERIFY2(imgfs::extractFileStream(path, QStringLiteral("hello.txt"), outPath, {}, &err),
+             qPrintable(err));
+    QFile fout(outPath);
+    QVERIFY(fout.open(QIODevice::ReadOnly));
+    QCOMPARE(fout.readAll(), QByteArray("Hello, ext4!"));
+
+    // 非 fs 镜像 → 明确错误（不崩溃）
+    const QString garbagePath = dir.path() + QStringLiteral("/g.bin");
+    QFile garbage(garbagePath);
+    QVERIFY(garbage.open(QIODevice::WriteOnly));
+    garbage.write(QByteArray("not an fs image at all...."));
+    garbage.close();
+    err.clear();
+    QVERIFY(!imgfs::listTreeLazy(garbagePath, QString(), out, &err));
+    QVERIFY(err.contains("不是文件系统镜像"));
+    err.clear();
+    QVERIFY(!imgfs::extractFileStream(garbagePath, QStringLiteral("x"), outPath, {}, &err));
+    QVERIFY(err.contains("不是文件系统镜像"));
+    err.clear();
+    QVERIFY(!imgfs::extractFileStream(dir.path() + QStringLiteral("/missing.img"),
+                                      QStringLiteral("x"), outPath, {}, &err));
+    QVERIFY(err.contains("无法打开镜像文件"));
+}
+
+void TestExt4::realStreamMatches()
+{
+    // 真实 mke2fs 镜像：流式提取与内存提取逐字节一致
+    QString errMsg;
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        QSKIP("无法创建临时目录");
+    QDir().mkpath(dir.path() + QLatin1String("/src/sub"));
+    {
+        QFile f(dir.path() + QLatin1String("/src/hello.txt"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("hello ext4 world\n");
+    }
+    {
+        QFile f(dir.path() + QLatin1String("/src/sub/inner.bin"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("deeper content 12345");
+    }
+    QFile::link(QLatin1String("/hello.txt"), dir.path() + QLatin1String("/src/link_to_hello"));
+    QByteArray img;
+    if (!buildRealImage(dir, QStringLiteral("src"), {}, img, errMsg))
+        QSKIP(qPrintable(QStringLiteral("mke2fs 不可用: ") + errMsg));
+    imgext4::SuperBlock sb;
+    QVERIFY(imgext4::parseSuper(img, sb));
+    const QString imagePath = writeTempImage(img, dir, QStringLiteral("real.img"));
+    QVERIFY(!imagePath.isEmpty());
+
+    QString err;
+    imgfs::FsFile f;
+    QVERIFY2(f.open(imagePath, &err), qPrintable(err));
+    imgext4::SuperBlock fsb;
+    QVERIFY2(imgext4::parseSuperFile(f, fsb, &err), qPrintable(err));
+
+    // lazy：根直接子项 = lost+found + hello.txt + link_to_hello + sub（mke2fs 在根
+    // 先建 lost+found；目录项按创建顺序存储，实测 lost+found 在前 —— 集合断言）
+    QList<imgfs::FsEntry> out;
+    QVERIFY2(imgext4::listTreeLazy(f, fsb, QString(), out, &err), qPrintable(err));
+    QCOMPARE(out.size(), 4);
+    QSet<QString> rootNames;
+    for (const imgfs::FsEntry &e : out)
+        rootNames.insert(e.path);
+    QVERIFY(rootNames.contains(QStringLiteral("hello.txt")));
+    QVERIFY(rootNames.contains(QStringLiteral("link_to_hello")));
+    QVERIFY(rootNames.contains(QStringLiteral("sub")));
+    QVERIFY(rootNames.contains(QStringLiteral("lost+found")));
+
+    const QString outPath = dir.path() + QStringLiteral("/out.bin");
+    verifyStreamMatches(img, sb, imagePath, QStringLiteral("hello.txt"), outPath, err);
+    verifyStreamMatches(img, sb, imagePath, QStringLiteral("sub/inner.bin"), outPath, err);
+    verifyStreamMatches(img, sb, imagePath, QStringLiteral("link_to_hello"), outPath, err);
 }
 
 // ===================== 真实 mke2fs 镜像用例 =====================

@@ -1,6 +1,7 @@
 #include "device_detector.h"
 #include "adb_embedded.h"
 #include "modes/edl_9008.h"
+#include "resource_monitor.h"
 #include <QProcess>
 #include <QStringList>
 #include <QDebug>
@@ -15,6 +16,13 @@ DeviceDetector::DeviceDetector(QObject *parent)
 {
     m_monitorTimer->setInterval(2000);
     connect(m_monitorTimer, SIGNAL(timeout()), this, SLOT(checkDevices()));
+
+    // H1 降级接入：整体 CPU 使用率 >80% 时设备轮询放慢为 5s（高负载降负），
+    // 恢复（<70%）后回到 2s。context 为本对象 → 析构自动断开。
+    connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
+            [this](bool high, int) {
+                m_monitorTimer->setInterval(high ? 5000 : 2000);
+            });
 }
 
 DeviceDetector::~DeviceDetector()

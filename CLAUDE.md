@@ -5,85 +5,114 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-cmake -B build -G "Unix Makefiles"
+cmake -B build -G Ninja
 cmake --build build
 ./build/PhoneToolbox
 ```
 
 Clean build:
 ```bash
-rm -rf build && cmake -B build -G "Unix Makefiles" && cmake --build build
+rm -rf build && cmake -B build -G Ninja && cmake --build build
 ```
 
-## Project Overview
+Windows static build (requires vcpkg with Qt6 + libusb):
+```powershell
+.\build_windows.ps1 -Static
+```
 
-PhoneToolbox is a **Qt6/C++17** cross-platform desktop application for Android device management via ADB, Fastboot, Fastbootd, EDL, and MTK DA modes. It embeds platform-specific ADB/fastboot binaries and extracts them at runtime.
+## Architecture Overview
 
-### Dependencies (Linux)
+PhoneToolbox is a **Qt6/C++17** desktop app for Android device management across 6 modes: ADB, Fastboot, Fastbootd, EDL 9008, MTK DA, Recovery.
 
-- Qt6 (Core, Widgets, Network)
-- libusb-1.0 (via pkg-config)
-- pthread
-
-### Directory Structure
+### Key Subsystems
 
 ```
-CMakeLists.txt              # Qt6 + libusb + pthread build config
 src/
-  main.cpp                  # App entry: QApplication + Fusion style + MainWindow
   core/
-    adb_embedded.cpp/h      # Singleton that extracts & manages ADB/fastboot processes
-    device_detector.cpp/h   # 2s-timer polling for devices, multi-mode detection
-    device_info.cpp/h       # DeviceInfo data class (serial, model, bootloader, etc.)
-    restart_tool.cpp/h      # Device reboot operations (system/recovery/bootloader/EDL/shutdown)
+    adb_embedded.cpp/h       # ADB acquisition: PATH → ANDROID_HOME → Google download
+    device_detector.cpp/h    # 2s-timer polling, multi-mode detection, bootloader status
+    device_info.cpp/h        # DeviceInfo model (serial, model, patch, SDK, CPU, battery...)
+    flash_tool.cpp/h         # Flash/burn core: routes to fastboot/ADB/EDL/MTK per mode
+    filename_parser.cpp/h    # ROM name parser: 18+ ROM types, CSV model DB lookup
+    restart_tool.cpp/h       # Reboot to system/recovery/bootloader/fastbootd/EDL/shutdown
+    modes/
+      edl_9008.cpp/h         # EDL USB detection (libusb VID/PID enumeration)
+      edl_handler.cpp/h      # Sahara protocol + Firehose XML over USB (based on bkerler/edl)
+      mtk_handler.cpp/h      # MTK DA JSON-RPC bridge to mtk_binary (based on bkerler/mtkclient)
+      normal_mode.cpp/h      # Placeholder
   ui/
-    main_window.cpp/h       # Top-level window, QSplitter layout, signal wiring
-    tool_panel.cpp/h        # Left panel: device list + restart mode selector
-    device_info_panel.cpp/h # Top-right panel: selectable device info labels
-    output_panel.cpp/h      # Bottom-right panel: timestamped command output log
-    device_widget.cpp/h     # Stub (unused)
-    info_panel.cpp/h        # Stub (unused)
-resources/
-  resources.qrc             # Qt resource file bundling ADB/fastboot per platform
-third_party/
-  adb_binaries/             # Prebuilt adb/fastboot for linux, windows, macos
+    main_window.cpp/h        # QSplitter layout, signal wiring, drag-drop ROM loading
+    tool_panel.cpp/h         # Left panel: device list + tool selector (4 tools) + restart
+    device_info_panel.cpp/h  # Device info display with SelectableLabel
+    flash_panel.cpp/h        # Flash UI: partition list, flash/erase/format/FRP/brick-repair
+    system_tool_panel.cpp/h  # System tools: 7 categories (perf/UI/partition/apps/security/debug/Xposed)
+    live_chart_widget.cpp/h  # Real-time multi-series line chart widget
+    vuln_panel.cpp/h         # Vulnerability scanning & exploitation UI
+    output_panel.cpp/h       # Timestamped color-coded log output
+  vuln_db/
+    vuln_entry.cpp/h         # VulnEntry model: CVE, AffectedRange, ExploitScript, PayloadFile
+    vuln_db.cpp/h            # In-memory DB, JSON serialize/deserialize
+    vuln_matcher.cpp/h       # Device-to-CVE matching engine (version/patch/SDK/platform)
+    exploit_engine.cpp/h     # Three-phase ADB shell exploit runner (detect→exploit→verify)
+    vuln_importer.h          # Abstract importer interface
+    importers/
+      local_importer.cpp/h   # Local JSON file + URL importer
 ```
 
-### Architecture & Data Flow
+### Data Flow
 
-1. **AdbEmbedded** (singleton) extracts the platform's adb/fastboot from Qt resources to a temp directory, starts the ADB server.
-2. **DeviceDetector** runs a 2-second QTimer, calling `checkDevices()` which detects devices in order: Fastboot → ADB → EDL → MTK DA. It emits `deviceConnected` / `deviceDisconnected` / `deviceModeChanged` signals.
-3. **MainWindow** receives device signals and routes them to **ToolPanel** (update device list) and **OutputPanel** (log messages). Device selection in ToolPanel triggers **DeviceInfoPanel** updates.
-4. **RestartTool** handles reboot commands. It reads the device's current mode and target mode, then issues the appropriate ADB/Fastboot command.
+1. **AdbEmbedded** (singleton) finds or downloads `adb`/`fastboot`, starts ADB server.
+2. **DeviceDetector** polls every 2s, probes ADB → Fastboot → EDL USB → MTK DA in sequence. Emits deviceConnected/Disconnected/ModeChanged signals.
+3. **MainWindow** routes device signals to ToolPanel (device list) and OutputPanel (log). Tool selection switches QStackedWidget index.
+4. **FlashTool** dispatches operations to the appropriate protocol handler based on device mode.
+5. **ExploitEngine** runs ADB shell scripts against matched CVEs through QProcess.
+
+### Device Mode Detection Order
+
+`checkDevices()` runs this order:
+1. **ADB**: `adb shell getprop ro.build.version.sdk`
+2. **Fastboot/Fastbootd**: `fastboot devices -l` + `getvar is-userspace` to distinguish
+3. **EDL 9008**: libusb VID/PID match (0x05c6:0x9008 etc.)
+4. **MTK DA**: libusb VID/PID match (vendor-specific)
+
+### Bootloader Lock Detection
+
+`getBootloaderStatus()` probes in order:
+- `fastboot oem device-info` (Google Pixel)
+- `fastboot oem get-bootinfo` (Huawei)
+- `getvar unlocked` (generic)
+- `getvar oem unlocking` (fallback)
 
 ### Key Patterns
 
-- **Singleton**: `AdbEmbedded::instance()` for ADB process access
-- **Signal/Slot**: All inter-component communication via Qt signals
-- **Polling**: `QTimer`-based device detection (2s interval)
-- **Embedded Binaries**: Platform-specific ADB/fastboot bundled via `.qrc`, extracted to `QTemporaryDir`
-- **Device Modes**: `DeviceDetector::DeviceMode` enum (ADB, FASTBOOT, FASTBOOTD, EDL_9008, MTK_DA, RECOVERY, UNKNOWN)
+- **Singleton**: `AdbEmbedded::instance()` for ADB process management
+- **Signal/Slot**: All cross-component communication via Qt signals
+- **Polling**: 2s QTimer for device detection; 0.5s for performance monitoring
+- **Protocol Bridging**: mtk_handler spawns `mtk_bridge` as a subprocess, communicates via JSON-RPC over stdin/stdout
+- **QProcess for ADB**: All device communication through `adb shell` / `fastboot` processes
 
-### Detected Mode Flow
+## Git Submodules
 
-When `DeviceDetector::detectDeviceMode()` runs, it tries ADB first (`shell getprop`), then falls back to Fastboot detection, EDL USB detection, and MTK DA detection. Fastbootd is distinguished from traditional Fastboot via `getvar is-userspace` or the `[fastbootd]` marker in `fastboot devices -l` output.
+```bash
+git submodule update --init
+```
 
-### Bootloader Lock Status
+The repo includes two GPLv3 submodules for reference/license:
+- `edl/` → https://github.com/bkerler/edl (Sahara/Firehose protocol)
+- `mtkclient/` → https://github.com/bkerler/mtkclient (MTK DA protocol)
 
-`DeviceDetector::getBootloaderStatus()` probes in order: `fastboot oem device-info` → `fastboot oem get-bootinfo` → `getvar unlocked` → `getvar oem unlocking`. Supports Xiaomi, Huawei, Google Pixel, and generic devices.
+## Dependencies (Linux)
 
-### Restart Mode Mapping
+```
+pacman -S qt6-base qt6-tools cmake ninja pkg-config
+# Ubuntu: apt install qt6-base-dev qt6-tools-dev cmake ninja-build pkg-config libusb-1.0-0-dev
+```
 
-| Target Mode | ADB Command | Fastboot Command |
-|---|---|---|
-| System | `reboot` | `reboot` |
-| Recovery | `reboot recovery` | `reboot recovery` |
-| Bootloader | `reboot bootloader` | `reboot bootloader` |
-| Fastbootd | `reboot fastboot` | `reboot fastboot` |
-| EDL | `reboot edl` | N/A |
-| Shutdown | `reboot -p` | `reboot` (might not work) |
+## Project Conventions
 
-### Custom Widgets
-
-- `SelectableLabel` (in device_info_panel.cpp) — QLabel subclass with text selection + right-click copy/select-all
-- `CopyableTextEdit` (in output_panel.cpp) — QTextEdit subclass with "copy all" context menu action
+- C++17
+- Qt6 (Core, Widgets, Network)
+- AUTOMOC enabled — Q_OBJECT classes auto-handled
+- Member variables prefixed `m_`
+- UI panels emit `outputMessage(QString, bool isError)` and `switchToDeviceInfo()` signals
+- No unit tests yet

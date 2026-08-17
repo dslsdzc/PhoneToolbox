@@ -1,5 +1,7 @@
 #include "system_tool_panel.h"
 #include "core/adb_embedded.h"
+#include "core/engineer_mode.h"
+#include "core/resource_monitor.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -32,6 +34,13 @@ SystemToolPanel::SystemToolPanel(QWidget *parent)
     m_perfTimer = new QTimer(this);
     m_perfTimer->setInterval(500);
     connect(m_perfTimer, &QTimer::timeout, this, &SystemToolPanel::onPerformancePoll);
+
+    // H1 降级接入：整体 CPU 使用率 >80% 时性能采样放慢为 2s（减少 adb shell
+    // 高频采样本身的开销），恢复（<70%）后回到 500ms。context 为本对象自动断开。
+    connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
+            [this](bool high, int) {
+                m_perfTimer->setInterval(high ? 2000 : 500);
+            });
 }
 
 // ==================== 辅助方法 ====================
@@ -511,6 +520,14 @@ connect(refreshBtn, &QPushButton::clicked, this, &SystemToolPanel::onAppRefreshL
         addBtn("Shizuku 状态", "检查 Shizuku 服务是否运行")->setObjectName("shizuku");
         m_shizukuStatus = addStatus();
 
+        addSection("维修诊断");
+        addBtn("打开工程模式", "按设备品牌/芯片自动打开工程模式: MTK/系统 Testing 直启 Activity, "
+                               "其余品牌打开拨号盘预填代码 (需按拨号键触发)")->setObjectName("engMode");
+        m_engModeStatus = addStatus();
+        addHint("入口表经联网验证 (2026-08-05): 仅 MTK 工程模式与系统 Testing 有已验证 Activity, "
+                "其余品牌为拨号码, 打开拨号盘后请按拨号键触发。"
+                "部分代码受机型/系统版本影响可能失效。");
+
         addSection("ROM 工具");
         addHint("ROM 解包/打包需要外部工具: \n  • payload_dumper — 解压 payload.bin\n  • img2simg/simg2img — sparse 镜像转换\n  • apktool — APK 反编译");
 
@@ -518,6 +535,7 @@ connect(refreshBtn, &QPushButton::clicked, this, &SystemToolPanel::onAppRefreshL
         connect(page->findChild<QPushButton*>("bugreport"), &QPushButton::clicked, this, &SystemToolPanel::onTakeBugreport);
         connect(page->findChild<QPushButton*>("dumpsys"), &QPushButton::clicked, this, &SystemToolPanel::onDumpsys);
         connect(page->findChild<QPushButton*>("shizuku"), &QPushButton::clicked, this, &SystemToolPanel::onShizukuStatus);
+        connect(page->findChild<QPushButton*>("engMode"), &QPushButton::clicked, this, &SystemToolPanel::onOpenEngineerMode);
         break;
     }
     }
@@ -1443,6 +1461,69 @@ void SystemToolPanel::onShizukuStatus()
                          "ps -A | grep -i shizuku 2>/dev/null || echo NOT_FOUND");
     m_shizukuStatus->setText(r.contains("NOT_FOUND") ? "Shizuku: 未运行" : "Shizuku: 检测到");
     appendOutput("Shizuku 状态: " + r, r.contains("NOT_FOUND"));
+}
+
+void SystemToolPanel::onOpenEngineerMode()
+{
+    // 无设备保护（按钮在 setDeviceInfo/clearDeviceInfo 中按连接状态禁用，此处双保险）
+    if (m_deviceInfo.serialNumber.isEmpty()) {
+        appendOutput("打开工程模式失败: 无设备连接", true);
+        if (m_engModeStatus) m_engModeStatus->setText("无设备连接");
+        return;
+    }
+
+    // 1) 读取品牌/芯片/型号 → engmode::lookup 查入口表（品牌 → 芯片回退 → 降级）
+    appendOutput("正在读取设备品牌/芯片信息...", false);
+    QString raw = adbShell("getprop ro.product.brand; echo ---; getprop ro.hardware; "
+                           "echo ---; getprop ro.product.model");
+    if (raw.isEmpty() || raw.contains("Error")) {
+        appendOutput("读取设备信息失败: " + raw, true);
+        if (m_engModeStatus) m_engModeStatus->setText("读取设备信息失败");
+        return;
+    }
+    QStringList parts = raw.split("---");
+    QString brand = parts.value(0).trimmed();
+    QString hardware = parts.value(1).trimmed();
+    QString model = parts.value(2).trimmed();
+
+    const engmode::Entry e = engmode::lookup(brand, hardware, model);
+    const QString activity = e.activity.trimmed();
+    const QString dialCode = e.dialCode.trimmed();
+
+    bool launched = false;
+    if (!activity.isEmpty() && engmode::isValid(e)) {
+        // 2a) 已验证 Activity：直启（仅 MTK 工程模式 / 系统 Testing）
+        QString r = adbShell(QString("am start -n %1").arg(activity));
+        launched = !r.contains("Error");
+        appendOutput(QString("打开 %1 (%2): %3").arg(e.name, activity, launched ? "已启动" : r), !launched);
+        if (m_engModeStatus)
+            m_engModeStatus->setText(launched ? QString("已启动: %1").arg(e.name)
+                                              : QString("启动失败: %1").arg(e.name));
+    }
+    if (!launched && !dialCode.isEmpty() && engmode::isValid(e)) {
+        // 2b) 仅拨号码，或 2a Activity 启动失败后的回退：打开拨号盘并预填代码，不自动拨打（按拨号键触发）。
+        //     tel: URI 中 '#' 是片段分隔符（'*' 亦为保留字符），先百分号编码，
+        //     避免设备端 Uri 解析截断代码、以及远程 shell 将 # 当注释。
+        //     回退原因：OEM 定制 Settings 组件常不存在、MTK 部分机型移除包，拨号码是已验证兜底。
+        QString tel = QStringLiteral("tel:%1").arg(
+            QString::fromLatin1(dialCode.toUtf8().toPercentEncoding()));
+        QString r = adbShell(QString("am start -a android.intent.action.DIAL -d \"%1\"").arg(tel));
+        bool ok = !r.contains("Error");
+        appendOutput(QString("已打开拨号盘，请手动拨打 %1 (%2): %3")
+                         .arg(dialCode, e.name, ok ? "OK" : r), !ok);
+        if (m_engModeStatus)
+            m_engModeStatus->setText(ok ? QString("拨号盘已打开: %1").arg(dialCode)
+                                        : QString("打开拨号盘失败"));
+    } else if (!launched) {
+        // 2c) 无已知入口（降级 Entry）
+        appendOutput("该设备无已知工程模式入口", true);
+        if (m_engModeStatus) m_engModeStatus->setText("无已知工程模式入口");
+    }
+
+    // 3) 原样展示来源/可靠性标注（E1 C3：OPPO/vivo 机型版本差异等需告知用户；
+    //    降级 Entry 的 note 即上条错误文案本身，跳过避免重复）
+    if (!e.note.isEmpty() && !e.name.isEmpty())
+        appendOutput(QString("提示(%1): %2").arg(e.name, e.note), false);
 }
 
 // =====================================================================

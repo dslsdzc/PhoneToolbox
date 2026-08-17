@@ -2,6 +2,7 @@
 #include <QByteArray>
 #include <QList>
 #include <QString>
+#include <functional>
 #include "image_engine/fs/fs_image.h"
 
 namespace imgext4 {
@@ -57,6 +58,26 @@ bool listTree(const QByteArray &image, const SuperBlock &sb,
               QList<imgfs::FsEntry> &out, QString *error);
 bool extractFile(const QByteArray &image, const SuperBlock &sb,
                  const QString &path, QByteArray &data, QString *error);
+
+// ---- G4 流式接口（镜像文件随机读，不整镜像读入内存）----
+// f 已由调用方打开（imgfs::FsFile）；内存版与文件版共享同一解析核心，结果一致。
+bool parseSuperFile(imgfs::FsFile &f, SuperBlock &out, QString *error = nullptr);
+
+// 按目录增量加载：只读 dir 的直接子项（不全树一次）。dir 为 "" / "/" / "."
+// 时列根目录直接子项；条目 path 为相对根的完整路径（如 "sub/inner.txt"），
+// 与 listTree 中对应子树逐项一致（isDir/size 来自子 inode，data 不填充）。
+// dir 不存在或不是目录 → false + error。
+bool listTreeLazy(imgfs::FsFile &f, const SuperBlock &sb, const QString &dir,
+                  QList<imgfs::FsEntry> &out, QString *error = nullptr);
+
+// 流式提取文件到 outPath（大文件边读边写，内存 O(chunk)），结果与 extractFile
+// 逐字节一致（路径语义/稀疏文件拒绝/符号链接目标语义均相同）。
+// progress(bytes)：单调递增、范围 [0, 文件大小]（已写入的内容字节数），可传空回调。
+// 失败返回 false + error；输出文件会被删除。
+bool extractFileStream(imgfs::FsFile &f, const SuperBlock &sb,
+                       const QString &path, const QString &outPath,
+                       const std::function<void(quint64)> &progress = {},
+                       QString *error = nullptr);
 
 // 在原镜像上替换文件内容（修改 image 本身，B13 的 FsImage 包装持镜像副本）：
 // 新数据 ≤ 原 inode 已分配空间 → 原地写 + 更新 i_size（extent 布局不变）；

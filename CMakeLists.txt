@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(PhoneToolbox VERSION 1.0.0 LANGUAGES CXX)
+project(PhoneToolbox VERSION 0.0.1 LANGUAGES CXX)
 
 # 选项：静态构建（Windows 单 EXE）
 option(STATIC_BUILD "Build fully static executable (single EXE on Windows)" OFF)
@@ -277,11 +277,16 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sin.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pac.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_erofs.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_ext4.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fs_ext4.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_engineer_mode.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_monitor.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
             set(_test_count 0)
+            # 首轮循环走 if(_test_count EQUAL 0) 分支，不会经 get_filename_component
+            # 赋值 _test_stem —— 循环前显式置空，避免读未初始化变量/残留值。
+            set(_test_stem "")
             foreach(_test_src IN LISTS IMAGE_TEST_SOURCES)
                 if(_test_count EQUAL 0)
                     set(_test_target image_engine_tests)
@@ -290,7 +295,15 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_target image_engine_tests_${_test_stem})
                 endif()
                 math(EXPR _test_count "${_test_count} + 1")
-                add_executable(${_test_target} ${_test_src})
+                # 核心模块测试：被测源在 src/core（已 GLOB 编入主程序，但不属于任何静态库），
+                # 把被测源文件直接编入该测试可执行文件。
+                set(_test_extra_sources "")
+                if(_test_stem STREQUAL "test_engineer_mode")
+                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/engineer_mode.cpp)
+                elseif(_test_stem STREQUAL "test_resource_monitor")
+                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
+                endif()
+                add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
                 set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
                 add_test(NAME ${_test_target} COMMAND ${_test_target})

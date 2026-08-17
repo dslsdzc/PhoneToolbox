@@ -91,6 +91,15 @@ QString formatSize(quint64 bytes)
     return QStringLiteral("%1 %2").arg(v, 0, 'f', u ? 1 : 0).arg(QLatin1String(units[u]));
 }
 
+// G5 流式路径标注（操作日志）：大小超阈值且该格式有流式接口时，标注本次走
+// 流式处理（进度条将按已处理/总量真实推进）；否则为旧内存路径。
+QString streamHint(const QString &path, imgreg::Format f)
+{
+    return ImageWorker::useStreamPath(path, f)
+        ? QStringLiteral("（大文件，流式处理，内存 O(chunk)）")
+        : QString();
+}
+
 // RootType → 展示名（与 root_patcher.cpp rootTypeName 文案一致）
 QString rootTypeDisplayName(patcher::RootType t)
 {
@@ -1105,7 +1114,8 @@ void ImageToolPanel::onUnpackClicked()
         appendLog(QStringLiteral("已取消解包（未选择输出目录）"));
         return;
     }
-    appendLog(QStringLiteral("开始解包: %1 → %2").arg(m_currentFile, outDir));
+    appendLog(QStringLiteral("开始解包: %1 → %2%3")
+                  .arg(m_currentFile, outDir, streamHint(m_currentFile, m_detected.format)));
     m_worker.runUnpack(m_currentFile, outDir, m_detected);
 }
 
@@ -1180,8 +1190,15 @@ void ImageToolPanel::onPackClicked()
         return;
     }
 
-    appendLog(QStringLiteral("开始打包: %1 → %2（目标 %3）")
-                  .arg(inputs.join(QLatin1String(", ")), outPath, targetName));
+    // G5：打包按输入合计大小判定流式路径（与 worker doPack 判定一致）
+    quint64 totalIn = 0;
+    for (const QString &in : inputs)
+        totalIn += quint64(qMax<qint64>(QFileInfo(in).size(), 0));
+    const QString packHint = (totalIn > quint64(ImageWorker::kStreamThreshold))
+        ? QStringLiteral("（大文件，流式处理，内存 O(chunk)）")
+        : QString();
+    appendLog(QStringLiteral("开始打包: %1 → %2（目标 %3）%4")
+                  .arg(inputs.join(QLatin1String(", ")), outPath, targetName, packHint));
     m_worker.runPack(outPath, inputs, m_detected);
 }
 
@@ -1213,7 +1230,8 @@ void ImageToolPanel::onConvertClicked()
         return;
     }
 
-    appendLog(QStringLiteral("开始转换: %1 → %2").arg(m_currentFile, outPath));
+    appendLog(QStringLiteral("开始转换: %1 → %2%3")
+                  .arg(m_currentFile, outPath, streamHint(m_currentFile, m_detected.format)));
     m_worker.runConvert(m_currentFile, outPath, m_detected);
 }
 
