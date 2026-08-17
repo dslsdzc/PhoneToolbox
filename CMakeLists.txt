@@ -111,8 +111,10 @@ file(GLOB_RECURSE SOURCES
 )
 
 # image_engine 与 root_patcher 由独立静态库目标编译，从主程序 GLOB 中排除
+# src/plugins 同理：由 phone_plugins 静态库编译，主程序仅链接（避免双重编译）
 list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
 list(FILTER SOURCES EXCLUDE REGEX "/root_patcher/")
+list(FILTER SOURCES EXCLUDE REGEX "/src/plugins/")
 
 file(GLOB_RECURSE HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
@@ -123,6 +125,7 @@ file(GLOB_RECURSE HEADERS
 # 会生成引用未链接构造函数的 moc，导致主程序链接失败
 list(FILTER HEADERS EXCLUDE REGEX "/image_engine/")
 list(FILTER HEADERS EXCLUDE REGEX "/root_patcher/")
+list(FILTER HEADERS EXCLUDE REGEX "/src/plugins/")
 
 message(STATUS "Found sources: ${SOURCES}")
 message(STATUS "Found headers: ${HEADERS}")
@@ -328,4 +331,14 @@ if(ENABLE_IMAGE_TESTS)
             endforeach()
         endif()
     endif()
+endif()
+
+# ---- 插件系统（主项目通用，F2-P）----
+add_subdirectory(src/plugins)
+target_link_libraries(PhoneToolbox phone_plugins)
+
+# 可选插件：默认构建（华为刷写），删除目录/关闭选项即完整移除
+option(BUILD_HUAWEI_FLASH_PLUGIN "Build Huawei flash plugin" ON)
+if(BUILD_HUAWEI_FLASH_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/plugins/huawei_flash/CMakeLists.txt)
+    add_subdirectory(plugins/huawei_flash)
 endif()

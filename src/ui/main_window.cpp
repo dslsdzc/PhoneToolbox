@@ -1,8 +1,10 @@
 #include "main_window.h"
 #include "core/adb_embedded.h"
 #include "core/resource_monitor.h"
+#include "plugins/plugin_manager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QCoreApplication>
 #include <QFileInfo>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -16,10 +18,19 @@ MainWindow::MainWindow(QWidget *parent)
     , m_systemToolPanel(nullptr)
     , m_vulnPanel(nullptr)
     , m_imageToolPanel(nullptr)
+    , m_pluginPanel(nullptr)
     , m_outputPanel(nullptr)
 {
     setupUI();
     setupConnections();
+
+    // F2-P：插件系统 — 启动时扫描并加载插件（华为刷写 .so 等），
+    // 加载失败仅记录到输出面板，不阻断启动
+    PluginManager::instance().scanPlugins(QCoreApplication::applicationDirPath() + "/plugins");
+    m_pluginPanel->setPlugins(PluginManager::instance().plugins());
+    const QStringList pluginErrors = PluginManager::instance().loadErrors();
+    for (const QString &err : pluginErrors)
+        m_outputPanel->appendOutput(err, true);
 
     if (AdbEmbedded::instance().initialize()) {
         m_deviceDetector.startMonitoring();
@@ -60,16 +71,18 @@ void MainWindow::setupUI()
     m_systemToolPanel = new SystemToolPanel(this);
     m_vulnPanel = new VulnPanel(this);
     m_imageToolPanel = new ImageToolPanel(this);
+    m_pluginPanel = new PluginToolPanel(this);
     m_outputPanel = new OutputPanel(this);
 
     // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools,
-    //        index 3 = vuln panel, index 4 = image tool panel
+    //        index 3 = vuln panel, index 4 = image tool panel, index 5 = plugin panel
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_deviceInfoPanel);
     m_stack->addWidget(m_flashPanel);
     m_stack->addWidget(m_systemToolPanel);
     m_stack->addWidget(m_vulnPanel);
     m_stack->addWidget(m_imageToolPanel);
+    m_stack->addWidget(m_pluginPanel);
     m_stack->setCurrentIndex(0);
 
     m_rightSplitter->addWidget(m_stack);
@@ -142,6 +155,10 @@ void MainWindow::setupConnections()
     connect(m_imageToolPanel, &ImageToolPanel::switchToDeviceInfo, this, [this]() {
         m_toolPanel->selectToolByIndex(0);
     });
+
+    // plugin panel -> output
+    connect(m_pluginPanel, &PluginToolPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
 }
 
 void MainWindow::onDeviceConnected(const DeviceInfo &info)
