@@ -50,11 +50,21 @@ private slots:
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
 {
-    // SBC 修补核心模式（GPLv3 子模块来源标注，见 mtk_payload.cpp 注释）：
-    // "10B50C680268" → "10B5012010BD"（ram blacklist）
-    QByteArray pl = QByteArray::fromHex("10B50C680268");
-    QVERIFY(mtkbrom::patchPreloaderSecurity(pl));
-    QCOMPARE(pl, QByteArray::fromHex("10B5012010BD"));
+    // SBC 修补全部 5 个核心模式（GPLv3 子模块来源标注，见 mtk_payload.cpp kPatches）：
+    // 每个模式：输入 fromHex(from) → 修补后 == fromHex(to)，且返回 true
+    struct Case { const char *hexFrom; const char *hexTo; };
+    const Case kCases[] = {
+        {"10B50C680268", "10B5012010BD"},                        // ram blacklist
+        {"08B5104B7B441B681B68", "00207047000000000000"},        // seclib_sec_usbdl_enabled
+        {"5072656C6F61646572205374617274", "50617463686564204C205374617274"}, // Patched loader msg
+        {"F0B58BB002AE20250C460746", "002070470000000000205374617274"},       // sec_img_auth
+        {"FFC0F3400008BD", "FF4FF0000008BD"},                    // get_vfy_policy
+    };
+    for (const Case &c : kCases) {
+        QByteArray pl = QByteArray::fromHex(c.hexFrom);
+        QVERIFY(mtkbrom::patchPreloaderSecurity(pl));
+        QCOMPARE(pl, QByteArray::fromHex(c.hexTo));
+    }
 }
 
 void TestMtkPayload::patchPreloaderSecurityNoMatchReturnsFalse()

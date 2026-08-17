@@ -13,8 +13,6 @@
 //   • V6 新平台 BROM 修补（JUMP_DA 后 DA 同步失败，规格 §1.2）返回明确错误，不假装支持
 
 #include <QByteArray>
-#include <QList>
-#include <QPair>
 #include <QString>
 #include <QtGlobal>
 
