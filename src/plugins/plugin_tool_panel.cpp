@@ -27,21 +27,25 @@ void PluginToolPanel::setPlugins(const QList<ProtocolPlugin *> &plugins)
     m_plugins = plugins;
     m_list->clear();
     for (ProtocolPlugin *p : m_plugins) {
-        for (const QString &cap : p->capabilities())
-            m_list->addItem(QStringLiteral("%1 — %2").arg(p->name(), cap));
+        for (const QString &cap : p->capabilities()) {
+            auto *item = new QListWidgetItem(QStringLiteral("%1 — %2").arg(p->name(), cap), m_list);
+            item->setData(Qt::UserRole, cap);
+            item->setData(Qt::UserRole + 1, QVariant::fromValue(static_cast<void *>(p)));
+        }
     }
 }
 
 void PluginToolPanel::onExecuteClicked()
 {
-    const int row = m_list->currentRow();
-    if (row < 0 || row >= m_plugins.size())
+    QListWidgetItem *item = m_list->currentItem();
+    if (!item)
         return;
-    ProtocolPlugin *p = m_plugins.at(row);
-    if (!p)
+    const QString cap = item->data(Qt::UserRole).toString();
+    auto *p = static_cast<ProtocolPlugin *>(item->data(Qt::UserRole + 1).value<void *>());
+    if (!p || cap.isEmpty())
         return;
     QString error;
-    if (!p->execute(p->capabilities().value(0), QVariantMap(), &error))
+    if (!p->execute(cap, QVariantMap(), &error))
         emit outputMessage(QStringLiteral("[插件] %1 执行失败: %2").arg(p->name(), error), true);
     else
         emit outputMessage(QStringLiteral("[插件] %1 执行完成").arg(p->name()), false);
