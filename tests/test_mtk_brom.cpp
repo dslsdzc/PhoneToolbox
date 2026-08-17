@@ -200,13 +200,13 @@ void TestMtkBrom::sendDaFrameConstruction()
     MockUsbChannel *m = usb.get();
     mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
     mtkbrom::BromSession s(std::move(usb), dev);
-    // 回显：0xD7 + addr + len + siglen（各 4B）；状态 0；上传响应 checksum(4B)+status(2B)
+    // 回显：0xD7 + addr + len + siglen（各 4B）；状态 0；上传响应 checksum(2B)+status(2B)
     m->reads << QByteArray(1, char(0xD7))
              << QByteArray("\x00\x40\x00\x00", 4)   // addr 回显 0x400000
              << QByteArray("\x00\x00\x00\x02", 4)   // len 回显
              << QByteArray("\x00\x00\x00\x00", 4)   // sig_len 回显
              << QByteArray("\x00\x00", 2)           // status = 0
-             << QByteArray("\x00\x00\x00\x00\x00\x00", 6); // checksum + status
+             << QByteArray("\x00\x00\x00\x00", 4);  // u16 checksum + u16 status（rword(2)）
     const QByteArray da("\xAA\xBB", 2); // 校验和 0xBBAA
     QVERIFY(s.sendDa(0x400000, 2, 0, da, nullptr));
     // 帧：0xD7 | addr(4B BE) | len(4B BE) | siglen(4B BE) | data，共 15 字节。
@@ -226,7 +226,7 @@ void TestMtkBrom::sendDaChunksAtPacketSize()
     m->reads << QByteArray(1, char(0xD7))
              << QByteArray("\x00\x00\x00\x00", 4) << QByteArray("\x00\x00\x00\x80", 4)
              << QByteArray("\x00\x00\x00\x00", 4) << QByteArray("\x00\x00", 2)
-             << QByteArray("\x00\x00\x00\x00\x00\x00", 6);
+             << QByteArray("\x00\x00\x00\x00", 4);
     const QByteArray da(128, '\x01');
     QVERIFY(s.sendDa(0, 128, 0, da, nullptr));
     // 帧头 13B（0xD7 + addr + len + siglen）后跟 128 字节数据
@@ -257,7 +257,7 @@ void TestMtkBrom::sendDaChecksumMismatchStillSucceeds()
     m->reads << QByteArray(1, char(0xD7))
              << QByteArray("\x00\x00\x00\x00", 4) << QByteArray("\x00\x00\x00\x01", 4)
              << QByteArray("\x00\x00\x00\x00", 4) << QByteArray("\x00\x00", 2)
-             << QByteArray("\xDE\xAD\xBE\xEF\x00\x00", 6); // checksum 不符但 status 0
+             << QByteArray("\xDE\xAD\x00\x00", 4); // checksum 不符但 status 0
     QVERIFY(s.sendDa(0, 1, 0, QByteArray("\x01", 1), nullptr)); // 警告不终止
 }
 
@@ -295,6 +295,7 @@ void TestMtkBrom::jumpDa64SendsOneByte()
     mtkbrom::BromSession s(std::move(usb), dev);
     m->reads << QByteArray(1, char(0xDE))
              << QByteArray("\x40\x00\x00\x00", 4)
+             << QByteArray(1, char(0x01)) // 0x01 标记回显
              << QByteArray("\x00\x00", 2);
     QVERIFY(s.jumpDa64(0x40000000, nullptr));
     // 0xDE | addr | 0x01（64 位标记）

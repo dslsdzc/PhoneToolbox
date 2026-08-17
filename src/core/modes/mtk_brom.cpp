@@ -431,15 +431,16 @@ bool BromSession::sendDa(quint32 address, quint32 length, quint32 sigLen,
             m_usb->write(QByteArray(), error); // 空包失败可忽略（对照源码不检查）
     }
     m_usb->write(QByteArray(), error); // 收尾空包
+    // 对照 upload_data()：rword(2) 读 4B unpack ">HH" —— u16 checksum BE + u16 status BE
     QByteArray resp;
-    if (!m_usb->read(resp, 6, 2000, error))
+    if (!m_usb->read(resp, 4, 2000, error))
         return false;
-    if (resp.size() != 6) {
+    if (resp.size() != 4) {
         if (error) *error = QStringLiteral("SEND_DA 上传响应长度不符");
         return false;
     }
-    const quint32 checksum = getBe32(resp, 0);
-    const quint16 upStatus = getBe16(resp, 4);
+    const quint16 checksum = getBe16(resp, 0);
+    const quint16 upStatus = getBe16(resp, 2);
     if (checksum != 0 && checksum != calcDaChecksum(data)) {
         // 对照 upload_data()：checksum 不符为警告级，不终止（以状态为准）
         if (error && error->isEmpty())
@@ -481,7 +482,7 @@ bool BromSession::jumpDa(quint32 addr, QString *error)
 
 bool BromSession::jumpDa64(quint32 addr, QString *error)
 {
-    // 对照 jump_da64()：echo 0xDE → 写 addr → 读回显 → echo 0x01（64 位）→ 读状态 == 0
+    // 对照 jump_da64()：echo 0xDE → 写 addr → 读回显 → echo 0x01（64 位，读回显校验）→ 读状态 == 0
     if (!echoCmd(CMD_JUMP_DA64, error))
         return false;
     QByteArray p;
@@ -495,8 +496,16 @@ bool BromSession::jumpDa64(quint32 addr, QString *error)
         if (error) *error = QStringLiteral("JUMP_DA64 地址回显不符");
         return false;
     }
+    // 对照 jump_da64()：echo(b"\x01") —— 写 0x01 后须读 1B 回显并校验 == 0x01
     if (!m_usb->write(QByteArray(1, char(0x01)), error))
         return false;
+    QByteArray marker;
+    if (!m_usb->read(marker, 1, 1000, error))
+        return false;
+    if (marker.size() != 1 || quint8(marker[0]) != 0x01) {
+        if (error) *error = QStringLiteral("JUMP_DA64 标记回显不符");
+        return false;
+    }
     quint16 status = 0;
     if (!readStatus(status, error))
         return false;
