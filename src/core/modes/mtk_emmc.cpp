@@ -1,7 +1,5 @@
 #include "core/modes/mtk_emmc.h"
 
-#include <QDebug>
-
 namespace mtkbrom {
 namespace {
 
@@ -25,12 +23,6 @@ void putBe64(QByteArray &out, quint64 v)
     out.append(char(v & 0xFF));
 }
 
-quint16 getBe16(const QByteArray &b, int off)
-{
-    return off + 2 <= b.size()
-        ? (quint16(quint8(b[off])) << 8) | quint16(quint8(b[off + 1])) : 0;
-}
-
 quint32 getBe32(const QByteArray &b, int off)
 {
     return off + 4 <= b.size()
@@ -46,6 +38,14 @@ quint64 getLe64(const QByteArray &b, int off)
     for (int i = 7; i >= 0; --i)
         v = (v << 8) | quint8(b[off + i]);
     return v;
+}
+
+quint32 getLe32(const QByteArray &b, int off)
+{
+    if (off + 4 > b.size())
+        return 0;
+    return quint32(quint8(b[off])) | (quint32(quint8(b[off + 1])) << 8)
+        | (quint32(quint8(b[off + 2])) << 16) | (quint32(quint8(b[off + 3])) << 24);
 }
 
 constexpr quint64 kPacketsize = 0x100000; // 对照 sdmmc_write_data/readflash
@@ -216,7 +216,10 @@ bool DaStorage::emmcWrite(quint64 addr, const QByteArray &data,
     if (!m_session.usb()->write(QByteArray(1, char(DA_CMD_SDMMC_WRITE_DATA)), error))
         return false;
     QByteArray hdr;
-    hdr.append(char(0x02)); // storage: EMMC
+    // storage: EMMC。对照 dalegacy_lib.py：write 帧源码用 MTK_DA_STORAGE_EMMC=0x01，
+    // 但 read/format 帧硬编码 0x02（源码内部不一致，storage.py 的 0x02 为死代码）——
+    // 本实现与 read 帧一致取 0x02，真机验证前标注"待抓包确认"
+    hdr.append(char(0x02));
     hdr.append(char(quint8(partType)));
     putBe64(hdr, addr);
     putBe64(hdr, quint64(data.size()));
@@ -290,12 +293,15 @@ bool DaStorage::listPartitions(QList<EmPartition> &out, QString *error)
 
     // 条目尺寸判定（对照 read_pmt()）：partdata[0x48]==0xFF → 0x60 条目；
     // 否则 mask_flags = <Q partdata[0x48:0x50]，0 < mask_flags < 0xA → 0x58，否则 0x4C
+    // 注：mtkclient 自身此判定为崩溃级缺陷（0x48:0x4C 仅 4B 却 unpack("<Q",…) 读 8B
+    // 抛 struct.error，0x4C 条目解析同病）——本实现重建为 4B 读（0x4C 条目 flags@0x48
+    // 就是 4B 字段），避免并入下一条目名字节；0x58 条目此处为 offset@0x48 低 4B。
     const quint8 marker = pd.size() > 0x48 ? quint8(pd[0x48]) : 0;
     int entrySize = 0x4C;
     if (marker == 0xFF) {
         entrySize = 0x60;
     } else {
-        const quint64 maskFlags = getLe64(pd, 0x48);
+        const quint64 maskFlags = getLe32(pd, 0x48);
         entrySize = (maskFlags > 0 && maskFlags < 0xA) ? 0x58 : 0x4C;
     }
     for (int pos = 0; pos + entrySize <= pd.size(); pos += entrySize) {
@@ -313,8 +319,9 @@ bool DaStorage::listPartitions(QList<EmPartition> &out, QString *error)
             p.sizeBytes = getLe64(pd, pos + 0x40);
             p.offsetBytes = getLe64(pd, pos + 0x48);
         } else {
-            p.sizeBytes = getLe64(pd, pos + 0x40);
-            p.offsetBytes = getLe64(pd, pos + 0x44);
+            // 0x4C 条目：name@0(0x40) + size@0x40(4B) + offset@0x44(4B) + flags@0x48(4B)
+            p.sizeBytes = getLe32(pd, pos + 0x40);
+            p.offsetBytes = getLe32(pd, pos + 0x44);
         }
         if (!p.name.isEmpty())
             out.append(p);

@@ -79,6 +79,8 @@ private slots:
     void emmcReadFrameAndDataLoop();
     void emmcWriteFrameAndDataLoop();
     void listPartitionsParses60ByteEntries();
+    void listPartitionsParses58ByteEntries();
+    void listPartitionsParses4cByteEntries();
 };
 
 void TestMtkBrom::checksumXorsLittleEndianU16()
@@ -465,6 +467,74 @@ void TestMtkBrom::listPartitionsParses60ByteEntries()
     QCOMPARE(parts[0].sizeBytes, quint64(0x10000));
     QCOMPARE(parts[1].name, QStringLiteral("system"));
     QCOMPARE(parts[1].offsetBytes, quint64(0x10000));
+}
+
+void TestMtkBrom::listPartitionsParses58ByteEntries()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // 0x58B 条目：判定走 mask_flags 路径，且 getLe32(0x48) 必须落在 (0,0xA) ——
+    // 对 0x58 条目而言 0x48 是 offset@0x48 的低 4B，故 offset 须 < 0xA（真机常见值）；
+    // pd[0x48] = 0x01 ≠ 0xFF，maskFlags = 1 → 0x58。
+    QByteArray pd(0xB0, '\x00');
+    memcpy(pd.data(), "boot", 4);
+    // 条目1: name="boot" size@0x40 <Q(小端)=0x10000 offset@0x48 <Q=0x1；
+    // 条目2 @0x58: name="system" size@0x98 <Q=0x20000 offset@0xA0 <Q=0x10001
+    memcpy(pd.data() + 0x40, "\x00\x00\x01\x00\x00\x00\x00\x00", 8);
+    memcpy(pd.data() + 0x48, "\x01\x00\x00\x00\x00\x00\x00\x00", 8);
+    memcpy(pd.data() + 0x58, "system", 6);
+    memcpy(pd.data() + 0x98, "\x00\x00\x02\x00\x00\x00\x00\x00", 8);
+    memcpy(pd.data() + 0xA0, "\x01\x00\x01\x00\x00\x00\x00\x00", 8);
+    m->reads << QByteArray(1, char(0x5A))
+             << QByteArray("\x00\x00\x00\xB0", 4)
+             << pd;
+    QList<mtkbrom::EmPartition> parts;
+    QVERIFY(st.listPartitions(parts, nullptr));
+    QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].name, QStringLiteral("boot"));
+    QCOMPARE(parts[0].sizeBytes, quint64(0x10000));
+    QCOMPARE(parts[0].offsetBytes, quint64(0x1));
+    QCOMPARE(parts[1].name, QStringLiteral("system"));
+    QCOMPARE(parts[1].sizeBytes, quint64(0x20000));
+    QCOMPARE(parts[1].offsetBytes, quint64(0x10001));
+}
+
+void TestMtkBrom::listPartitionsParses4cByteEntries()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // 0x4C 条目（32-bit）：判定走 mask_flags 路径，flags@0x48=0 → maskFlags=0 ∉(0,0xA) → 0x4C；
+    // 布局: name@0(0x40) + size@0x40(4B) + offset@0x44(4B) + flags@0x48(4B)。
+    // size/offset 均为 4B 字段，此前用 getLe64 会把相邻字段合并进高 32 位（审查 F2）。
+    QByteArray pd(0x98, '\x00');
+    memcpy(pd.data(), "boot", 4);
+    // 条目1: name="boot" size@0x40 <I=0x10000 offset@0x44 <I=0x10000 flags@0x48 <I=0；
+    // 条目2 @0x4C: name="system" size@0x8C <I=0x20000 offset@0x90 <I=0x20000
+    memcpy(pd.data() + 0x40, "\x00\x00\x01\x00", 4);
+    memcpy(pd.data() + 0x44, "\x00\x00\x01\x00", 4);
+    memcpy(pd.data() + 0x4C, "system", 6);
+    memcpy(pd.data() + 0x8C, "\x00\x00\x02\x00", 4);
+    memcpy(pd.data() + 0x90, "\x00\x00\x02\x00", 4);
+    m->reads << QByteArray(1, char(0x5A))
+             << QByteArray("\x00\x00\x00\x98", 4)
+             << pd;
+    QList<mtkbrom::EmPartition> parts;
+    QVERIFY(st.listPartitions(parts, nullptr));
+    QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].name, QStringLiteral("boot"));
+    QCOMPARE(parts[0].sizeBytes, quint64(0x10000));
+    QCOMPARE(parts[0].offsetBytes, quint64(0x10000));
+    QCOMPARE(parts[1].name, QStringLiteral("system"));
+    QCOMPARE(parts[1].sizeBytes, quint64(0x20000));
+    QCOMPARE(parts[1].offsetBytes, quint64(0x20000));
 }
 
 QTEST_APPLESS_MAIN(TestMtkBrom)
