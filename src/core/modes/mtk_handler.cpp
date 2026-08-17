@@ -589,6 +589,8 @@ bool runBromFlash(const QByteArray &daBinary,
         if (error) *error = QStringLiteral("设备启用 SLA/DAA 认证，暂不支持（RSA 响应自研为后续任务）");
         return false;
     }
+    // 当前 sendPayload 使用地址 0/签名长度 0 —— 仅协议验证用途；真实刷写需 DA 头解析
+    // （brom_payload_addr 每芯片不同）落地后启用
     if (!mtkbrom::sendPayload(session, daBinary, error))
         return false;
     mtkbrom::DaStorage st(session);
