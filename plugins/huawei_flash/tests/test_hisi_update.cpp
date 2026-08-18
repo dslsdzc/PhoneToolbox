@@ -78,6 +78,8 @@ private slots:
     // ---- F2-3: update.app 解析 ----
     void parseUpdateAppEntries();
     void parseUpdateAppBadMagicFails();
+    void parseUpdateAppHugeDataLenFails();
+    void parseUpdateAppHeaderLenExceedsFails();
     // ---- F2-3: xloader 边界 ----
     void isXloaderPartitionNames();
 };
@@ -331,8 +333,8 @@ void TestHisiUpdate::parseUpdateAppEntries()
         const quint32 dlen = QByteArray(name).size() == 4 ? 0x10000u : 0x20000u;
         h[24] = char(dlen & 0xFF); h[25] = char((dlen >> 8) & 0xFF);
         h[26] = char((dlen >> 16) & 0xFF); h[27] = char((dlen >> 24) & 0xFF);
-        // 分区名 @56（32B NUL 结尾）
-        memcpy(h.data() + 56, name, qMin<qsizetype>(strlen(name), 32));
+        // 分区名 @60（32B NUL 结尾）
+        memcpy(h.data() + 60, name, qMin<qsizetype>(strlen(name), 32));
         // fileSeq @20（大端）：boot=0, system=1
         h[20] = char(QByteArray(name).size() == 4 ? 0 : 1);
         app += h;
@@ -355,6 +357,40 @@ void TestHisiUpdate::parseUpdateAppBadMagicFails()
     QList<hisi::AppPartition> parts;
     QVERIFY(!hisi::parseUpdateApp(app, parts, &err));
     QVERIFY(err.contains("magic"));
+}
+
+void TestHisiUpdate::parseUpdateAppHugeDataLenFails()
+{
+    // 数据长度字段 0xFFFFFFFF（恶意）→ 拒绝（> INT_MAX）
+    QByteArray h(98, '\0');
+    h[0] = 0x55; h[1] = 0xAA; h[2] = 0x5A; h[3] = 0xA5;
+    const quint32 headerLen = 98;
+    h[4] = char(headerLen & 0xFF); h[5] = char((headerLen >> 8) & 0xFF);
+    h[6] = char((headerLen >> 16) & 0xFF); h[7] = char((headerLen >> 24) & 0xFF);
+    h[24] = 0xFF; h[25] = 0xFF; h[26] = 0xFF; h[27] = 0xFF; // dataLen = 0xFFFFFFFF
+    memcpy(h.data() + 60, "boot", 4);
+    QByteArray app = h + QByteArray(10, '\x00'); // 数据区不足
+    QList<hisi::AppPartition> parts;
+    QString err;
+    QVERIFY(!hisi::parseUpdateApp(app, parts, &err));
+    QVERIFY(err.contains("越界"));
+    // 错误串携带真实分区名（分区名在越界校验前已解析）
+    QVERIFY(err.contains(QStringLiteral("boot")));
+}
+
+void TestHisiUpdate::parseUpdateAppHeaderLenExceedsFails()
+{
+    // headerLen 超出剩余字节 → 拒绝
+    QByteArray h(98, '\0');
+    h[0] = 0x55; h[1] = 0xAA; h[2] = 0x5A; h[3] = 0xA5;
+    const quint32 headerLen = 0x1000; // 远超实际
+    h[4] = char(headerLen & 0xFF); h[5] = char((headerLen >> 8) & 0xFF);
+    h[6] = char((headerLen >> 16) & 0xFF); h[7] = char((headerLen >> 24) & 0xFF);
+    QByteArray app = h;
+    QList<hisi::AppPartition> parts;
+    QString err;
+    QVERIFY(!hisi::parseUpdateApp(app, parts, &err));
+    QVERIFY(err.contains("头长"));
 }
 
 void TestHisiUpdate::isXloaderPartitionNames()

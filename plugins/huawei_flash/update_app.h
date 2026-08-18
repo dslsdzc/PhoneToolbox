@@ -6,7 +6,7 @@
 //
 // 布局（行为观察）：条目 magic 55 AA 5A A5 + headerLength(LE32) + 4B + 8B
 // + 4B + dataLength(LE32) + 16B + 16B + 32B 分区名(UTF-8, NUL 结尾) + 6B
-// + (headerLength - 98) 剩余字节；分区名偏移 = 4+4+4+8+4+4+16+16 = 56。
+// + (headerLength - 98) 剩余字节；分区名偏移 = 4+4+4+8+4+4+16+16 = 60。
 // 头总长 = headerLength。
 
 #include <QByteArray>

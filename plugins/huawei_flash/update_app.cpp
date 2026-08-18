@@ -30,28 +30,30 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
         // 恶意/损坏文件防御：长度字段来自文件（不可信），拒绝 > INT_MAX 与越界
         // （项目先例：len > INT_MAX 拒绝，7ad80f8）
         const int headerLen = int(le32(data, pos + 4));
-        if (headerLen < kHeaderFixed || headerLen > int(data.size()) - pos) {
+        // data.size() - pos 为 qsizetype 比较：≥ 2 GiB 的 update.app 不再被
+        // int 截断误拒（int-pos 解析器对超 2 GiB 总量文件仍是已知上限，如实标注）
+        if (headerLen < kHeaderFixed || headerLen > data.size() - pos) {
             if (error) *error = QStringLiteral("update.app 条目头长非法 @0x%1")
                                     .arg(pos, 0, 16);
             return false;
         }
         const int dataOff = pos + headerLen;
-        AppPartition p; // 数据长度校验在前：校验失败时 p.name 尚未填充（错误串回退 "?"）
+        AppPartition p;
+        p.header = data.mid(pos, headerLen);
+        // 分区名：头内偏移 60（magic 4 + headerLen 4 + 4 + 8 + 4 + dataLen 4
+        // + 16 + 16 = 60，行为观察核实）
+        const QByteArray nameRaw = p.header.mid(60, 32);
+        const int nul = nameRaw.indexOf('\0');
+        p.name = QString::fromUtf8(nul >= 0 ? nameRaw.left(nul) : nameRaw);
         // 恶意/损坏文件防御：数据长度字段同样不可信，拒绝 > INT_MAX 与越界
-        // （项目先例：len > INT_MAX 拒绝，7ad80f8）
+        // （项目先例：len > INT_MAX 拒绝，7ad80f8）；分区名已取，错误串携带真名
         const quint64 dataLen64 = le32(data, pos + 24); // magic+4+4+8+4 = 偏移 24
         if (dataLen64 > quint64(INT_MAX)
             || dataLen64 > quint64(data.size()) - quint64(dataOff)) {
-            if (error) *error = QStringLiteral("update.app 分区数据越界: %1")
-                                    .arg(p.name.isEmpty() ? QStringLiteral("?") : p.name);
+            if (error) *error = QStringLiteral("update.app 分区数据越界: %1").arg(p.name);
             return false;
         }
         const int dataLen = int(dataLen64);
-        p.header = data.mid(pos, headerLen);
-        // 分区名：头内偏移 56（magic 4 + headerLen 4 + 4 + 8 + 4 + dataLen 4 + 16 + 16）
-        const QByteArray nameRaw = p.header.mid(56, 32);
-        const int nul = nameRaw.indexOf('\0');
-        p.name = QString::fromUtf8(nul >= 0 ? nameRaw.left(nul) : nameRaw);
         if (p.name.isEmpty()) {
             if (error) *error = QStringLiteral("update.app 条目名为空 @0x%1").arg(pos, 0, 16);
             return false;
