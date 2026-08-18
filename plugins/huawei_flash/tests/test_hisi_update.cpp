@@ -278,11 +278,18 @@ void TestHisiUpdate::flashPartitionFrames()
     QVERIFY(m->writes.contains('\x43'));
     QVERIFY(m->writes.indexOf('\x41') < m->writes.indexOf('\x0F'));
     QVERIFY(m->writes.indexOf('\x0F') < m->writes.indexOf('\x43'));
+    // DATA 帧定位：按 HEAD 帧帧长计算（不依赖 0x0F 是否恰为内容中首遇字节），
+    // DATA 帧紧随 HEAD 帧（0x7E 0x0F 命令字节）
+    const QByteArray headFrame = hisi::buildFrame(hisi::FRAME_HEAD, header);
+    const int headStart = m->writes.indexOf(headFrame);
+    QVERIFY(headStart >= 0);
+    const int dataStart = headStart + headFrame.size();
+    QCOMPARE(m->writes.at(dataStart), char('\x7E'));
+    QCOMPARE(m->writes.at(dataStart + 1), char('\x0F'));
     // DATA 帧体（协议核实记录）：0x0F + (fileSeq+addr) BE32 + origLen BE32
-    // 头帧字节不含 0x0F，故首遇 0x0F 即 DATA 命令字节；镜像 15B → origLen = 0x0F
-    const int d = m->writes.indexOf('\x0F');
-    QCOMPARE(m->writes.mid(d + 1, 4), QByteArray("\x00\x00\x00\x00", 4));
-    QCOMPARE(m->writes.mid(d + 5, 4), QByteArray("\x00\x00\x00\x0F", 4));
+    // 镜像 15B → origLen = 0x0F
+    QCOMPARE(m->writes.mid(dataStart + 2, 4), QByteArray("\x00\x00\x00\x00", 4));
+    QCOMPARE(m->writes.mid(dataStart + 6, 4), QByteArray("\x00\x00\x00\x0F", 4));
 }
 
 void TestHisiUpdate::rebootCommands()
@@ -297,6 +304,8 @@ void TestHisiUpdate::rebootCommands()
     QVERIFY(f.reboot(nullptr));
     QVERIFY(m->writes.contains('\x0A'));
     QVERIFY(m->writes.contains('\x32'));
+    // 顺序：REBOOT(0x0A) 先于 FORCE_REBOOT(0x32)
+    QVERIFY(m->writes.indexOf('\x0A') < m->writes.indexOf('\x32'));
 }
 
 QTEST_APPLESS_MAIN(TestHisiUpdate)

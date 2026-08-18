@@ -1,7 +1,6 @@
 #include "hisi_flash.h"
 
 #include <QFile>
-#include <QFileInfo>
 
 #include <cstring>
 
@@ -45,12 +44,11 @@ bool HisiFlasher::flashPartition(const QString &name, const QByteArray &header,
                                  const QString &imagePath,
                                  std::function<void(qint64)> progress, QString *error)
 {
-    Q_UNUSED(name)
     // HEAD：0x41 + 分区头
     if (!m_session.sendCommand(FRAME_HEAD, header, 2.0, error))
         return false;
     // DATA 块
-    if (!sendDataBlocks(header, imagePath, progress, error))
+    if (!sendDataBlocks(name, header, imagePath, progress, error))
         return false;
     // TAIL：0x43 + 分区头
     if (!m_session.sendCommand(FRAME_TAIL, header, 8.0, error))
@@ -58,12 +56,13 @@ bool HisiFlasher::flashPartition(const QString &name, const QByteArray &header,
     return true;
 }
 
-bool HisiFlasher::sendDataBlocks(const QByteArray &header, const QString &imagePath,
+bool HisiFlasher::sendDataBlocks(const QString &name, const QByteArray &header,
+                                 const QString &imagePath,
                                  std::function<void(qint64)> progress, QString *error)
 {
     QFile f(imagePath);
     if (!f.open(QIODevice::ReadOnly)) {
-        if (error) *error = QStringLiteral("无法打开分区镜像: %1").arg(imagePath);
+        if (error) *error = QStringLiteral("无法打开分区 %1 镜像: %2").arg(name, imagePath);
         return false;
     }
     // fileSeq = 分区头偏移 20 的 4 字节（大端）
@@ -81,7 +80,13 @@ bool HisiFlasher::sendDataBlocks(const QByteArray &header, const QString &imageP
     while (sent < fileSize) {
         const int toRead = int(qMin<qint64>(0x20000, fileSize - sent));
         const qint64 n = f.read(buf.data(), toRead);
-        if (n <= 0) break;
+        if (n <= 0) {
+            // 中途读失败（EOF 不会触发：toRead 已钳制到剩余长度）：
+            // 不得静默退出继续发 TAIL，否则截断分区被报告为刷写成功
+            if (error) *error = QStringLiteral("读取分区 %1 镜像失败（偏移 %2）: %3")
+                                    .arg(name).arg(sent).arg(f.errorString());
+            return false;
+        }
         const QByteArray raw = buf.left(int(n));
         const QByteArray comp = zlibCompress(raw);
         if (comp.isEmpty()) {

@@ -43,7 +43,7 @@ public:
     bool reboot(QString *error = nullptr);
 
 private:
-    bool sendDataBlocks(const QByteArray &header, const QString &imagePath,
+    bool sendDataBlocks(const QString &name, const QByteArray &header, const QString &imagePath,
                         std::function<void(qint64)> progress, QString *error);
 
     HisiSession &m_session;
