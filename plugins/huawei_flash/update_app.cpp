@@ -20,6 +20,12 @@ quint32 le32(const QByteArray &b, int off)
 bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *error)
 {
     out.clear();
+    // 明确上限：int 偏移解析器仅支持 ≤ 2 GiB 总量（完整固件 update.app
+    // 多为多 GB —— 超限显式拒绝而非回绕 OOB；流式解析为后续任务）
+    if (data.size() > qsizetype(INT_MAX)) {
+        if (error) *error = QStringLiteral("update.app 过大（>2GiB 暂不支持，流式解析为后续任务）");
+        return false;
+    }
     int pos = 0;
     while (pos <= data.size() - 4) {
         if (memcmp(data.constData() + pos, kMagic, 4) != 0) {
@@ -31,7 +37,7 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
         // （项目先例：len > INT_MAX 拒绝，7ad80f8）
         const int headerLen = int(le32(data, pos + 4));
         // data.size() - pos 为 qsizetype 比较：≥ 2 GiB 的 update.app 不再被
-        // int 截断误拒（int-pos 解析器对超 2 GiB 总量文件仍是已知上限，如实标注）
+        // int 截断误拒（超 2 GiB 总量已由入口守卫显式拒绝）
         if (headerLen < kHeaderFixed || headerLen > data.size() - pos) {
             if (error) *error = QStringLiteral("update.app 条目头长非法 @0x%1")
                                     .arg(pos, 0, 16);
