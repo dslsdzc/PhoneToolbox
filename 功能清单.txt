@@ -3,7 +3,7 @@ PhoneToolbox - Android 设备多功能工具箱 v0.0.1-beta03
 开源 / GPLv3 / Qt6 C++17 / 跨平台 (Linux + Windows)
 
 GitHub: https://github.com/DslsDZC/PhoneToolbox
-构建: cmake -B build && cmake --build build
+构建: cmake -B build -G Ninja && cmake --build build
 
 
 一、设备连接与检测
@@ -14,6 +14,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] Fastboot 详细: product / variant / hardware / bootloader 版本 / 解锁状态
 [√] EDL USB 枚举 (Qualcomm / Sony / Sierra / Netgear / ZTE VID/PID)
 [√] ADB 自动获取: 系统 PATH → ANDROID_HOME → Google 官方下载
+[√] CPU>80% 自动降级 (轮询降频 + 线程降优先级, 恢复自动回升)
 
 
 二、刷机工具
@@ -34,6 +35,24 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 分区列表获取: Fastboot / ADB / EDL Firehose / MTK 四通道
 [√] 死砖修复: 固件自动校验 → 分区文件权重匹配 → 稀疏镜像检测
 [√] 死砖修复: 镜像大小校验 → 按优先级排序写入 → 失败重试 → 进度保存/恢复
+
+--- MTK BROM 直刷 (自研, 协议对照 mtkclient 源码逐条核实) ---
+[√] BROM USB 枚举 + 握手 (A0 0A 50 05 回显补码, 3 次重试)
+[√] BROM 命令层: SEND_DA / JUMP_DA / JUMP_DA64 / GET_TARGET_CONFIG
+[√] BROM 内存协议: READ32/WRITE32 (echo 模式 + 状态字)
+[√] DA 存储命令层: EMMC 读写 / PMT 分区表 (0x60/0x58/0x4C 三种条目)
+[√] SEND_DA 上传 (16-bit XOR 校验 + 分块 + ZLP) + 跳转 DA
+[√] SBC 修补 (preloader 字节模式, 参照 mtkclient 五模式)
+[√] 刷写路由骨架 (runBromFlash: 枚举 → 会话 → 逐分区)
+[√] 诚实边界: SLA/DAA 检测返回明确错误 (RSA 响应生成标后续)
+
+--- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---
+[√] USB Update (VCOM) 协议: 0x7E HDLC 帧 / CRC16-X25 / 转义
+[√] 握手 (3 次重试) + 命令层: HEAD/DATA/TAIL/UNLOCK/REBOOT
+[√] 逐分区刷写 (0x20000 块 zlib 压缩 + 自适应超时)
+[√] update.app 解析 (插件内自包含: magic/分区表/对齐填充容错)
+[√] Xloader 诚实边界: 修补载荷不内置 (需用户自备)
+[√] 法务隔离: 独立 .so 运行时加载, 删除插件文件即完整移除
 
 
 三、系统工具 - 性能监控
@@ -145,6 +164,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 格式信息卡: 格式类型 / 分区列表 / 元数据展示
 [√] 动作按钮按格式动态启用 (解包 / 转换 / 打包 / 修补 / 浏览)
 [√] 后台线程执行 (worker 线程, UI 不卡顿) + 进度条 + 彩色日志
+[√] 大文件自动流式处理 (>64MB 走流式接口, 内存 O(chunk), 进度真实推进)
 
 --- 解包 (15 种格式真实实现) ---
 [√] payload.bin 解包 (含增量 OTA diff: bspatch / SOURCE_COPY, 手写 protobuf)
@@ -206,18 +226,27 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 模块框架安装 (Zygisk / LSPosed 类: 校验 + 规范化 + /data 路径, 激活需对应 App)
 
 
-十五、UI 框架
+十五、插件系统
+--------------
+[√] ProtocolPlugin 接口 (Q_DECLARE_INTERFACE, 名称/描述/能力/执行)
+[√] QPluginLoader 运行时扫描加载 (plugins/ 目录, 失败记录不崩溃)
+[√] 插件面板 (插件列表 + 能力执行 + 输出日志)
+[√] 主程序零编译链接插件 (独立 .so, 法务/许可隔离)
+[√] 首款插件: 华为 Kirin USB Update 刷写 (见"二、刷机工具")
+
+
+十六、UI 框架
 -------------
 [√] 暗色主题 (Catppuccin Mocha 风格)
 [√] 设备列表 (序列号 + 型号 + 模式标签)
 [√] 实时折线图 (多系列 / 渐变填充 / 自动缩放)
 [√] 拖拽加载 ROM 文件 (自动切换到刷机面板)
 [√] 颜色编码日志输出 (绿/红/橙/灰)
-[√] 五工具切换: 设备信息 / 刷机 / 系统工具 / 漏洞扫描 / 镜像工具
+[√] 六工具切换: 设备信息 / 刷机 / 系统工具 / 漏洞扫描 / 镜像工具 / 插件
 [√] 支持复制日志文本
 
 
-十六、第三方依赖
+十七、第三方依赖
 ----------------
 [√] Qt 6 (LGPL v3) - UI 框架
 [√] libusb-1.0 (LGPL v2.1) - USB 通讯
@@ -226,13 +255,14 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] KHwang9883/MobileModels-csv (CC BY-NC-SA 4.0) - 设备型号数据库
 [√] Google platform-tools (Apache 2.0) - ADB / Fastboot
 [√] zstd / lz4 / bzip2 / xz / brotli (压缩算法, 镜像处理)
+[√] 参照库 (reference/, 不参与构建): GeekFlashCore (AGPL) / qdl (BSD-3)
+    / Kirin-Tool (BSL 1.1) / unpack_huawei_package / HISuite-Proxy
 
 
-规划中 (计划 F, 全自研)
+规划中 (计划 F 剩余 + 后续)
 ------------------------
-[ ] MTK BROM 直刷 (旧平台免 DA + V6 新平台 preloader + payload 绕过)
-[ ] 华为 HDB/HiSuite 刷机通道
-[ ] OPPO/一加/realme EDL 刷机链 (OFP/OPS 解密 + Sahara/Firehose 自研)
+[ ] OPPO/一加/realme EDL 刷机链 (OFP/OPS 解密 + Sahara/Firehose 自研, geekflashcore 参照)
 [ ] 展锐 ResearchDownload 刷写通道
+[ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
 [ ] 三星 Heimdall 集成 (Odin 协议开源实现)
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)
