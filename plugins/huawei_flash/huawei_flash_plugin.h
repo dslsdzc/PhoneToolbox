@@ -15,7 +15,9 @@ public:
     QString name() const override { return QStringLiteral("华为刷写"); }
     QString description() const override
     {
-        return QStringLiteral("华为 Kirin USB Update 刷写通道（update.app 集成）");
+        // 机型范围诚实标注：支持 Kirin 系芯片 USB Update 模式（实测前不承诺具体机型）
+        return QStringLiteral("华为 Kirin USB Update 刷写通道（update.app 集成）；"
+                              "支持 Kirin 系芯片 USB Update 模式（实测前不承诺具体机型）");
     }
     QStringList capabilities() const override
     {

@@ -28,11 +28,20 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
     }
     int pos = 0;
     while (pos <= data.size() - 4) {
-        if (memcmp(data.constData() + pos, kMagic, 4) != 0) {
+        // 首个 magic 前导容忍（行为观察：参考实现按字节扫描首个 magic，
+        // 首个条目不假定从偏移 0 开始）：magic 不符时尝试 pos+1..pos+3，
+        // 仍不符才报错
+        int magicPos = pos;
+        while (magicPos <= data.size() - 4 && magicPos - pos < 4
+               && memcmp(data.constData() + magicPos, kMagic, 4) != 0)
+            ++magicPos;
+        // 窗口内（pos..pos+3）或数据耗尽处仍未找到 magic → 报错
+        if (magicPos > data.size() - 4 || magicPos - pos >= 4) {
             if (error) *error = QStringLiteral("update.app 条目 magic 不符 @0x%1")
                                     .arg(pos, 0, 16);
             return false;
         }
+        pos = magicPos;
         // 恶意/损坏文件防御：长度字段来自文件（不可信），拒绝 > INT_MAX 与越界
         // （项目先例：len > INT_MAX 拒绝，7ad80f8）
         const int headerLen = int(le32(data, pos + 4));
@@ -60,13 +69,20 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
             return false;
         }
         const int dataLen = int(dataLen64);
-        if (p.name.isEmpty()) {
-            if (error) *error = QStringLiteral("update.app 条目名为空 @0x%1").arg(pos, 0, 16);
-            return false;
-        }
+        // 条目尾部可能带 0-3 字节 4 字节对齐填充（行为观察：每条目后
+        // (4 - 当前位置%4) % 4 字节跳过）；dataLength==0/空名为列表结束标记
+        const int dataEnd = dataOff + dataLen;
+        int next = dataEnd;
+        while (next + 4 <= data.size() && memcmp(data.constData() + next, kMagic, 4) != 0
+               && next - dataEnd < 4)
+            ++next; // 跳过最多 3 字节填充
+        pos = next;
+        // dataLength==0 或空名 → 列表结束（行为观察：解析头后即 break，
+        // 该条目不追加）
+        if (dataLen == 0 || p.name.isEmpty())
+            break;
         p.data = data.mid(dataOff, dataLen);
         out.append(p);
-        pos = dataOff + dataLen;
     }
     if (out.isEmpty()) {
         if (error) *error = QStringLiteral("update.app 无分区条目");

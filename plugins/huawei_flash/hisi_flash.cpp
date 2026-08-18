@@ -4,8 +4,10 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QScopeGuard>
 
+#include <climits>
 #include <cstring>
 #include <memory>
 
@@ -49,14 +51,26 @@ bool HisiFlasher::flashPartition(const QString &name, const QByteArray &header,
                                  const QString &imagePath,
                                  std::function<void(qint64)> progress, QString *error)
 {
-    // HEAD：0x41 + 分区头
-    if (!m_session.sendCommand(FRAME_HEAD, header, 2.0, error))
+    // 发送前头变换（行为观察）：92-93 两字节置零 + 追加 1 字节 0x00；
+    // 变换后的头用于 HEAD 与 TAIL（同一份）
+    QByteArray sendHeader = header;
+    if (sendHeader.size() >= 94) {
+        sendHeader[92] = '\0';
+        sendHeader[93] = '\0';
+    }
+    sendHeader.append(char(0));
+    // HEAD：0x41 + 分区头（变换后）
+    if (!m_session.sendCommand(FRAME_HEAD, sendHeader, 2.0, error))
         return false;
-    // DATA 块
+    // DATA 块（fileSeq 提取自原始头偏移 20，不受头变换影响）
     if (!sendDataBlocks(name, header, imagePath, progress, error))
         return false;
-    // TAIL：0x43 + 分区头
-    if (!m_session.sendCommand(FRAME_TAIL, header, 8.0, error))
+    // TAIL：0x43 + 分区头（变换后）；TAIL 等待设备落盘提交，固定 8s 在
+    // 中/大分区上会假失败——超时按行为观察公式随镜像大小伸缩：
+    // tailTimeout = max(35, min(180, 15 + 镜像 MB/10))
+    const double fileSizeMB = QFileInfo(imagePath).size() / 1024.0 / 1024.0;
+    const double tailTimeout = qBound(35.0, 15.0 + fileSizeMB / 10.0, 180.0);
+    if (!m_session.sendCommand(FRAME_TAIL, sendHeader, tailTimeout, error))
         return false;
     return true;
 }
@@ -148,6 +162,13 @@ bool runHisiFlash(const QString &updateAppPath,
     QFile appFile(updateAppPath);
     if (!appFile.open(QIODevice::ReadOnly)) {
         if (error) *error = QStringLiteral("无法打开 update.app: %1").arg(updateAppPath);
+        return false;
+    }
+    // 2GiB 守卫提前到 readAll 之前：int 偏移解析器上限，整载内存无谓
+    // 浪费且可能 OOM——显式拒绝而非先整载再拒（流式解析为后续任务）；
+    // parseUpdateApp 内守卫保留作纵深防御
+    if (QFileInfo(updateAppPath).size() > qsizetype(INT_MAX)) {
+        if (error) *error = QStringLiteral("update.app 过大（>2GiB 暂不支持，流式解析为后续任务）");
         return false;
     }
     const QByteArray appData = appFile.readAll();

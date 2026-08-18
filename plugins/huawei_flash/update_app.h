@@ -8,6 +8,9 @@
 // + 4B + dataLength(LE32) + 16B + 16B + 32B 分区名(UTF-8, NUL 结尾) + 6B
 // + (headerLength - 98) 剩余字节；分区名偏移 = 4+4+4+8+4+4+16+16 = 60。
 // 头总长 = headerLength。
+// 容错（行为观察）：每条目数据后可有 0-3 字节 4 字节对齐填充；dataLength==0
+// 或分区名为空 = 列表结束标记（不追加）；首条目 magic 前可有前导字节（按字节
+// 扫描首个 magic）。
 
 #include <QByteArray>
 #include <QList>

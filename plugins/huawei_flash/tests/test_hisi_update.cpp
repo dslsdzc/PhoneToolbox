@@ -280,7 +280,10 @@ void TestHisiUpdate::flashPartitionFrames()
     QVERIFY(tmp.open());
     tmp.write("test image data");
     tmp.flush();
-    const QByteArray header(64, '\x00'); // 64B 分区头（含 fileSeq@20 全 0）
+    // 98B 分区头（fileSeq@20 全 0）：92-93 预置非零，验证发送前头变换置零
+    QByteArray header(98, '\x00');
+    header[92] = '\x11';
+    header[93] = '\x22';
     QVERIFY(f.flashPartition(QStringLiteral("boot"), header, tmp.fileName(), nullptr, nullptr));
     // 三帧顺序：HEAD(0x41) → DATA(0x0F) → TAIL(0x43)
     QVERIFY(m->writes.contains('\x41'));
@@ -288,11 +291,19 @@ void TestHisiUpdate::flashPartitionFrames()
     QVERIFY(m->writes.contains('\x43'));
     QVERIFY(m->writes.indexOf('\x41') < m->writes.indexOf('\x0F'));
     QVERIFY(m->writes.indexOf('\x0F') < m->writes.indexOf('\x43'));
+    // 发送前头变换（行为观察）：92-93 置零 + 追加 1 字节 0x00；HEAD/TAIL 同源
+    QByteArray sendHeader = header;
+    sendHeader[92] = '\0';
+    sendHeader[93] = '\0';
+    sendHeader.append(char(0));
+    QCOMPARE(sendHeader.size(), 99); // 98 + 1
     // DATA 帧定位：按 HEAD 帧帧长计算（不依赖 0x0F 是否恰为内容中首遇字节），
     // DATA 帧紧随 HEAD 帧（0x7E 0x0F 命令字节）
-    const QByteArray headFrame = hisi::buildFrame(hisi::FRAME_HEAD, header);
+    const QByteArray headFrame = hisi::buildFrame(hisi::FRAME_HEAD, sendHeader);
     const int headStart = m->writes.indexOf(headFrame);
     QVERIFY(headStart >= 0);
+    // HEAD 帧体 = 变换后头（头内无 0x7E/0x7D 无需转义；92-93 已置零 + 尾 0x00）
+    QCOMPARE(m->writes.mid(headStart + 2, sendHeader.size()), sendHeader);
     const int dataStart = headStart + headFrame.size();
     QCOMPARE(m->writes.at(dataStart), char('\x7E'));
     QCOMPARE(m->writes.at(dataStart + 1), char('\x0F'));
@@ -300,6 +311,8 @@ void TestHisiUpdate::flashPartitionFrames()
     // 镜像 15B → origLen = 0x0F
     QCOMPARE(m->writes.mid(dataStart + 2, 4), QByteArray("\x00\x00\x00\x00", 4));
     QCOMPARE(m->writes.mid(dataStart + 6, 4), QByteArray("\x00\x00\x00\x0F", 4));
+    // TAIL 帧 = 0x43 + 变换后头（与 HEAD 同源，行为观察）
+    QVERIFY(m->writes.indexOf(hisi::buildFrame(hisi::FRAME_TAIL, sendHeader)) > dataStart);
 }
 
 void TestHisiUpdate::rebootCommands()
@@ -320,8 +333,11 @@ void TestHisiUpdate::rebootCommands()
 
 void TestHisiUpdate::parseUpdateAppEntries()
 {
-    // 构造 2 条条目：boot（0x10000 数据）+ system（0x20000 数据）
+    // 构造 2 条条目：boot（0x10000 数据）+ system（0x20000 数据）。
+    // 覆盖行为观察容错：前导 2 字节（首 magic 按字节扫描）+ 条目数据后
+    // 0-3 字节 4 字节对齐填充 + 尾部 dataLen==0/空名列表结束标记（不追加）
     QByteArray app;
+    app.append('\x00').append('\x01'); // 前导字节（preamble 容忍）
     for (const char *name : {"boot", "system"}) {
         const quint32 headerLen = 98 + 8; // 98 固定 + 8 剩余
         QByteArray h(headerLen, '\0');
@@ -339,7 +355,18 @@ void TestHisiUpdate::parseUpdateAppEntries()
         h[20] = char(QByteArray(name).size() == 4 ? 0 : 1);
         app += h;
         app += QByteArray(int(dlen), char(0xAB));
+        // 条目数据后 4 字节对齐填充（行为观察：(4 - pos%4) % 4，0-3 字节）
+        const int pad = (4 - (app.size() % 4)) % 4;
+        if (pad > 0)
+            app += QByteArray(pad, char(0x00));
     }
+    // 列表结束标记条目：dataLength==0 + 空分区名（解析后 break，不追加）
+    QByteArray endH(98, '\0');
+    endH[0] = 0x55; endH[1] = 0xAA; endH[2] = 0x5A; endH[3] = 0xA5;
+    const quint32 endLen = 98;
+    endH[4] = char(endLen & 0xFF); endH[5] = char((endLen >> 8) & 0xFF);
+    endH[6] = char((endLen >> 16) & 0xFF); endH[7] = char((endLen >> 24) & 0xFF);
+    app += endH;
     QList<hisi::AppPartition> parts;
     QVERIFY(hisi::parseUpdateApp(app, parts, nullptr));
     QCOMPARE(parts.size(), 2);

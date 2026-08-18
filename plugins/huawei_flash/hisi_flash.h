@@ -10,7 +10,11 @@
 //   • DATA 块：0x20000 字节原始数据 → zlib 压缩（0x78 01 + Deflate + Adler32 BE）
 //     → 帧体 (fileSeqInt+addr) BE32 + origLen BE32 + 压缩数据
 //   • addr 从 0 起按原始长度累加；fileSeq = 分区头偏移 20 的 4 字节（大端）
-//   • 超时 = max(1, min(8, 压缩后 MB × 1.5)) 秒
+//   • DATA 超时 = max(1, min(8, 压缩后 MB × 1.5)) 秒
+//   • TAIL 超时 = max(35, min(180, 15 + 镜像 MB/10)) 秒（TAIL 等设备落盘提交，
+//     固定 8s 会假失败）
+//   • HEAD/TAIL 发送前头变换：92-93 两字节置零 + 追加 1 字节 0x00（变换后头
+//     长度 = headerLen + 1；两命令共用同一份变换后头）
 
 #include <QByteArray>
 #include <QString>

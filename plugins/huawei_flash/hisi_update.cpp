@@ -1,6 +1,7 @@
 #include "hisi_update.h"
 
 #include <QDateTime>
+#include <QThread>
 
 #include <libusb.h>
 
@@ -294,7 +295,8 @@ bool HisiSession::connect(QString *error)
 bool HisiSession::handshake(QString *error)
 {
     // 发握手帧（命令 + CRC LE + 0x7E，无前导 0x7E），期望响应含前缀；
-    // 3 次重试，间隔 200ms
+    // 3 次重试，间隔 200ms（行为观察；写后 50ms 停顿存在于参考时序，
+    // 未实现——bulk 写同步完成且读超时已覆盖设备处理时间）
     const quint16 crc = crc16X25(kHandshakeCommand);
     QByteArray frame = kHandshakeCommand;
     frame.append(char(crc & 0xFF)).append(char((crc >> 8) & 0xFF));
@@ -305,6 +307,9 @@ bool HisiSession::handshake(QString *error)
         QByteArray resp;
         if (m_usb->read(resp, 512, 500, error) && resp.contains(kHandshakePrefix))
             return true;
+        // 3 次重试，间隔 200ms（行为观察）
+        if (attempt < 2)
+            QThread::msleep(200);
         // 不丢弃残留输入直接重试：残留由 readFrame/read 的前导字节过滤吸收；
         // 且 bulk 读超时即丢包，不会残留半帧
     }
