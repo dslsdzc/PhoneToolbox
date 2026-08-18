@@ -333,7 +333,7 @@ void TestHisiUpdate::parseUpdateAppEntries()
         h[26] = char((dlen >> 16) & 0xFF); h[27] = char((dlen >> 24) & 0xFF);
         // 分区名 @56（32B NUL 结尾）
         memcpy(h.data() + 56, name, qMin<qsizetype>(strlen(name), 32));
-        // fileSeq @20（大端）：boot=1, system=2
+        // fileSeq @20（大端）：boot=0, system=1
         h[20] = char(QByteArray(name).size() == 4 ? 0 : 1);
         app += h;
         app += QByteArray(int(dlen), char(0xAB));
@@ -341,6 +341,7 @@ void TestHisiUpdate::parseUpdateAppEntries()
     QList<hisi::AppPartition> parts;
     QVERIFY(hisi::parseUpdateApp(app, parts, nullptr));
     QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].header.size(), 106); // 98 固定 + 8 剩余：完整头透传
     QCOMPARE(parts[0].name, QStringLiteral("boot"));
     QCOMPARE(parts[0].data.size(), 0x10000);
     QCOMPARE(parts[1].name, QStringLiteral("system"));

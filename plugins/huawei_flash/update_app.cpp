@@ -1,5 +1,6 @@
 #include "update_app.h"
 
+#include <climits>
 #include <cstring>
 
 namespace hisi {
@@ -20,20 +21,32 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
 {
     out.clear();
     int pos = 0;
-    while (pos + 4 <= data.size()) {
+    while (pos <= data.size() - 4) {
         if (memcmp(data.constData() + pos, kMagic, 4) != 0) {
             if (error) *error = QStringLiteral("update.app 条目 magic 不符 @0x%1")
                                     .arg(pos, 0, 16);
             return false;
         }
+        // 恶意/损坏文件防御：长度字段来自文件（不可信），拒绝 > INT_MAX 与越界
+        // （项目先例：len > INT_MAX 拒绝，7ad80f8）
         const int headerLen = int(le32(data, pos + 4));
-        if (headerLen < kHeaderFixed || pos + headerLen > data.size()) {
+        if (headerLen < kHeaderFixed || headerLen > int(data.size()) - pos) {
             if (error) *error = QStringLiteral("update.app 条目头长非法 @0x%1")
                                     .arg(pos, 0, 16);
             return false;
         }
-        const quint32 dataLen = le32(data, pos + 24); // magic+4+4+8+4 = 偏移 24
-        AppPartition p;
+        const int dataOff = pos + headerLen;
+        AppPartition p; // 数据长度校验在前：校验失败时 p.name 尚未填充（错误串回退 "?"）
+        // 恶意/损坏文件防御：数据长度字段同样不可信，拒绝 > INT_MAX 与越界
+        // （项目先例：len > INT_MAX 拒绝，7ad80f8）
+        const quint64 dataLen64 = le32(data, pos + 24); // magic+4+4+8+4 = 偏移 24
+        if (dataLen64 > quint64(INT_MAX)
+            || dataLen64 > quint64(data.size()) - quint64(dataOff)) {
+            if (error) *error = QStringLiteral("update.app 分区数据越界: %1")
+                                    .arg(p.name.isEmpty() ? QStringLiteral("?") : p.name);
+            return false;
+        }
+        const int dataLen = int(dataLen64);
         p.header = data.mid(pos, headerLen);
         // 分区名：头内偏移 56（magic 4 + headerLen 4 + 4 + 8 + 4 + dataLen 4 + 16 + 16）
         const QByteArray nameRaw = p.header.mid(56, 32);
@@ -43,14 +56,9 @@ bool parseUpdateApp(const QByteArray &data, QList<AppPartition> &out, QString *e
             if (error) *error = QStringLiteral("update.app 条目名为空 @0x%1").arg(pos, 0, 16);
             return false;
         }
-        const int dataOff = pos + headerLen;
-        if (dataOff + int(dataLen) > data.size()) {
-            if (error) *error = QStringLiteral("update.app 分区数据越界: %1").arg(p.name);
-            return false;
-        }
-        p.data = data.mid(dataOff, int(dataLen));
+        p.data = data.mid(dataOff, dataLen);
         out.append(p);
-        pos = dataOff + int(dataLen);
+        pos = dataOff + dataLen;
     }
     if (out.isEmpty()) {
         if (error) *error = QStringLiteral("update.app 无分区条目");

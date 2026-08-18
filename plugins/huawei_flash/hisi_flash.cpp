@@ -4,6 +4,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QScopeGuard>
 
 #include <cstring>
 #include <memory>
@@ -138,6 +139,8 @@ bool isXloaderPartition(const QString &partitionName)
         || n.startsWith(QStringLiteral("xloader_")) || n.startsWith(QStringLiteral("preloader_"));
 }
 
+// UNLOCK 未接线（解锁码提取为后续任务）：未解锁机型（bootloader 仍锁定）可能
+// 刷写失败——诚实边界标注，不假装支持。
 bool runHisiFlash(const QString &updateAppPath,
                   std::function<void(const QString &, int)> progress, QString *error)
 {
@@ -187,9 +190,10 @@ bool runHisiFlash(const QString &updateAppPath,
         }
         out.write(p.data);
         out.close();
+        // 临时文件 RAII 清理：成功/失败路径都不留残渣
+        const auto cleanup = qScopeGuard([&imgPath] { QFile::remove(imgPath); });
         if (!flasher.flashPartition(p.name, p.header, imgPath, nullptr, error))
             return false;
-        QFile::remove(imgPath);
         ++done;
     }
     if (progress) progress(QString(), 100);

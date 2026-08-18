@@ -15,5 +15,6 @@ bool HuaweiFlashPlugin::execute(const QString &capability, const QVariantMap &pa
         if (error) *error = QStringLiteral("缺少 updateApp 参数（update.app 路径）");
         return false;
     }
+    // UNLOCK 未接线（解锁码提取为后续任务），未解锁机型可能刷写失败（诚实边界标注）。
     return hisi::runHisiFlash(updateApp, nullptr, error);
 }
