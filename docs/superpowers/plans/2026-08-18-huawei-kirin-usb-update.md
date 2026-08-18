@@ -45,9 +45,9 @@
 
 **响应**：成功 `7E 02 6A D3 7E`（帧内 payload = `02` + CRC）；错误帧 payload 首字节 `03`；读端丢弃非 `0x7E` 起始字节、收集至 `0x7E … 0x7E` 闭合；发送分块 ≤0x10000；块间 10ms。
 
-**刷写流程**：握手 → UNLOCK（有解锁码时）→ 逐分区：HEAD → DATA×N → TAIL。DATA 块大小 `0x20000`（128KB），每块 zlib 压缩（`78 01` 头 + Deflate Fastest + Adler32 BE 尾），addr 从 0 起按**原始长度**累加；超时 = max(1, min(8, 压缩后 MB × 1.5)) 秒。
+**刷写流程**：握手 → UNLOCK（有解锁码时）→ 逐分区：HEAD → DATA×N → TAIL。DATA 块大小 `0x20000`（128KB），每块 zlib 压缩（`78 01` 头 + Deflate Fastest + Adler32 BE 尾），addr 从 0 起按**原始长度**累加；DATA 超时 = max(1, min(8, 压缩后 MB × 1.5)) 秒；**TAIL 超时 = max(35, min(180, 15 + 镜像 MB/10)) 秒**（TAIL 等设备落盘提交，固定 8s 会假失败）。**HEAD/TAIL 发送前头变换**：92-93 两字节置零 + 追加 1 字节 `0x00`（变换后头长 = headerLen + 1；HEAD/TAIL 共用同一份变换后头）。
 
-**update.app 解包**（复用 B5/B6 imghw）：条目 magic `55 AA 5A A5` + headerLength(LE32) + 固定字段 + dataLength(LE32) + 16B + 16B + 32B 分区名(UTF-8 NUL 结尾) + 6B + 剩余到 headerLength。头总长 = 98 + 剩余。
+**update.app 解包**（复用 B5/B6 imghw）：条目 magic `55 AA 5A A5` + headerLength(LE32) + 固定字段 + dataLength(LE32) + 16B + 16B + 32B 分区名(UTF-8 NUL 结尾) + 6B + 剩余到 headerLength。头总长 = 98 + 剩余。容错（行为观察）：每条目数据后可有 **0-3 字节 4 字节对齐填充** `(4 - pos%4) % 4`；**dataLength==0 或分区名为空 = 列表结束标记**（解析头后即 break，该条目不追加）；首条目 magic 前可有前导字节（按字节扫描首个 magic）。
 
 **Xloader 修补**：bootrom 漏洞利用（"head resend" 类），0x8000 字节载荷替换 xloader 对应段——**诚实边界：载荷不内置**，接口标注"需用户自行准备修补载荷"。
 
@@ -1763,3 +1763,4 @@ git commit -m "feat: 华为 Kirin USB Update 集成 — 插件内 update.app 解
 - **占位符扫描**：无 TBD/TODO；update_app 解析布局为行为观察核实值；测试构造含完整字节 ✓
 - **类型一致性**：`HisiSession`/`HisiFlasher`/`parseUpdateApp`/`runHisiFlash` 跨任务签名一致；`zlibCompress` 输入输出类型一致 ✓
 - **依赖顺序**：F2-P → F2-1 → F2-2 → F2-3 串行；每任务结束是可独立测试的绿态（25/25 递增）✓
+- **最终审查吸收**（2026-08-18）：核实记录补 TAIL 超时公式（max(35,min(180,15+MB/10))）、条目后 4B 对齐填充（0-3 字节）与 dataLen==0/空名=列表结束、HEAD/TAIL 发送前头变换（92-93 置零 + 追加 0x00）——全部为行为观察，实现同 commit 落地（4f4d237）✓
