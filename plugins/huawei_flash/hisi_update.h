@@ -46,6 +46,9 @@ public:
     virtual bool open(QString *error) = 0;
     virtual bool write(const QByteArray &data, QString *error) = 0;
     virtual bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) = 0;
+    // 丢弃通道读缓冲中的残留输入（发送命令前清残留，协议行为）；
+    // 实现不得阻塞等待数据（短超时即返回）。返回是否成功执行丢弃。
+    virtual bool discardInput(int maxLen, int timeoutMs, QString *error) = 0;
     virtual int maxPacketSize() const { return 0x400; }
     virtual bool close() = 0;
 };

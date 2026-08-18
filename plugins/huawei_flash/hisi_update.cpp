@@ -88,6 +88,23 @@ public:
         return true;
     }
 
+    bool discardInput(int maxLen, int timeoutMs, QString *error) override
+    {
+        if (!m_handle || !m_epIn) {
+            if (error) *error = QStringLiteral("USB 通道未打开");
+            return false;
+        }
+        QByteArray buf(maxLen, Qt::Uninitialized);
+        int transferred = 0;
+        const int ret = libusb_bulk_transfer(m_handle, m_epIn,
+                                             reinterpret_cast<unsigned char *>(buf.data()),
+                                             maxLen, &transferred, timeoutMs);
+        if (ret == LIBUSB_SUCCESS || ret == LIBUSB_ERROR_TIMEOUT || ret == LIBUSB_ERROR_NO_DEVICE)
+            return true; // 无数据/超时/设备消失均可视为已清
+        if (error) *error = QStringLiteral("USB 读失败: %1").arg(QLatin1String(usbErrName(ret)));
+        return false;
+    }
+
     bool close() override
     {
         if (m_handle) {
@@ -304,6 +321,9 @@ bool HisiSession::sendCommand(quint8 cmd, const QByteArray &payload, double time
         if (error) *error = QStringLiteral("未打开 USB 通道");
         return false;
     }
+
+    // 协议行为：发送前丢弃读缓冲残留（避免上次命令的迟到响应被误判为本命令响应）
+    m_usb->discardInput(4096, 10, nullptr);
 
     const QByteArray frame = buildFrame(cmd, payload);
     int offset = 0;

@@ -8,6 +8,7 @@ class MockUsbChannel : public hisi::IUsbChannel {
 public:
     QByteArray writes;
     QList<QByteArray> reads;
+    QByteArray stale; // 读缓冲残留（discardInput 清除；read 优先消费）
     bool failOpen = false;
     QString openError;
 
@@ -25,10 +26,21 @@ public:
     bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
     {
         Q_UNUSED(timeoutMs) Q_UNUSED(error)
+        if (!stale.isEmpty()) {
+            out = stale.left(maxLen);
+            stale.remove(0, out.size());
+            return true;
+        }
         if (reads.isEmpty()) { out.clear(); return false; }
         QByteArray r = reads.takeFirst();
         out = r.left(maxLen);
         return !r.isEmpty() || maxLen == 0;
+    }
+    bool discardInput(int maxLen, int timeoutMs, QString *error) override
+    {
+        Q_UNUSED(maxLen) Q_UNUSED(timeoutMs) Q_UNUSED(error)
+        stale.clear();
+        return true;
     }
     bool close() override { return true; }
 };
@@ -48,6 +60,8 @@ private slots:
     void sendCommandAckSuccess();
     void sendCommandDeviceError();
     void sendCommandTimeoutFails();
+    void sendCommandDiscardsStaleInput();
+    void readFrameDiscardsLeadingNoise();
     void connectOpenFailure();
 };
 
@@ -115,8 +129,9 @@ void TestHisiUpdate::handshakeRetriesOnMismatch()
              << QByteArray("\x7E\x03\x00\x00\x7E", 5)
              << QByteArray("\x7E\x26\x00\x00\x25\xA7\x7E", 7);
     QVERIFY(s.connect(nullptr));
-    // 三次握手帧
-    QCOMPARE(m->writes.count('\x26'), 3); // 每帧含 0x26 一次
+    // 三次握手帧：19B 命令 + 2B CRC LE + 0x7E = 22B，3 帧共 66B，帧内容相同
+    QCOMPARE(m->writes.size(), 66);
+    QCOMPARE(m->writes.mid(0, 22), m->writes.mid(22, 22));
 }
 
 void TestHisiUpdate::sendCommandAckSuccess()
@@ -152,6 +167,28 @@ void TestHisiUpdate::sendCommandTimeoutFails()
     QString err;
     QVERIFY(!s.sendCommand(hisi::FRAME_REBOOT, QByteArray(), 0.1, &err));
     QVERIFY(!err.isEmpty());
+}
+
+void TestHisiUpdate::sendCommandDiscardsStaleInput()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    hisi::HisiDevice dev; dev.vid = 0x12D1; dev.pid = 0x0000;
+    hisi::HisiSession s(std::move(usb), dev);
+    m->stale = QByteArray("\x7E\x03\x00\x00\x00\x00\x7E", 7); // 上次命令的迟到错误帧
+    m->reads << QByteArray(hisi::HisiSession::kAckResponse);  // 本命令的 ACK
+    QVERIFY(s.sendCommand(hisi::FRAME_REBOOT, QByteArray(), 0.3, nullptr));
+}
+
+void TestHisiUpdate::readFrameDiscardsLeadingNoise()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    hisi::HisiDevice dev; dev.vid = 0x12D1; dev.pid = 0x0000;
+    hisi::HisiSession s(std::move(usb), dev);
+    // 前导垃圾字节 + 有效 ACK 帧；drain 已清 stale，噪声随响应读入被 readFrame 过滤
+    m->reads << QByteArray("\x00\x01\x02\x7E\x02\x6A\xD3\x7E", 8);
+    QVERIFY(s.sendCommand(hisi::FRAME_REBOOT, QByteArray(), 0.3, nullptr));
 }
 
 void TestHisiUpdate::connectOpenFailure()
