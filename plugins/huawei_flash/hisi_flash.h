@@ -24,6 +24,13 @@ namespace hisi {
 // zlib 压缩：0x78 01 头 + Deflate + Adler32 BE 尾（协议要求）
 QByteArray zlibCompress(const QByteArray &data);
 
+// 集成路由：update.app → 枚举 → 会话 → 逐分区刷写（诚实边界见 cpp）
+bool runHisiFlash(const QString &updateAppPath,
+                  std::function<void(const QString &name, int percent)> progress,
+                  QString *error = nullptr);
+// 纯函数（单测）：xloader/preloader 分区名判定（诚实边界用）
+bool isXloaderPartition(const QString &partitionName);
+
 class HisiFlasher {
 public:
     explicit HisiFlasher(HisiSession &session) : m_session(session) {}

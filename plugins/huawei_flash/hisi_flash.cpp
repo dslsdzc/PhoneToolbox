@@ -1,8 +1,12 @@
 #include "hisi_flash.h"
 
+#include "update_app.h"
+
+#include <QDir>
 #include <QFile>
 
 #include <cstring>
+#include <memory>
 
 #include <zlib.h>
 
@@ -125,6 +129,71 @@ bool HisiFlasher::reboot(QString *error)
     if (!m_session.sendCommand(FRAME_REBOOT, QByteArray(), 0.3, error))
         return false;
     return m_session.sendCommand(FRAME_FORCE_REBOOT, QByteArray(), 0.3, error);
+}
+
+bool isXloaderPartition(const QString &partitionName)
+{
+    const QString n = partitionName.toLower();
+    return n == QStringLiteral("xloader") || n == QStringLiteral("preloader")
+        || n.startsWith(QStringLiteral("xloader_")) || n.startsWith(QStringLiteral("preloader_"));
+}
+
+bool runHisiFlash(const QString &updateAppPath,
+                  std::function<void(const QString &, int)> progress, QString *error)
+{
+    // 1. 解析 update.app（插件内自包含）
+    QFile appFile(updateAppPath);
+    if (!appFile.open(QIODevice::ReadOnly)) {
+        if (error) *error = QStringLiteral("无法打开 update.app: %1").arg(updateAppPath);
+        return false;
+    }
+    const QByteArray appData = appFile.readAll();
+    QList<AppPartition> parts;
+    if (!parseUpdateApp(appData, parts, error))
+        return false;
+
+    // 2. 枚举 + 打开会话
+    QList<HisiDevice> devs;
+    if (!enumerateUsb(devs, error))
+        return false;
+    if (devs.isEmpty()) {
+        if (error) *error = QStringLiteral("未检测到华为 USB Update 设备（VID 0x12D1）");
+        return false;
+    }
+    std::unique_ptr<IUsbChannel> usb;
+    if (!openLibusbUsb(devs.first(), usb, error))
+        return false;
+    HisiSession session(std::move(usb), devs.first());
+    if (!session.connect(error))
+        return false;
+    HisiFlasher flasher(session);
+
+    // 3. 逐分区刷写（xloader 诚实边界）
+    int done = 0;
+    for (const AppPartition &p : parts) {
+        if (progress) progress(p.name, 100 * done / parts.size());
+        if (isXloaderPartition(p.name)) {
+            if (error) *error = QStringLiteral("分区 %1 为 Xloader：修补载荷未内置（需用户自行准备）")
+                                    .arg(p.name);
+            return false; // 诚实边界：不假装支持
+        }
+        // 分区数据落临时文件后经 flashPartition 流式分块刷写（DATA 帧按 0x20000 块）
+        const QString imgPath = QDir::temp().filePath(
+            QStringLiteral("huawei_flash_%1.img").arg(p.name));
+        QFile out(imgPath);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (error) *error = QStringLiteral("无法写入临时文件 %1").arg(imgPath);
+            return false;
+        }
+        out.write(p.data);
+        out.close();
+        if (!flasher.flashPartition(p.name, p.header, imgPath, nullptr, error))
+            return false;
+        QFile::remove(imgPath);
+        ++done;
+    }
+    if (progress) progress(QString(), 100);
+    return flasher.reboot(error);
 }
 
 } // namespace hisi

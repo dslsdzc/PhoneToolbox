@@ -2,10 +2,13 @@
 #include <QTemporaryFile>
 #include <memory>
 
+#include <cstring>
+
 #include <zlib.h>
 
 #include "hisi_flash.h"
 #include "hisi_update.h"
+#include "update_app.h"
 
 // MockUsbChannel：记录写入序列、预置读取队列（IUsbChannel 注入）
 class MockUsbChannel : public hisi::IUsbChannel {
@@ -72,6 +75,11 @@ private slots:
     void unlockFrame();
     void flashPartitionFrames();
     void rebootCommands();
+    // ---- F2-3: update.app 解析 ----
+    void parseUpdateAppEntries();
+    void parseUpdateAppBadMagicFails();
+    // ---- F2-3: xloader 边界 ----
+    void isXloaderPartitionNames();
 };
 
 void TestHisiUpdate::crc16X25StandardVector()
@@ -306,6 +314,55 @@ void TestHisiUpdate::rebootCommands()
     QVERIFY(m->writes.contains('\x32'));
     // 顺序：REBOOT(0x0A) 先于 FORCE_REBOOT(0x32)
     QVERIFY(m->writes.indexOf('\x0A') < m->writes.indexOf('\x32'));
+}
+
+void TestHisiUpdate::parseUpdateAppEntries()
+{
+    // 构造 2 条条目：boot（0x10000 数据）+ system（0x20000 数据）
+    QByteArray app;
+    for (const char *name : {"boot", "system"}) {
+        const quint32 headerLen = 98 + 8; // 98 固定 + 8 剩余
+        QByteArray h(headerLen, '\0');
+        h[0] = 0x55; h[1] = 0xAA; h[2] = 0x5A; h[3] = 0xA5;
+        const quint32 len = headerLen;
+        h[4] = char(len & 0xFF); h[5] = char((len >> 8) & 0xFF);
+        h[6] = char((len >> 16) & 0xFF); h[7] = char((len >> 24) & 0xFF);
+        // dataLength @24（magic 4 + headerLen 4 + 4 + 8 + 4）
+        const quint32 dlen = QByteArray(name).size() == 4 ? 0x10000u : 0x20000u;
+        h[24] = char(dlen & 0xFF); h[25] = char((dlen >> 8) & 0xFF);
+        h[26] = char((dlen >> 16) & 0xFF); h[27] = char((dlen >> 24) & 0xFF);
+        // 分区名 @56（32B NUL 结尾）
+        memcpy(h.data() + 56, name, qMin<qsizetype>(strlen(name), 32));
+        // fileSeq @20（大端）：boot=1, system=2
+        h[20] = char(QByteArray(name).size() == 4 ? 0 : 1);
+        app += h;
+        app += QByteArray(int(dlen), char(0xAB));
+    }
+    QList<hisi::AppPartition> parts;
+    QVERIFY(hisi::parseUpdateApp(app, parts, nullptr));
+    QCOMPARE(parts.size(), 2);
+    QCOMPARE(parts[0].name, QStringLiteral("boot"));
+    QCOMPARE(parts[0].data.size(), 0x10000);
+    QCOMPARE(parts[1].name, QStringLiteral("system"));
+    QCOMPARE(parts[1].data.size(), 0x20000);
+}
+
+void TestHisiUpdate::parseUpdateAppBadMagicFails()
+{
+    QByteArray app(200, '\x00');
+    QString err;
+    QList<hisi::AppPartition> parts;
+    QVERIFY(!hisi::parseUpdateApp(app, parts, &err));
+    QVERIFY(err.contains("magic"));
+}
+
+void TestHisiUpdate::isXloaderPartitionNames()
+{
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("xloader")));
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("preloader")));
+    QVERIFY(hisi::isXloaderPartition(QStringLiteral("xloader_a")));
+    QVERIFY(!hisi::isXloaderPartition(QStringLiteral("boot")));
+    QVERIFY(!hisi::isXloaderPartition(QStringLiteral("system")));
 }
 
 QTEST_APPLESS_MAIN(TestHisiUpdate)

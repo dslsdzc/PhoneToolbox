@@ -4,7 +4,7 @@
 
 #include "src/plugins/plugin_interface.h"
 
-// 华为刷写插件入口（协议层在 F2-1/2/3 填充；本任务仅骨架验证插件系统）
+// 华为刷写插件入口（协议层 F2-1/2/3 已填充；本文件仅插件接口适配）
 class HuaweiFlashPlugin : public ProtocolPlugin {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID ProtocolPlugin_iid)
@@ -15,16 +15,11 @@ public:
     QString name() const override { return QStringLiteral("华为刷写"); }
     QString description() const override
     {
-        return QStringLiteral("华为 Kirin USB Update 刷写通道（协议层后续任务填充）");
+        return QStringLiteral("华为 Kirin USB Update 刷写通道（update.app 集成）");
     }
     QStringList capabilities() const override
     {
         return { QStringLiteral("huawei-usb-update.flash") };
     }
-    bool execute(const QString &capability, const QVariantMap &params, QString *error) override
-    {
-        Q_UNUSED(capability) Q_UNUSED(params)
-        if (error) *error = QStringLiteral("协议层未实现（F2-1/2/3）");
-        return false;
-    }
+    bool execute(const QString &capability, const QVariantMap &params, QString *error) override;
 };
