@@ -15,11 +15,12 @@ if(Qt6Test_FOUND AND ENABLE_IMAGE_TESTS)
     enable_testing()
     add_executable(test_hisi_update
         tests/test_hisi_update.cpp
-        hisi_update.cpp)
+        hisi_update.cpp
+        hisi_flash.cpp)
     target_include_directories(test_hisi_update PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${LIBUSB_INCLUDE_DIRS})
-    target_link_libraries(test_hisi_update PRIVATE Qt6::Test ${LIBUSB_LIBRARIES})
+    target_link_libraries(test_hisi_update PRIVATE Qt6::Test ${LIBUSB_LIBRARIES} ${ZLIB_LIBRARY})
     set_target_properties(test_hisi_update PROPERTIES AUTOMOC ON)
     add_test(NAME test_hisi_update COMMAND test_hisi_update)
 endif()
