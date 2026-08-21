@@ -43,9 +43,9 @@
 | READ_START | 0x10 | 无 |
 
 **分区选择**（select_partition）：name 36×UTF-16LE + size(LE32) + size_hi(LE32，64 位模式) + dummy(8B)——命令 type 由调用方定（写分区等）。
-**FDL 上传**（send_buf）：START_DATA(addr BE32 + size BE32) → MIDST_DATA×N（块 ≤ step，默认 0x800=2048）→ END_DATA（end_data 标志）→ 每步 send_and_check（发后收响应确认）。
-**FDL1 流程**：CONNECT → CHANGE_BAUD → START_DATA(FDL1 加载地址 0x40004000 等，芯片相关) → MIDST×N → END → EXEC_DATA。
-**FDL2 流程**：CONNECT → START_DATA(FDL2 地址 0x14000000/0x34000000) → MIDST×N → END → EXEC → 之后可用 READ_FLASH/ERASE_FLASH/NORMAL_RESET/POWER_OFF。
+**FDL 上传**（send_buf）：START_DATA(addr BE32 + size BE32) → MIDST_DATA×N（块 ≤ step，参照默认 528；本项目选值 2048，≤4096 可观察范围内）→ END_DATA（end_data 标志）→ 每步 send_and_check（发后收响应确认）。
+**FDL1 流程**（终审修正线序，2026-08-22）：CHECK_BAUD(1B 全 0x7E) → REP_VER(0x81) → CONNECT(ACK) → START_DATA(FDL1 加载地址 0x40004000 等，芯片相关) → MIDST×N → END → EXEC_DATA(ACK)；随后 FDL2 就绪等待（同一会话）：CHECK_BAUD(4B) 重试 ≤10 次直至 REP_VER → CONNECT(ACK)。（CHANGE_BAUD 0x09 仅枚举定义、参照从不发送——原记录有误；注：FDL1 阶段帧校验为 CRC16 模式，本项目统一求和校验，真机待验证）
+**FDL2 上传**：直接 START_DATA(FDL2 地址 0x14000000/0x34000000) → MIDST×N → END → EXEC —— 无 CONNECT（就绪等待已完成 CONNECT，原记录矛盾已修正）；EXEC 响应参照容忍 0x96 INCOMPATIBLE_PARTITION，本项目严格 ACK。之后可用 READ_FLASH/ERASE_FLASH/NORMAL_RESET/POWER_OFF。
 **READ_FLASH 响应**：type = BSL_REP_READ_FLASH + len(2B BE) + 数据（nread ≤ 请求 n）。
 **USB**：VID 0x1782（展锐），bulk 端点；串口模式（非 libusb）为参考路径，主实现用 libusb。
 **ZLP**：endp_out_blk == 512 且发送长度 % 512 == 0 时补空包（UMS9117 兼容）。
