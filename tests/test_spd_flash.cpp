@@ -1,7 +1,9 @@
 #include <QtTest>
+#include <QTemporaryFile>
 #include <memory>
 
 #include "core/modes/spd_flash.h"
+#include "core/modes/spd_storage.h"
 
 // MockUsbChannel：记录写入序列、预置读取队列（IUsbChannel 注入）
 class MockUsbChannel : public spd::IUsbChannel {
@@ -39,15 +41,56 @@ private slots:
     // ---- 纯函数 ----
     void sumChecksumVector();
     void crc16Vector();
+    // ---- 枚举 ----
+    void enumValues();
     // ---- 帧 ----
     void frameConstruction();
     void frameEscaping();
     // ---- 命令 ----
     void sendCommandAck();
     void sendCommandBadChecksumFails();
+    void responseDataExtraction();
+    void responseEmbedded0x7e();
+    void responseTranscoded();
+    void checkBaudFrame();
     void connectOpenFailure();
     void enumerateVid();
+    // ---- F4-2: FDL 上传与存储 ----
+    void uploadFdlSequence();
+    void eraseFlashFrame();
+    void readFlashResponse();
+    void resetFrame();
 };
+
+// 构造响应帧：type BE16 + len BE16 + data + checksum（行为观察帧布局）
+QByteArray makeResponseFrame(quint16 type, const QByteArray &data)
+{
+    QByteArray body;
+    body.append(char((type >> 8) & 0xFF)).append(char(type & 0xFF));
+    body.append(char((data.size() >> 8) & 0xFF)).append(char(data.size() & 0xFF));
+    body += data;
+    const quint16 chk = spd::sumChecksum(body);
+    body.append(char((chk >> 8) & 0xFF)).append(char(chk & 0xFF));
+    QByteArray frame(1, '\x7E');
+    frame += body;
+    frame += QByteArray(1, '\x7E');
+    return frame;
+}
+
+// 转义帧体（保留首尾 0x7E 分隔符不转义）：body 中 0x7E→7D 5E、0x7D→7D 5D
+// （与发送侧一致，行为观察 TRANSCODE）
+QByteArray escapeFrame(const QByteArray &rawFrame)
+{
+    QByteArray frame(1, '\x7E');
+    for (int i = 1; i < rawFrame.size() - 1; ++i) {
+        const quint8 b = quint8(rawFrame[i]);
+        if (b == 0x7E) frame += QByteArray("\x7D\x5E", 2);
+        else if (b == 0x7D) frame += QByteArray("\x7D\x5D", 2);
+        else frame.append(char(b));
+    }
+    frame.append(char(0x7E));
+    return frame;
+}
 
 void TestSpdFlash::sumChecksumVector()
 {
@@ -60,6 +103,14 @@ void TestSpdFlash::crc16Vector()
     // CRC-16/XMODEM（poly 0x11021 非反射，init 0）标准向量："123456789" → 0x31C3
     // （行为观察核实为 init 0；0x29B1 是 init 0xFFFF 的 CCITT-FALSE 变体）
     QCOMPARE(spd::crc16(QByteArray("123456789")), quint16(0x31C3));
+}
+
+void TestSpdFlash::enumValues()
+{
+    // 行为观察：响应默认 ACK=0x80（命令后强制校验）、READ_FLASH 响应 0x93、POWER_OFF=0x17
+    QCOMPARE(int(spd::BSL_REP_ACK), 0x80);
+    QCOMPARE(int(spd::BSL_REP_READ_FLASH), 0x93);
+    QCOMPARE(int(spd::BSL_CMD_POWER_OFF), 0x17);
 }
 
 void TestSpdFlash::frameConstruction()
@@ -85,8 +136,9 @@ void TestSpdFlash::frameEscaping()
     m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
     QByteArray reply;
     QVERIFY(s.sendCommand(spd::BSL_CMD_CONNECT, QByteArray(1, char(0x7E)), reply, 64, nullptr));
-    // payload 1B 0x7E → 转义为 0x7D 0x5E（HDLC：0x7D 0x5D 是 0x7D 的转义）
-    QVERIFY(m->writes.contains(QByteArray("\x7D\x5E", 2)));
+    // 完整帧：0x7E + type(00 00) + len(00 01) + 转义 payload(7D 5E) + checksum(81 FE) + 0x7E
+    // （checksum 81 FE：sum(00 00 00 01 7E)=0x017E → ~0xFE81 → 交换 0x81FE）
+    QCOMPARE(m->writes, QByteArray("\x7E\x00\x00\x00\x01\x7D\x5E\x81\xFE\x7E", 10));
 }
 
 void TestSpdFlash::sendCommandAck()
@@ -112,6 +164,57 @@ void TestSpdFlash::sendCommandBadChecksumFails()
     QVERIFY(err.contains("checksum"));
 }
 
+void TestSpdFlash::responseDataExtraction()
+{
+    // 响应带数据（READ_FLASH 风格）：reply 剥离 type/len/checksum，仅返回数据区
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    const QByteArray data("\xAA\xBB\xCC\xDD", 4);
+    m->reads << makeResponseFrame(spd::BSL_REP_READ_FLASH, data);
+    QByteArray reply;
+    QVERIFY(s.sendCommand(spd::BSL_CMD_READ_FLASH, QByteArray(12, '\0'), reply, 64, nullptr));
+    QCOMPARE(reply, data);
+}
+
+void TestSpdFlash::responseEmbedded0x7e()
+{
+    // H1：非转义模式，数据区含 0x7E —— 响应须按 len 字段闭合（len+6），不得提前截断
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    const QByteArray data("\xAA\x7E\xCC\xDD", 4);
+    m->reads << makeResponseFrame(spd::BSL_REP_READ_FLASH, data);
+    QByteArray reply;
+    QVERIFY(s.sendCommand(spd::BSL_CMD_READ_FLASH, QByteArray(12, '\0'), reply, 64, nullptr));
+    QCOMPARE(reply, data);
+}
+
+void TestSpdFlash::responseTranscoded()
+{
+    // H1：转义模式响应 —— 接收侧反转义（7D 5E→7E、7D 5D→7D）后 checksum 通过
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0, /*transcode=*/true);
+    const QByteArray data("\x7E\x7D\x41\x42", 4);
+    m->reads << escapeFrame(makeResponseFrame(spd::BSL_REP_READ_FLASH, data));
+    QByteArray reply;
+    QVERIFY(s.sendCommand(spd::BSL_CMD_READ_FLASH, QByteArray(12, '\0'), reply, 64, nullptr));
+    QCOMPARE(reply, data);
+}
+
+void TestSpdFlash::checkBaudFrame()
+{
+    // H2：CHECK_BAUD 特判帧 —— 整帧为 len 个 0x7E（无 header/len/checksum 结构）
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    QByteArray reply;
+    QVERIFY(s.sendCommand(spd::BSL_CMD_CHECK_BAUD, QByteArray(4, char(0xAA)), reply, 64, nullptr));
+    QCOMPARE(m->writes, QByteArray(4, char(0x7E)));
+}
+
 void TestSpdFlash::connectOpenFailure()
 {
     auto usb = std::make_unique<MockUsbChannel>();
@@ -131,6 +234,65 @@ void TestSpdFlash::enumerateVid()
     QString err;
     QVERIFY(spd::enumerateUsb(devs, &err)); // 无设备时 true + 空列表
     Q_UNUSED(devs)
+}
+
+void TestSpdFlash::uploadFdlSequence()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    // 临时 FDL 文件（3 字节 → 单块 MIDST）
+    QTemporaryFile tmp;
+    QVERIFY(tmp.open());
+    tmp.write("fdl");
+    tmp.flush();
+    // 响应队列：START_DATA 确认 + MIDST_DATA 确认 + END_DATA 确认 + EXEC_DATA 确认
+    const QByteArray ack = QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    m->reads << ack << ack << ack << ack;
+    QVERIFY(f.uploadFdl(tmp.fileName(), 0x40004000, true, nullptr));
+    // 帧序列：START_DATA(0x01, addr+size BE32) → MIDST_DATA(0x02, 3B) → END(0x03) → EXEC(0x04)
+    QVERIFY(m->writes.contains('\x01'));
+    QVERIFY(m->writes.contains('\x02'));
+    QVERIFY(m->writes.contains('\x03'));
+    QVERIFY(m->writes.contains('\x04'));
+}
+
+void TestSpdFlash::eraseFlashFrame()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    QVERIFY(f.eraseFlash(0x1000, 0x100, nullptr));
+    // ERASE_FLASH(0x0A)：addr BE32 + size BE32
+    QVERIFY(m->writes.contains('\x0A'));
+}
+
+void TestSpdFlash::readFlashResponse()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    // READ_FLASH 响应：type=BSL_REP_READ_FLASH(0x93) + len + 4B 数据
+    const QByteArray data("\xAA\xBB\xCC\xDD", 4);
+    m->reads << makeResponseFrame(spd::BSL_REP_READ_FLASH, data);
+    QByteArray out;
+    QVERIFY(f.readFlash(0x1000, 4, 0, out, nullptr));
+    QCOMPARE(out, data);
+}
+
+void TestSpdFlash::resetFrame()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    QVERIFY(f.resetDevice(nullptr));
+    QVERIFY(m->writes.contains('\x05'));
 }
 
 QTEST_APPLESS_MAIN(TestSpdFlash)

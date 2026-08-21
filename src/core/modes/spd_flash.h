@@ -40,12 +40,14 @@ enum BslCmd : quint16 {
     BSL_CMD_READ_FLASH_INFO = 0x0D,
     BSL_CMD_READ_SECTOR_SIZE = 0x0F,
     BSL_CMD_READ_START = 0x10,
+    BSL_CMD_POWER_OFF = 0x17, // 行为观察：关机（FDL2 阶段）
     // 行为观察核实：0x7E（与帧头同值，发送时整帧填 0x7E；0x25 是 SET_DEBUGINFO）
     BSL_CMD_CHECK_BAUD = 0x7E,
 };
 
-// 响应 type（行为观察核实：0x93）
+// 响应 type（行为观察核实）
 enum BslReply : quint16 {
+    BSL_REP_ACK = 0x80, // 行为观察：命令响应一律为 ACK（send_and_check 强制校验）
     BSL_REP_READ_FLASH = 0x93,
 };
 
@@ -83,8 +85,10 @@ public:
 
     // 帧封装 + 发送 + 响应解析（type/len/data + checksum 校验）。
     // 成功返回 true 并填充 reply（响应 data 区）；checksum 不符失败。
+    // replyType 可选：回传响应 type（sendCommand 不校验 type，供调用方断言，
+    // 如 readFlash 校验 BSL_REP_READ_FLASH）。
     bool sendCommand(quint16 type, const QByteArray &payload, QByteArray &reply,
-                     int replyMaxLen, QString *error);
+                     int replyMaxLen, QString *error, quint16 *replyType = nullptr);
 
     bool close(QString *error);
     bool isClosed() const { return m_closed; }

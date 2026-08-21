@@ -318,7 +318,9 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
-                    set(_test_extra_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp)
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)

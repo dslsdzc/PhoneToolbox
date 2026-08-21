@@ -261,6 +261,11 @@ bool SpdSession::connect(QString *error)
 
 bool SpdSession::buildFrame(quint16 type, const QByteArray &payload, QByteArray &frame) const
 {
+    // CHECK_BAUD 特判：整帧为 len 个 0x7E，无 header/len/checksum 结构（行为观察）
+    if (type == BSL_CMD_CHECK_BAUD) {
+        frame = QByteArray(payload.size(), char(0x7E));
+        return true;
+    }
     // 0x7E | type(2B BE) + len(2B BE) + data + checksum(2B BE) | 0x7E
     if (payload.size() > 0xFFFF)
         return false;
@@ -289,7 +294,7 @@ bool SpdSession::buildFrame(quint16 type, const QByteArray &payload, QByteArray 
 }
 
 bool SpdSession::sendCommand(quint16 type, const QByteArray &payload, QByteArray &reply,
-                             int replyMaxLen, QString *error)
+                             int replyMaxLen, QString *error, quint16 *replyType)
 {
     if (!m_usb) {
         if (error) *error = QStringLiteral("未打开 USB 通道");
@@ -302,12 +307,19 @@ bool SpdSession::sendCommand(quint16 type, const QByteArray &payload, QByteArray
     }
     if (!m_usb->write(frame, error))
         return false;
-    // 读响应帧（0x7E ... 0x7E 闭合；帧前杂散字节跳过，累计到闭合即止）
-    QByteArray resp;
+    // 响应帧解析（行为观察 recv 侧）：
+    //   • 帧头 0x7E 之前的杂散字节跳过；起始 0x7E 后累计 body（type+len+data+checksum）
+    //   • 帧长由 len 字段闭合：期望总长 = len + 6（type 2 + len 2 + data + checksum 2；
+    //     len 为 16 位，帧长天然上限 0x10005）——数据区含 0x7E 不提前截断
+    //   • 转义模式（TRANSCODE）：接收侧反转义 7D 5E→7E、7D 5D→7D
+    QByteArray raw;
     QByteArray chunk;
+    bool headFound = false;
+    bool escaped = false;
+    int expected = 6; // 最小帧长（type 2 + len 2 + checksum 2）
     const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 2000;
-    bool frameClosed = false;
-    while (!frameClosed) {
+    bool frameDone = false;
+    while (!frameDone) {
         const int remaining = int(deadline - QDateTime::currentMSecsSinceEpoch());
         if (remaining <= 0) {
             if (error && error->isEmpty())
@@ -317,29 +329,70 @@ bool SpdSession::sendCommand(quint16 type, const QByteArray &payload, QByteArray
         if (!m_usb->read(chunk, 256, qMin(remaining, 256), error))
             return false;
         for (char c : chunk) {
-            if (resp.isEmpty() && quint8(c) != 0x7E)
-                continue; // 起始 0x7E 之前的杂散字节忽略（行为观察：头前数据跳过）
-            resp.append(c);
-            if (quint8(c) == 0x7E && resp.size() >= 2) {
-                frameClosed = true;
-                break;
+            const quint8 b = quint8(c);
+            if (m_transcode) {
+                // 转义后字节必须是 5E/5D（行为观察）
+                if (escaped && b != 0x5E && b != 0x5D) {
+                    if (error) *error = QStringLiteral("响应转义字节异常 (0x%1)")
+                                            .arg(b, 2, 16, QLatin1Char('0'));
+                    return false;
+                }
+                if (b == kHdlcHeader) {
+                    if (!headFound) { headFound = true; continue; }
+                    if (raw.isEmpty()) continue;
+                    if (raw.size() < expected) {
+                        if (error) *error = QStringLiteral("响应帧过短");
+                        return false;
+                    }
+                    frameDone = true; // 闭合 0x7E
+                    break;
+                }
+                if (b == kHdlcEscape) { escaped = true; continue; }
+                if (!headFound) continue; // 帧前杂散字节跳过
+                if (raw.size() >= expected) {
+                    if (error) *error = QStringLiteral("响应帧过长");
+                    return false;
+                }
+                raw.append(char(b ^ (escaped ? 0x20 : 0)));
+                escaped = false;
+            } else {
+                if (!headFound) {
+                    if (b == kHdlcHeader) headFound = true;
+                    continue; // 帧前杂散字节跳过
+                }
+                if (raw.size() == expected) {
+                    if (b != kHdlcHeader) {
+                        if (error) *error = QStringLiteral("响应帧尾缺失 0x7E");
+                        return false;
+                    }
+                    frameDone = true;
+                    break;
+                }
+                raw.append(c);
             }
+            if (raw.size() == 4)
+                expected = getBe16(raw, 2) + 6; // len 字段声明期望帧长
         }
     }
-    // 解析：跳过起始 0x7E；type/len/checksum 校验
-    if (resp.size() < 8) {
+    // 校验：长度 + checksum（type/len 不校验，调用方按需断言）
+    if (raw.size() < 6) {
         if (error) *error = QStringLiteral("响应帧过短");
         return false;
     }
-    const int bodyLen = resp.size() - 2;
-    QByteArray body = resp.mid(1, bodyLen); // 去头尾 0x7E（type+len+data+checksum）
-    const quint16 expChk = getBe16(body, body.size() - 2);
-    const quint16 actChk = sumChecksum(body.left(body.size() - 2));
+    if (raw.size() != expected) {
+        if (error) *error = QStringLiteral("响应长度不符 (%1, 期望 %2)")
+                                .arg(raw.size()).arg(expected);
+        return false;
+    }
+    const quint16 expChk = getBe16(raw, raw.size() - 2);
+    const quint16 actChk = sumChecksum(raw.left(raw.size() - 2));
     if (expChk != actChk) {
         if (error) *error = QStringLiteral("响应 checksum 不符");
         return false;
     }
-    reply = body.mid(4, qMin(body.size() - 6, replyMaxLen));
+    const int dataLen = getBe16(raw, 2);
+    reply = raw.mid(4, qMin(dataLen, replyMaxLen));
+    if (replyType) *replyType = getBe16(raw, 0);
     return true;
 }
 
