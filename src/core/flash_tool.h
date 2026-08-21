@@ -101,7 +101,7 @@ public:
 
     // F5: 整包刷写入口——按设备模式分派到协议通道（MTK BROM/华为插件/展锐）。
     // params 承载通道所需文件参数（键名见各通道实现）：
-    //   mtk-brom:            daPath(DA 二进制路径)
+    //   mtk-brom:            daPath(DA 二进制路径)(分区列表待接线)
     //   huawei-usb-update:   updateApp(update.app 路径)
     //   spd:                 pacPath + fdl1Path + fdl2Path
     // 失败返回 false 并填 error；插件缺失时明确提示。

@@ -1150,6 +1150,10 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         }
         const QByteArray daBinary = daFile.readAll();
         daFile.close();
+        if (daBinary.isEmpty()) {
+            if (error) *error = QStringLiteral("DA 文件为空");
+            return false;
+        }
         // 分区列表（分区名→镜像路径）由 F5-3 FlashPanel 构建并经 params 传入——
         // 结构待接线，先空列表（诚实边界，详见 F5-2 报告）。
         const QList<QPair<QString, QByteArray>> partitions;
@@ -1179,6 +1183,9 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
     }
     if (channel == QStringLiteral("spd")) {
         // F4 通道：FDL 二进制由用户提供（诚实边界）
+        // 已知行为（F5-1）：0x1782 为 VID-only 通配 —— 正常 ADB 模式的展锐
+        // 手机会双重列出（ADB + 展锐模式）；F5-3 UI 不得对 ADB 设备提供该
+        // 协议通道（PID 收窄为后续任务）
         const QString pacPath = params.value(QStringLiteral("pacPath")).toString();
         const QString fdl1 = params.value(QStringLiteral("fdl1Path")).toString();
         const QString fdl2 = params.value(QStringLiteral("fdl2Path")).toString();
@@ -1189,6 +1196,7 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         emit outputMessage(QStringLiteral("展锐刷写通道：%1").arg(deviceId), false);
         return spd::runSpdFlash(pacPath, fdl1, fdl2, nullptr, error);
     }
-    if (error) *error = QStringLiteral("未知通道: %1").arg(channel);
+    // 不可达：flashChannelForMode 仅返回上述三字面量或空串（空串已在上方拒绝），
+    // 保留裸 return 以满足编译器的全路径返回检查。
     return false;
 }
