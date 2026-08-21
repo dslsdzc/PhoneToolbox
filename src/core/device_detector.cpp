@@ -2,6 +2,7 @@
 #include "adb_embedded.h"
 #include "modes/edl_9008.h"
 #include "resource_monitor.h"
+#include <libusb.h>
 #include <QProcess>
 #include <QStringList>
 #include <QDebug>
@@ -86,6 +87,9 @@ void DeviceDetector::detectConnectedDevices()
     
     // 检测EDL设备
     detectEDLDevices(newDevices);
+
+    // 检测协议通道设备（F5）：MTK BROM / 华为 USB Update / 展锐
+    detectProtocolDevices(newDevices);
 
     // 检测ADB设备
     QStringList adbDevices;
@@ -538,6 +542,60 @@ bool DeviceDetector::detectEDLDevices(QMap<QString, DeviceInfo> &newDevices)
     return !edlDevices.isEmpty();
 }
 
+void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices)
+{
+    // 协议通道设备检测（F5）：libusb VID/PID 快查三个自研协议通道。
+    // 设备 ID 用 usb-<bus>-<addr>；模式映射：
+    //   0x0E8D:0x0003 → MTK BROM；0x12D1（DBAdapter，任意 PID）→ 华为 USB Update；
+    //   0x1782（任意 PID）→ 展锐。
+    struct ProtoId { int vid; int pid; DeviceMode mode; };
+    const ProtoId ids[] = {
+        { 0x0E8D, 0x0003, MODE_MTK_BROM },
+        { 0x12D1, -1,     MODE_HUAWEI_USB_UPDATE },
+        { 0x1782, -1,     MODE_SPD },
+    };
+    libusb_context *ctx = nullptr;
+    if (libusb_init(&ctx) != LIBUSB_SUCCESS)
+        return;
+    libusb_set_option(ctx, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+    libusb_device **list = nullptr;
+    const ssize_t count = libusb_get_device_list(ctx, &list);
+    if (count < 0) { libusb_exit(ctx); return; }
+    for (ssize_t i = 0; i < count; ++i) {
+        libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != LIBUSB_SUCCESS)
+            continue;
+        for (const ProtoId &id : ids) {
+            if (desc.idVendor != id.vid)
+                continue;
+            if (id.pid != -1 && desc.idProduct != id.pid)
+                continue;
+            const QString devId = QStringLiteral("usb-%1-%2")
+                                      .arg(libusb_get_bus_number(list[i]))
+                                      .arg(libusb_get_device_address(list[i]));
+            DeviceInfo info;
+            info.serialNumber = devId;
+            info.mode = id.mode;
+            info.model = getModeDisplayName(id.mode); // 与 detectEDLDevices 构造模式一致（列表第二行显示）
+            newDevices[devId] = info;
+
+            // emit 模式与 detectEDLDevices 一致：新设备 → deviceConnected；
+            // 同 ID 模式变化 → deviceModeChanged（与 fastboot/ADB 分支一致）
+            if (!m_currentDevices.contains(devId)) {
+                qDebug() << "Protocol device connected:" << devId;
+                emit deviceConnected(info);
+            } else if (m_currentDevices[devId].mode != id.mode) {
+                emit deviceModeChanged(devId, id.mode);
+                qDebug() << "Protocol device mode changed:" << devId
+                         << "to" << getModeDisplayName(id.mode);
+            }
+            break;
+        }
+    }
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+}
+
 bool DeviceDetector::detectMTKDAMode()
 {
     // MTK DA模式检测
@@ -638,6 +696,12 @@ QString DeviceDetector::getModeDisplayName(DeviceMode mode) const
     case MODE_EDL_9008: return "EDL 9008";
     case MODE_MTK_DA: return "MTK DA";
     case MODE_RECOVERY: return "Recovery";
+    case MODE_MTK_BROM:
+        return QStringLiteral("MTK BROM");
+    case MODE_HUAWEI_USB_UPDATE:
+        return QStringLiteral("华为 USB Update");
+    case MODE_SPD:
+        return QStringLiteral("展锐");
     default: return "未知";
     }
 }

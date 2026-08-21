@@ -22,7 +22,10 @@ public:
         MODE_FASTBOOTD = 3,
         MODE_EDL_9008 = 4,
         MODE_MTK_DA = 5,
-        MODE_RECOVERY = 6
+        MODE_RECOVERY = 6,
+        MODE_MTK_BROM = 7,          // MTK BROM 直刷（F1）
+        MODE_HUAWEI_USB_UPDATE = 8, // 华为 Kirin USB Update（F2 插件）
+        MODE_SPD = 9                // 展锐 ResearchDownload（F4）
     };
 
     explicit DeviceDetector(QObject *parent = nullptr);
@@ -64,6 +67,7 @@ private:
     
     // 特定模式检测
     bool detectEDLDevices(QMap<QString, DeviceInfo> &newDevices);
+    void detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices); // F5：MTK BROM / 华为 USB Update / 展锐
     bool detectMTKDAMode();
     bool detectADBDevices(QStringList &devices);
 
