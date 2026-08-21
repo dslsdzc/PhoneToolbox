@@ -15,7 +15,7 @@
 - **默认信息不可信原则**：协议细节以本计划核实的字节序列为准，实现时不得自行更改帧结构
 - 诚实边界（不假装）：FDL 二进制需用户提供（官方固件/工具提取，自研为后续）；未上传 FDL 前存储命令返回明确错误；机型范围标注（展锐芯片系，实测前不承诺）
 - 每个任务独立 commit，前缀 `feat:`；协议层单测 mock 传输通道（`IUsbChannel` 注入），不依赖真实设备
-- 后端冻结例外：允许新增 `src/core/modes/` 文件与修改 `CMakeLists.txt`；不改 `src/image_engine/`、`src/root_patcher/`（imgpac 只读复用）
+- 后端冻结例外：允许新增 `src/core/modes/` 文件与修改 `CMakeLists.txt`；不改 `src/image_engine/`、`src/root_patcher/`（imgpac 只读复用）（F4-3 例外记录：imgpac::PacPartition 暴露 size 字段 —— B8 遗留 TODO 兑现，行为中性，审查裁决 accepted）
 
 ## 协议核实记录（行为观察，2026-08-18）
 
