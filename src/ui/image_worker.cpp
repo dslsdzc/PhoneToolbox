@@ -690,9 +690,8 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
             break;
         }
         for (int i = 0; i < parts.size(); ++i) {
-            // 后端待办: imgpac::PacPartition 公开结构未暴露分区数据长度（内部
-            // 已解析 size 但未落进结构），UI 侧按下一分区 offset / EOF 推断。
-            // 标准布局（新格式表后连续数据段 / 旧格式头+数据连续）下即真实长度。
+            // 注: PacPartition.size 已自 F4-3 起公开（新/旧格式解析均回填真实长度）；
+            // UI 侧仍按下一分区 offset / EOF 推断（标准布局下与 size 一致，未改行为）
             const quint64 next = (i + 1 < parts.size())
                 ? parts.at(i + 1).offset
                 : static_cast<quint64>(data.size());

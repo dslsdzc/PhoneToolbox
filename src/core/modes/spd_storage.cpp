@@ -4,6 +4,8 @@
 
 #include <climits>
 
+#include "image_engine/pac_image.h"
+
 // 实现对照（核实记录见头文件与计划文档"协议核实记录"）
 namespace spd {
 namespace {
@@ -17,7 +19,37 @@ void putBe32(QByteArray &out, quint32 v)
 }
 
 constexpr int kFdlBlock = 2048; // MIDST_DATA 块上限（行为观察）
+constexpr int kPartBlock = 4096; // 分区写 MIDST_DATA 块（行为观察 write_part 默认 4096）
 constexpr int kExecTimeoutMs = 15000; // EXEC_DATA 设备执行耗时可达 15s（行为观察 recv_msg_timeout(15000)）
+
+// 分区选择包（行为观察 select_partition 核实）：name 36×UTF-16LE + size LE32
+// （mode64 时另含 size_hi LE32 + dummy u64）——载荷 76B 或 88B。
+// 名称超 36 单元时截断（调用方 selectPartition 已前置拒绝）。
+QByteArray selectPartitionPacket(const QString &name, quint64 size, bool mode64)
+{
+    QByteArray pkt(mode64 ? 88 : 76, '\0');
+    // name 36×UTF-16LE（显式小端写入，不依赖宿主字节序；行为观察 WRITE16_LE）
+    int off = 0;
+    for (const QChar c : name) {
+        if (off >= 72) break;
+        const quint16 u = c.unicode();
+        pkt[off++] = char(u & 0xFF);
+        pkt[off++] = char(u >> 8);
+    }
+    // size LE32（低 32 位；高 32 位入 size_hi，行为观察 WRITE32_LE）
+    pkt[72] = char(size & 0xFF);
+    pkt[73] = char((size >> 8) & 0xFF);
+    pkt[74] = char((size >> 16) & 0xFF);
+    pkt[75] = char((size >> 24) & 0xFF);
+    if (mode64) {
+        pkt[76] = char((size >> 32) & 0xFF);
+        pkt[77] = char((size >> 40) & 0xFF);
+        pkt[78] = char((size >> 48) & 0xFF);
+        pkt[79] = char((size >> 56) & 0xFF);
+        // dummy 8B 保持零（行为观察 pkt 零初始化）
+    }
+    return pkt;
+}
 
 } // namespace
 
@@ -125,6 +157,119 @@ bool SpdFlasher::readFlash(quint32 addr, quint32 len, quint32 offset, QByteArray
 bool SpdFlasher::resetDevice(QString *error)
 {
     return sendAndExpectAck(BSL_CMD_NORMAL_RESET, QByteArray(), error);
+}
+
+bool SpdFlasher::selectPartition(quint16 cmd, const QString &name, quint64 size,
+                                 QString *error)
+{
+    // 分区名 36 单元上限（行为观察 copy_to_wstr 超长报错——此处显式拒绝）
+    if (name.size() > 36) {
+        if (error) *error = QStringLiteral("分区名过长（>36 单元）: %1").arg(name);
+        return false;
+    }
+    const bool mode64 = (size >> 32) != 0;
+    return sendAndExpectAck(cmd, selectPartitionPacket(name, size, mode64), error);
+}
+
+bool SpdFlasher::erasePartition(const QString &name, QString *error)
+{
+    // 行为观察 erase_partition：ERASE_FLASH + 选择包（size=0，非 64 位，载荷 76B）
+    return selectPartition(BSL_CMD_ERASE_FLASH, name, 0, error);
+}
+
+bool SpdFlasher::writePartition(const QString &name, const QByteArray &data,
+                                QString *error)
+{
+    // 行为观察 load_partition：START_DATA + 选择包（size=数据长度）→ ACK →
+    // MIDST_DATA×N（块 ≤4096，逐块 ACK，15s 超时）→ END_DATA → ACK。
+    // 分区写无 EXEC_DATA（区别于 FDL 上传）；真机验证待后续（诚实边界）
+    if (!selectPartition(BSL_CMD_START_DATA, name, quint64(data.size()), error))
+        return false;
+    for (qsizetype off = 0; off < data.size(); off += kPartBlock) {
+        if (!sendAndExpectAck(BSL_CMD_MIDST_DATA, data.mid(off, kPartBlock), error,
+                              kExecTimeoutMs))
+            return false;
+    }
+    return sendAndExpectAck(BSL_CMD_END_DATA, QByteArray(), error);
+}
+
+bool isFdlPartition(const QString &partitionName)
+{
+    const QString n = partitionName.toLower();
+    return n == QStringLiteral("fdl") || n == QStringLiteral("fdl1")
+        || n == QStringLiteral("fdl2");
+}
+
+bool runSpdFlash(const QString &pacPath, const QString &fdl1Path, const QString &fdl2Path,
+                 std::function<void(const QString &, int)> progress, QString *error)
+{
+    // 1. 解析 pac（B8 imgpac 复用）
+    QFile pacFile(pacPath);
+    if (!pacFile.open(QIODevice::ReadOnly)) {
+        if (error) *error = QStringLiteral("无法打开 pac: %1").arg(pacPath);
+        return false;
+    }
+    const QByteArray pacData = pacFile.readAll();
+    QList<imgpac::PacPartition> parts;
+    if (!imgpac::parsePac(pacData, parts, error))
+        return false;
+    if (parts.isEmpty()) {
+        if (error) *error = QStringLiteral("pac 无分区");
+        return false;
+    }
+
+    // 2. 枚举 + 打开会话
+    QList<QPair<int, int>> devs;
+    if (!enumerateUsb(devs, error))
+        return false;
+    if (devs.isEmpty()) {
+        if (error) *error = QStringLiteral("未检测到展锐设备（VID 0x1782）");
+        return false;
+    }
+    std::unique_ptr<IUsbChannel> usb;
+    if (!openLibusbUsb(devs.first().first, devs.first().second, usb, error))
+        return false;
+    SpdSession session(std::move(usb), devs.first().first, devs.first().second);
+    if (!session.connect(error))
+        return false;
+    SpdFlasher flasher(session);
+
+    // 3. FDL1 + FDL2 上传（诚实边界：二进制用户提供）
+    if (progress) progress(QStringLiteral("fdl1"), 5);
+    if (!flasher.uploadFdl(fdl1Path, 0x40004000, true, error))
+        return false;
+    if (progress) progress(QStringLiteral("fdl2"), 10);
+    // FDL2 上传后设备重新枚举（行为观察）——等待新端口，超时 30s 标注
+    // （诚实边界：新端口等待实现时按行为观察核实；不可得时标注待真机验证）
+    if (!flasher.uploadFdl(fdl2Path, 0x14000000, true, error))
+        return false;
+
+    // 4. 逐分区（fdl 分区跳过——已单独上传）
+    // 写路径（行为观察核实，对照参考实现）：擦除 erase_partition → 写
+    // load_partition；分区选择包 name 36×UTF-16LE + size LE32（mode64 时
+    // + size_hi + dummy，载荷 76/88B）；写数据经 START_DATA/MIDST_DATA×N/
+    // END_DATA 上传，无 EXEC_DATA
+    int done = 0;
+    for (const imgpac::PacPartition &p : parts) {
+        if (isFdlPartition(p.name)) continue;
+        // 操作型条目无数据（行为观察 nFileFlag=0，如 "FLASH"）——跳过
+        if (p.size == 0) continue;
+        if (progress) progress(p.name, 10 + 80 * done / parts.size());
+        // 分区数据从 pac 提取（B8 布局：p.offset/p.size；parsePac 已校验数据范围）
+        const QByteArray pdata = pacData.mid(qsizetype(p.offset), qsizetype(p.size));
+        // 逐分区先擦后写（计划流程；行为观察：参考实现 write_part 本身不预擦除，
+        // 擦除为独立命令 erase_part）
+        if (!flasher.erasePartition(p.name, error))
+            return false;
+        if (!flasher.writePartition(p.name, pdata, error))
+            return false;
+        ++done;
+    }
+    if (progress) progress(QString(), 95);
+    if (!flasher.resetDevice(error))
+        return false;
+    if (progress) progress(QString(), 100);
+    return true;
 }
 
 } // namespace spd

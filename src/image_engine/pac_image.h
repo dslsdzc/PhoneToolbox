@@ -16,6 +16,7 @@ struct PacPartition {
     QString name;        // 分区 ID（如 FDL1 / preloader / boot / system）
     QString fileName;    // 分区数据在容器内的文件名（如 boot.img）
     quint64 offset = 0;  // 分区数据在 pac 文件中的绝对偏移
+    quint64 size = 0;    // 分区数据长度（字节；0 = 操作型条目无数据，如 "FLASH"）
 };
 
 bool isPac(const QByteArray &pac);                              // 能完整解析即为 pac

@@ -63,6 +63,11 @@ private slots:
     // ---- F4-2 审查修复：ACK 强制校验 + log 帧跳过 ----
     void uploadFdlRejectsNonAck();
     void logFrameSkipped();
+    // ---- F4-3: 集成边界 ----
+    void isFdlPartitionNames();
+    // ---- F4-3: 分区写路径（行为观察核实后实现）----
+    void erasePartitionFrame();
+    void writePartitionSequence();
 };
 
 // 构造响应帧：type BE16 + len BE16 + data + checksum（行为观察帧布局）
@@ -335,6 +340,54 @@ void TestSpdFlash::logFrameSkipped()
                           nullptr, &rtype));
     QCOMPARE(rtype, spd::BSL_REP_ACK); // 返回的是 ACK 帧而非 log 帧
     QVERIFY(m->reads.isEmpty());       // 两帧均已消费
+}
+
+void TestSpdFlash::isFdlPartitionNames()
+{
+    QVERIFY(spd::isFdlPartition(QStringLiteral("fdl1")));
+    QVERIFY(spd::isFdlPartition(QStringLiteral("fdl2")));
+    QVERIFY(spd::isFdlPartition(QStringLiteral("fdl")));
+    QVERIFY(!spd::isFdlPartition(QStringLiteral("boot")));
+    QVERIFY(!spd::isFdlPartition(QStringLiteral("system")));
+}
+
+void TestSpdFlash::erasePartitionFrame()
+{
+    // 按名擦除（行为观察 erase_partition）：ERASE_FLASH(0x0A) + 分区选择包
+    // （name 36×UTF-16LE + size LE32=0，载荷 76B）→ ACK
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    m->reads << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
+    QVERIFY(f.erasePartition(QStringLiteral("boot"), nullptr));
+    // 选择包：name "boot" UTF-16LE（b 00 o 00 o 00 t 00）+ 补零至 36 单元 + size LE32=0
+    QByteArray pkt(76, '\0');
+    pkt[0] = 'b'; pkt[2] = 'o'; pkt[4] = 'o'; pkt[6] = 't';
+    QCOMPARE(m->writes, makeResponseFrame(spd::BSL_CMD_ERASE_FLASH, pkt));
+}
+
+void TestSpdFlash::writePartitionSequence()
+{
+    // 按名写分区（行为观察 load_partition）：START_DATA(0x01) + 分区选择包 → ACK →
+    // MIDST_DATA×N → END_DATA → ACK（分区写无 EXEC_DATA）
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    m->reads << makeResponseFrame(spd::BSL_REP_ACK, QByteArray())
+             << makeResponseFrame(spd::BSL_REP_ACK, QByteArray())
+             << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
+    QVERIFY(f.writePartition(QStringLiteral("boot"), QByteArray("pkg", 3), nullptr));
+    // 选择包：name "boot" UTF-16LE + 补零 + size LE32=3（载荷 76B，非 64 位模式）
+    QByteArray pkt(76, '\0');
+    pkt[0] = 'b'; pkt[2] = 'o'; pkt[4] = 'o'; pkt[6] = 't';
+    pkt[72] = char(3);
+    QByteArray expect;
+    expect += makeResponseFrame(spd::BSL_CMD_START_DATA, pkt);
+    expect += makeResponseFrame(spd::BSL_CMD_MIDST_DATA, QByteArray("pkg", 3));
+    expect += makeResponseFrame(spd::BSL_CMD_END_DATA, QByteArray());
+    QCOMPARE(m->writes, expect);
 }
 
 QTEST_APPLESS_MAIN(TestSpdFlash)

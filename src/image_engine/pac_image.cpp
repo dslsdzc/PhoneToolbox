@@ -143,6 +143,7 @@ bool parseNewFormat(const QByteArray &pac, QList<PacPartition> &out, QString *er
             return false;
         }
         p.offset = addr;
+        p.size = size;
         out.append(p);
     }
     return true;
@@ -183,6 +184,7 @@ bool parseLegacyFormat(const QByteArray &pac, QList<PacPartition> &out, QString 
             return false;
         }
         p.offset = addr;
+        p.size = size;
         out.append(p);
         cur += len;
     }
