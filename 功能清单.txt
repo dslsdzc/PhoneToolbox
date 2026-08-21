@@ -235,7 +235,17 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 首款插件: 华为 Kirin USB Update 刷写 (见"二、刷机工具")
 
 
-十六、UI 框架
+十六、刷机管线自动集成
+----------------------
+[√] 三协议通道自动接入刷机管线 (用户指令: 自动集成, 非手动插件面板)
+[√] 设备检测: MTK BROM / 华为 USB Update / 展锐 新模式 (VID/PID 轮询)
+[√] 分派路由: 按设备模式自动分派 (FlashTool::flashFullPackage)
+[√] 模式感知 UI: 刷写按钮自动启用 + 文件参数对话框 (update.app/pac+FDL/DA)
+[√] 多设备防护: 同厂商多设备警告 (刷写首个枚举设备提示)
+[√] 诚实边界: MTK BROM 分区刷写待接线; VID 通配双列表已知行为
+
+
+十七、UI 框架
 -------------
 [√] 暗色主题 (Catppuccin Mocha 风格)
 [√] 设备列表 (序列号 + 型号 + 模式标签)
@@ -246,7 +256,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 支持复制日志文本
 
 
-十七、第三方依赖
+十八、第三方依赖
 ----------------
 [√] Qt 6 (LGPL v3) - UI 框架
 [√] libusb-1.0 (LGPL v2.1) - USB 通讯
