@@ -49,6 +49,7 @@ enum BslCmd : quint16 {
 enum BslReply : quint16 {
     BSL_REP_ACK = 0x80, // 行为观察：命令响应一律为 ACK（send_and_check 强制校验）
     BSL_REP_READ_FLASH = 0x93,
+    BSL_REP_LOG = 0xFF, // log 帧：接收循环跳过（行为观察 recv_msg 循环语义）
 };
 
 // 抽象传输通道（mock 注入单测；libusb 生产实现）
@@ -87,8 +88,11 @@ public:
     // 成功返回 true 并填充 reply（响应 data 区）；checksum 不符失败。
     // replyType 可选：回传响应 type（sendCommand 不校验 type，供调用方断言，
     // 如 readFlash 校验 BSL_REP_READ_FLASH）。
+    // BSL_REP_LOG(0xFF) log 帧自动跳过（连续上限 16，行为观察 recv_msg 循环语义）；
+    // timeoutMs 为单帧响应超时（EXEC_DATA 设备执行耗时可达 15s，其余 2000ms）。
     bool sendCommand(quint16 type, const QByteArray &payload, QByteArray &reply,
-                     int replyMaxLen, QString *error, quint16 *replyType = nullptr);
+                     int replyMaxLen, QString *error, quint16 *replyType = nullptr,
+                     int timeoutMs = 2000);
 
     bool close(QString *error);
     bool isClosed() const { return m_closed; }

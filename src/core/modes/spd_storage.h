@@ -44,6 +44,10 @@ public:
     bool resetDevice(QString *error = nullptr);
 
 private:
+    // 发送命令并强制校验响应 type == BSL_REP_ACK（行为观察 send_and_check 语义；
+    // 设备错误响应如 0x84 不得当成功）。timeoutMs 默认 2000，EXEC_DATA 传 15000。
+    bool sendAndExpectAck(quint16 type, const QByteArray &payload, QString *error,
+                          int timeoutMs = 2000);
     SpdSession &m_session;
 };
 

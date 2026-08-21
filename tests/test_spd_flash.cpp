@@ -60,6 +60,9 @@ private slots:
     void eraseFlashFrame();
     void readFlashResponse();
     void resetFrame();
+    // ---- F4-2 审查修复：ACK 强制校验 + log 帧跳过 ----
+    void uploadFdlRejectsNonAck();
+    void logFrameSkipped();
 };
 
 // 构造响应帧：type BE16 + len BE16 + data + checksum（行为观察帧布局）
@@ -107,9 +110,11 @@ void TestSpdFlash::crc16Vector()
 
 void TestSpdFlash::enumValues()
 {
-    // 行为观察：响应默认 ACK=0x80（命令后强制校验）、READ_FLASH 响应 0x93、POWER_OFF=0x17
+    // 行为观察：响应默认 ACK=0x80（命令后强制校验）、READ_FLASH 响应 0x93、
+    // POWER_OFF=0x17、log 帧 0xFF（接收循环跳过）
     QCOMPARE(int(spd::BSL_REP_ACK), 0x80);
     QCOMPARE(int(spd::BSL_REP_READ_FLASH), 0x93);
+    QCOMPARE(int(spd::BSL_REP_LOG), 0xFF);
     QCOMPARE(int(spd::BSL_CMD_POWER_OFF), 0x17);
 }
 
@@ -248,7 +253,8 @@ void TestSpdFlash::uploadFdlSequence()
     tmp.write("fdl");
     tmp.flush();
     // 响应队列：START_DATA 确认 + MIDST_DATA 确认 + END_DATA 确认 + EXEC_DATA 确认
-    const QByteArray ack = QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    // （真实 ACK：type=0x80；sendAndExpectAck 强制校验）
+    const QByteArray ack = makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
     m->reads << ack << ack << ack << ack;
     QVERIFY(f.uploadFdl(tmp.fileName(), 0x40004000, true, nullptr));
     // 帧序列：START_DATA(0x01, addr+size BE32) → MIDST_DATA(0x02, 3B) → END(0x03) → EXEC(0x04)
@@ -264,7 +270,7 @@ void TestSpdFlash::eraseFlashFrame()
     MockUsbChannel *m = usb.get();
     spd::SpdSession s(std::move(usb), 0x1782, 0);
     spd::SpdFlasher f(s);
-    m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    m->reads << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
     QVERIFY(f.eraseFlash(0x1000, 0x100, nullptr));
     // ERASE_FLASH(0x0A)：addr BE32 + size BE32
     QVERIFY(m->writes.contains('\x0A'));
@@ -290,9 +296,45 @@ void TestSpdFlash::resetFrame()
     MockUsbChannel *m = usb.get();
     spd::SpdSession s(std::move(usb), 0x1782, 0);
     spd::SpdFlasher f(s);
-    m->reads << QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    m->reads << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
     QVERIFY(f.resetDevice(nullptr));
     QVERIFY(m->writes.contains('\x05'));
+}
+
+void TestSpdFlash::uploadFdlRejectsNonAck()
+{
+    // H3：设备错误响应（0x84 OPERATION_FAILED）不得被当作成功——
+    // 每步强制校验 ACK 0x80（行为观察 send_and_check 语义）
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    spd::SpdFlasher f(s);
+    QTemporaryFile tmp;
+    QVERIFY(tmp.open());
+    tmp.write("fdl");
+    tmp.flush();
+    m->reads << makeResponseFrame(0x84, QByteArray()); // BSL_REP_OPERATION_FAILED
+    QString err;
+    QVERIFY(!f.uploadFdl(tmp.fileName(), 0x40004000, false, &err));
+    QVERIFY(err.contains("ACK"));
+    QVERIFY(err.contains("0084"));
+}
+
+void TestSpdFlash::logFrameSkipped()
+{
+    // H3：设备先发 BSL_REP_LOG(0xFF) 帧 —— 接收须跳过 log 帧继续读，
+    // 直至真实响应帧（行为观察 recv_msg 循环语义）
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << makeResponseFrame(spd::BSL_REP_LOG, QByteArray("log"))
+             << makeResponseFrame(spd::BSL_REP_ACK, QByteArray()); // 真实 ACK
+    QByteArray reply;
+    quint16 rtype = 0;
+    QVERIFY(s.sendCommand(spd::BSL_CMD_START_DATA, QByteArray(8, '\0'), reply, 64,
+                          nullptr, &rtype));
+    QCOMPARE(rtype, spd::BSL_REP_ACK); // 返回的是 ACK 帧而非 log 帧
+    QVERIFY(m->reads.isEmpty());       // 两帧均已消费
 }
 
 QTEST_APPLESS_MAIN(TestSpdFlash)
