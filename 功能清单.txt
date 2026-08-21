@@ -257,12 +257,20 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] zstd / lz4 / bzip2 / xz / brotli (压缩算法, 镜像处理)
 [√] 参照库 (reference/, 不参与构建): GeekFlashCore (AGPL) / qdl (BSD-3)
     / Kirin-Tool (BSL 1.1) / unpack_huawei_package / HISuite-Proxy
+    / spreadtrum_flash (Unlicense)
+
+--- 展锐 ResearchDownload 刷写 (自研, 行为观察核实) ---
+[√] HDLC 帧层 (0x7E 帧 / type+len BE16 / 16-bit 求和 checksum / CRC16)
+[√] BSL 命令层: CONNECT / START-MIDST-END / EXEC / ERASE / READ_FLASH / RESET
+[√] FDL 上传 (FDL1/FDL2 握手: CHECK_BAUD→REP_VER→CONNECT + FDL2 就绪等待)
+[√] 分区选择包 (name UTF-16LE + size + 64 位模式) + 分区擦除/写入 (4096 块)
+[√] .pac 固件刷写路由 (B8 解包复用: 解析 → FDL 上传 → 逐分区 → 复位)
+[√] 诚实边界: FDL 二进制需用户提供; FDL1 CRC16 模式等真机待验证
 
 
 规划中 (计划 F 剩余 + 后续)
 ------------------------
 [ ] OPPO/一加/realme EDL 刷机链 (OFP/OPS 解密 + Sahara/Firehose 自研, geekflashcore 参照)
-[ ] 展锐 ResearchDownload 刷写通道
 [ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
 [ ] 三星 Heimdall 集成 (Odin 协议开源实现)
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)
