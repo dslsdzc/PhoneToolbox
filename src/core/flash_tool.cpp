@@ -2,6 +2,7 @@
 #include "adb_embedded.h"
 #include "core/modes/spd_storage.h"
 #include "src/plugins/plugin_manager.h"
+#include <libusb.h>
 #include <QProcess>
 #include <QFileInfo>
 #include <QFile>
@@ -1113,6 +1114,41 @@ bool FlashTool::mtkReadAllPartitions(const QString &directory)
 
 // ==================== F5: 整包刷写分派 ====================
 
+// 多设备防护（F5 终审）：三个协议层均取枚举首个设备（mtk_handler.cpp runBromFlash
+// 的 devs.first() / spd_storage.cpp runSpdFlash / hisi_flash.cpp runHisiFlash 的首个枚举）
+// ——多台同厂商设备时刷写目标与用户所选条目未必一致。完整设备选择器
+// （bus-addr 直通协议层）为后续任务；此处仅做分派层计数警告。
+// 直接用 libusb 按 VID 计数（libusb 已链接）——不引入华为插件头（插件法务隔离保持），
+// 三种 VID 统一处理。返回匹配 VID 的设备数；枚举失败返回 -1（不阻断刷写，仅无法计数）。
+static int countDevicesOfVid(int vid, QString *error)
+{
+    libusb_context *ctx = nullptr;
+    int ret = libusb_init(&ctx);
+    if (ret != LIBUSB_SUCCESS) {
+        if (error)
+            *error = QStringLiteral("libusb_init 失败: %1").arg(QLatin1String(libusb_error_name(ret)));
+        return -1;
+    }
+    libusb_set_option(ctx, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+    libusb_device **list = nullptr;
+    const ssize_t count = libusb_get_device_list(ctx, &list);
+    if (count < 0) {
+        if (error) *error = QStringLiteral("libusb_get_device_list 失败");
+        libusb_exit(ctx);
+        return -1;
+    }
+    int n = 0;
+    for (ssize_t i = 0; i < count; ++i) {
+        libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) == LIBUSB_SUCCESS &&
+            desc.idVendor == vid)
+            ++n;
+    }
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return n;
+}
+
 QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
 {
     switch (mode) {
@@ -1157,6 +1193,12 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         // 分区列表（分区名→镜像路径）由 F5-3 FlashPanel 构建并经 params 传入——
         // 结构待接线，先空列表（诚实边界，详见 F5-2 报告）。
         const QList<QPair<QString, QByteArray>> partitions;
+        // 多设备防护：BROM 层取枚举首个设备（devs.first()）——多台 MTK 同连时警告
+        const int mtkCount = countDevicesOfVid(0x0E8D, nullptr);
+        if (mtkCount > 1)
+            emit outputMessage(QStringLiteral(
+                "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
+                .arg(mtkCount), false);
         emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1").arg(deviceId), false);
         return runBromFlash(daBinary, partitions, error);
     }
@@ -1164,6 +1206,7 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         // F2 插件通道：经 PluginManager 运行时加载（法务隔离保持——删除插件文件即完整移除）。
         // 已知行为（F5-1 交接）：VID 通配检测（0x12D1 任意 PID）会让华为手机同时以 ADB
         // 模式出现；本分派按模式键控不受影响，但 F5-3 UI 不得对 ADB 设备提供该协议通道。
+        // 进度：插件 execute 契约无 progress 参数（huawei_flash_plugin.cpp），华为通道进度不接线。
         const QString updateApp = params.value(QStringLiteral("updateApp")).toString();
         if (updateApp.isEmpty()) {
             if (error) *error = QStringLiteral("缺少 update.app 路径（huawei-usb-update 通道）");
@@ -1177,6 +1220,13 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         }
         QVariantMap capParams;
         capParams.insert(QStringLiteral("updateApp"), updateApp);
+        // 多设备防护：hisi_flash.cpp 取枚举首个设备——多台华为同连时警告
+        // （raw libusb VID 计数，不经插件 API——法务隔离保持）
+        const int huaweiCount = countDevicesOfVid(0x12D1, nullptr);
+        if (huaweiCount > 1)
+            emit outputMessage(QStringLiteral(
+                "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
+                .arg(huaweiCount), false);
         emit outputMessage(QStringLiteral("华为 USB Update 刷写通道：%1").arg(deviceId), false);
         return plugins.first()->execute(
             QStringLiteral("huawei-usb-update.flash"), capParams, error);
@@ -1193,8 +1243,20 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
             if (error) *error = QStringLiteral("缺少 pac 路径（spd 通道）");
             return false;
         }
+        // 多设备防护：spd_storage.cpp 取枚举首个设备——多台展锐同连时警告
+        const int spdCount = countDevicesOfVid(0x1782, nullptr);
+        if (spdCount > 1)
+            emit outputMessage(QStringLiteral(
+                "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
+                .arg(spdCount), false);
         emit outputMessage(QStringLiteral("展锐刷写通道：%1").arg(deviceId), false);
-        return spd::runSpdFlash(pacPath, fdl1, fdl2, nullptr, error);
+        // SPD 进度接线（F5 终审）：runSpdFlash 的 progress 回调（分区名, 百分比）
+        // 转发到 FlashTool::flashProgress 信号（与 EDLHandler::progress 同款转发模式）
+        return spd::runSpdFlash(pacPath, fdl1, fdl2,
+            [this](const QString &name, int percent) {
+                Q_UNUSED(name)
+                emit flashProgress(percent);
+            }, error);
     }
     // 不可达：flashChannelForMode 仅返回上述三字面量或空串（空串已在上方拒绝），
     // 保留裸 return 以满足编译器的全路径返回检查。

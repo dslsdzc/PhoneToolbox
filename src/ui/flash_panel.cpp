@@ -642,8 +642,10 @@ void FlashPanel::onFlashClicked()
             if (pacPath.isEmpty()) return;
             const QString fdl1 = QFileDialog::getOpenFileName(
                 this, QStringLiteral("选择 FDL1 二进制"));
+            if (fdl1.isEmpty()) return;
             const QString fdl2 = QFileDialog::getOpenFileName(
                 this, QStringLiteral("选择 FDL2 二进制"));
+            if (fdl2.isEmpty()) return;
             params.insert(QStringLiteral("pacPath"), pacPath);
             params.insert(QStringLiteral("fdl1Path"), fdl1);
             params.insert(QStringLiteral("fdl2Path"), fdl2);
@@ -679,6 +681,9 @@ void FlashPanel::onFlashClicked()
                 static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode),
                 params, &error))
             emit outputMessage(QStringLiteral("刷写失败: %1").arg(error), true);
+        else if (channel == QStringLiteral("mtk-brom"))
+            // MTK BROM 通道当前仅 DA 握手（分区刷写待接线，见 F5-3 诚实边界标注）
+            emit outputMessage(QStringLiteral("握手完成（分区刷写待接线）"), false);
         else
             emit outputMessage(QStringLiteral("刷写完成"), false);
 
