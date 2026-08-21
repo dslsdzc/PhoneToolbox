@@ -241,6 +241,12 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         modeStr = "EDL 9008"; break;
     case DeviceDetector::MODE_MTK_DA:
         modeStr = "MTK DA"; break;
+    case DeviceDetector::MODE_MTK_BROM:
+        modeStr = "MTK BROM"; break;
+    case DeviceDetector::MODE_HUAWEI_USB_UPDATE:
+        modeStr = "华为 USB Update"; break;
+    case DeviceDetector::MODE_SPD:
+        modeStr = "展锐"; break;
     default:
         modeStr = "未知"; break;
     }
@@ -307,6 +313,20 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
             m_lockBtn->setEnabled(true);
         }
         return; // MTK 不走后面的逻辑
+    }
+
+    // F5: 协议通道模式（MTK BROM / 华为 USB Update / 展锐）——整包刷写通道。
+    // 分区列表不适用：MTK BROM 分区镜像选择待接线（F1 runBromFlash 分区结构），
+    // 华为/展锐为整包通道；跳过 onRefreshPartitions，避免对协议设备(如
+    // usb-1-2)发 ADB 查询。「刷入」按所选设备模式走协议通道文件参数对话框。
+    if (m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM ||
+        m_deviceInfo.mode == DeviceDetector::MODE_HUAWEI_USB_UPDATE ||
+        m_deviceInfo.mode == DeviceDetector::MODE_SPD) {
+        m_partitionList->clear();
+        m_partitions.clear();
+        m_flashBtn->setEnabled(true);
+        m_flashBtn->setToolTip(QStringLiteral("协议通道整包刷写（按模式选择 update.app / pac+FDL / DA 文件）"));
+        return;
     }
 
     // 选中设备自动刷新分区
@@ -601,6 +621,72 @@ bool FlashPanel::checkBootloaderUnlock(const QString &deviceId)
 
 void FlashPanel::onFlashClicked()
 {
+    // F5: 协议通道整包刷写（MTK BROM / 华为 USB Update / 展锐）——
+    // 优先于分区刷写；通道按所选设备模式分派，ADB 条目不会进入此分支
+    // （flashChannelForMode 对非协议模式返回空串）。
+    const QString channel = FlashTool::flashChannelForMode(
+        static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode));
+    if (!channel.isEmpty()) {
+        const QString deviceId = m_deviceInfo.serialNumber;
+        QVariantMap params;
+        if (channel == QStringLiteral("huawei-usb-update")) {
+            const QString appPath = QFileDialog::getOpenFileName(
+                this, QStringLiteral("选择 update.app"), QString(),
+                QStringLiteral("华为固件 (*.app)"));
+            if (appPath.isEmpty()) return;
+            params.insert(QStringLiteral("updateApp"), appPath);
+        } else if (channel == QStringLiteral("spd")) {
+            const QString pacPath = QFileDialog::getOpenFileName(
+                this, QStringLiteral("选择 pac 固件"), QString(),
+                QStringLiteral("展锐固件 (*.pac)"));
+            if (pacPath.isEmpty()) return;
+            const QString fdl1 = QFileDialog::getOpenFileName(
+                this, QStringLiteral("选择 FDL1 二进制"));
+            const QString fdl2 = QFileDialog::getOpenFileName(
+                this, QStringLiteral("选择 FDL2 二进制"));
+            params.insert(QStringLiteral("pacPath"), pacPath);
+            params.insert(QStringLiteral("fdl1Path"), fdl1);
+            params.insert(QStringLiteral("fdl2Path"), fdl2);
+        } else if (channel == QStringLiteral("mtk-brom")) {
+            const QString daPath = QFileDialog::getOpenFileName(
+                this, QStringLiteral("选择 DA 二进制"));
+            if (daPath.isEmpty()) return;
+            params.insert(QStringLiteral("daPath"), daPath);
+            // 分区镜像选择（诚实边界）：当前先整包/单分区待接线——按 F1
+            // runBromFlash 分区结构适配，未适配前标注"分区选择待接线"。
+            emit outputMessage(QStringLiteral(
+                "MTK BROM 通道：分区镜像选择待接线，本次仅执行 DA 协议握手"), false);
+        }
+
+        // 已知显示伪影（F5-1）：VID 通配检测（华为 0x12D1 / 展锐 0x1782）
+        // 会让同设备同时以 ADB 模式列出。协议条目的 ID 为 usb-<bus>-<addr>，
+        // 无法与 ADB serial 关联，故不做身份匹配；按所选条目模式分派保证
+        // ADB 条目不会进入协议通道——用户选择协议条目即表明意图，放行并记录。
+        if (channel == QStringLiteral("huawei-usb-update") ||
+            channel == QStringLiteral("spd")) {
+            emit outputMessage(QStringLiteral(
+                "提示：该设备可能同时以 ADB 模式列出（VID 通配检测）；"
+                "本次按所选协议条目走 %1 通道，请确认设备处于对应协议模式")
+                .arg(channel), false);
+        }
+
+        m_progressBar->setVisible(true);
+        m_progressBar->setValue(0);
+        m_flashBtn->setEnabled(false);
+
+        QString error;
+        if (!m_flashTool->flashFullPackage(deviceId,
+                static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode),
+                params, &error))
+            emit outputMessage(QStringLiteral("刷写失败: %1").arg(error), true);
+        else
+            emit outputMessage(QStringLiteral("刷写完成"), false);
+
+        m_progressBar->setVisible(false);
+        m_flashBtn->setEnabled(true);
+        return;
+    }
+
     QListWidgetItem *item = m_partitionList->currentItem();
     if (!item || m_currentFile.isEmpty()) return;
 
