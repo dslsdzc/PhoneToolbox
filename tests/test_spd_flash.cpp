@@ -68,6 +68,7 @@ private slots:
     // ---- F4-3: 分区写路径（行为观察核实后实现）----
     void erasePartitionFrame();
     void writePartitionSequence();
+    void mode64PacketLayout();
 };
 
 // 构造响应帧：type BE16 + len BE16 + data + checksum（行为观察帧布局）
@@ -388,6 +389,24 @@ void TestSpdFlash::writePartitionSequence()
     expect += makeResponseFrame(spd::BSL_CMD_MIDST_DATA, QByteArray("pkg", 3));
     expect += makeResponseFrame(spd::BSL_CMD_END_DATA, QByteArray());
     QCOMPARE(m->writes, expect);
+}
+
+void TestSpdFlash::mode64PacketLayout()
+{
+    // mode64 分区选择包（88B，行为观察 select_partition）：name 36×UTF-16LE
+    // @0..71 + size LE32 @72 + size_hi LE32 @76 + dummy 8B @80..87 零
+    const QByteArray pkt = spd::selectPartitionPacket(
+        QStringLiteral("boot"), 0x0000000200000003ULL, true);
+    QCOMPARE(pkt.size(), 88);
+    QByteArray expected(88, '\0');
+    // name UTF-16LE（b 00 o 00 o 00 t 00，其余 36 单元补零）
+    expected[0] = 'b'; expected[2] = 'o'; expected[4] = 'o'; expected[6] = 't';
+    // size LE32 @72 = 0x00000003（低 32 位）
+    expected[72] = char(3);
+    // size_hi LE32 @76 = 0x00000002（高 32 位）
+    expected[76] = char(2);
+    // dummy @80..87 保持零（行为观察 pkt 零初始化）
+    QCOMPARE(pkt, expected);
 }
 
 QTEST_APPLESS_MAIN(TestSpdFlash)

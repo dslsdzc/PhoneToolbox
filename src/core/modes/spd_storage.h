@@ -77,5 +77,9 @@ bool runSpdFlash(const QString &pacPath, const QString &fdl1Path, const QString 
                  QString *error = nullptr);
 // 纯函数（单测）：fdl/fdl1/fdl2 分区名判定（诚实边界用——FDL 单独上传不参与普通刷写）
 bool isFdlPartition(const QString &partitionName);
+// 分区选择包（行为观察 select_partition）：name 36×UTF-16LE + size LE32
+// （mode64 时另含 size_hi LE32 + dummy 8B）——载荷 76B 或 88B。
+// 纯函数（单测覆盖 mode64 88B 布局）；mode64 由调用方按 size 高位判定
+QByteArray selectPartitionPacket(const QString &name, quint64 size, bool mode64);
 
 } // namespace spd

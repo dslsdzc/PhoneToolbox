@@ -20,11 +20,16 @@ void putBe32(QByteArray &out, quint32 v)
 
 constexpr int kFdlBlock = 2048; // MIDST_DATA 块上限（行为观察）
 constexpr int kPartBlock = 4096; // 分区写 MIDST_DATA 块（行为观察 write_part 默认 4096）
-constexpr int kExecTimeoutMs = 15000; // EXEC_DATA 设备执行耗时可达 15s（行为观察 recv_msg_timeout(15000)）
+// 命令响应超时：EXEC_DATA 设备执行可达 15s；writePartition 的 MIDST 每块
+// 同样用 15s（行为观察：分区数据块上传等待）
+constexpr int kExecTimeoutMs = 15000;
+
+} // namespace
 
 // 分区选择包（行为观察 select_partition 核实）：name 36×UTF-16LE + size LE32
 // （mode64 时另含 size_hi LE32 + dummy u64）——载荷 76B 或 88B。
 // 名称超 36 单元时截断（调用方 selectPartition 已前置拒绝）。
+// 公共纯函数：单测直接验证 mode64 88B 布局（writePartition 经 selectPartition 使用）
 QByteArray selectPartitionPacket(const QString &name, quint64 size, bool mode64)
 {
     QByteArray pkt(mode64 ? 88 : 76, '\0');
@@ -50,8 +55,6 @@ QByteArray selectPartitionPacket(const QString &name, quint64 size, bool mode64)
     }
     return pkt;
 }
-
-} // namespace
 
 bool SpdFlasher::sendAndExpectAck(quint16 type, const QByteArray &payload, QString *error,
                                   int timeoutMs)
@@ -239,8 +242,8 @@ bool runSpdFlash(const QString &pacPath, const QString &fdl1Path, const QString 
     if (!flasher.uploadFdl(fdl1Path, 0x40004000, true, error))
         return false;
     if (progress) progress(QStringLiteral("fdl2"), 10);
-    // FDL2 上传后设备重新枚举（行为观察）——等待新端口，超时 30s 标注
-    // （诚实边界：新端口等待实现时按行为观察核实；不可得时标注待真机验证）
+    // FDL2 上传后继续使用同一会话（行为观察：参照实现不重新枚举/不等待新端口）；
+    // 若真机出现断线重枚举，需重新连接会话 —— 标注待真机验证
     if (!flasher.uploadFdl(fdl2Path, 0x14000000, true, error))
         return false;
 
