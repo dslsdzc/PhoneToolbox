@@ -285,7 +285,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_resource_monitor.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_brom.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_payload.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_spd_flash.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_spd_flash.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pipeline.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -321,6 +322,20 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
+                elseif(_test_stem STREQUAL "test_pipeline")
+                    # F5-2：flashChannelForMode 为 flash_tool.cpp 静态纯函数——整链编译 flash_tool
+                    # 及其传递依赖（ADB 采集/EDL/MTK handler/SPD 路由）；插件符号（PluginManager）
+                    # 经 phone_plugins 链接，见下方 add_subdirectory(src/plugins) 之后的块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/flash_tool.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/adb_embedded.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/edl_handler.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_handler.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
@@ -330,9 +345,14 @@ if(ENABLE_IMAGE_TESTS)
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
                 if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
-                   OR _test_stem STREQUAL "test_spd_flash")
+                   OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
+                endif()
+                # 记下 test_pipeline 目标名——phone_plugins 库在本循环之后才定义，
+                # 链接放 add_subdirectory(src/plugins) 之后（避免"target not found"）。
+                if(_test_stem STREQUAL "test_pipeline")
+                    set(_pipeline_test_target ${_test_target})
                 endif()
             endforeach()
         endif()
@@ -342,6 +362,12 @@ endif()
 # ---- 插件系统（主项目通用，F2-P）----
 add_subdirectory(src/plugins)
 target_link_libraries(PhoneToolbox phone_plugins)
+
+# F5-2：test_pipeline 引用 PluginManager（phone_plugins）与 adb_embedded 的
+# QNetworkAccessManager（Qt6::Network）——目标在上一节循环已建，此处补链。
+if(_pipeline_test_target)
+    target_link_libraries(${_pipeline_test_target} PRIVATE phone_plugins Qt6::Network)
+endif()
 
 # 可选插件：默认构建（华为刷写），删除目录/关闭选项即完整移除
 option(BUILD_HUAWEI_FLASH_PLUGIN "Build Huawei flash plugin" ON)

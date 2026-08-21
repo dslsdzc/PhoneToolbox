@@ -1,5 +1,7 @@
 #include "flash_tool.h"
 #include "adb_embedded.h"
+#include "core/modes/spd_storage.h"
+#include "src/plugins/plugin_manager.h"
 #include <QProcess>
 #include <QFileInfo>
 #include <QFile>
@@ -7,6 +9,7 @@
 #include <QDir>
 #include <QCoreApplication>
 #include <QThread>
+#include <QPair>
 
 #ifdef Q_OS_WIN
 static const char *kPlatformScript = "flash-all.bat";
@@ -1106,4 +1109,86 @@ bool FlashTool::mtkReadAllPartitions(const QString &directory)
 {
     if (!m_mtkHandler || !m_mtkHandler->isConnected()) return false;
     return m_mtkHandler->readAllPartitions(directory);
+}
+
+// ==================== F5: 整包刷写分派 ====================
+
+QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
+{
+    switch (mode) {
+    case DeviceDetector::MODE_MTK_BROM:
+        return QStringLiteral("mtk-brom");
+    case DeviceDetector::MODE_HUAWEI_USB_UPDATE:
+        return QStringLiteral("huawei-usb-update");
+    case DeviceDetector::MODE_SPD:
+        return QStringLiteral("spd");
+    default:
+        return QString();
+    }
+}
+
+bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::DeviceMode mode,
+                                 const QVariantMap &params, QString *error)
+{
+    const QString channel = flashChannelForMode(mode);
+    if (channel.isEmpty()) {
+        if (error) *error = QStringLiteral("模式 %1 无协议通道").arg(int(mode));
+        return false;
+    }
+    if (channel == QStringLiteral("mtk-brom")) {
+        // F1 通道：DA 二进制路径由 params 提供，读入字节交 runBromFlash
+        // （F1 签名为 QByteArray daBinary——路径→字节转换在此完成）。
+        const QString daPath = params.value(QStringLiteral("daPath")).toString();
+        if (daPath.isEmpty()) {
+            if (error) *error = QStringLiteral("缺少 DA 二进制路径（mtk-brom 通道）");
+            return false;
+        }
+        QFile daFile(daPath);
+        if (!daFile.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("无法读取 DA 二进制: %1").arg(daPath);
+            return false;
+        }
+        const QByteArray daBinary = daFile.readAll();
+        daFile.close();
+        // 分区列表（分区名→镜像路径）由 F5-3 FlashPanel 构建并经 params 传入——
+        // 结构待接线，先空列表（诚实边界，详见 F5-2 报告）。
+        const QList<QPair<QString, QByteArray>> partitions;
+        emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1").arg(deviceId), false);
+        return runBromFlash(daBinary, partitions, error);
+    }
+    if (channel == QStringLiteral("huawei-usb-update")) {
+        // F2 插件通道：经 PluginManager 运行时加载（法务隔离保持——删除插件文件即完整移除）。
+        // 已知行为（F5-1 交接）：VID 通配检测（0x12D1 任意 PID）会让华为手机同时以 ADB
+        // 模式出现；本分派按模式键控不受影响，但 F5-3 UI 不得对 ADB 设备提供该协议通道。
+        const QString updateApp = params.value(QStringLiteral("updateApp")).toString();
+        if (updateApp.isEmpty()) {
+            if (error) *error = QStringLiteral("缺少 update.app 路径（huawei-usb-update 通道）");
+            return false;
+        }
+        auto plugins = PluginManager::instance()
+                           .byCapability(QStringLiteral("huawei-usb-update.flash"));
+        if (plugins.isEmpty()) {
+            if (error) *error = QStringLiteral("未找到华为刷写插件（plugins/ 目录缺失或未加载）");
+            return false;
+        }
+        QVariantMap capParams;
+        capParams.insert(QStringLiteral("updateApp"), updateApp);
+        emit outputMessage(QStringLiteral("华为 USB Update 刷写通道：%1").arg(deviceId), false);
+        return plugins.first()->execute(
+            QStringLiteral("huawei-usb-update.flash"), capParams, error);
+    }
+    if (channel == QStringLiteral("spd")) {
+        // F4 通道：FDL 二进制由用户提供（诚实边界）
+        const QString pacPath = params.value(QStringLiteral("pacPath")).toString();
+        const QString fdl1 = params.value(QStringLiteral("fdl1Path")).toString();
+        const QString fdl2 = params.value(QStringLiteral("fdl2Path")).toString();
+        if (pacPath.isEmpty()) {
+            if (error) *error = QStringLiteral("缺少 pac 路径（spd 通道）");
+            return false;
+        }
+        emit outputMessage(QStringLiteral("展锐刷写通道：%1").arg(deviceId), false);
+        return spd::runSpdFlash(pacPath, fdl1, fdl2, nullptr, error);
+    }
+    if (error) *error = QStringLiteral("未知通道: %1").arg(channel);
+    return false;
 }
