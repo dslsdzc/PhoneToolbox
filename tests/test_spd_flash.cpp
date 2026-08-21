@@ -26,11 +26,22 @@ public:
     }
     bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
     {
-        Q_UNUSED(timeoutMs) Q_UNUSED(error)
-        if (reads.isEmpty()) { out.clear(); return false; }
+        Q_UNUSED(timeoutMs)
+        if (reads.isEmpty()) {
+            // 设备静默：报超时（FDL2 就绪等待测试依赖——无响应重试语义）
+            out.clear();
+            if (error) *error = QStringLiteral("响应超时");
+            return false;
+        }
         QByteArray r = reads.takeFirst();
+        if (r.isEmpty()) {
+            // 队列空条目 = 一次静默（超时）；测试用连续空条目模拟设备未就绪
+            out.clear();
+            if (error) *error = QStringLiteral("响应超时");
+            return false;
+        }
         out = r.left(maxLen);
-        return !r.isEmpty() || maxLen == 0;
+        return true;
     }
     bool close() override { return true; }
 };
@@ -55,6 +66,11 @@ private slots:
     void checkBaudFrame();
     void connectOpenFailure();
     void enumerateVid();
+    // ---- F4 终审：FDL 握手（CHECK_BAUD→REP_VER→CONNECT + FDL2 就绪等待）----
+    void handshakeFdl1Sequence();
+    void handshakeFdl2ReadyRetry();
+    void handshakeRejectsNonRepVer();
+    void handshakeRejectsNonAck();
     // ---- F4-2: FDL 上传与存储 ----
     void uploadFdlSequence();
     void eraseFlashFrame();
@@ -247,6 +263,68 @@ void TestSpdFlash::enumerateVid()
     Q_UNUSED(devs)
 }
 
+void TestSpdFlash::handshakeFdl1Sequence()
+{
+    // FDL1 握手（行为观察核实线序）：CHECK_BAUD(1B 全 0x7E) → REP_VER(0x81) → CONNECT → ACK
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << makeResponseFrame(spd::BSL_REP_VER, QByteArray("SPRD3"))
+             << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
+    QVERIFY(s.handshake(1, 1, nullptr));
+    // CHECK_BAUD(1B)：1 个 0x7E；CONNECT：0x7E 00 00 00 00 FF FF 7E
+    QByteArray expect("\x7E", 1);
+    expect += QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    QCOMPARE(m->writes, expect);
+}
+
+void TestSpdFlash::handshakeFdl2ReadyRetry()
+{
+    // FDL2 就绪等待（行为观察核实）：CHECK_BAUD(4B) 重试 ≤10 次直至 REP_VER→CONNECT→ACK；
+    // 前两次设备静默（空条目=超时）→ 重试，第三次响应
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << QByteArray() << QByteArray()
+             << makeResponseFrame(spd::BSL_REP_VER, QByteArray("CHIP ID = 0x98180000"))
+             << makeResponseFrame(spd::BSL_REP_ACK, QByteArray());
+    QVERIFY(s.handshake(4, 10, nullptr));
+    // 3 次 CHECK_BAUD(4B 全 0x7E) + 1 次 CONNECT
+    QByteArray expect;
+    expect += QByteArray(4, char(0x7E));
+    expect += QByteArray(4, char(0x7E));
+    expect += QByteArray(4, char(0x7E));
+    expect += QByteArray("\x7E\x00\x00\x00\x00\xFF\xFF\x7E", 8);
+    QCOMPARE(m->writes, expect);
+    QVERIFY(m->reads.isEmpty()); // 两帧均已消费
+}
+
+void TestSpdFlash::handshakeRejectsNonRepVer()
+{
+    // 非 REP_VER 响应（0x84 OPERATION_FAILED）→ 立即失败（参照：不重试）
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << makeResponseFrame(0x84, QByteArray());
+    QString err;
+    QVERIFY(!s.handshake(1, 1, &err));
+    QVERIFY(err.contains("REP_VER"));
+    QVERIFY(err.contains("0084"));
+}
+
+void TestSpdFlash::handshakeRejectsNonAck()
+{
+    // REP_VER 之后 CONNECT 未获 ACK（0x84）→ 失败
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    spd::SpdSession s(std::move(usb), 0x1782, 0);
+    m->reads << makeResponseFrame(spd::BSL_REP_VER, QByteArray("SPRD3"))
+             << makeResponseFrame(0x84, QByteArray());
+    QString err;
+    QVERIFY(!s.handshake(1, 1, &err));
+    QVERIFY(err.contains("ACK"));
+}
+
 void TestSpdFlash::uploadFdlSequence()
 {
     auto usb = std::make_unique<MockUsbChannel>();
@@ -310,7 +388,7 @@ void TestSpdFlash::resetFrame()
 void TestSpdFlash::uploadFdlRejectsNonAck()
 {
     // H3：设备错误响应（0x84 OPERATION_FAILED）不得被当作成功——
-    // 每步强制校验 ACK 0x80（行为观察 send_and_check 语义）
+    // 每步强制校验 ACK 0x80（行为观察：发后强制校验 ACK 响应）
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     spd::SpdSession s(std::move(usb), 0x1782, 0);
@@ -329,7 +407,7 @@ void TestSpdFlash::uploadFdlRejectsNonAck()
 void TestSpdFlash::logFrameSkipped()
 {
     // H3：设备先发 BSL_REP_LOG(0xFF) 帧 —— 接收须跳过 log 帧继续读，
-    // 直至真实响应帧（行为观察 recv_msg 循环语义）
+    // 直至真实响应帧（行为观察：接收循环跳过 log 帧）
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     spd::SpdSession s(std::move(usb), 0x1782, 0);
@@ -354,7 +432,7 @@ void TestSpdFlash::isFdlPartitionNames()
 
 void TestSpdFlash::erasePartitionFrame()
 {
-    // 按名擦除（行为观察 erase_partition）：ERASE_FLASH(0x0A) + 分区选择包
+    // 按名擦除（行为观察：分区选择/加载/擦除流程）：ERASE_FLASH(0x0A) + 分区选择包
     // （name 36×UTF-16LE + size LE32=0，载荷 76B）→ ACK
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
@@ -370,7 +448,7 @@ void TestSpdFlash::erasePartitionFrame()
 
 void TestSpdFlash::writePartitionSequence()
 {
-    // 按名写分区（行为观察 load_partition）：START_DATA(0x01) + 分区选择包 → ACK →
+    // 按名写分区（行为观察：分区选择/加载/擦除流程）：START_DATA(0x01) + 分区选择包 → ACK →
     // MIDST_DATA×N → END_DATA → ACK（分区写无 EXEC_DATA）
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
@@ -393,7 +471,7 @@ void TestSpdFlash::writePartitionSequence()
 
 void TestSpdFlash::mode64PacketLayout()
 {
-    // mode64 分区选择包（88B，行为观察 select_partition）：name 36×UTF-16LE
+    // mode64 分区选择包（88B，行为观察：分区选择/加载/擦除流程）：name 36×UTF-16LE
     // @0..71 + size LE32 @72 + size_hi LE32 @76 + dummy 8B @80..87 零
     const QByteArray pkt = spd::selectPartitionPacket(
         QStringLiteral("boot"), 0x0000000200000003ULL, true);

@@ -34,6 +34,10 @@ public:
 
     bool open(QString *error) override
     {
+        // 幂等守卫：openLibusbUsb 后 SpdSession::connect 再次调用 open——
+        // 二次 libusb_init/claim 真机返回 BUSY 且首 ctx/handle 泄漏
+        if (m_handle)
+            return true; // 已打开（幂等：openLibusbUsb 后 connect 再次调用）
         int ret = libusb_init(&m_ctx);
         if (ret != LIBUSB_SUCCESS) {
             if (error) *error = QStringLiteral("libusb_init 失败: %1").arg(QLatin1String(usbErrName(ret)));
@@ -49,6 +53,7 @@ public:
             return false;
         }
         libusb_detach_kernel_driver(m_handle, 0);
+        // claim 固定接口 0（参照 claim 端点所在接口）；典型展锐设备为 0，真机鲁棒性项
         ret = libusb_claim_interface(m_handle, 0);
         if (ret != LIBUSB_SUCCESS) {
             if (error) *error = QStringLiteral("claim 接口失败: %1").arg(QLatin1String(usbErrName(ret)));
@@ -201,7 +206,8 @@ bool openLibusbUsb(int vid, int pid, std::unique_ptr<IUsbChannel> &ch, QString *
 
 quint16 sumChecksum(const QByteArray &data)
 {
-    // 每 2 字节小端字累加 + 进位折叠 + 取反 + BE 交换
+    // 每 2 字节小端字累加 + 进位折叠 + 取反 + BE 交换。
+    // 奇长 body 恒交换；参照发送侧仅偶长交换（接收侧一致），真机奇长末块待验证
     quint32 sum = 0;
     int i = 0;
     for (; i + 1 < data.size(); i += 2)
@@ -260,6 +266,48 @@ bool SpdSession::connect(QString *error)
     return true;
 }
 
+bool SpdSession::handshake(int checkBaudLen, int maxAttempts, QString *error)
+{
+    if (m_closed) {
+        if (error) *error = QStringLiteral("会话已关闭");
+        return false;
+    }
+    if (!m_usb) {
+        if (error) *error = QStringLiteral("未打开 USB 通道");
+        return false;
+    }
+    // FDL1：单次 CHECK_BAUD → REP_VER；FDL2 就绪等待：CHECK_BAUD 重试 ≤maxAttempts
+    // （参照语义：仅无数据/超时重试，其余失败立即报错）
+    const QByteArray baud(QByteArray(checkBaudLen, '\0')); // buildFrame 只取长度
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        QByteArray reply;
+        quint16 rtype = 0;
+        QString err;
+        if (!sendCommand(BSL_CMD_CHECK_BAUD, baud, reply, 64, &err, &rtype)) {
+            if (attempt < maxAttempts
+                && (err.contains(QStringLiteral("超时")) || err.contains(QStringLiteral("TIMEOUT"))))
+                continue; // 设备未就绪（无响应）——重试
+            if (error) *error = err;
+            return false;
+        }
+        if (rtype != BSL_REP_VER) {
+            if (error) *error = QStringLiteral("CHECK_BAUD 未获 REP_VER（响应 0x%1）")
+                                    .arg(rtype, 4, 16, QLatin1Char('0'));
+            return false;
+        }
+        // CONNECT → 强制 ACK（行为观察：发后强制校验 ACK 响应）
+        if (!sendCommand(BSL_CMD_CONNECT, QByteArray(), reply, 64, error, &rtype))
+            return false;
+        if (rtype != BSL_REP_ACK) {
+            if (error) *error = QStringLiteral("CONNECT 未获 ACK（响应 0x%1）")
+                                    .arg(rtype, 4, 16, QLatin1Char('0'));
+            return false;
+        }
+        return true;
+    }
+    return false; // maxAttempts ≥ 1 时不可达
+}
+
 bool SpdSession::buildFrame(quint16 type, const QByteArray &payload, QByteArray &frame) const
 {
     // CHECK_BAUD 特判：整帧为 len 个 0x7E，无 header/len/checksum 结构（行为观察）
@@ -314,8 +362,10 @@ bool SpdSession::sendCommand(quint16 type, const QByteArray &payload, QByteArray
     //   • 帧长由 len 字段闭合：期望总长 = len + 6（type 2 + len 2 + data + checksum 2；
     //     len 为 16 位，帧长天然上限 0x10005）——数据区含 0x7E 不提前截断
     //   • 转义模式（TRANSCODE）：接收侧反转义 7D 5E→7E、7D 5D→7D
-    //   • BSL_REP_LOG(0xFF) log 帧跳过继续读（行为观察 recv_msg 循环语义），
+    //   • BSL_REP_LOG(0xFF) log 帧跳过继续读（行为观察：接收循环跳过 log 帧），
     //     连续 log 帧上限 kMaxLogFrames，防设备刷屏死循环
+    //   • 帧间残留：LOG 帧闭合后同 chunk 残留字节丢弃（参照有残量缓冲）；
+    //     失败形态为明确报错
     int logFrames = 0;
     quint16 frameType = 0;
     for (;;) {
@@ -398,7 +448,7 @@ bool SpdSession::sendCommand(quint16 type, const QByteArray &payload, QByteArray
             return false;
         }
         frameType = getBe16(raw, 0);
-        // 跳过 log 帧（0xFF）：继续读下一帧直至真实响应（行为观察 recv_msg 语义）
+        // 跳过 log 帧（0xFF）：继续读下一帧直至真实响应（行为观察：接收循环跳过 log 帧）
         if (frameType == BSL_REP_LOG) {
             if (++logFrames > kMaxLogFrames) {
                 if (error) *error = QStringLiteral("响应 log 帧过多");

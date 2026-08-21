@@ -47,9 +47,10 @@ enum BslCmd : quint16 {
 
 // 响应 type（行为观察核实）
 enum BslReply : quint16 {
-    BSL_REP_ACK = 0x80, // 行为观察：命令响应一律为 ACK（send_and_check 强制校验）
+    BSL_REP_ACK = 0x80, // 行为观察：命令响应一律为 ACK（发后强制校验 ACK 响应）
+    BSL_REP_VER = 0x81, // 行为观察：FDL 握手版本响应（CHECK_BAUD 应答，如 "SPRD3"）
     BSL_REP_READ_FLASH = 0x93,
-    BSL_REP_LOG = 0xFF, // log 帧：接收循环跳过（行为观察 recv_msg 循环语义）
+    BSL_REP_LOG = 0xFF, // log 帧：接收循环跳过（行为观察：接收循环跳过 log 帧）
 };
 
 // 抽象传输通道（mock 注入单测；libusb 生产实现）
@@ -88,11 +89,20 @@ public:
     // 成功返回 true 并填充 reply（响应 data 区）；checksum 不符失败。
     // replyType 可选：回传响应 type（sendCommand 不校验 type，供调用方断言，
     // 如 readFlash 校验 BSL_REP_READ_FLASH）。
-    // BSL_REP_LOG(0xFF) log 帧自动跳过（连续上限 16，行为观察 recv_msg 循环语义）；
+    // BSL_REP_LOG(0xFF) log 帧自动跳过（连续上限 16，行为观察：接收循环跳过 log 帧）；
     // timeoutMs 为单帧响应超时（EXEC_DATA 设备执行耗时可达 15s，其余 2000ms）。
     bool sendCommand(quint16 type, const QByteArray &payload, QByteArray &reply,
                      int replyMaxLen, QString *error, quint16 *replyType = nullptr,
                      int timeoutMs = 2000);
+
+    // FDL 握手（行为观察核实线序）：CHECK_BAUD（全 0x7E 帧，checkBaudLen 字节）
+    // → 响应须为 REP_VER(0x81) → CONNECT → 响应须为 ACK(0x80)。
+    // checkBaudLen：FDL1 用 1、FDL2 就绪用 4（行为观察核实）；
+    // maxAttempts：FDL1 传 1（单次尝试）；FDL2 就绪等待传 10（无响应重试 ≤10 次，
+    // 参照仅无数据超时重试，其余失败立即报错）。
+    // 注意（真机待验证）：参照 FDL1 阶段（含本握手与 FDL1 上传）帧校验为 CRC16
+    // 模式（FLAGS_CRC16），本项目统一 16-bit 求和校验——真机 FDL1 校验不符时需补齐。
+    bool handshake(int checkBaudLen, int maxAttempts, QString *error);
 
     bool close(QString *error);
     bool isClosed() const { return m_closed; }
