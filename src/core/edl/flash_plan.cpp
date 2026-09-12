@@ -776,6 +776,16 @@ bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString
     f.close();
 
     constexpr int kHeaderBytes = 92;         // UEFI 头最小 92 字节（parseGpt 只读到头 +88）
+    if (imgdisk::isGpt(bytes.mid(512, 8)) && bytes.size() < 2 * 512) {
+        // 512 布局的长度早退（与下面 4096 分支同款）：parseGpt 的第一道门槛是"整盘 ≥ 2 个 512 扇区"
+        // （disk_image.cpp:48-49，头在 LBA1、表项数组从 LBA2 起才有意义）。少了这一条，520–1023 字节的
+        // **截断文件**会一路落到下游那句"表项数组越界或表项大小 <128"，把"包内 GPT 被截断"诊断成
+        // "表坏了"（误导修包方向）。
+        if (error)
+            *error = QStringLiteral("文件过短（%1 字节）：512 字节 LBA 的 GPT 至少需要 1024 字节"
+                                    "（保护 MBR + 头 + 表项数组起点）").arg(bytes.size());
+        return false;
+    }
     if (!imgdisk::isGpt(bytes.mid(512, 8))) {
         if (!imgdisk::isGpt(bytes.mid(4096, 8))) {
             if (error)
@@ -894,14 +904,21 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, const GptTab
                         .arg(e.startSector).arg(e.numSectors)
                         .arg(hit->firstLba).arg(hit->numSectors);
     } else {
-        warnings << QStringLiteral("条目 %1（lun=%2）元数据未提供 %3，几何由 %4 回填："
-                                   "start=%5、num=%6")
-                        .arg(entryName(e), QString::number(e.lun),
-                             haveStart ? QStringLiteral("num_partition_sectors")
-                                       : (haveCount ? QStringLiteral("start_sector")
-                                                    : QStringLiteral("start_sector/num_partition_sectors")),
-                             gpt.fileName)
-                        .arg(hit->firstLba).arg(hit->numSectors);
+        // 有一方缺失（或双方都缺）：**逐字段如实描述哪些用了 GPT 值、哪些元数据值被覆盖** ——
+        // 本函数末尾是**无条件写回两个字段**的，所以"只缺 num"时 start 也会被 GPT 值覆盖；
+        // 只报"未提供 num_partition_sectors"会让人以为 start 仍是元数据值（实际已被换掉）。
+        QStringList parts;
+        if (!haveStart)
+            parts << QStringLiteral("start_sector=%1（元数据未提供，由 GPT 回填）").arg(hit->firstLba);
+        else if (hit->firstLba != e.startSector)
+            parts << QStringLiteral("start_sector=%1（覆盖元数据值 %2）").arg(hit->firstLba).arg(e.startSector);
+        if (!haveCount)
+            parts << QStringLiteral("num_partition_sectors=%1（元数据未提供，由 GPT 回填）").arg(hit->numSectors);
+        else if (hit->numSectors != e.numSectors)
+            parts << QStringLiteral("num_partition_sectors=%1（覆盖元数据值 %2）").arg(hit->numSectors).arg(e.numSectors);
+        warnings << QStringLiteral("条目 %1（lun=%2）几何以 %3 为准：%4")
+                        .arg(entryName(e), QString::number(e.lun), gpt.fileName,
+                             parts.join(QStringLiteral("；")));
     }
     e.startSector = hit->firstLba;
     e.numSectors = hit->numSectors;
@@ -909,16 +926,25 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, const GptTab
 
 // ---- OPS 条目 ----
 
-// 属性合并：子元素优先、容器兜底。真实 settings.xml 有两种形态（brief 的扁平形态 + FirmwareKit 样本的
-// 容器形态 `<program label="persist" num_partition_sectors="…"><Image filename="persist.img" …/></program>`：
+// 属性合并：**子元素优先、容器兜底**。真实 settings.xml 有两种形态（brief 的扁平形态 + FirmwareKit 样本
+// 的容器形态 `<program label="persist" num_partition_sectors="…"><Image filename="persist.img" …/></program>`：
 // reference/FirmwareKit.Oppo/FirmwareKit.Oppo.Tests/Parsers/OpsParserTests.cs:116-122）——文件名在子元素、
-// 几何在容器的情况很常见，合并成一份集合后按同一套字段规则读一次即可，不必为两种形态写两套取值。
+// 几何在容器，合并成一份集合后按同一套字段规则读一次即可，不必为两种形态写两套取值。
+//
+// **方向不能写反（以 child 为基底）**：`QXmlStreamAttributes::value()` 取的是列表中**首个**匹配，
+// 故只有"child 属性在前、container 缺的补在后"才能实现"子元素优先"。若反过来以 container 为基底，
+// 同名属性会静默取容器的值 —— 不崩、不报错，只是写错地址。方向由
+// `opsContainerFormChildWinsOverContainer` 刻意构造同名冲突钉住（真实样本父子属性集不重叠，看不见）。
+//
+// 参照的取舍说明：FirmwareKit 的 `OppOpsParser.cs:388-416` **完全不从父元素继承几何**，只用父的 label
+// 给空 filename 兜底命名。本项目**要继承**，因为该样本的几何恰恰只在容器上（不继承就等于丢元数据，
+// 而元数据几何是本任务的一等来源）；冲突时以子元素为准（子元素离数据更近）。
 QXmlStreamAttributes mergeAttrs(const QXmlStreamAttributes &container, const QXmlStreamAttributes &child)
 {
-    QXmlStreamAttributes merged = container;
-    for (const QXmlStreamAttribute &a : child)
+    QXmlStreamAttributes merged = child;                     // 基底 = 子元素（value() 取首个匹配）
+    for (const QXmlStreamAttribute &a : container)
         if (!merged.hasAttribute(a.name()))
-            merged.append(a);
+            merged.append(a);                                // 容器只补子元素没有的
     return merged;
 }
 
@@ -944,8 +970,18 @@ void appendOpsProgramEntry(const QXmlStreamAttributes &attrs, quint32 groupLun, 
                            QStringList &warnings)
 {
     const QString filename = attrs.value(QStringLiteral("filename")).toString();
-    if (filename.isEmpty())
-        return;      // 空名跳过（同参照 opscrypto.py:614-615 的 `wfilename == "" → continue`）
+    if (filename.isEmpty()) {
+        // 空名跳过（同参照 opscrypto.py:614-615 的 `wfilename == "" → continue`）。但**不静默**：
+        // 有 label 却没 filename 的条目（FirmwareKit 样本里 `<Image filename=""/>` 对应的
+        // `<program label="misc">`）在本项目里无法编程（没有镜像可写）⇒ 它不会进计划，
+        // 用户必须知道"这个分区没被安排写入"。
+        const QString label = attrs.value(QStringLiteral("label")).toString();
+        if (!label.isEmpty())
+            warnings << QStringLiteral("OPS 条目 %1（lun=%2）无 filename，不加入计划（没有镜像可写；"
+                                       "参照 opscrypto.py:614-615 跳过空名）")
+                            .arg(label, attrs.value(QStringLiteral("physical_partition_number")).toString());
+        return;
+    }
 
     PlanEntry e;
     e.action = PlanEntry::Action::Program;

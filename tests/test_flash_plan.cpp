@@ -67,6 +67,9 @@ private slots:
     void opsSourceUsesMetadataAndGpt();
     void opsReconcilesGptLayout4096();
     void opsReconcilesGptLayout512();
+    void opsContainerFormChildWinsOverContainer();
+    void opsReportsOverriddenStartInBackfillWarning();
+    void opsReportsTruncated512Gpt();
     void opsKeepsMetadataWhenGptLacksPartition();
     void opsAcceptsMetadataConsistentWithGpt();
     void opsPatchGroupsAndMissingPatchWarning();
@@ -795,6 +798,112 @@ void TestFlashPlan::opsReconcilesGptLayout512()
         if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("gpt_main0.bin")))
             mismatchWarned = true;
     QVERIFY(mismatchWarned);                                 // 对账确实发生
+}
+
+// 容器形态（FirmwareKit 样本的真实形态）：几何挂在容器 `<program label=… 几何…>` 上、文件名挂在子元素
+// `<Image filename=… />` 上。本用例钉两件事：
+//   1) 容器属性**会被继承**（该样本的几何只在容器上，不继承就等于丢元数据）；
+//   2) **同名属性冲突时取子元素的值**（"子元素优先、容器兜底"）。`QXmlStreamAttributes::value()` 取
+//      合并结果里的**首个**匹配 ⇒ 合并必须以**子元素为基底**；写反不会崩，只会静默取错值，
+//      而真实样本父子属性集不重叠（看不见）⇒ 这里的冲突是**刻意构造**的方向钉子。
+// 附：`<Image filename=""/>`（样本里的 misc 条目）在本项目语义下不能编程（无镜像可写）→ 不产条目，
+// 但要告警（不静默丢分区）。
+void TestFlashPlan::opsContainerFormChildWinsOverContainer()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>\n"
+        "  <program label=\"persist\" SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "           sparse=\"true\" start_sector=\"2048\" num_partition_sectors=\"16\">\n"
+        "    <Image filename=\"persist.img\" sparse=\"false\" SECTOR_SIZE_IN_BYTES=\"512\"\n"
+        "           start_sector=\"4096\" num_partition_sectors=\"8\" Sha256=\"ab\" />\n"
+        "  </program>\n"
+        "  <program label=\"misc\" SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "           start_sector=\"1\" num_partition_sectors=\"1\">\n"
+        "    <Image filename=\"\" sparse=\"false\" />\n"
+        "  </program>\n"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/persist.img", QByteArray(4096, '\x21')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);                                   // misc 无 filename → 不产条目
+    const edl::PlanEntry &e = plan.entries[0];
+    QCOMPARE(e.partitionName, QStringLiteral("persist"));               // 继承容器 label
+    QCOMPARE(e.lun, quint32(0));                                        // 继承容器 ppn
+    QCOMPARE(e.imageFile, dir.path() + "/persist.img");                 // 子元素 filename
+    QCOMPARE(e.startSector, quint64(4096));                             // **子元素胜**（容器 2048）
+    QCOMPARE(e.numSectors, quint64(8));                                 // **子元素胜**（容器 16）
+    QCOMPARE(e.sectorSize, quint32(512));                               // **子元素胜**（容器 4096）
+    QCOMPARE(e.sparse, false);                                          // **子元素胜**（容器 true）
+    QCOMPARE(e.sha256, QStringLiteral("ab"));                           // 子元素 Sha256
+    bool miscWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("misc")) && w.contains(QStringLiteral("无 filename")))
+            miscWarned = true;
+    QVERIFY(miscWarned);
+}
+
+// 诊断如实性：元数据**只缺 num** 时，start 也会被 GPT 值覆盖（对账末尾无条件写回两个字段）——
+// 只说"未提供 num_partition_sectors"会让人以为 start 仍是元数据的值。文案必须两件都说清：
+// 哪些字段是 GPT 回填、哪个元数据值被覆盖。
+void TestFlashPlan::opsReportsOverriddenStartInBackfillWarning()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"1\" />"        // 有 start、无 num
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin", buildGptWithPartition("xbl", 4096, 12287)));
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x31')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(4096));   // 元数据 1 → 被 GPT 覆盖
+    QCOMPARE(plan.entries[0].numSectors, quint64(8192));    // 元数据未提供 → GPT 回填
+    bool warned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("gpt_main0.bin"))
+            && w.contains(QStringLiteral("start_sector=4096"))
+            && w.contains(QStringLiteral("覆盖元数据值 1"))
+            && w.contains(QStringLiteral("num_partition_sectors=8192"))
+            && w.contains(QStringLiteral("元数据未提供")))
+            warned = true;
+    QVERIFY(warned);
+}
+
+// 截断文件诊断（512 布局）：头在 0x200 但整盘不足 2×512 字节（只可能来自截断/损坏的包内 GPT）→
+// 必须报"文件过短"，而不是下游那句"表项数组越界或表项大小 <128"（把"被截断"诊断成"表坏了"）。
+// 结论仍是"未对账 + 保留元数据几何"（元数据有几何 ⇒ 不因此拒刷）。
+void TestFlashPlan::opsReportsTruncated512Gpt()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"6\" num_partition_sectors=\"901\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QByteArray gpt = buildGptWithPartition("xbl", 6, 906);   // 512 布局，头在 0x200
+    QVERIFY(gpt.size() > 1000);
+    gpt.truncate(1000);                                      // 头完整，但整盘 < 1024
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin", gpt));
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x41')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(6));       // 元数据值（未对账）
+    QCOMPARE(plan.entries[0].numSectors, quint64(901));
+    bool shortWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("gpt_main0.bin")) && w.contains(QStringLiteral("过短")))
+            shortWarned = true;
+    QVERIFY(shortWarned);
 }
 
 // 对账态之二：GPT 里**查不到**该分区名 → 保留元数据几何 + warning。
