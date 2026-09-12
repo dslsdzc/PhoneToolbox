@@ -35,6 +35,13 @@ constexpr quint64 kQcPartialDecryptSize = 0x40000;
 // QC 包最小尺寸（一页）——小于此值不可能含清单
 constexpr quint64 kQcMinFileSize = kQcPageSizeSmall;
 
+// 清单长度上限（Task 终审复审补防）: 声明长度（含 A57 重算值）只要 ≤ 文件大小就会
+// 被整段读入内存，而 doDetect「选中即 parse」→ 伪造长度的大包（如 20GB 包声明 4GB）
+// 会在仅选中文件时产生同量级分配，与 image_worker.cpp 的"不预载整文件"口径相悖。
+// 真实 ProFile.xml 远小于 1 MiB（数十~数百条目 × 数百字节），取 8 MiB 作宽松天花板：
+// 不误伤真实包，又把病态情形钉死在读取之前（超限报错，不静默截断）。
+constexpr quint64 kMaxManifestLength = 8 * 1024 * 1024;
+
 // MTK 首 16B 解密后的明文前缀（brutekey() L104-107 `data[:3] == b"MMM"`）
 constexpr char kMtkPlainMagic[] = "MMM";
 // MTK 尾头长度（main() L120 hdrlength = 0x6C）
@@ -330,6 +337,14 @@ bool parseQc(QFile &file, const QByteArray &tail, quint64 fileSize, OfpInfo &inf
                                .arg(xmlOffset)
                                .arg(xmlLength)
                                .arg(fileSize));
+    // 病态长度防护（Task 终审复审）：放在既有越界检查之后 —— 超出文件大小的值仍报
+    // "越界"（原文案不变），只有"≤文件大小但不成比例"的声明/重算值走这里。
+    // 检查在 file.read() 之前 → 不产生任何大分配。
+    if (xmlLength > kMaxManifestLength)
+        return fail(error,
+                    QStringLiteral("OFP 清单长度异常（%1 字节，超出 %2 MiB 上限），文件可能已损坏")
+                        .arg(xmlLength)
+                        .arg(kMaxManifestLength / (1024 * 1024)));
     if (!file.seek(qint64(xmlOffset)))
         return fail(error, QStringLiteral("OFP 清单读取失败（偏移 %1）").arg(xmlOffset));
     const QByteArray encXml = file.read(qint64(xmlLength));

@@ -43,10 +43,13 @@ inline QByteArray mtkShuffleEncode(const QByteArray &plain,
     return out;
 }
 
-// 定长字段写入（ASCII；不足补 0x00，超长截断）。buf 须已 resize 到可容纳 pos + width。
+// 定长字段写入（UTF-8 编码，与解析侧 cleanCString() 的 decode('utf-8') 口径对齐；
+// 不足补 0x00，超长截断）。buf 须已 resize 到可容纳 pos + width。
+// 注: 既有调用点全为 ASCII，toUtf8() 与旧的 toLatin1() 在这些输入上逐字节相同；
+// 非 ASCII（如 prjname = 测试项目）此前会被 toLatin1() 打成 '?'，无法表达真实语义。
 inline void putFixed(QByteArray &buf, qsizetype pos, qsizetype width, const QString &s)
 {
-    const QByteArray raw = s.toLatin1();
+    const QByteArray raw = s.toUtf8();
     for (qsizetype i = 0; i < width; ++i)
         buf[pos + i] = i < raw.size() ? raw.at(i) : '\0';
 }

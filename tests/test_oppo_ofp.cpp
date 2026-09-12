@@ -26,6 +26,7 @@ private slots:
 
     void parseRejectsUnknownKey();
     void parseRejectsOutOfBounds();
+    void parseRejectsOversizedManifestLength();
     void parseRejectsPkZip();
     void parseRejectsGarbageOrMissing();
 };
@@ -369,6 +370,46 @@ void TestOppoOfp::parseRejectsOutOfBounds()
     error.clear();
     QVERIFY(!imgopp::parseOFP(mtkPath, info, &error));
     QVERIFY2(error.contains(QStringLiteral("越界")), qPrintable(error));
+}
+
+// 病态清单长度防护（Task 终审复审）：声明值只要"≤ 文件大小 − 清单偏移"就会被整段
+// 读入内存，而 doDetect 现在「选中即 parse」→ 伪造长度的大包仅选中文件就产生同量级
+// 分配。两条子用例都必须在上限检查处失败（返回 false + 中文 error）——检查位于
+// file.read() 之前，故不存在大分配（用例本身即快速返回，不做耗时刻意断言）。
+void TestOppoOfp::parseRejectsOversizedManifestLength()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // 9 MiB 载荷 → 包体 > 8 MiB 上限，且 8 MiB + 1 仍 ≤ 文件大小 − 清单偏移：
+    // 既有"清单越界"检查兜不住，只剩新加的上限防护能拦
+    ofptest::QcPackage pkg = ofptest::buildQcPackage(
+        {{QStringLiteral("Firmware"), QStringLiteral("boot.img"),
+          QByteArray(9 * 1024 * 1024, 'F'), 0}});
+    QVERIFY(pkg.isValid());
+    const qsizetype tailBase = pkg.blob.size() - qsizetype(pkg.pageSize);
+    QVERIFY(quint64(0x800001) <= quint64(pkg.blob.size()) - pkg.xmlOffset); // 前提：不触发越界检查
+
+    // (1) 尾页 +0x18 声明 8 MiB + 1
+    QByteArray declared = pkg.blob;
+    ofptest::putLE32(declared, tailBase + 0x18, 0x800001);
+    const QString declaredPath = writePkg(dir, QStringLiteral("huge-declared.ofp"), declared);
+    QVERIFY(!declaredPath.isEmpty());
+    imgopp::OfpInfo info;
+    QString error;
+    QVERIFY(!imgopp::parseOFP(declaredPath, info, &error));
+    // 断言上限文案的独有片段（"清单长度异常"也是既有 A57 早退分支的用词 → 区分力不足）：
+    // 命中它即证明走的是新上限检查，并顺带钉住 8 MiB 这个上限值
+    QVERIFY2(error.contains(QStringLiteral("超出 8 MiB 上限")), qPrintable(error));
+
+    // (2) A57 重算路（字段写 0 → 按 (fileSize-page)-xmlOffset-0x57 重算）：重算值同样超限，
+    //     证明上限检查覆盖重算后的值而不只是字段值
+    QByteArray a57 = pkg.blob;
+    ofptest::putLE32(a57, tailBase + 0x18, 0);
+    const QString a57Path = writePkg(dir, QStringLiteral("huge-a57.ofp"), a57);
+    QVERIFY(!a57Path.isEmpty());
+    error.clear();
+    QVERIFY(!imgopp::parseOFP(a57Path, info, &error));
+    QVERIFY2(error.contains(QStringLiteral("超出 8 MiB 上限")), qPrintable(error));
 }
 
 // 老式密码 ZIP 包（spec §7；ofp_qc_decrypt.py main() L286-290 的 PK 判定）

@@ -40,8 +40,8 @@ struct OpsEntry
 
 struct OpsInfo
 {
-    QString projectId;                 // 尾页 +0x1C 16B ASCII（首个 0x00 截断）
-    QString firmwareName;              // 尾页 +0x2C 32B ASCII（C# OpsTailPage 口径）
+    QString projectId;                 // 尾页 +0x1C 16B 定长字段（去全部 0x00 + UTF-8 解码）
+    QString firmwareName;              // 尾页 +0x2C 32B 定长字段（同一解码口径）
     quint64 settingsOffset = 0;        // settings.xml 密文起点（字节）= 尾页 +0x14 × 0x200
     quint32 settingsLength = 0;        // 尾页 +0x18：settings.xml 明文长度（未按 16/0x200 对齐）
     QString keyId;                     // 命中的 mbox 候选 id（mbox5/mbox6/mbox4）

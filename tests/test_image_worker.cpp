@@ -22,8 +22,12 @@
 //   4. **A10**：extractOFP 可 ok==true 且 *error 非空（部分条目被跳过）→ worker
 //      必须把警告经 unpackFinished 回传，不得丢弃（静默部分解包是刷机场景大忌）。
 //
-// 夹具（合成包）来自 oppo_test_helpers.h + 本文件内的 opsPackage()：只按格式事实拼
-// 字节流，不调用被测代码。
+// 夹具（合成包）来自 oppo_test_helpers.h + 本文件内的 opsPackage()：按格式事实拼字节流。
+// 注: opsPackage() 并非"完全不调用被测代码"—— 它用被测模块的密码 helper
+// （imgopp::opsEncrypt / opsKeyCandidates）产出 settings.xml 密文，以便 parseOPS
+// 能真正解出尾页字段。密码实现的正确性由 test_oppo_ops::opsCipherAgainstPython
+// （对拍参照实产密文向量）兜底；本文件的 detail 断言只依赖尾页字段与清单条目数，
+// 与密码实现是否正确无关（密码错了这些用例只会走 parse 失败降级路径）。
 // 线程模型：ImageWorker 在工作线程执行，结果经 queued 信号投递 → 用 QSignalSpy
 // 的 wait() 驱动事件循环，必须有 application 对象 —— 本文件用 QTEST_MAIN 建立
 // QCoreApplication（QTEST_APPLESS_MAIN 不建 application 对象，切回去 spy.wait()
@@ -37,6 +41,7 @@ private slots:
     void detectOpsTailWithUnknownExtension();
     void detectQcPackage();
     void detectMtkPackage();
+    void detectMtkDetailUtf8FieldSemantics();
     void detectTinyFileSkipsTailProbe();
     void detectUnknownBytesStaysUnknown();
     void opsTailAlsoMatchesOfpQcJudge();
@@ -277,6 +282,45 @@ void TestImageWorker::detectMtkPackage()
     QCOMPARE(r.format, imgreg::Format::OFP);
     QCOMPARE(r.detail,
              QStringLiteral("OPPO/realme OFP 固件包 (MTK) · CPH1827 · UFS · 2 个条目"));
+}
+
+// cleanCString 的 UTF-8 口径回归钉（Task 终审复审）：此前全仓夹具只造 ASCII 字段名，
+// 该改动零覆盖。两条子用例：
+//   (1) 非 ASCII prjname（"测试项目" UTF-8 共 12 字节）→ detail 须原样显示；按 Latin-1
+//       解码会得到 "æµ‹è¯•é¡¹ç›®" 一类乱码 → 本断言必红；
+//   (2) 字段中部含 0x00（"AB\0CD"）→ 参照 replace(b"\x00", b"").decode('utf-8') 去掉
+//       全部 NUL，故 detail = "ABCD"；旧的"首个 NUL 截断 + Latin-1"实现只会给出 "AB"
+//       → 本断言钉住"内部 NUL 之后内容不再丢弃"的语义变化。
+void TestImageWorker::detectMtkDetailUtf8FieldSemantics()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ofptest::MtkBuildOptions utf8Opts;
+    utf8Opts.prjname = QStringLiteral("测试项目");
+    const ofptest::MtkPackage utf8Pkg = ofptest::buildMtkPackage(
+        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')}}, utf8Opts);
+    QVERIFY(utf8Pkg.isValid());
+    const QString utf8Path = writeBlob(dir.filePath(QStringLiteral("utf8.ofp")), utf8Pkg.blob);
+    QVERIFY(!utf8Path.isEmpty());
+
+    ImageWorker worker;
+    imgreg::Detected r;
+    QString why;
+    QVERIFY2(detectFile(worker, utf8Path, &r, &why), qPrintable(why));
+    QCOMPARE(r.detail,
+             QStringLiteral("OPPO/realme OFP 固件包 (MTK) · 测试项目 · UFS · 1 个条目"));
+
+    // 内部 NUL：显式长度构造（保留嵌入的 U+0000），夹具按 UTF-8 写出 5 字节 "AB\0CD"
+    ofptest::MtkBuildOptions nulOpts;
+    nulOpts.prjname = QString::fromLatin1("AB\0CD", 5);
+    const ofptest::MtkPackage nulPkg = ofptest::buildMtkPackage(
+        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')}}, nulOpts);
+    QVERIFY(nulPkg.isValid());
+    const QString nulPath = writeBlob(dir.filePath(QStringLiteral("nul.ofp")), nulPkg.blob);
+    QVERIFY(!nulPath.isEmpty());
+    QVERIFY2(detectFile(worker, nulPath, &r, &why), qPrintable(why));
+    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (MTK) · ABCD · UFS · 1 个条目"));
 }
 
 // 不足一页（0x200B）：读不到完整尾页 → 跳过尾页探测，仅扩展名兜底（不崩不误判）

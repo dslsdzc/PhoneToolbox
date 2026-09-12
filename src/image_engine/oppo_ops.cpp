@@ -30,6 +30,10 @@ constexpr int kFirmwareNameLen = 32;
 // 扇区尺寸（OpsSectorSize，OppOpsParser.cs L227；opscrypto.py 里到处硬编码的 0x200）
 constexpr quint64 kSectorSize = 0x200;
 
+// settings.xml 长度上限（Task 终审复审补防，同 oppo_ofp.cpp kMaxManifestLength）:
+// 8 MiB 宽松天花板 —— 真实清单远小于 1 MiB，病态声明在读取前被拒绝（不静默截断）。
+constexpr quint64 kMaxManifestLength = 8 * 1024 * 1024;
+
 // ==================== 小工具 ====================
 
 // 4 字节 LE 读（越界返回 0）—— 尾页字段读取用
@@ -45,10 +49,13 @@ quint32 le32(const QByteArray &buf, qsizetype off)
     return v;
 }
 
-// 定长 C 字符串字段（同 oppo_ofp.cpp cleanCString() L130-134；参照定义不在
-// opscrypto.py，而在 reference/oppo_decrypt/ofp_mtk_decrypt.py cleancstring()
-// L112-113: replace(b"\x00", b"").decode('utf-8') —— 去掉全部 0x00 后按 UTF-8
-// 解码，不是首 NUL 截断 + Latin-1）
+// 定长 C 字符串字段（projectId/firmwareName 等）。读侧参照 =
+// reference/FirmwareKit.Oppo/FirmwareKit.Oppo.Core/Models/OppHeader.cs L198-199
+// （OpsTailPage.Parse 取 +0x1C/+0x2C 定长片）与 L226-230（OfpHelper.DecodeAscii =
+// ASCII 解码 + TrimEnd('\0')，只去尾部 0x00）。注意 opscrypto.py **不读**这两个
+// 字段，故 bkerler 侧无对应实现；本实现采用其 ofp_mtk_decrypt.py cleancstring()
+// L112-113 的更宽口径 replace(b"\x00", b"").decode('utf-8')（去全部 0x00 + UTF-8，
+// 见 oppo_ofp.cpp 同名函数），比 C# 的 TrimEnd 能多容忍字段中部的填充 0x00。
 QString cleanCString(const QByteArray &field)
 {
     // 0x00 在 UTF-8 中只能是 U+0000 的编码（不参与任何多字节序列），故"解码后删
@@ -261,6 +268,18 @@ bool parseOPS(const QString &path, OpsInfo &info, QString *error)
                         .arg(parsed.settingsLength)
                         .arg(tailStart)
                         .arg(path));
+
+    // 病态长度防护（Task 终审复审）：声明长度只要 ≤ 可用空间就会被整段读入，而
+    // doDetect「选中即 parse」→ 伪造长度的大包（如 20GB 包声明 4GB）仅选中文件即
+    // 产生同量级分配，与 image_worker.cpp 的"不预载整文件"口径相悖。真实 settings.xml
+    // 远小于 1 MiB，取 8 MiB 作宽松天花板；检查在 file.read() 之前 → 不产生大分配。
+    // 放在既有区域越界检查之后：超出可用空间的值仍报"区域越界"（原文案不变）。
+    if (quint64(parsed.settingsLength) > kMaxManifestLength)
+        return fail(error,
+                    QStringLiteral("OPS settings.xml 长度异常（%1 字节，超出 %2 MiB 上限），"
+                                   "文件可能已损坏")
+                        .arg(parsed.settingsLength)
+                        .arg(kMaxManifestLength / (1024 * 1024)));
 
     // 读取长度 = align16(settingsLength)，按"尾页之前可用字节"封顶（C# TryDecryptXml()
     // L183-191 的 opsBlockSize 对齐 + maxAvailable 封顶）。密码块路对末块本就按零扩展，

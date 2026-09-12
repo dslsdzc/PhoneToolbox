@@ -26,6 +26,7 @@ private slots:
     void detectOpsFromTail();
     void parseOpsKeyCandidates();
     void parseOpsSkipsEntryWithoutOffset();
+    void parseRejectsOversizedXmlLength();
     void extractOpsEndToEnd();
     void extractOpsProgramHash();
     void extractOpsRejectsUnsafeNames();
@@ -809,6 +810,37 @@ void TestOppoOps::extractOpsRejectsBadPackages()
     QCOMPARE(QFileInfo(guardPath).size(), qint64(guardPkg.blob.size()));
     imgopp::OpsInfo guardInfo;
     QVERIFY2(imgopp::parseOPS(guardPath, guardInfo, &err), qPrintable(err));
+}
+
+// 病态 settings.xml 长度防护（Task 终审复审）：声明长度只要"≤ 尾页之前可用空间"就会被
+// 整段读入内存，而 doDetect 现在「选中即 parse」→ 伪造长度的大包仅选中文件即产生同量级
+// 分配。必须在读取前失败（返回 false + 中文 error）——检查位于 file.read() 之前，故不
+// 产生大分配（用例本身快速返回，不做耗时刻意断言）。
+void TestOppoOps::parseRejectsOversizedXmlLength()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // 9 MiB 条目 → 包体 > 8 MiB 上限（让"区域越界"检查不再是唯一防线）
+    const OpsPackage pkg = buildOpsPackage(
+        {{QStringLiteral("UFS_PROVISION"), QStringLiteral("big.bin"),
+          QByteArray(9 * 1024 * 1024, 'B')}});
+    QVERIFY(pkg.isValid());
+
+    // 尾页 +0x14 改指扇区 0（settings 起点移到包首）+ +0x18 声明 8 MiB + 1：
+    // 声明值 ≤ 尾页起点 → 通过既有"区域越界"检查，只剩新加的上限防护能拦
+    OpsPackage patched = pkg;
+    const qsizetype tailBase = patched.blob.size() - 0x200;
+    putLE32(patched.blob, tailBase + 0x14, 0);
+    putLE32(patched.blob, tailBase + 0x18, 0x800001);
+    QVERIFY(quint64(0x800001) <= quint64(tailBase));   // 前提：不触发"区域越界"
+    const QString path = writePkg(dir.path(), QStringLiteral("huge.ops"), patched.blob);
+    QVERIFY(!path.isEmpty());
+
+    imgopp::OpsInfo info;
+    QString error;
+    QVERIFY(!imgopp::parseOPS(path, info, &error));
+    // 断言上限文案的独有片段（同时钉住 8 MiB 这个上限值）
+    QVERIFY2(error.contains(QStringLiteral("超出 8 MiB 上限")), qPrintable(error));
 }
 
 QTEST_APPLESS_MAIN(TestOppoOps)
