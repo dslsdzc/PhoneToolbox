@@ -1,5 +1,6 @@
 #include "flash_plan.h"
 
+#include "image_engine/disk_image.h"
 #include "image_engine/sparse_image.h"
 
 #include <QDir>
@@ -8,6 +9,7 @@
 #include <QHash>
 #include <QSet>
 #include <QXmlStreamReader>
+#include <QtEndian>
 #include <algorithm>
 #include <limits>
 
@@ -19,15 +21,21 @@ namespace {
 
 // 原始字符串属性；属性缺失 → *ok=false。
 // 参照 reference/qdl/src/util.c:90-105（attr_as_string：xmlGetProp 取不到 → 记错）
-QString attrRaw(QXmlStreamReader &reader, const char *name, bool *ok)
+// **按属性集合实现**（唯一实现）：OPS 元数据的"容器兜底"形态必须先把父子属性合并成一份集合
+// 再读（见 mergeAttrs / appendOpsProgramEntry），reader 版只是"取当前元素属性"的薄包装。
+QString attrRawFrom(const QXmlStreamAttributes &attrs, const char *name, bool *ok)
 {
-    const QXmlStreamAttributes attrs = reader.attributes();
     if (!attrs.hasAttribute(QLatin1String(name))) {
         if (ok) *ok = false;
         return QString();
     }
     if (ok) *ok = true;
     return attrs.value(QLatin1String(name)).toString();
+}
+
+QString attrRaw(QXmlStreamReader &reader, const char *name, bool *ok)
+{
+    return attrRawFrom(reader.attributes(), name, ok);
 }
 
 // 数值属性：base 0 解析（识别 0x 前缀），与 qdl strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）。
@@ -37,14 +45,19 @@ QString attrRaw(QXmlStreamReader &reader, const char *name, bool *ok)
 // （SECTOR_SIZE_IN_BYTES / num_partition_sectors / physical_partition_number / byte_offset /
 // size_in_bytes）。可能承载 firehose 表达式的扇区属性（start_sector、erase 的
 // num_partition_sectors）一律走 readSectorAttr —— 那里有"缺失 / 十进制 / 表达式"三态语义。
-quint64 attrU64(QXmlStreamReader &reader, const char *name, bool *ok)
+quint64 attrU64From(const QXmlStreamAttributes &attrs, const char *name, bool *ok)
 {
     bool present = false;
-    const QString raw = attrRaw(reader, name, &present);
+    const QString raw = attrRawFrom(attrs, name, &present);
     bool numOk = false;
     const quint64 value = raw.toULongLong(&numOk, 0);
     if (ok) *ok = present && numOk;
     return numOk ? value : 0;
+}
+
+quint64 attrU64(QXmlStreamReader &reader, const char *name, bool *ok)
+{
+    return attrU64From(reader.attributes(), name, ok);
 }
 
 // ---- 扇区类属性的统一三态（start_sector 与 erase 的 num_partition_sectors 共用）----
@@ -81,11 +94,11 @@ struct SectorAttr {
 //   base=0 （erase 的 num_partition_sectors）：识别 0x/0 前缀，与 qdl 的数值属性
 //          attr_as_unsigned → strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）——
 //          它是纯数值属性，0x800 这种十六进制形态必须当数值接受，而不是当"表达式"丢弃。
-SectorAttr readSectorAttr(QXmlStreamReader &reader, const char *name, int base = 10)
+SectorAttr readSectorAttrFrom(const QXmlStreamAttributes &attrs, const char *name, int base = 10)
 {
     SectorAttr out;
     bool present = false;
-    out.raw = attrRaw(reader, name, &present);
+    out.raw = attrRawFrom(attrs, name, &present);
     if (!present)
         return out;                                     // Missing（raw 为空）
     if (out.raw.isEmpty()) {
@@ -102,6 +115,11 @@ SectorAttr readSectorAttr(QXmlStreamReader &reader, const char *name, int base =
         out.kind = SectorAttrKind::NonDecimal;
     }
     return out;
+}
+
+SectorAttr readSectorAttr(QXmlStreamReader &reader, const char *name, int base = 10)
+{
+    return readSectorAttrFrom(reader.attributes(), name, base);
 }
 
 // 必需属性收集器：任一必需属性缺失/空/不可解析 → 该条目被丢弃并记 warning。
@@ -169,6 +187,24 @@ void readStartSector(QXmlStreamReader &reader, PlanEntry &e, RequiredAttrs &attr
         if (required)
             attrs.noteMissing("start_sector");
         return;
+    }
+}
+
+// start_sector 的**三态处置**（唯一实现；逐态语义见上面 readStartSector 的注释）。
+// 单独拆出来是给 OPS 元数据用：那条路径没有 RequiredAttrs（OPS 条目不是"缺一即丢"的模型，
+// 缺几何由 GPT 回填），但仍必须与 rawprogram/patch 走**同一套**状态机 —— 否则两处会各自漂移。
+void applyStartSector(const SectorAttr &a, PlanEntry &e)
+{
+    switch (a.kind) {
+    case SectorAttrKind::Decimal:
+        e.startSector = a.value;
+        return;
+    case SectorAttrKind::NonDecimal:
+        e.startSectorExpr = a.raw;
+        return;
+    case SectorAttrKind::Missing:
+    case SectorAttrKind::Empty:
+        return;                      // 保持 0：待 GPT 回填（调用方负责告警）
     }
 }
 
@@ -610,6 +646,505 @@ PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)
 
     chk.ok = chk.errors.isEmpty();                        // 规则 8：任何 error → 拒刷
     return chk;
+}
+
+// ================= Task 3：来源探测 + OPS 元数据 + GPT 回填对账 =================
+
+namespace {
+
+// ---- 序号工具 ----
+
+// 取字符串末尾数字（"rawprogram10" → 10、"Program0" → 0、"UFS_PROVISION" → 无）。
+// 末尾无数字或超出 u32 → 0 + warning（不静默）。文件名序号与组标签序号是**同一条约定**
+// （协议速查 §4：rawprogramN.xml 的序号 == 条目 physical_partition_number；
+// reference/qdl/tests/data/rawprogram1.xml:5-8），故共用本实现。
+quint32 trailingNumber(const QString &text, const QString &label, QStringList &warnings)
+{
+    int i = text.size();
+    while (i > 0 && text.at(i - 1).isDigit())
+        --i;
+    if (i == text.size()) {
+        warnings << QStringLiteral("%1 末尾无 LUN 序号，按 lun=0 解析").arg(label);
+        return 0;
+    }
+    bool ok = false;
+    const uint n = text.mid(i).toUInt(&ok);
+    if (!ok) {
+        warnings << QStringLiteral("%1 末尾的 LUN 序号超出范围，按 lun=0 解析").arg(label);
+        return 0;
+    }
+    return n;
+}
+
+// 目录内 `<prefix>*.xml` → (lun, 文件名) 列表。按 (lun, 文件名) **数值**排序：QDir::Name 是字典序
+// （"rawprogram10.xml" 会排在 "rawprogram2.xml" 前面），直接用它会让多 LUN 包的计划顺序不稳定。
+QList<QPair<quint32, QString>> numberedXmlFiles(const QString &dir, const QString &prefix,
+                                                QStringList &warnings)
+{
+    QList<QPair<quint32, QString>> out;
+    const QStringList names = QDir(dir).entryList(QStringList{prefix + QStringLiteral("*.xml")},
+                                                 QDir::Files, QDir::Name);
+    for (const QString &n : names)
+        out.append({trailingNumber(QFileInfo(n).completeBaseName(),
+                                   QStringLiteral("文件 %1").arg(n), warnings), n});
+    std::sort(out.begin(), out.end(), [](const QPair<quint32, QString> &a, const QPair<quint32, QString> &b) {
+        return a.first != b.first ? a.first < b.first : a.second < b.second;
+    });
+    return out;
+}
+
+// ---- storageType 探测（spec §3.4）----
+
+// prog_ufs_firehose_* → "ufs"；prog_emmc_firehose_* → "emmc"；都无 → 默认 "ufs" + warning。
+// 之所以必须告警：真包常见不带 ufs/emmc 标识的 `prog_firehose_ddr.elf`（reference/qdl/docs/nbd.md:43、
+// src/qdl.c:398 的示例就是它），默认值只是猜测 —— 会话层按 spec §4 在 configure 报
+// "Not support configure MemoryName" 时还有一次换类型重试，这里不猜死。
+void detectStorageType(const QString &dir, FlashPlan &plan)
+{
+    const QStringList names = QDir(dir).entryList(QDir::Files);
+    const auto anyContains = [&names](const QString &needle) {
+        for (const QString &n : names)
+            if (n.contains(needle, Qt::CaseInsensitive))
+                return true;
+        return false;
+    };
+    if (anyContains(QStringLiteral("ufs_firehose"))) {
+        plan.storageType = QStringLiteral("ufs");
+        return;
+    }
+    if (anyContains(QStringLiteral("emmc_firehose"))) {
+        plan.storageType = QStringLiteral("emmc");
+        return;
+    }
+    plan.storageType = QStringLiteral("ufs");
+    plan.warnings << QStringLiteral("目录内未找到 prog_ufs_firehose_* / prog_emmc_firehose_*，"
+                                    "存储类型按默认 \"ufs\" 处理（configure 报 Not support configure "
+                                    "MemoryName 时会换类型重试一次）");
+}
+
+// ---- GPT：文件 → 分区名/LBA 表（复用既有解析器 + 布局适配）----
+
+// GPT 分区项：只取对账需要的三个字段。用 numSectors 而不是 lastLba —— PlanEntry 按扇区数建模，
+// 少一次 ±1 换算就少一处 off-by-one（last-first+1 已由解析层做，disk_image.cpp:80）。
+struct GptPartition { QString name; quint64 firstLba = 0; quint64 numSectors = 0; };
+
+// 单个 LUN 的 GPT 加载结果（含失败文本，供"未对账"告警引用）
+struct GptTable {
+    bool loaded = false;             // 本 LUN 是否已尝试加载（失败也只告警一次）
+    bool ok = false;
+    QString fileName;                // gpt_main{N}.bin
+    QList<GptPartition> parts;
+};
+
+// GPT 文件 → 分区名/LBA 表。**复用既有解析器** imgdisk::parseGpt（src/image_engine/disk_image.cpp:46-88），
+// 不重写解析逻辑（硬要求 2）：它的接口本就给出"分区名 → (startSector, numSectors)"（disk_image.h:8-9），
+// 故本任务**未改** disk_image.{h,cpp}，只加了读取 + 布局适配这一层薄胶水。
+//
+// **布局适配（真包必需）**：parseGpt 硬编码 512 字节 LBA —— 在文件偏移 512 处找头、按 `表LBA × 512`
+// 定位表项数组（disk_image.cpp:8,50-63）。而真实 EDL 包的 gpt_main{N}.bin 是 **4096 字节 LBA**：
+//   * edl/edlclient/Library/TestFiles/gpt_sm8180x.bin 实测 24576 字节、`EFI PART` 在 0x1000、
+//     part_entry_lba=2（本仓内的真实样本）；
+//   * reference/qdl/tests/data/rawprogram1.xml:12 的 `gpt_main1.bin num_partition_sectors="6"`
+//     ⇒ 6 × 4096 = 24576 字节，与上者吻合；
+//   * bkerler 读盘时 512/4096 都试（edl/edlclient/Library/gpt.py:526-531）。
+// 只支持 512 会让 OPS 路径在真机（UFS）上永远拿不到 GPT 几何 ⇒ 回填/对账整体失效。
+// 适配只搬运字节布局、不碰解析语义：把 92 字节头块搬到偏移 512，并把头里的"表项数组 LBA"字段按
+// (lbaSize/512) 放大 —— 表项数组的**字节偏移不变**，parseGpt 随后读到的 LBA 与分区名与文件完全一致。
+// 头既不在 512 也不在 4096 → 直接失败（不猜布局，交给调用方记"未对账"告警）。
+bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString *error)
+{
+    QFile f(gptPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (error) *error = QStringLiteral("无法打开（%1）").arg(f.errorString());
+        return false;
+    }
+    QByteArray bytes = f.readAll();
+    f.close();
+
+    constexpr int kHeaderBytes = 92;         // UEFI 头最小 92 字节（parseGpt 只读到头 +88）
+    if (!imgdisk::isGpt(bytes.mid(512, 8))) {
+        if (!imgdisk::isGpt(bytes.mid(4096, 8))) {
+            if (error)
+                *error = QStringLiteral("\"EFI PART\" 既不在 0x200 也不在 0x1000"
+                                        "（本解析器只支持 512/4096 字节 LBA 两种布局）");
+            return false;
+        }
+        constexpr quint64 kLbaSize = 4096;
+        if (bytes.size() < qint64(kLbaSize + kHeaderBytes)) {
+            if (error)
+                *error = QStringLiteral("文件过短（%1 字节），容不下 0x1000 处的 GPT 头").arg(bytes.size());
+            return false;
+        }
+        QByteArray head = bytes.mid(kLbaSize, kHeaderBytes);
+        const quint64 tableLba = qFromLittleEndian<quint64>(head.constData() + 72);
+        // 字节偏移 = tableLba × 4096 = (tableLba × 8) × 512 —— 换算成 512 单位后交回 parseGpt
+        if (tableLba > std::numeric_limits<quint64>::max() / (kLbaSize / 512)) {
+            if (error) *error = QStringLiteral("分区表 LBA 字段溢出（%1）").arg(tableLba);
+            return false;
+        }
+        qToLittleEndian<quint64>(tableLba * (kLbaSize / 512), head.data() + 72);
+        bytes.replace(512, kHeaderBytes, head);   // 头搬到 512：parseGpt 只在这里找头
+    }
+
+    imgdisk::DiskInfo info;
+    if (!imgdisk::parseGpt(bytes, info)) {
+        if (error) *error = QStringLiteral("GPT 解析失败（表项数组越界或表项大小 <128）");
+        return false;
+    }
+    for (const imgdisk::Partition &p : info.partitions)
+        out.append({p.name, p.startSector, p.numSectors});
+    return true;
+}
+
+// 该 LUN 的 GPT 表（每个 LUN 只读一次；失败也只告警一次 —— 一个 LUN 上几十条分区，
+// 逐条报"未对账"会把预览刷爆）。
+const GptTable &gptTableForLun(quint32 lun, const QString &packageDir, QHash<quint32, GptTable> &cache,
+                               QStringList &warnings)
+{
+    GptTable &t = cache[lun];
+    if (t.loaded)
+        return t;
+    t.loaded = true;
+    // 包内 GPT 文件名 = gpt_main{N}.bin（N = lun）：协议速查 §5 "社区一手清单确认 .ops 内含
+    // gpt_main0-5.bin / gpt_backup0-5.bin"。同名的 gpt_backup{N}.bin 是**备份 GPT 头**，
+    // 几何与主表一致且 LBA 语义不同于分区表 → 不用它做对账。
+    t.fileName = QStringLiteral("gpt_main%1.bin").arg(lun);
+    const QString path = QDir(packageDir).filePath(t.fileName);
+    if (!QFile::exists(path)) {
+        warnings << QStringLiteral("LUN %1 的 %2 不存在 —— 该 LUN 的几何仅来自元数据、未做 GPT 对账")
+                        .arg(lun).arg(t.fileName);
+        return t;
+    }
+    QString gptErr;
+    if (!readGptPartitions(path, t.parts, &gptErr)) {
+        warnings << QStringLiteral("LUN %1 的 %2 不可用：%3 —— 该 LUN 的几何仅来自元数据、未做 GPT 对账")
+                        .arg(lun).arg(t.fileName, gptErr);
+        return t;
+    }
+    t.ok = true;
+    return t;
+}
+
+// 分区名匹配候选：label / 条目标识（= label，或文件名主干）+ 文件名主干 —— 两侧大小写不敏感比较
+// （GPT 名与元数据名都是 ASCII 标识符，大小写不是协议语义；用不敏感比较避免无谓的"查不到"）。
+// 同名多条 → 取第一条（GPT 里分区名唯一是 UEFI 的期望，但真包不保证）。
+const GptPartition *matchGptPartition(const PlanEntry &e, const GptTable &gpt)
+{
+    QStringList candidates;
+    if (!e.partitionName.isEmpty())
+        candidates << e.partitionName;
+    const QString stem = QFileInfo(e.imageFile).completeBaseName();
+    if (!stem.isEmpty() && !candidates.contains(stem, Qt::CaseInsensitive))
+        candidates << stem;
+    for (const QString &c : candidates)
+        for (const GptPartition &p : gpt.parts)
+            if (p.name.compare(c, Qt::CaseInsensitive) == 0)
+                return &p;
+    return nullptr;
+}
+
+// 逐条目对账（spec §3.4 规则 2；协议速查 §5 的"唯一有开源实证的几何来源"）。四态：
+//   * 该 LUN 的 GPT 不可用 → 静默返回（LUN 级告警已在 gptTableForLun 出过，见那里）；
+//   * GPT 里查不到该分区名 → 保留元数据值 + warning；
+//   * 元数据**没有**提供该几何值 → 用 GPT 回填 + warning（"值来自 GPT"必须可见）；
+//   * 两边都有但不一致 → warning + **以 GPT 为准**（brief 明文）；
+//   * 一致 → 静默（不制造告警噪音）。
+// 例外：startSectorExpr 非空（firehose 表达式，如 "NUM_DISK_SECTORS-5."）的条目**不参与对账** ——
+// 表达式由设备侧求值、主机不得改写（reference/qdl/src/firehose.c:874-879），拿包内 GPT 的具体数字
+// 替换会把"盘尾"语义写死成这个包的大小；只记一条"未对账"warning。
+void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, const GptTable &gpt,
+                      QStringList &warnings)
+{
+    if (!gpt.ok)
+        return;
+    if (!e.startSectorExpr.isEmpty()) {
+        warnings << QStringLiteral("条目 %1（lun=%2）的 start_sector 是表达式 \"%3\"，按参照原样下发、"
+                                   "不参与 GPT 对账（reference/qdl/src/firehose.c:874-879）")
+                        .arg(entryName(e), QString::number(e.lun), e.startSectorExpr);
+        return;
+    }
+    const GptPartition *hit = matchGptPartition(e, gpt);
+    if (!hit) {
+        warnings << QStringLiteral("条目 %1（lun=%2）在 %3 的分区表里查不到 —— 保留元数据几何"
+                                   "（start=%4、num=%5），未经 GPT 核对")
+                        .arg(entryName(e), QString::number(e.lun), gpt.fileName)
+                        .arg(e.startSector).arg(e.numSectors);
+        return;
+    }
+    if (haveStart && haveCount && hit->firstLba == e.startSector && hit->numSectors == e.numSectors)
+        return;                                          // 一致 → 静默
+    if (haveStart && haveCount) {
+        warnings << QStringLiteral("条目 %1（lun=%2）几何与 %3 不一致（元数据 start=%4、num=%5；"
+                                   "GPT start=%6、num=%7）—— 以 GPT 为准修正")
+                        .arg(entryName(e), QString::number(e.lun), gpt.fileName)
+                        .arg(e.startSector).arg(e.numSectors)
+                        .arg(hit->firstLba).arg(hit->numSectors);
+    } else {
+        warnings << QStringLiteral("条目 %1（lun=%2）元数据未提供 %3，几何由 %4 回填："
+                                   "start=%5、num=%6")
+                        .arg(entryName(e), QString::number(e.lun),
+                             haveStart ? QStringLiteral("num_partition_sectors")
+                                       : (haveCount ? QStringLiteral("start_sector")
+                                                    : QStringLiteral("start_sector/num_partition_sectors")),
+                             gpt.fileName)
+                        .arg(hit->firstLba).arg(hit->numSectors);
+    }
+    e.startSector = hit->firstLba;
+    e.numSectors = hit->numSectors;
+}
+
+// ---- OPS 条目 ----
+
+// 属性合并：子元素优先、容器兜底。真实 settings.xml 有两种形态（brief 的扁平形态 + FirmwareKit 样本的
+// 容器形态 `<program label="persist" num_partition_sectors="…"><Image filename="persist.img" …/></program>`：
+// reference/FirmwareKit.Oppo/FirmwareKit.Oppo.Tests/Parsers/OpsParserTests.cs:116-122）——文件名在子元素、
+// 几何在容器的情况很常见，合并成一份集合后按同一套字段规则读一次即可，不必为两种形态写两套取值。
+QXmlStreamAttributes mergeAttrs(const QXmlStreamAttributes &container, const QXmlStreamAttributes &child)
+{
+    QXmlStreamAttributes merged = container;
+    for (const QXmlStreamAttribute &a : child)
+        if (!merged.hasAttribute(a.name()))
+            merged.append(a);
+    return merged;
+}
+
+// 一个 OPS `<program>`/`<Image>` 条目 → PlanEntry{Program}。
+//
+// 属性语义与出处（逐字段）：
+//   filename → imageFile（包内相对名，以 packageDir 绝对化）
+//   label    → partitionName（缺失时用文件名主干兜底：条目标识必须非空，见 entryName()）
+//   sparse   → sparse（"true"（不区分大小写）或 "1"；同 Phase A 清单口径 oppo_ops.cpp:157-159）
+//   Sha256   → sha256（字段名见 opscrypto.py:614 的 `item.attrib["Sha256"]`；元数据有的原样带走）
+//   SECTOR_SIZE_IN_BYTES → sectorSize（缺失保持 PlanEntry 默认值）
+//   physical_partition_number → lun（**属性优先**：参照对每条带 filename 的 <program> 硬读该属性，
+//       edl/edlclient/Library/firehose_client.py:950；缺失才用组序号 Program{N} → N）
+//   start_sector / num_partition_sectors → startSector / numSectors（"强推断存在"，依据同上的硬读
+//       firehose_client.py:950,952 + chayleaf 原样导出后 `edl qfil` 刷机成功；缺失/不可解析 → 0，
+//       并按 haveStart/haveCount = false 交给 GPT 回填）
+// **包内偏移字段一律不读**：FileOffsetInSrc / SizeInByteInSrc / SizeInSectorInSrc 是"在包里的位置/
+//   长度"—— 打包器按包内累计位置重算它们（reference/oppo_decrypt/opscrypto.py:503-513），C# 模型
+//   注释也写 "Start offset in the archive (bytes)"（reference/FirmwareKit.Oppo/.../OppEntry.cs:16-17）；
+//   它们与设备扇区无关，当成 startSector/numSectors 会直接把镜像写到错误地址（协议速查 §5）。
+void appendOpsProgramEntry(const QXmlStreamAttributes &attrs, quint32 groupLun, const QString &packageDir,
+                           QHash<quint32, GptTable> &gptCache, QList<PlanEntry> &out,
+                           QStringList &warnings)
+{
+    const QString filename = attrs.value(QStringLiteral("filename")).toString();
+    if (filename.isEmpty())
+        return;      // 空名跳过（同参照 opscrypto.py:614-615 的 `wfilename == "" → continue`）
+
+    PlanEntry e;
+    e.action = PlanEntry::Action::Program;
+    e.imageFile = QDir(packageDir).filePath(filename);
+    e.partitionName = attrs.value(QStringLiteral("label")).toString();
+    if (e.partitionName.isEmpty())
+        e.partitionName = QFileInfo(filename).completeBaseName();
+
+    const QString sparse = attrs.value(QStringLiteral("sparse")).toString();
+    e.sparse = sparse.compare(QLatin1String("true"), Qt::CaseInsensitive) == 0
+               || sparse == QLatin1String("1");
+    e.sha256 = attrs.value(QStringLiteral("Sha256")).toString();
+
+    bool ok = false;
+    const quint64 sectorSize = attrU64From(attrs, "SECTOR_SIZE_IN_BYTES", &ok);
+    if (ok && sectorSize > 0 && sectorSize <= std::numeric_limits<quint32>::max())
+        e.sectorSize = quint32(sectorSize);
+
+    bool lunOk = false;
+    const quint64 attrLun = attrU64From(attrs, "physical_partition_number", &lunOk);
+    e.lun = (lunOk && attrLun <= std::numeric_limits<quint32>::max()) ? quint32(attrLun) : groupLun;
+
+    // 几何三态：与 rawprogram/patch 共用同一套状态机（readSectorAttrFrom + applyStartSector）
+    const SectorAttr startAttr = readSectorAttrFrom(attrs, "start_sector");
+    applyStartSector(startAttr, e);
+    const SectorAttr countAttr = readSectorAttrFrom(attrs, "num_partition_sectors", /*base=*/0);
+    if (countAttr.kind == SectorAttrKind::Decimal) {
+        e.numSectors = countAttr.value;
+    } else if (countAttr.kind != SectorAttrKind::Missing) {
+        // 存在但空/不可解析：不静默当 0 —— 0 在本模型里会被当成"元数据没给"而由 GPT 回填，
+        // 脏元数据就这样悄悄被掩盖过去了（同 rawprogram 侧"宁可少条目并告警"的原则）。
+        warnings << QStringLiteral("OPS 条目 %1（lun=%2）的 num_partition_sectors=\"%3\" 不可解析"
+                                   "—— 该值改由 %4 回填")
+                        .arg(e.partitionName, QString::number(e.lun),
+                             countAttr.kind == SectorAttrKind::Empty ? QStringLiteral("(空)") : countAttr.raw,
+                             QStringLiteral("gpt_main%1.bin").arg(e.lun));
+    }
+
+    // GPT 回填 + 对账（brief 明文：不一致 → 以 GPT 为准）
+    const GptTable &gpt = gptTableForLun(e.lun, packageDir, gptCache, warnings);
+    reconcileWithGpt(e, startAttr.kind == SectorAttrKind::Decimal,
+                     countAttr.kind == SectorAttrKind::Decimal, gpt, warnings);
+
+    warnLunMismatch(QStringLiteral("OPS program"), e, groupLun, warnings);
+    out << e;
+}
+
+} // namespace
+
+bool parseOpsSettingsXml(const QString &settingsXmlPath, const QString &packageDir,
+                         QList<PlanEntry> &out, QStringList &warnings, QString *error)
+{
+    QFile file;
+    if (!openXml(settingsXmlPath, QStringLiteral("OPS settings.xml"), file, error))
+        return false;
+
+    QXmlStreamReader reader(&file);
+    // 根元素名不做限制：样本/参照是 <Firehose>（FirmwareKit OpsParserTests.cs:113），Phase A 的清单
+    // 解析同样只要求"有根元素"（src/image_engine/oppo_ops.cpp:176-177）—— 收窄会拒真包。
+    if (!reader.readNextStartElement()) {
+        if (error)
+            *error = QStringLiteral("OPS settings.xml 不是有效的 XML（缺少根元素）：%1").arg(settingsXmlPath);
+        return false;
+    }
+
+    const int firstIndex = out.size();      // 只统计本次新增（parse 约定：out 只追加）
+    QHash<quint32, GptTable> gptCache;      // lun → GPT 表（每 LUN 只读一次）
+    bool havePatchGroup = false;
+
+    while (reader.readNextStartElement()) {              // 顶层：组
+        const QString tag = reader.name().toString();
+        if (tag.contains(QLatin1String("Patch"))) {
+            havePatchGroup = true;
+            const quint32 lun = trailingNumber(tag, QStringLiteral("组标签 %1").arg(tag), warnings);
+            while (reader.readNextStartElement()) {      // 组内：<patch>（与 patch XML 逐属性同构）
+                if (reader.name() == QLatin1String("patch"))
+                    loadPatchTag(reader, lun, out, warnings);   // 复用：8 必需属性 + 非 DISK 跳过 + lun 告警
+                reader.skipCurrentElement();
+            }
+            continue;
+        }
+        if (tag.contains(QLatin1String("Program")) || tag == QLatin1String("UFS_PROVISION")) {
+            const quint32 lun = tag == QLatin1String("UFS_PROVISION")
+                                    ? 0                       // brief/协议速查：UFS_PROVISION 组恒 lun=0
+                                    : trailingNumber(tag, QStringLiteral("组标签 %1").arg(tag), warnings);
+            while (reader.readNextStartElement()) {      // 组内：条目或容器
+                if (reader.attributes().hasAttribute(QStringLiteral("filename"))) {
+                    appendOpsProgramEntry(reader.attributes(), lun, packageDir, gptCache, out, warnings);
+                    reader.skipCurrentElement();
+                    continue;
+                }
+                // 容器形态（<program label="…">）：孙元素带 filename 者逐条产出，属性子优先、容器兜底
+                const QXmlStreamAttributes container = reader.attributes();
+                while (reader.readNextStartElement()) {
+                    if (reader.attributes().hasAttribute(QStringLiteral("filename")))
+                        appendOpsProgramEntry(mergeAttrs(container, reader.attributes()), lun, packageDir,
+                                              gptCache, out, warnings);
+                    reader.skipCurrentElement();
+                }
+            }
+            continue;
+        }
+        reader.skipCurrentElement();                     // SAHARA/BasicInfo 等非分区组：忽略
+    }
+    if (reader.hasError()) {
+        if (error)
+            *error = QStringLiteral("OPS settings.xml 解析失败：%1（%2）")
+                         .arg(settingsXmlPath, reader.errorString());
+        return false;
+    }
+
+    int patchEntries = 0;
+    for (int i = firstIndex; i < out.size(); ++i)
+        if (out[i].action == PlanEntry::Action::Patch)
+            ++patchEntries;
+    // spec §3.4：patch 条目缺失必须明说（GPT 头定点修补 = 刷后能否引导）。
+    // 分两种：整个 patch 分组不存在 vs 分组在但一条 DISK 条目都没产出（非 DISK 的会被 loadPatchTag 跳过）
+    if (!havePatchGroup) {
+        warnings << QStringLiteral("元数据中未找到 patch 分组：GPT 头定点修补缺失，刷后可能无法引导");
+    } else if (patchEntries == 0) {
+        warnings << QStringLiteral("patch 分组存在但未产出任何 DISK 条目：GPT 头定点修补缺失，刷后可能无法引导");
+    }
+    return true;
+}
+
+bool buildPlanFromDir(const QString &dir, FlashPlan &plan, QString *error)
+{
+    // 计划对象是本函数的**输出**：入口清空，重复调用不累积（parse*Xml 的契约是"只追加"，
+    // 若这里不清，UI 换目录重建预览时会把上一次的条目/告警混进来）。
+    plan.source.clear();
+    plan.storageType.clear();
+    plan.entries.clear();
+    plan.warnings.clear();
+    plan.totalBytes = 0;
+
+    QDir d(dir);
+    if (!d.exists()) {
+        if (error)
+            *error = QStringLiteral("目录不存在：%1").arg(dir);
+        return false;
+    }
+    detectStorageType(dir, plan);
+
+    // 目录内 XML 清单：诊断用（③ 失败时列给用户看），只列 .xml 文件名
+    const QStringList xmlNames = d.entryList(QStringList{QStringLiteral("*.xml")}, QDir::Files, QDir::Name);
+    const QString xmlList = xmlNames.isEmpty() ? QStringLiteral("（无）")
+                                              : xmlNames.join(QStringLiteral("、"));
+
+    // ① rawprogram*.xml（文件名末尾数字 = lun）+ patch*.xml
+    const QList<QPair<quint32, QString>> rawprograms =
+            numberedXmlFiles(dir, QStringLiteral("rawprogram"), plan.warnings);
+    const QList<QPair<quint32, QString>> patches =
+            numberedXmlFiles(dir, QStringLiteral("patch"), plan.warnings);
+
+    bool built = false;
+    if (!rawprograms.isEmpty()) {
+        QStringList used;
+        for (const QPair<quint32, QString> &rp : rawprograms) {
+            if (!parseRawprogramXml(d.filePath(rp.second), rp.first, plan.entries, plan.warnings, error))
+                return false;
+            used << rp.second;
+        }
+        for (const QPair<quint32, QString> &pt : patches) {
+            if (!parsePatchXml(d.filePath(pt.second), pt.first, plan.entries, plan.warnings, error))
+                return false;
+            used << pt.second;
+        }
+        if (!plan.entries.isEmpty()) {
+            plan.source = QStringLiteral("rawprogram XML：%1").arg(used.join(QStringLiteral("、")));
+            built = true;
+        } else {
+            // ①文件在但一条都没解析出来（空文件/标签不符）：不静默 —— 回退②并说明
+            plan.warnings << QStringLiteral("rawprogram*.xml 存在但未产出任何条目，"
+                                            "改用 OPS settings.xml 作为计划来源");
+        }
+    }
+
+    // ② OPS settings.xml（.ops/.ofp 解包产物；几何走包内 gpt_main{N}.bin 回填对账）
+    if (!built && QFile::exists(d.filePath(QStringLiteral("settings.xml")))) {
+        if (!parseOpsSettingsXml(d.filePath(QStringLiteral("settings.xml")), d.absolutePath(),
+                                 plan.entries, plan.warnings, error))
+            return false;
+        plan.source = QStringLiteral("OPS settings.xml 元数据 + gpt_main{N}.bin GPT 回填对账");
+        built = true;
+    }
+
+    // ③ 两个来源都没有
+    if (!built) {
+        if (error) {
+            *error = rawprograms.isEmpty()
+                ? QStringLiteral("未找到 rawprogram*.xml 或 settings.xml，无法构建刷写计划。目录内 XML：%1")
+                      .arg(xmlList)
+                : QStringLiteral("rawprogram*.xml 存在但未产出任何条目，且目录内无 settings.xml 可回退。"
+                                 "目录内 XML：%1").arg(xmlList);
+        }
+        return false;
+    }
+    // 选了来源却一条都没有 → 拒（fail-closed：空计划绝不能进预览/刷写）
+    if (plan.entries.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("%1 未产出任何刷写条目（XML 标签/属性与本项目解析器不符？）。"
+                                    "目录内 XML：%2").arg(plan.source, xmlList);
+        return false;
+    }
+
+    // 调用链：parse* → normalizePlan → finalizePlan（validatePlan 由会话层在 getstorageinfo 后做）
+    QString normErr;
+    if (!normalizePlan(plan, plan.warnings, &normErr)) {
+        if (error) *error = normErr;                     // 逐行合并的失败清单，直接透传
+        return false;
+    }
+    finalizePlan(plan);
+    return true;
 }
 
 } // namespace edl

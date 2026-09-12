@@ -45,6 +45,36 @@ bool parseRawprogramXml(const QString &xmlPath, quint32 lun,
 bool parsePatchXml(const QString &xmlPath, quint32 lun,
                    QList<PlanEntry> &out, QStringList &warnings, QString *error);
 
+// ---- 来源探测（Task 3；spec §3.4 三层来源）----
+//
+// `buildPlanFromDir`：目录 → FlashPlan（**只读目录**，不写盘）。`plan` 是本函数的**输出**：
+// 入口先清空 source/storageType/entries/warnings/totalBytes，同一对象可重复调用而不累积。
+// 内部完成 `parse* → normalizePlan → finalizePlan` 三步（**不**跑 validatePlan —— 那需要设备
+// 几何，由会话层在 getstorageinfo 之后调用，见 §3.5）。来源顺序：
+//   ① 目录内有 rawprogram*.xml（**文件名末尾数字 = lun**）→ 连同 patch*.xml 一起解析；
+//   ② 否则（或①解析出 0 条目）有 settings.xml → `parseOpsSettingsXml`（OPS 元数据回退）；
+//   ③ 都没有 → 失败，*error 列出目录内所有 .xml 文件名（帮助诊断）。
+// 所选来源产出 0 条目 → 失败（fail-closed，绝不放行空计划）。
+// storageType：目录含 prog_ufs_firehose_* → "ufs"；含 prog_emmc_firehose_* → "emmc"；
+// 都无 → "ufs" + warning（真包常见不带 ufs/emmc 标识的 prog_firehose_*.elf）。
+// 解析告警一律进 plan.warnings（含 normalizePlan 的）；失败返回 false 并写中文 *error。
+bool buildPlanFromDir(const QString &dir, FlashPlan &plan, QString *error);
+
+// 来源②：OPS `settings.xml`（`.ops` 解包产物）→ 条目（**只追加** out，同 parse*Xml 约定：
+// 对账只作用于本次新增的条目）。分组语义（协议速查 §5；样本形态见
+// reference/FirmwareKit.Oppo/FirmwareKit.Oppo.Tests/Parsers/OpsParserTests.cs:113-124）：
+//   <Program{N}> / <Patch{N}> → lun = 标签末尾数字；<UFS_PROVISION> → lun = 0；其余组忽略。
+// 条目：子元素带 `filename` 即条目；否则容器（如 `<program label="…">`）的孙元素带 `filename`
+// 者逐条产出，属性按"子元素优先、容器兜底"合并（两种真实形态都覆盖）。
+// 几何：元数据有 `start_sector`/`num_partition_sectors` 则取用，随后用包内 `gpt_main{N}.bin`
+// 的 LBA 表**对账**（一致 → 静默；不一致 → warning 且**以 GPT 为准**；GPT 里查不到 → 保留元数据
+// + warning）。`start_sector` 为 firehose 表达式时**不参与对账**（表达式由设备侧求值）。
+// **忽略包内偏移字段** `FileOffsetInSrc`/`SizeInByteInSrc`/`SizeInSectorInSrc` —— 它们只描述文件在
+// 包内的位置与长度，与设备扇区无关（协议速查 §5）。
+// `packageDir`：包内文件所在目录（imageFile 与 gpt_main{N}.bin 的基准；通常 = settings.xml 所在目录）。
+bool parseOpsSettingsXml(const QString &settingsXmlPath, const QString &packageDir,
+                         QList<PlanEntry> &out, QStringList &warnings, QString *error);
+
 // 排序 + 统计（spec §3.3/§3.5）：Erase 一律在前，Program 按 (lun, startSector) 升序，Patch 一律最后；
 // 同键保持解析顺序（stable_sort）。填 totalBytes = Program 条目 rawBytes（为 0 时退化为
 // numSectors × sectorSize）之和 —— 进度分母，Patch/Erase 不计入。

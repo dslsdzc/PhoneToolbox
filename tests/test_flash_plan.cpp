@@ -4,6 +4,7 @@
 #include <limits>
 #include "core/edl/flash_plan.h"
 #include "image_engine/sparse_image.h"
+#include "flash_plan_helpers.h"
 
 // 手写字节的合成 rawprogram（绝不调用被测解析代码）
 static QString writeFile(const QString &dir, const QString &name, const QByteArray &bytes)
@@ -62,6 +63,17 @@ private slots:
     void validateRejectsWraparoundGeometry();
     void errorNamesEraseEntryUniquely();
     void sparseNumSectorsFromHeader();
+    // Task 3：来源探测 + OPS 元数据 + GPT 回填对账
+    void opsSourceUsesMetadataAndGpt();
+    void opsReconcilesRealPackageGptLayout();
+    void opsKeepsMetadataWhenGptLacksPartition();
+    void opsAcceptsMetadataConsistentWithGpt();
+    void opsPatchGroupsAndMissingPatchWarning();
+    void opsGroupTagAndUfsProvisionGiveLun();
+    void dirPrefersRawprogramAndFallsBackWhenEmpty();
+    void dirNormalizesSparseImageFromHeader();
+    void dirWithoutPlanReportsXmlList();
+    void storageTypeFromProgrammerFile();
 };
 
 void TestFlashPlan::parsesProgramEntries()
@@ -666,6 +678,394 @@ void TestFlashPlan::sparseNumSectorsFromHeader()
     QVERIFY(imgsparse::sparseRawSizeFromHeader(h, raw));
     QCOMPARE(raw, quint64(3 * 4096));
     QVERIFY(!imgsparse::sparseRawSizeFromHeader(QByteArray(8, '\0'), raw));  // 头太短
+}
+
+// ================= Task 3：来源探测 + OPS 元数据 + GPT 回填对账 =================
+
+// brief 的用例（断言原样保留）。**两处夹具修正**，都在注释里写明：
+//   1) 补写 `xbl.img` —— brief 只写了 settings.xml + gpt_main0.bin，但 normalizePlan（Task 2 契约）
+//      要求 Program 条目的镜像可打开；缺文件会让 buildPlanFromDir 按设计失败（fail-closed）。
+//   2) `buildGptWithPartition` 按 `disk_image.cpp` 的**实际读取条件**构造（见 flash_plan_helpers.h）。
+// 断言之外补三条：imageFile 指向包目录、无 label 时用文件名主干作条目标识、不一致告警点名 gpt_main0.bin。
+void TestFlashPlan::opsSourceUsesMetadataAndGpt()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose>\n"
+        "  <Program0>\n"
+        "    <program filename=\"xbl.img\" sparse=\"false\" ID=\"0\"\n"
+        "             FileOffsetInSrc=\"2\" SizeInSectorInSrc=\"8\" SizeInByteInSrc=\"4096\"\n"
+        "             Sha256=\"00\" physical_partition_number=\"0\"\n"
+        "             start_sector=\"1\" num_partition_sectors=\"1\" />\n"   // 元数据故意写错几何
+        "  </Program0>\n"
+        "</Firehose>\n";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("xbl", 4096, 12287)));       // GPT 才是真相
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x5A')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].lun, quint32(0));
+    QCOMPARE(plan.entries[0].startSector, quint64(4096));                 // 以 GPT 为准
+    QCOMPARE(plan.entries[0].numSectors, quint64(12287 - 4096 + 1));
+    QVERIFY(plan.source.contains(QStringLiteral("OPS")));
+    QVERIFY(!plan.warnings.isEmpty());                                    // 记录了与元数据不符
+    // 追加断言：镜像绝对路径、条目标识（无 label → 文件名主干）、元数据 sha256 原样带走、
+    // 不一致告警文本点名是哪个 GPT 文件
+    QCOMPARE(plan.entries[0].imageFile, dir.path() + "/xbl.img");
+    QCOMPARE(plan.entries[0].partitionName, QStringLiteral("xbl"));
+    QCOMPARE(plan.entries[0].sha256, QStringLiteral("00"));
+    bool mismatchWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("gpt_main0.bin")))
+            mismatchWarned = true;
+    QVERIFY(mismatchWarned);
+    // 默认存储类型告警（目录里没有 prog_*_firehose_*）
+    bool storageWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("默认")))
+            storageWarned = true;
+    QVERIFY(storageWarned);
+
+    // 重复调用不累积：计划对象是本函数的输出（入口清空 entries/warnings）
+    edl::FlashPlan again = plan;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), again, &err), qPrintable(err));
+    QCOMPARE(again.entries.size(), 1);
+    QCOMPARE(again.warnings.size(), plan.warnings.size());
+}
+
+// 真实包布局：`gpt_main{N}.bin` 是 **4096 字节 LBA**（证据见 flash_plan_helpers.h 的 lbaSize 注释：
+// edl 子模块内的真实样本 gpt_sm8180x.bin：24576 B、EFI PART@0x1000；qdl 的 gpt_main1.bin = 6×4096）。
+// imgdisk::parseGpt 只按 512 定位 → 本用例钉住 buildPlanFromDir 内的**布局适配**（不重写解析器）。
+void TestFlashPlan::opsReconcilesRealPackageGptLayout()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"super.img\" label=\"super\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"2048\" num_partition_sectors=\"16\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("super", 4096, 12287, /*lbaSize=*/4096)));
+    QVERIFY(writeBytes(dir.path() + "/super.img", QByteArray(65536, '\x11')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(4096));   // 元数据 2048 → 以 GPT 为准
+    QCOMPARE(plan.entries[0].numSectors, quint64(8192));
+    bool mismatchWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("不一致")))
+            mismatchWarned = true;
+    QVERIFY(mismatchWarned);
+}
+
+// 对账态之二：GPT 里**查不到**该分区名 → 保留元数据几何 + warning。
+// 同时钉住"包内偏移字段一律忽略"：FileOffsetInSrc/SizeInSectorInSrc/SizeInByteInSrc 若被误当几何，
+// startSector/numSectors 会变成 999/777/555，本用例断言它们**仍是元数据的 2/3**（协议速查 §5）。
+void TestFlashPlan::opsKeepsMetadataWhenGptLacksPartition()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+        "FileOffsetInSrc=\"999\" SizeInSectorInSrc=\"777\" SizeInByteInSrc=\"555\" "
+        "physical_partition_number=\"0\" start_sector=\"2\" num_partition_sectors=\"3\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("modem", 4096, 12287)));     // 表里没有 xbl
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x22')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(2));       // 元数据值，InSrc 未被误用
+    QCOMPARE(plan.entries[0].numSectors, quint64(3));
+    bool keepWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("查不到")))
+            keepWarned = true;
+    QVERIFY(keepWarned);
+}
+
+// 对账态之一：元数据与 GPT **一致** → 值不变、不产生"不一致/回填"告警（静默成功）。
+void TestFlashPlan::opsAcceptsMetadataConsistentWithGpt()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"4096\" num_partition_sectors=\"8192\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin", buildGptWithPartition("xbl", 4096, 12287)));
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x33')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(4096));
+    QCOMPARE(plan.entries[0].numSectors, quint64(8192));
+    for (const QString &w : plan.warnings) {
+        QVERIFY2(!w.contains(QStringLiteral("不一致")), qPrintable(w));
+        QVERIFY2(!w.contains(QStringLiteral("回填")), qPrintable(w));
+    }
+}
+
+// <Patch{N}> 组 → Action::Patch（8 属性同 patch XML，直接复用 loadPatchTag 的规则：非 DISK 跳过）。
+// 另半边：**没有** patch 分组时必须出"GPT 头定点修补缺失"告警（spec §3.4 要求不静默）。
+void TestFlashPlan::opsPatchGroupsAndMissingPatchWarning()
+{
+    {
+        QTemporaryDir dir;
+        const QString settings =
+            "<Firehose>\n"
+            "  <Program0>\n"
+            "  </Program0>\n"
+            "  <Patch0>\n"
+            "    <patch start_sector=\"1\" byte_offset=\"16\" physical_partition_number=\"0\"\n"
+            "           size_in_bytes=\"4\" value=\"CRC32(1,92)\" filename=\"DISK\"\n"
+            "           SECTOR_SIZE_IN_BYTES=\"4096\" what=\"Update Primary Header with CRC.\" />\n"
+            "    <patch start_sector=\"1\" byte_offset=\"16\" physical_partition_number=\"0\"\n"
+            "           size_in_bytes=\"4\" value=\"CRC32(1,92)\" filename=\"gpt_main0.bin\"\n"
+            "           SECTOR_SIZE_IN_BYTES=\"4096\" what=\"离线改 bin 用\" />\n"
+            "  </Patch0>\n"
+            "</Firehose>\n";
+        QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.entries.size(), 1);                       // 非 DISK 那条被跳过
+        QCOMPARE(plan.entries[0].action, edl::PlanEntry::Action::Patch);
+        QCOMPARE(plan.entries[0].byteOffset, quint64(16));
+        QCOMPARE(plan.entries[0].sizeInBytes, quint32(4));
+        QCOMPARE(plan.entries[0].value, QStringLiteral("CRC32(1,92)"));  // 表达式原样
+        QCOMPARE(plan.entries[0].imageFile, QStringLiteral("DISK"));
+        bool skipWarned = false, missingPatchWarned = false;
+        for (const QString &w : plan.warnings) {
+            if (w.contains(QStringLiteral("非 DISK"))) skipWarned = true;
+            if (w.contains(QStringLiteral("未找到 patch 分组"))) missingPatchWarned = true;
+        }
+        QVERIFY(skipWarned);
+        QVERIFY(!missingPatchWarned);                           // 有 Patch 组就不该报"缺失"
+    }
+    {
+        QTemporaryDir dir;
+        // 只有 Program 组（条目几何留在元数据里，GPT 缺失 → 只是一条"未对账"告警）
+        const QString settings =
+            "<Firehose><Program0>"
+            "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+            "physical_partition_number=\"0\" start_sector=\"1\" num_partition_sectors=\"1\" />"
+            "</Program0></Firehose>";
+        QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+        QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x44')));
+
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        bool missingPatchWarned = false;
+        for (const QString &w : plan.warnings)
+            if (w.contains(QStringLiteral("未找到 patch 分组"))
+                && w.contains(QStringLiteral("刷后可能无法引导")))
+                missingPatchWarned = true;
+        QVERIFY(missingPatchWarned);
+    }
+}
+
+// 组标签 → lun：`Program{N}` 取末尾数字（同 rawprogram{N}.xml 的约定），`UFS_PROVISION` 恒 0。
+// 另钉住两条既有语义：
+//   * `<File Path=…>`（真实 UFS_PROVISION 子元素形态，无 filename）**不产条目**；
+//   * 条目属性 `physical_partition_number` 与组序号不一致 → 走既有 warnLunMismatch 告警通道，
+//     且**以属性为准**（Task 1 契约，本任务不得删该通道）。
+void TestFlashPlan::opsGroupTagAndUfsProvisionGiveLun()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose>\n"
+        "  <Program1>\n"
+        "    <program filename=\"xbl.img\" label=\"xbl_a\" sparse=\"false\"\n"
+        "             physical_partition_number=\"1\" start_sector=\"6\" num_partition_sectors=\"901\"\n"
+        "             SECTOR_SIZE_IN_BYTES=\"4096\" />\n"
+        "  </Program1>\n"
+        "  <UFS_PROVISION>\n"
+        "    <File Path=\"provision.xml\" FileOffsetInSrc=\"0\" SizeInByteInSrc=\"10\" />\n"
+        "    <program filename=\"persist.img\" label=\"persist\" sparse=\"false\"\n"
+        "             physical_partition_number=\"0\" start_sector=\"100\" num_partition_sectors=\"8\"\n"
+        "             SECTOR_SIZE_IN_BYTES=\"4096\" />\n"
+        "  </UFS_PROVISION>\n"
+        "  <Program2>\n"
+        "    <program filename=\"modem.img\" label=\"modem_a\" sparse=\"false\"\n"
+        "             physical_partition_number=\"3\" start_sector=\"200\" num_partition_sectors=\"9\"\n"
+        "             SECTOR_SIZE_IN_BYTES=\"4096\" />\n"
+        "  </Program2>\n"
+        "</Firehose>\n";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x55')));
+    QVERIFY(writeBytes(dir.path() + "/persist.img", QByteArray(4096, '\x66')));
+    QVERIFY(writeBytes(dir.path() + "/modem.img", QByteArray(4096, '\x77')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 3);                 // provision.xml（无 filename）不产条目
+    QHash<QString, edl::PlanEntry> byName;
+    for (const edl::PlanEntry &e : plan.entries)
+        byName.insert(e.partitionName, e);
+    QVERIFY(byName.contains(QStringLiteral("xbl_a")));
+    QCOMPARE(byName.value(QStringLiteral("xbl_a")).lun, quint32(1));    // Program1 → 1
+    QVERIFY(byName.contains(QStringLiteral("persist")));
+    QCOMPARE(byName.value(QStringLiteral("persist")).lun, quint32(0));  // UFS_PROVISION → 0
+    QCOMPARE(byName.value(QStringLiteral("persist")).startSector, quint64(100));
+    QVERIFY(byName.contains(QStringLiteral("modem_a")));
+    QCOMPARE(byName.value(QStringLiteral("modem_a")).lun, quint32(3));  // 属性 wins（Program2 → 告警）
+    QVERIFY(!byName.contains(QStringLiteral("provision.xml")));
+    // finalizePlan 确实在 buildPlanFromDir 内部跑了：顺序按 (lun, startSector)、totalBytes 是
+    // Program 条目 numSectors × sectorSize 之和（rawBytes 为 0 时的退化口径，见 finalizePlan 注释）
+    QCOMPARE(plan.entries[0].partitionName, QStringLiteral("persist"));   // lun 0
+    QCOMPARE(plan.entries[1].partitionName, QStringLiteral("xbl_a"));     // lun 1
+    QCOMPARE(plan.entries[2].partitionName, QStringLiteral("modem_a"));   // lun 3
+    QCOMPARE(plan.totalBytes, quint64(8 + 901 + 9) * 4096);
+
+    bool lunMismatchWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("lun=3")))
+            lunMismatchWarned = true;
+    QVERIFY(lunMismatchWarned);
+}
+
+// 来源优先级：有 rawprogram*.xml 就用它（即使 settings.xml 同时在，也不产 OPS 条目/告警）；
+// rawprogram*.xml 存在但**产出 0 条目**时回退 settings.xml（并记 warning，不静默）。
+void TestFlashPlan::dirPrefersRawprogramAndFallsBackWhenEmpty()
+{
+    {
+        QTemporaryDir dir;
+        QVERIFY(writeBytes(dir.path() + "/rawprogram0.xml",
+                           "<data><program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"boot.img\" "
+                           "label=\"boot_a\" num_partition_sectors=\"16\" "
+                           "physical_partition_number=\"0\" start_sector=\"1234\" "
+                           "file_sector_offset=\"0\" /></data>"));
+        QVERIFY(writeBytes(dir.path() + "/boot.img", QByteArray(65536, '\x88')));
+        QVERIFY(writeBytes(dir.path() + "/settings.xml",
+                           "<Firehose><Program0><program filename=\"never.img\" label=\"never\" "
+                           "physical_partition_number=\"0\" start_sector=\"5\" "
+                           "num_partition_sectors=\"1\" /></Program0></Firehose>"));
+
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.entries.size(), 1);
+        QCOMPARE(plan.entries[0].partitionName, QStringLiteral("boot_a"));   // 只有 XML 里那份
+        QCOMPARE(plan.entries[0].startSector, quint64(1234));
+        QVERIFY(plan.source.contains(QStringLiteral("rawprogram")));
+        for (const QString &w : plan.warnings)                              // OPS 分支没被跑
+            QVERIFY2(!w.contains(QStringLiteral("未找到 patch 分组")), qPrintable(w));
+    }
+    {
+        QTemporaryDir dir;
+        QVERIFY(writeBytes(dir.path() + "/rawprogram0.xml", "<data></data>"));   // 空 → 0 条目
+        QVERIFY(writeBytes(dir.path() + "/settings.xml",
+                           "<Firehose><Program0><program filename=\"xbl.img\" label=\"xbl\" "
+                           "sparse=\"false\" physical_partition_number=\"0\" start_sector=\"7\" "
+                           "num_partition_sectors=\"2\" /></Program0></Firehose>"));
+        QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x99')));
+
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.entries.size(), 1);
+        QCOMPARE(plan.entries[0].partitionName, QStringLiteral("xbl"));
+        QCOMPARE(plan.entries[0].startSector, quint64(7));
+        QVERIFY(plan.source.contains(QStringLiteral("OPS")));
+        bool fallbackWarned = false;
+        for (const QString &w : plan.warnings)
+            if (w.contains(QStringLiteral("改用 OPS")))
+                fallbackWarned = true;
+        QVERIFY(fallbackWarned);
+    }
+}
+
+// buildPlanFromDir 内部**确实**跑了 normalizePlan（硬要求 3 的调用链）：OPS 元数据声明 sparse="true"
+// 且扇区数写错（1），镜像 sparse 头声明 3 块 × 4096 → 以文件头为准修正为 3 扇区 + warning、rawBytes 回填。
+// 注：镜像只落 28 字节头 + 1 字节数据 —— normalizePlan 只读头（Task 2 契约），chunk 流校验属于发送侧。
+void TestFlashPlan::dirNormalizesSparseImageFromHeader()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"system.img\" label=\"system\" sparse=\"true\" "
+        "physical_partition_number=\"0\" start_sector=\"10\" num_partition_sectors=\"1\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/system.img",
+                       sparseHeaderBytes(3, 4096) + QByteArray(1, '\x01')));   // 头声明 3 块 × 4096
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].sparse, true);
+    QCOMPARE(plan.entries[0].startSector, quint64(10));      // 元数据值（本目录无 GPT 可对账）
+    QCOMPARE(plan.entries[0].numSectors, quint64(3));        // 文件头为准（元数据写 1）
+    QCOMPARE(plan.entries[0].rawBytes, quint64(3 * 4096));
+    QCOMPARE(plan.totalBytes, quint64(3 * 4096));            // finalizePlan 也跑了（rawBytes 为分母）
+    bool corrected = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("以文件头为准")))
+            corrected = true;
+    QVERIFY(corrected);
+}
+
+// brief 的用例（断言原样保留）+ 补一条：列的是**全部** .xml，且不含非 .xml 文件（帮助诊断）。
+void TestFlashPlan::dirWithoutPlanReportsXmlList()
+{
+    QTemporaryDir dir;
+    QVERIFY(writeBytes(dir.path() + "/notes.xml", QByteArray("<x/>")));
+    QVERIFY(writeBytes(dir.path() + "/extra.xml", QByteArray("<y/>")));
+    QVERIFY(writeBytes(dir.path() + "/readme.txt", QByteArray("<z/>")));
+    edl::FlashPlan plan; QString err;
+    QVERIFY(!edl::buildPlanFromDir(dir.path(), plan, &err));
+    QVERIFY(err.contains(QStringLiteral("未找到")));
+    QVERIFY(err.contains(QStringLiteral("notes.xml")));                    // 列举帮助诊断
+    QVERIFY(err.contains(QStringLiteral("extra.xml")));
+    QVERIFY(!err.contains(QStringLiteral("readme.txt")));
+}
+
+// storageType 探测：prog_ufs_firehose_* → "ufs"；prog_emmc_firehose_* → "emmc"；都无 → "ufs" + warning。
+// 用"整 LUN 擦"条目做计划源：Erase 不需要镜像文件，能让三个目录都构建成功（最小夹具）。
+void TestFlashPlan::storageTypeFromProgrammerFile()
+{
+    const QByteArray eraseXml = "<data><erase SECTOR_SIZE_IN_BYTES=\"4096\" "
+                                "physical_partition_number=\"0\"/></data>";
+    {
+        QTemporaryDir dir;
+        QVERIFY(writeBytes(dir.path() + "/rawprogram0.xml", eraseXml));
+        QVERIFY(writeBytes(dir.path() + "/prog_ufs_firehose_ddr.elf", QByteArray(4, '\x01')));
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.storageType, QStringLiteral("ufs"));
+        for (const QString &w : plan.warnings)
+            QVERIFY2(!w.contains(QStringLiteral("默认")), qPrintable(w));
+    }
+    {
+        QTemporaryDir dir;
+        QVERIFY(writeBytes(dir.path() + "/rawprogram0.xml", eraseXml));
+        QVERIFY(writeBytes(dir.path() + "/prog_emmc_firehose_660.elf", QByteArray(4, '\x02')));
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.storageType, QStringLiteral("emmc"));
+    }
+    {
+        QTemporaryDir dir;
+        QVERIFY(writeBytes(dir.path() + "/rawprogram0.xml", eraseXml));
+        edl::FlashPlan plan; QString err;
+        QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+        QCOMPARE(plan.storageType, QStringLiteral("ufs"));
+        bool defaultWarned = false;
+        for (const QString &w : plan.warnings)
+            if (w.contains(QStringLiteral("默认")) && w.contains(QStringLiteral("ufs")))
+                defaultWarned = true;
+        QVERIFY(defaultWarned);
+    }
 }
 
 QTEST_APPLESS_MAIN(TestFlashPlan)
