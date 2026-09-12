@@ -26,15 +26,20 @@
 //
 // == lbaSize：逻辑块大小（= 头所在字节偏移 = LBA 编号的字节单位）==
 //   * **512（默认）**：解析器原生布局（`tests/test_disk.cpp:13-38` 同款），eMMC 类设备的形态。
-//   * **4096**：**真实 EDL 包 `gpt_main{N}.bin` 的形态**。证据（都在本仓）：
+//     用例：`opsReconcilesGptLayout512`（显式传 512）。
+//   * **4096**：**真实 EDL 包 `gpt_main{N}.bin` 的形态**。证据（仅作**注释引用**，见下）：
 //       - `edl/edlclient/Library/TestFiles/gpt_sm8180x.bin`：24576 字节，`EFI PART` 在 **0x1000**，
 //         part_entry_lba=2、32 项 ×128B；
 //       - `reference/qdl/tests/data/rawprogram1.xml:12`：`gpt_main1.bin num_partition_sectors="6"`
 //         —— 6 × 4096 = 24576，与上者完全吻合；
 //       - bkerler 读盘时**同时试 512 与 4096**（`edl/edlclient/Library/gpt.py:526-531`）。
 //     `imgdisk::parseGpt` 只按 512 定位 → 该布局由 `buildPlanFromDir` 内的**布局适配**
-//     （`flash_plan.cpp` 的 readGptPartitions）归一化后再交给 parseGpt，用例见
-//     `opsReconcilesRealPackageGptLayout`。
+//     （`flash_plan.cpp` 的 readGptPartitions）归一化后再交给 parseGpt。
+//     用例：`opsReconcilesGptLayout4096`。
+// ⚠️ **测试绝不读真实样本 `gpt_sm8180x.bin`**：它属 `edl/` 子模块，未初始化的克隆（CI/新机器）里不存在
+//    → 测试会挂。上面两条只是**证据引用**；4096 布局的夹具是本函数用同样布局手写出来的字节。
+// ⚠️ 两种布局的用例都必须断言"**对账真的发生**"（元数据故意写错 → 以 GPT 为准 + warning），
+//    而不是只断言 parse 成功 —— 解析器本身另有 tests/test_disk.cpp。
 //
 // 文件尺寸 = (2 + 表项数组占用的 LBA 数) × lbaSize：LBA0 保护 MBR + LBA1 头 + 表项数组。
 inline QByteArray buildGptWithPartition(const QByteArray &name, quint64 firstLba, quint64 lastLba,

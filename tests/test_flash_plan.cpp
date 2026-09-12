@@ -65,7 +65,8 @@ private slots:
     void sparseNumSectorsFromHeader();
     // Task 3：来源探测 + OPS 元数据 + GPT 回填对账
     void opsSourceUsesMetadataAndGpt();
-    void opsReconcilesRealPackageGptLayout();
+    void opsReconcilesGptLayout4096();
+    void opsReconcilesGptLayout512();
     void opsKeepsMetadataWhenGptLacksPartition();
     void opsAcceptsMetadataConsistentWithGpt();
     void opsPatchGroupsAndMissingPatchWarning();
@@ -687,6 +688,8 @@ void TestFlashPlan::sparseNumSectorsFromHeader()
 //      要求 Program 条目的镜像可打开；缺文件会让 buildPlanFromDir 按设计失败（fail-closed）。
 //   2) `buildGptWithPartition` 按 `disk_image.cpp` 的**实际读取条件**构造（见 flash_plan_helpers.h）。
 // 断言之外补三条：imageFile 指向包目录、无 label 时用文件名主干作条目标识、不一致告警点名 gpt_main0.bin。
+// 本条用的夹具是**默认 512 字节 LBA**（解析器原生布局）；4096 字节 LBA（真实包形态）另见
+// opsReconcilesGptLayout4096，两条布局用例都断言"对账真的发生"。
 void TestFlashPlan::opsSourceUsesMetadataAndGpt()
 {
     QTemporaryDir dir;
@@ -736,10 +739,12 @@ void TestFlashPlan::opsSourceUsesMetadataAndGpt()
     QCOMPARE(again.warnings.size(), plan.warnings.size());
 }
 
-// 真实包布局：`gpt_main{N}.bin` 是 **4096 字节 LBA**（证据见 flash_plan_helpers.h 的 lbaSize 注释：
-// edl 子模块内的真实样本 gpt_sm8180x.bin：24576 B、EFI PART@0x1000；qdl 的 gpt_main1.bin = 6×4096）。
-// imgdisk::parseGpt 只按 512 定位 → 本用例钉住 buildPlanFromDir 内的**布局适配**（不重写解析器）。
-void TestFlashPlan::opsReconcilesRealPackageGptLayout()
+// 布局② **4096 字节 LBA = 真实包 `gpt_main{N}.bin` 的形态**（证据见 flash_plan_helpers.h 的 lbaSize
+// 注释：edl 子模块真实样本 gpt_sm8180x.bin 24576 B、EFI PART@0x1000；qdl 的 gpt_main1.bin = 6×4096）。
+// imgdisk::parseGpt 只按 512 定位 → 本用例钉住 buildPlanFromDir 内的**布局适配**（解析仍走 parseGpt）。
+// 夹具是**手写字节**（buildGptWithPartition 的 lbaSize=4096），不读子模块里的真实样本。
+// 断言到"对账真的发生"：元数据故意写 2048/16 → 结果必须是 GPT 的 4096/8192 + 不一致告警。
+void TestFlashPlan::opsReconcilesGptLayout4096()
 {
     QTemporaryDir dir;
     const QString settings =
@@ -756,12 +761,40 @@ void TestFlashPlan::opsReconcilesRealPackageGptLayout()
     QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
     QCOMPARE(plan.entries.size(), 1);
     QCOMPARE(plan.entries[0].startSector, quint64(4096));   // 元数据 2048 → 以 GPT 为准
-    QCOMPARE(plan.entries[0].numSectors, quint64(8192));
+    QCOMPARE(plan.entries[0].numSectors, quint64(12287 - 4096 + 1));
     bool mismatchWarned = false;
     for (const QString &w : plan.warnings)
-        if (w.contains(QStringLiteral("不一致")))
+        if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("gpt_main0.bin")))
             mismatchWarned = true;
-    QVERIFY(mismatchWarned);
+    QVERIFY(mismatchWarned);                                 // 对账确实发生（不是只 parse 成功）
+}
+
+// 布局① **512 字节 LBA = 解析器原生布局**（适配分支不介入，直接交 parseGpt）。与 4096 那条成对，
+// 同样断言"对账真的发生"：元数据 7/2 与 GPT 6/901 不一致 → 以 GPT 为准 + 告警点名 gpt_main0.bin。
+// （数字取自 reference/qdl/tests/data/rawprogram1.xml:5 的真实 xbl_a 几何，便于对照。）
+void TestFlashPlan::opsReconcilesGptLayout512()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"boot.img\" label=\"boot_a\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"7\" num_partition_sectors=\"2\" />"
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("boot_a", 6, 906, /*lbaSize=*/512)));
+    QVERIFY(writeBytes(dir.path() + "/boot.img", QByteArray(4096, '\x12')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].startSector, quint64(6));       // 元数据 7 → 以 GPT 为准
+    QCOMPARE(plan.entries[0].numSectors, quint64(901));      // 元数据 2 → 以 GPT 为准
+    bool mismatchWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("gpt_main0.bin")))
+            mismatchWarned = true;
+    QVERIFY(mismatchWarned);                                 // 对账确实发生
 }
 
 // 对账态之二：GPT 里**查不到**该分区名 → 保留元数据几何 + warning。

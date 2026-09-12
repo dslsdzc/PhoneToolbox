@@ -737,13 +737,12 @@ struct GptTable {
 };
 
 // GPT 文件 → 分区名/LBA 表。**复用既有解析器** imgdisk::parseGpt（src/image_engine/disk_image.cpp:46-88），
-// 不重写解析逻辑（硬要求 2）：它的接口本就给出"分区名 → (startSector, numSectors)"（disk_image.h:8-9），
-// 故本任务**未改** disk_image.{h,cpp}，只加了读取 + 布局适配这一层薄胶水。
+// 不重写解析逻辑（硬要求 2）：它的接口本就给出"分区名 → (startSector, numSectors)"（disk_image.h:8-9）。
 //
 // **布局适配（真包必需）**：parseGpt 硬编码 512 字节 LBA —— 在文件偏移 512 处找头、按 `表LBA × 512`
 // 定位表项数组（disk_image.cpp:8,50-63）。而真实 EDL 包的 gpt_main{N}.bin 是 **4096 字节 LBA**：
 //   * edl/edlclient/Library/TestFiles/gpt_sm8180x.bin 实测 24576 字节、`EFI PART` 在 0x1000、
-//     part_entry_lba=2（本仓内的真实样本）；
+//     part_entry_lba=2、32 项 ×128B（本仓内的真实样本）；
 //   * reference/qdl/tests/data/rawprogram1.xml:12 的 `gpt_main1.bin num_partition_sectors="6"`
 //     ⇒ 6 × 4096 = 24576 字节，与上者吻合；
 //   * bkerler 读盘时 512/4096 都试（edl/edlclient/Library/gpt.py:526-531）。
@@ -751,6 +750,21 @@ struct GptTable {
 // 适配只搬运字节布局、不碰解析语义：把 92 字节头块搬到偏移 512，并把头里的"表项数组 LBA"字段按
 // (lbaSize/512) 放大 —— 表项数组的**字节偏移不变**，parseGpt 随后读到的 LBA 与分区名与文件完全一致。
 // 头既不在 512 也不在 4096 → 直接失败（不猜布局，交给调用方记"未对账"告警）。
+//
+// **CRC32：解析器完全不校验，故本适配无需重算任何校验和**（适用边界就写在这里，后人不必猜）：
+//   `imgdisk::parseGpt`/`isGpt` 只读四处 —— 偏移 512 处的 8 字节签名、头 +72（表 LBA）、+80（表项数）、
+//   +84（表项大小），加表项内 +32/+40/+56；`src/image_engine/disk_image.cpp` 内**没有任何 CRC 代码**
+//   （grep 无命中），头 +16（header CRC32）与 +88（表 CRC32）连读都没读。因此把改过的头块写到 512
+//   不会触发"校验和不符"。**若将来 parseGpt 加上 CRC 校验**，本适配必须同步处理（重算 header CRC，
+//   92 字节范围的口径见 reference/qdl/tests/data/patch1.xml:27 的 `CRC32(1,92)`），或改为在
+//   disk_image 内实现双布局 —— 否则 4096 包会开始解析失败。
+//
+// **为什么适配在这里、而不改 disk_image**：本次改动的范围最小，且**不动镜像引擎既有行为** ——
+// `imgdisk::parseGpt` 还被 UI 的"GPT 磁盘镜像提取"用着（src/ui/image_worker.cpp:788-791）。
+// 共享解析器若要支持双布局，应在 `disk_image` 内做（bkerler 同款：按 512/4096 逐次尝试，
+// edl/edlclient/Library/gpt.py:526-531）；那是独立后续项。顺便记一笔**本任务之前就存在**的限制：
+// 同一个 512-only 解析器让 UI 的 GPT 整盘提取对 **4096-LBA 的 GPT 磁盘**同样解析失败（`image_worker.cpp`
+// 报"GPT 解析失败"），非本任务引入。
 bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString *error)
 {
     QFile f(gptPath);
