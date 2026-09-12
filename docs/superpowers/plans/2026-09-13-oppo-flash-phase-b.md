@@ -415,22 +415,13 @@ git commit -m "feat(edl): 计划排序/统计 + validatePlan（越界/重叠/扇
 #include <QFile>
 #include <QString>
 
-// 合成一个最小 GPT：1 个分区（名字由参数给），LBA 由参数给
-inline QByteArray buildGptWithPartition(const QByteArray &name, quint64 firstLba, quint64 lastLba)
-{
-    const int sectorSize = 512;
-    const int entries = 128, entrySize = 128;
-    QByteArray gpt(2 * sectorSize + entries * entrySize, '\0');
-    auto put64 = [&gpt](int off, quint64 v) {
-        for (int i = 0; i < 8; ++i) gpt[off+i] = char((v >> (8*i)) & 0xFF);
-    };
-    const int entriesOff = 2 * sectorSize;                 // 表项从 LBA 2 起
-    for (int i = 0; i < name.size() && i < 16; ++i)        // GPT 名字段 = 16 字节 UTF-16LE; ASCII 名逐字节写高字节 0
-        gpt[entriesOff + i * 2] = name.at(i);
-    put64(entriesOff + 32, firstLba);
-    put64(entriesOff + 40, lastLba);
-    return gpt;
-}
+// 合成 GPT 夹具。
+// ⚠️ 不要照抄本段之外的任何"示例偏移"：请**先读 `src/image_engine/disk_image.{h,cpp}` 的 GPT 解析代码**，
+//    按它实际接受的条件构造（签名 "EFI PART"、header 里的分区表 LBA/表项数/表项大小字段、
+//    表项内 type GUID 非零、StartingLBA@32、EndingLBA@40、分区名 UTF-16LE@56、以及它是否校验 CRC32）。
+//    夹具与我们的解析器自洽即可 —— 本任务要测的是 `buildPlanFromDir` 的**对账逻辑**，不是 GPT 解析器本身
+//    （后者已有自己的测试）。请在函数注释里写明这一点。
+QByteArray buildGptWithPartition(const QByteArray &name, quint64 firstLba, quint64 lastLba);
 
 inline bool writeBytes(const QString &path, const QByteArray &bytes)
 {
@@ -441,6 +432,7 @@ inline bool writeBytes(const QString &path, const QByteArray &bytes)
     return n == bytes.size();
 }
 ```
+（`buildGptWithPartition` 的实现放 `tests/flash_plan_helpers.cpp`？**不需要** —— 它是 inline 可放头文件，但既然要按解析器实际要求迭代，放头文件里 `inline` 实现即可；若你发现需要非 inline 状态，就落地为 `inline` 函数 + 注释说明。）
 
 `tests/test_flash_plan.cpp` 新槽（`opsSourceUsesMetadataAndGpt`、`dirWithoutPlanReportsXmlList`）：
 
