@@ -45,4 +45,18 @@ bool parseRawprogramXml(const QString &xmlPath, quint32 lun,
 bool parsePatchXml(const QString &xmlPath, quint32 lun,
                    QList<PlanEntry> &out, QStringList &warnings, QString *error);
 
+// 排序 + 统计（spec §3.3/§3.5）：Erase 一律在前，Program 按 (lun, startSector) 升序，Patch 一律最后；
+// 同键保持解析顺序（stable_sort）。填 totalBytes = Program 条目 rawBytes（为 0 时退化为
+// numSectors × sectorSize）之和 —— 进度分母，Patch/Erase 不计入。
+// **调用顺序**：validatePlan 会就地修正 sparse 条目的 numSectors/rawBytes，故应由
+// "finalizePlan → validatePlan → finalizePlan（或校验通过后重算）"保证 totalBytes 与最终下发值一致。
+void finalizePlan(FlashPlan &plan);
+
+// 刷前校验（spec §3.5 七条规则；在 getstorageinfo 之后、进入写入之前调用）。
+// **会就地修正 plan**：sparse 条目按文件头回填 rawBytes、并在与 XML 不符时以头为准修正 numSectors
+// （Task 1 的模型契约：rawBytes 由校验步骤填充，flash_plan.cpp:155 注释）。
+// 因此参数是**非 const** 引用 —— 调用方传入的必须是可写的 FlashPlan。
+// errors 非空 → ok=false（拒刷，绝不放行）；warnings 只进预览与日志。
+PlanCheck validatePlan(FlashPlan &plan, const QList<StorageInfo> &device);
+
 } // namespace edl

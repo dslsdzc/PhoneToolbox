@@ -1,9 +1,14 @@
 #include "flash_plan.h"
 
+#include "image_engine/sparse_image.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QSet>
 #include <QXmlStreamReader>
+#include <algorithm>
 
 namespace edl {
 
@@ -163,6 +168,12 @@ void loadProgramTag(QXmlStreamReader &reader, quint32 fileLun, const QString &xm
 // reference/qdl/src/firehose.c:611-628），缺省置 0，由会话层按"整 LUN"解释。
 // 注：qdl 的 load_erase_tag 把这四项都当必需且拒绝 num_sectors=0（src/program.c:39-59）——
 // 本项目按 spec §3.4/§4 允许整 LUN 擦，故此处放宽为可缺省。
+//
+// **安全语义（Task 1 审查发现、Task 2 修复）**：num_partition_sectors 属性**存在但不可解析**
+// （"abc"、firehose 表达式）曾被静默当 0，而 0 在本模型里 ="整 LUN 擦" ⇒ 定点擦被静默放大成
+// 整盘擦。qdl 对这类输入是直接拒绝的（src/program.c:56-62 "erase tag with num_sectors=0 not
+// allowed"）。现在只有**属性确实缺失**才保留整 LUN 语义；其余（不可解析 / 表达式 / 显式 0）
+// 一律丢弃该条目 + 中文 warning —— 与本文件"宁可少条目并告警，也不猜"的原则一致。
 void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
                   QList<PlanEntry> &out, QStringList &warnings)
 {
@@ -179,7 +190,28 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
     // 缺省 0 = 整 LUN；表达式同样原样保留。
     // 注意（Task 5）：startSectorExpr 非空时不能按"numSectors==0 = 整 LUN"处理。
     readStartSector(reader, e, attrs, /*required=*/false);
-    e.numSectors = attrU64(reader, "num_partition_sectors", nullptr);  // 缺省 0 = 整 LUN
+
+    bool countPresent = false;
+    const QString countRaw = attrRaw(reader, "num_partition_sectors", &countPresent);
+    if (!countPresent) {
+        // 属性缺失 = 整 LUN 擦（唯一保留该语义的形态）
+        e.numSectors = 0;
+    } else {
+        bool countOk = false;
+        const quint64 count = countRaw.toULongLong(&countOk, 0);
+        if (!countOk || count == 0) {
+            warnings << QStringLiteral("rawprogram erase 条目被跳过：num_partition_sectors=\"%1\" %2"
+                                       "（lun=%3，start_sector=%4）—— 按 0 处理会把定点擦放大成整 LUN 擦")
+                            .arg(countRaw,
+                                 countOk ? QStringLiteral("不是有效的定点擦范围（整 LUN 擦请省略该属性）")
+                                         : QStringLiteral("不可解析"))
+                            .arg(e.lun)
+                            .arg(e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
+                                                             : e.startSectorExpr);
+            return;
+        }
+        e.numSectors = count;
+    }
     warnLunMismatch(QStringLiteral("erase"), e, fileLun, warnings);
     out << e;
 }
@@ -291,6 +323,197 @@ bool parsePatchXml(const QString &xmlPath, quint32 lun,
     if (xmlParseError(xmlPath, QStringLiteral("patch"), reader, error))
         return false;
     return true;
+}
+
+// ================= Task 2：排序/统计 + 校验 =================
+
+namespace {
+
+// 排序分组：Erase 一律先于 Program（整 LUN 擦要覆盖掉旧数据后再写，spec §3.5），
+// Patch 一律最后（打的是 GPT 头等任意磁盘偏移，必须在 program 之后）。
+int actionRank(PlanEntry::Action a)
+{
+    switch (a) {
+    case PlanEntry::Action::Erase:   return 0;
+    case PlanEntry::Action::Program: return 1;
+    case PlanEntry::Action::Patch:   return 2;
+    }
+    return 3;
+}
+
+// 报错/告警里的条目标识：program/patch 用 label（patch 无 label，解析层已用 filename 填
+// partitionName），erase 在 XML 里没有名字 → 用动作名。保证非空，文案里永远能定位到条目。
+QString entryName(const PlanEntry &e)
+{
+    if (!e.partitionName.isEmpty())
+        return e.partitionName;
+    if (!e.imageFile.isEmpty())
+        return e.imageFile;
+    return e.action == PlanEntry::Action::Erase ? QStringLiteral("erase") : QStringLiteral("(未命名)");
+}
+
+// 规则 4/5/6 的 Program 侧：镜像在不在、sparse 头算出的扇区数是多少、sha256 记不记 warning。
+// **规则 5 会就地修正条目**（numSectors / rawBytes / sparse 标记）—— 见 validatePlan 注释。
+void checkProgramImage(PlanEntry &e, PlanCheck &chk)
+{
+    if (e.imageFile.isEmpty()) {
+        chk.errors << QStringLiteral("条目 %1 未指定镜像文件（imageFile 为空）").arg(entryName(e));
+        return;
+    }
+    QFile f(e.imageFile);
+    if (!f.open(QIODevice::ReadOnly)) {
+        chk.errors << QStringLiteral("条目 %1 的镜像文件无法打开：%2（%3）")
+                          .arg(entryName(e), e.imageFile, f.errorString());
+        return;
+    }
+    if (!e.sparse)
+        return;   // 非 sparse：存在且可读即可（不校验文件大小 —— 下发的 num_partition_sectors 来自 XML）
+
+    // 规则 5：读 sparse 头 → 去 sparse 后的 raw 字节数（协议速查 §1：bkerler 按去 sparse 后大小
+    // 算 num_partition_sectors，Library/sparse.py:53-76 + firehose.py:475-486）
+    const QByteArray head = f.read(28);
+    quint64 rawBytes = 0;
+    if (!imgsparse::sparseRawSizeFromHeader(head, rawBytes)) {
+        // 标了 sparse="true" 但文件里没有 sparse 头。qdl 先例（reference/qdl/src/program.c:79-93）：
+        // 若 文件大小 == SECTOR_SIZE_IN_BYTES × num_partition_sectors，判为"标记写错"，改按非 sparse
+        // 处理并告警；对不上则报错 —— 宁可拒刷，也不猜文件结构。
+        const quint64 declared = e.numSectors * e.sectorSize;
+        if (declared != 0 && static_cast<quint64>(f.size()) == declared) {
+            e.sparse = false;
+            chk.warnings << QStringLiteral("条目 %1 标记 sparse=\"true\" 但文件头不是 sparse（文件 %2 字节"
+                                           " == 声明 %3 字节）—— 按非 sparse 处理（参照 reference/qdl/src/program.c:79-93）")
+                                .arg(entryName(e)).arg(f.size()).arg(declared);
+        } else {
+            chk.errors << QStringLiteral("条目 %1 标记 sparse 但文件头不是 sparse 格式：%2（文件 %3 字节，"
+                                         "声明 %4 扇区）")
+                              .arg(entryName(e), e.imageFile).arg(f.size()).arg(e.numSectors);
+        }
+        return;
+    }
+    if (e.sectorSize == 0) {
+        // qdl 对 sparse 且 SECTOR_SIZE_IN_BYTES=0 直接报错（reference/qdl/src/program.c:98-101）：
+        // 没有扇区大小就无法把字节数换算成扇区数。
+        chk.errors << QStringLiteral("条目 %1 的 SECTOR_SIZE_IN_BYTES 为 0，无法换算 sparse 扇区数")
+                          .arg(entryName(e));
+        return;
+    }
+    const quint64 declared = e.numSectors * e.sectorSize;
+    if (declared != rawBytes) {
+        // 不足整扇区的尾巴向上取整：firehose 只能按扇区下发（protocol facts §1）
+        const quint64 corrected = (rawBytes + e.sectorSize - 1) / e.sectorSize;
+        chk.warnings << QStringLiteral("条目 %1 的 sparse 头声明 %2 字节（%3 扇区），与 XML 的 %4 扇区"
+                                       "（%5 字节）不符 —— 以文件头为准修正 numSectors")
+                            .arg(entryName(e)).arg(rawBytes).arg(corrected)
+                            .arg(e.numSectors).arg(declared);
+        e.numSectors = corrected;
+    }
+    e.rawBytes = rawBytes;   // Task 1 模型契约：rawBytes（去 sparse 后字节数）由校验步骤回填
+}
+
+} // namespace
+
+void finalizePlan(FlashPlan &plan)
+{
+    // stable_sort：同组同键（同 lun、同 startSector）保持解析顺序。表达式条目的 startSector 恒为 0
+    // （模型契约），会排到本 LUN 的 Program 组最前 —— 无副作用：每个区间的写入彼此独立，
+    // 表达式由设备侧求值（决策见 Task 1 报告；不是按地址排序，不改变写入结果）。
+    std::stable_sort(plan.entries.begin(), plan.entries.end(),
+                     [](const PlanEntry &a, const PlanEntry &b) {
+                         const int ra = actionRank(a.action), rb = actionRank(b.action);
+                         if (ra != rb) return ra < rb;
+                         if (a.lun != b.lun) return a.lun < b.lun;
+                         return a.startSector < b.startSector;
+                     });
+
+    quint64 total = 0;
+    for (const PlanEntry &e : plan.entries) {
+        if (e.action != PlanEntry::Action::Program)
+            continue;                                    // Erase/Patch 不进进度分母
+        total += e.rawBytes ? e.rawBytes : e.numSectors * e.sectorSize;
+    }
+    plan.totalBytes = total;
+}
+
+PlanCheck validatePlan(FlashPlan &plan, const QList<StorageInfo> &device)
+{
+    PlanCheck chk;
+
+    QHash<quint32, StorageInfo> geo;                     // LUN → 设备几何（getstorageinfo 逐 LUN）
+    for (const StorageInfo &s : device)
+        geo.insert(s.lun, s);
+
+    // ---- 第一遍：逐条目的文件与 sparse 换算（规则 3/4/5/6）+ 就地修正 ----
+    // 顺序说明：**先**按文件头校正扇区数，**再**做几何校验（第二遍）—— 下发放多少扇区就按多少校验；
+    // 否则 XML 少报的扇区数会让越界条目蒙混过关（见 validateSparseCorrectionFeedsBoundsCheck）。
+    for (PlanEntry &e : plan.entries) {
+        // 规则 3：逐条目 SECTOR_SIZE_IN_BYTES 覆盖全局是参照允许的（qdl 每个 op 用自己的值，
+        // reference/qdl/src/firehose.c:1022），与设备 block_size 不一致只记 warning、以条目值为准。
+        const auto it = geo.constFind(e.lun);
+        if (it != geo.constEnd() && e.sectorSize != it->blockSize) {
+            chk.warnings << QStringLiteral("条目 %1 的 sectorSize %2 与设备 blockSize %3 不一致（以条目值为准）")
+                                .arg(entryName(e)).arg(e.sectorSize).arg(it->blockSize);
+        }
+        // 规则 6：有 sha256 即记 warning。此处**不读整个文件**——"边写边算"是默认路径，
+        // "刷前完整校验"是 Task 8 的可选开关。
+        if (!e.sha256.isEmpty()) {
+            chk.warnings << QStringLiteral("条目 %1 携带 sha256（%2…）：默认边写边校验，"
+                                           "刷前完整校验为可选开关（Task 8）")
+                                .arg(entryName(e), e.sha256.left(12));
+        }
+        if (e.action == PlanEntry::Action::Program)
+            checkProgramImage(e, chk);
+        // Patch：imageFile=="DISK" 是"打设备磁盘偏移"哨兵，不是本地文件，不查（解析层已把
+        // 非 DISK 的 patch 条目丢弃，flash_plan.cpp loadPatchTag）；Erase 没有镜像文件。
+    }
+
+    // ---- 第二遍：设备几何（规则 1/2/7）----
+    int exprSkipped = 0;
+    QSet<quint32> missingLun;
+    QHash<quint32, QList<int>> programsByLun;             // 已见的 Program 条目下标（解析顺序）
+    for (int i = 0; i < plan.entries.size(); ++i) {
+        const PlanEntry &e = plan.entries[i];
+        // 规则 7：表达式条目主机侧无法求值（参照也不解释，reference/qdl/src/firehose.c:874-879），
+        // 跳过规则 1/2，最后汇总成一条 warning。
+        if (!e.startSectorExpr.isEmpty()) {
+            ++exprSkipped;
+            continue;
+        }
+        const auto it = geo.constFind(e.lun);
+        if (it == geo.constEnd()) {
+            // 规则 1 前置：没有该 LUN 的几何信息就无法判越界 → error（逐 LUN 只报一次）
+            if (!missingLun.contains(e.lun)) {
+                missingLun.insert(e.lun);
+                chk.errors << QStringLiteral("LUN %1 无设备几何信息（getstorageinfo 未返回）").arg(e.lun);
+            }
+            continue;
+        }
+        const quint64 end = e.startSector + e.numSectors;      // 半开区间 [start, end)
+        if (end > it->totalBlocks) {
+            chk.errors << QStringLiteral("条目 %1 越界：LUN %2 需要扇区 %3..%4，设备仅 %5")
+                              .arg(entryName(e)).arg(e.lun).arg(e.startSector).arg(end).arg(it->totalBlocks);
+        }
+        // 规则 2：重叠只在 Program 条目之间判（同 LUN 区间相交）。整 LUN 擦本来就会覆盖后续 program
+        // 的范围，patch 打的是任意磁盘偏移 —— 二者都不参与（spec §3.5）。
+        if (e.action != PlanEntry::Action::Program)
+            continue;
+        for (int j : programsByLun.value(e.lun)) {
+            const PlanEntry &prev = plan.entries[j];
+            const quint64 prevEnd = prev.startSector + prev.numSectors;
+            if (e.startSector < prevEnd && prev.startSector < end) {
+                chk.errors << QStringLiteral("条目 %1 与 %2 重叠：LUN %3 区间 [%4,%5) 与 [%6,%7)")
+                                  .arg(entryName(e), entryName(prev)).arg(e.lun)
+                                  .arg(e.startSector).arg(end).arg(prev.startSector).arg(prevEnd);
+            }
+        }
+        programsByLun[e.lun].append(i);
+    }
+    if (exprSkipped > 0) {
+        chk.warnings << QStringLiteral("%1 个条目的 start_sector 为表达式，未参与设备几何校验（按参照原样下发）")
+                            .arg(exprSkipped);
+    }
+
+    chk.ok = chk.errors.isEmpty();                        // 规则 8：任何 error → 拒刷
+    return chk;
 }
 
 } // namespace edl

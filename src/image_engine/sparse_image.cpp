@@ -314,6 +314,21 @@ bool isSparse(const QByteArray &header)
     return header.size() >= 4 && qFromLittleEndian<quint32>(header.constData()) == kSparseMagic;
 }
 
+bool sparseRawSizeFromHeader(const QByteArray &header, quint64 &rawBytes)
+{
+    // 布局同 parseSparseHeader（AOSP sparse_format.h）：magic u32@0、file_hdr_sz u16@8、
+    // chunk_hdr_sz u16@10、blk_sz u32@12、total_blks u32@16。此处只取算大小必需的四个字段，
+    // 版本/头长的深校验留给解包路径（parseSparseHeader），本函数不做完整合法性背书。
+    if (header.size() < kSparseHeaderSize) return false;
+    const char *p = header.constData();
+    if (qFromLittleEndian<quint32>(p) != kSparseMagic) return false;
+    const quint32 blkSz = qFromLittleEndian<quint32>(p + 12);
+    const quint32 totalBlks = qFromLittleEndian<quint32>(p + 16);
+    if (blkSz == 0 || totalBlks == 0) return false;
+    rawBytes = static_cast<quint64>(totalBlks) * blkSz;   // u32 × u32 < 2^64
+    return true;
+}
+
 QByteArray simg2img(const QByteArray &sparse)
 {
     if (sparse.size() < kSparseHeaderSize) return {};

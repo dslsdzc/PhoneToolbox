@@ -7,6 +7,14 @@ namespace imgsparse {
 
 // 整内存接口（小文件/测试用；内部与流式接口共享同一核心逻辑）
 bool isSparse(const QByteArray &header);                    // magic 0xED26FF3A
+
+// 只读 sparse 头（前 28 字节）算**去 sparse 后**的 raw 字节数：total_blks × blk_sz
+// （AOSP sparse 头布局，qdl `sparse.h` 同构；参照按去 sparse 后的大小算扇区数，
+//  见 `edl/edlclient/Library/sparse.py:53-76` + `firehose.py:475-486`）。
+// header 为文件开头至少 28 字节；成功返回 true 并写 rawBytes。
+// 失败（头太短 / magic 不符 / blk_sz==0 / total_blks==0）返回 false 且**不修改** rawBytes ——
+// 纯函数不产文案，调用方按自己的上下文给错误/警告。u32×u32 < 2^64，无溢出。
+bool sparseRawSizeFromHeader(const QByteArray &header, quint64 &rawBytes);
 QByteArray simg2img(const QByteArray &sparse);              // 失败返回空
 QByteArray img2simg(const QByteArray &raw, quint32 blockSize = 4096);
 

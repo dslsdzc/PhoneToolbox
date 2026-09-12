@@ -10,6 +10,7 @@ class TestSparse : public QObject
     Q_OBJECT
 private slots:
     void detectSparse();
+    void sparseRawSizeFromHeaderCase();
     void simg2imgRawChunk();
     void simg2imgFillAndDontcare();
     void img2simgRoundTrip();
@@ -69,6 +70,31 @@ void TestSparse::detectSparse()
     QByteArray h = buildSparseHeader(0, 0);
     QVERIFY(imgsparse::isSparse(h));
     QVERIFY(!imgsparse::isSparse(QByteArray("ANDROID!")));
+}
+
+// Task 2：从 sparse 头（不读整个文件）算去 sparse 后的 raw 字节数 —— 计划层据此校正
+// num_partition_sectors（协议速查 §1：参照按去 sparse 后大小算扇区数）。
+void TestSparse::sparseRawSizeFromHeaderCase()
+{
+    QByteArray h = buildSparseHeader(3, 1);          // blk_sz 4096、total_blks 3
+    quint64 raw = 0;
+    QVERIFY(imgsparse::sparseRawSizeFromHeader(h, raw));
+    QCOMPARE(raw, quint64(3 * 4096));
+
+    // 失败路径：不写 rawBytes
+    const quint64 sentinel = 0xDEADBEEFULL;
+    raw = sentinel;
+    QVERIFY(!imgsparse::sparseRawSizeFromHeader(QByteArray(8, '\0'), raw));        // 头太短
+    QCOMPARE(raw, sentinel);
+    QVERIFY(!imgsparse::sparseRawSizeFromHeader(QByteArray(27, '\0'), raw));       // 差一字节
+    QByteArray badMagic = buildSparseHeader(3, 1);
+    badMagic[0] = char(0x00);                                                     // magic 错
+    QVERIFY(!imgsparse::sparseRawSizeFromHeader(badMagic, raw));
+    QByteArray zeroBlk = buildSparseHeader(3, 1);
+    zeroBlk.replace(12, 4, QByteArray(4, '\0'));                                  // blk_sz = 0
+    QVERIFY(!imgsparse::sparseRawSizeFromHeader(zeroBlk, raw));
+    QVERIFY(!imgsparse::sparseRawSizeFromHeader(buildSparseHeader(0, 1), raw));   // total_blks = 0
+    QCOMPARE(raw, sentinel);
 }
 
 void TestSparse::simg2imgRawChunk()
