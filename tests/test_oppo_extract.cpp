@@ -21,6 +21,7 @@ class TestOppoExtract : public QObject
 private slots:
     void extractQcSynthetic();
     void extractQcPartialDecrypt();
+    void extractCrossChunkDecrypt();
     void extractMtkPackage();
     void extractSparseAnnotation();
     void extractRejectsBadChecksum();
@@ -156,6 +157,47 @@ void TestOppoExtract::extractQcPartialDecrypt()
     // 前缀解密 + 尾部原样拷贝 → 整文件等于原始明文（少解/多解/全拷贝都会在此暴露）
     QCOMPARE(readFile(outDir + "/config.bin"), plain);
     QCOMPARE(QFileInfo(outDir + "/config.bin").size(), qint64(plain.size()));
+}
+
+// 跨块解密（本模块最高风险不变量）: 解密区间必须 > 1 个分块（0x100000）才能让 decryptRange
+// 走到第二次迭代，从而执行"把上一块末 16B 密文作为下一块 IV"的进位（oppo_extract.cpp
+// decryptRange()）—— CFB 的反馈是密文块，丢了进位则第二块起 keystream 全错。
+// 组选择: 只有 Sahara（fullDecrypt）的解密区间 == size；Config 等组的解密前缀被 parseOFP
+// 截到 min(0x40000,size)（oppo_ofp.cpp L253），最多一块，进不了跨块路径。
+// 夹具侧: buildQcPackage 对整段明文一次调用 aes128CfbEncrypt（单一 keystream 贯穿全部
+// 0x120000 字节），与真实包"整段 CFB 密文"语义一致；若夹具改成逐块独立加密，本用例将失去意义。
+void TestOppoExtract::extractCrossChunkDecrypt()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    constexpr int kBigSize = 0x120000;   // 1.125 MiB = 块 1（0x100000）+ 块 2（0x20000）
+    const QByteArray plain = pseudoRandom(kBigSize, 0x1CEBu);
+    const ofptest::QcPackage pkg = ofptest::buildQcPackage(
+        {{QStringLiteral("Sahara"), QStringLiteral("prog_big.elf"), plain, 0}});
+    QVERIFY(pkg.isValid());
+    const QString pkgPath = writePkg(dir.path(), QStringLiteral("big.ofp"), pkg.blob);
+    QVERIFY(!pkgPath.isEmpty());
+
+    // 反自证：包内该段确为密文（首 16B 与明文不同），且条目长度确实跨过 1 MiB 块界
+    imgopp::OfpInfo info;
+    QString err;
+    QVERIFY2(imgopp::parseOFP(pkgPath, info, &err), qPrintable(err));
+    QCOMPARE(info.files.size(), 1);
+    QVERIFY(info.files[0].fullDecrypt);
+    QCOMPARE(info.files[0].size, quint64(kBigSize));
+    QVERIFY(info.files[0].size > 0x100000u);
+    QVERIFY(pkg.blob.mid(qsizetype(info.files[0].offset), 16) != plain.left(16));
+
+    const QString outDir = dir.filePath(QStringLiteral("out"));
+    ProgressLog log;
+    QVERIFY2(imgopp::extractOFP(pkgPath, outDir, log.callback(), &err), qPrintable(err));
+    const QByteArray got = readFile(outDir + "/prog_big.elf");
+    QCOMPARE(got.size(), qsizetype(kBigSize));
+    // 块界起点即 IV 进位生效点：先单独钉一次 —— QCOMPARE 失败会立即返回，此断言排在最前
+    // 才能在失败输出里直接看到第二块（0x100000 起）的字节差异，而不是被前 1 MiB 掩住
+    QCOMPARE(got.mid(0x100000), plain.mid(0x100000));
+    QCOMPARE(got, plain);   // 全量逐字节（0x120000 字节整体比较）
+    QCOMPARE(log.percents.last(), 100);
 }
 
 // MTK 变体：文件表 encrypted_length 三形态（前 0x200 解密 / 整段解密 / 全明文）
