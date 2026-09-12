@@ -502,6 +502,7 @@ git commit -m "feat(edl): buildPlanFromDir + OPS 元数据来源 + GPT 回填对
 - Create: `src/core/edl/edl_transport.h`
 - Create: `src/core/edl/sahara.h` / `sahara.cpp`
 - Create: `tests/mock_edl_transport.h`
+- Create: `tests/edl_test_helpers.h`（**共享**的合成 Sahara 帧构造器，Task 6 复用 —— 不得在测试间各写一份）
 - Test: `tests/test_edl_sahara.cpp`
 - Modify: `CMakeLists.txt`（注册测试）
 
@@ -607,14 +608,16 @@ public:
 
 - [ ] **Step 1: 写失败测试**
 
-`tests/test_edl_sahara.cpp`：用一个"假设备"驱动 —— 预置 reads 队列（HELLO_REQ 帧、两段 READ_DATA、END_OF_IMAGE），断言 writes 里的应答与数据切片。
+先建共享夹具 `tests/edl_test_helpers.h`（Task 6 也要 include 它）：
 
 ```cpp
-#include <QtTest>
-#include "core/edl/sahara.h"
-#include "mock_edl_transport.h"
+// tests/edl_test_helpers.h
+#pragma once
+#include <QByteArray>
+#include <QList>
 
-static QByteArray saharaFrame(quint32 cmd, const QList<quint32> &words)
+// Sahara 帧：cmd(4B LE) + 总长(4B LE) + N×4B LE 参数（与 src/core/edl/sahara.cpp 的帧布局一致）
+inline QByteArray saharaFrame(quint32 cmd, const QList<quint32> &words)
 {
     QByteArray f(8 + words.size() * 4, '\0');
     auto put32 = [&f](int off, quint32 v) {
@@ -625,6 +628,17 @@ static QByteArray saharaFrame(quint32 cmd, const QList<quint32> &words)
     for (int i = 0; i < words.size(); ++i) put32(8 + i * 4, words.at(i));
     return f;
 }
+```
+
+`tests/test_edl_sahara.cpp`：用一个"假设备"驱动 —— 预置 reads 队列（HELLO_REQ 帧、两段 READ_DATA、END_OF_IMAGE），断言 writes 里的应答与数据切片。
+
+```cpp
+#include <QtTest>
+#include "core/edl/sahara.h"
+#include "mock_edl_transport.h"
+#include "edl_test_helpers.h"
+
+#include "edl_test_helpers.h"   // saharaFrame()（Task 6 的测试也用它，不许各写一份）
 
 class TestEdlSahara : public QObject
 {
@@ -957,28 +971,17 @@ bool sparseWalk(const QString &inPath, const std::function<bool(const SparseChun
 #include "core/edl/edl_session.h"
 #include "mock_edl_transport.h"
 
-// Sahara 帧（与 test_edl_sahara.cpp 同一布局；测试之间不共享代码，此处独立写一份）
-static QByteArray frame(quint32 cmd, const QList<quint32> &words)
-{
-    QByteArray f(8 + words.size() * 4, '\0');
-    auto put32 = [&f](int off, quint32 v) {
-        f[off] = char(v & 0xFF); f[off+1] = char((v >> 8) & 0xFF);
-        f[off+2] = char((v >> 16) & 0xFF); f[off+3] = char((v >> 24) & 0xFF);
-    };
-    put32(0, cmd); put32(4, 8 + words.size() * 4);
-    for (int i = 0; i < words.size(); ++i) put32(8 + i * 4, words.at(i));
-    return f;
-}
+#include "edl_test_helpers.h"   // saharaFrame()（与 test_edl_sahara.cpp 共用同一份，不重复实现）
 
 // 组装一次完整会话的 mock 读队列：programmer 一次性读完 → 结束 → configure → getstorageinfo → program(声明+数据)
 static void queueSuccessfulSession(edl::MockEdlTransport &t, const QByteArray &programmer, bool programAck)
 {
     const QByteArray ack = QByteArray("<response value=\"ACK\" />");
     const QByteArray nak = QByteArray("<response value=\"NAK\" />");
-    t.reads << frame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
-            << frame(edl::SAHARA_READ_DATA, {0, 0, quint32(programmer.size()), 0})
-            << frame(edl::SAHARA_END_OF_IMAGE, {0, 0})
-            << frame(edl::SAHARA_DONE_REQ, {})
+    t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+            << saharaFrame(edl::SAHARA_READ_DATA, {0, 0, quint32(programmer.size()), 0})
+            << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
+            << saharaFrame(edl::SAHARA_DONE_REQ, {})
             << ack                                                                    // configure
             << QByteArray("<log value=\"{&quot;storage_info&quot;:{&quot;total_blocks&quot;:100000,"
                           "&quot;block_size&quot;:4096}}\" /><response value=\"ACK\" />") // getstorageinfo
