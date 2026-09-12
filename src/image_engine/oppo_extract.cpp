@@ -7,7 +7,9 @@
 #include <QList>
 
 #include "oppo_crypto.h"
+#include "oppo_keys.h"
 #include "oppo_ofp.h"
+#include "oppo_ops.h"
 
 namespace imgopp {
 
@@ -196,6 +198,54 @@ bool verifyHashes(const ProductWriter &writer, const OfpFile &file, QString *err
     return true;
 }
 
+// ==================== OPS 条目搬运与校验（Task 5） ====================
+
+// 单条目搬运（opscrypto.py main() L589-638 的三个分支归一）:
+//   decrypt == true（SAHARA 组）→ 整段 opsDecrypt() 解密。参照 decryptfile() L423-437 也是
+//     整段读入再解（密码是带链式反馈的流密码，逐块调用的状态接不上），SAHARA 组只有
+//     Firehose programmer（MB 级）→ 整段读入可接受
+//   decrypt == false（UFS_PROVISION / Program）→ 原样拷贝（copyfile() L487-491）
+bool writeOpsEntry(QFile &in, const OpsEntry &entry, const QByteArray &mboxBlob,
+                   ProductWriter &writer, QString *error)
+{
+    if (!entry.decrypt)
+        return copyRange(in, entry.offset, entry.size, writer, error);
+
+    if (!in.seek(qint64(entry.offset)))
+        return fail(error, QStringLiteral("包内定位失败（偏移 %1）").arg(entry.offset));
+    const QByteArray cipher = in.read(qint64(entry.size));
+    if (quint64(cipher.size()) != entry.size) {
+        return fail(error,
+                    QStringLiteral("包数据读取不完整（偏移 %1 期望 %2 字节，实得 %3），文件可能被截断")
+                        .arg(entry.offset)
+                        .arg(entry.size)
+                        .arg(cipher.size()));
+    }
+    const QByteArray plain = opsDecrypt(cipher, mboxBlob);
+    // 空/长度不符 = 密码原语的失败契约（A9）→ 收口为中文错误，不静默写出半截产物
+    if (quint64(plain.size()) != entry.size)
+        return fail(error, QStringLiteral("数据段解密失败（密钥未知或文件损坏）：%1").arg(entry.name));
+    return writer.write(plain, error);
+}
+
+// OPS 的 sha256 校验（opscrypto.py L619-623 的 `sha256 != csha256` + calc_digest() L462-470）:
+// 摘要按"整段 + 补零到 0x1000 边界"计算 —— 与 extractOFP 的整段口径不同（A10 附注），
+// 故不复用 verifyHashes()。比较大小写不敏感（同 Task 4）。sparse 跳过由调用方决定
+// （参照 L622 的 `and not sparse`）。
+bool verifyOpsHash(ProductWriter &writer, const OpsEntry &entry, QString *error)
+{
+    if (!writer.wantSha256)
+        return true;
+    const quint64 rem = entry.size % 0x1000;
+    if (rem != 0)
+        writer.sha256.addData(QByteArray(qsizetype(0x1000 - rem), '\0'));
+    const QString actual = QString::fromLatin1(writer.sha256.result().toHex());
+    if (QString::compare(actual, entry.sha256Hex, Qt::CaseInsensitive) != 0)
+        return fail(error, QStringLiteral("校验失败: %1 sha256 不匹配（清单 %2，实际 %3）")
+                               .arg(entry.name, entry.sha256Hex, actual));
+    return true;
+}
+
 } // namespace
 
 bool extractOFP(const QString &path, const QString &outDir, const ExtractProgress &progress,
@@ -274,6 +324,89 @@ bool extractOFP(const QString &path, const QString &outDir, const ExtractProgres
             progress(file.sparse
                          ? QStringLiteral("%1（sparse 镜像，原样输出）").arg(file.name)
                          : file.name,
+                     percent);
+        }
+    }
+    return true;
+}
+
+// OPS 解包入口（流程与 extractOFP 同构：解析 → 条目名净化 → 逐条搬运 → 校验 → 进度）
+bool extractOPS(const QString &path, const QString &outDir, const ExtractProgress &progress,
+                QString *error)
+{
+    QFile in(path);
+    if (!in.open(QIODevice::ReadOnly))
+        return fail(error, QStringLiteral("无法打开 OPS 文件：%1").arg(path));
+
+    // 复用 oppo_ops: 尾页校验 + settings.xml 定位/试解 + 清单解析（失败文案由 parseOPS 负责）
+    OpsInfo info;
+    if (!parseOPS(path, info, error)) {
+        // 契约兜底（A9: 失败必带中文文案；parseOPS 各失败路径均已填，此处仅防漏）
+        if (error && error->isEmpty())
+            *error = QStringLiteral("OPS 解析失败：%1").arg(path);
+        return false;
+    }
+    if (info.entries.isEmpty())
+        return fail(error, QStringLiteral("OPS 清单中没有可提取的文件：%1").arg(path));
+
+    // 条目名净化先行: 跳过的条目不计入进度分母（A10 第一条：跳过 + 提示 + 其余继续）
+    QList<OpsEntry> entries;
+    entries.reserve(info.entries.size());
+    for (const OpsEntry &entry : info.entries) {
+        if (!isSafeEntryName(entry.name)) {
+            appendNote(error, QStringLiteral("跳过条目：文件名不安全（%1）").arg(entry.name));
+            continue;
+        }
+        entries.append(entry);
+    }
+    if (entries.isEmpty())
+        return false;   // error 已含上面逐条累积的跳过原因（A10 第二条）
+
+    if (!QDir().mkpath(outDir))
+        return fail(error, QStringLiteral("无法创建输出目录：%1").arg(outDir));
+
+    const quint64 fileSize = quint64(in.size());
+    quint64 total = 0;
+    for (const OpsEntry &entry : entries)
+        total += entry.size;
+
+    quint64 done = 0;
+    for (const OpsEntry &entry : entries) {
+        // 读前复核包内区间（parseOPS 已校验；解析后被截断/改写的包在此兜底）
+        if (entry.offset > fileSize || entry.size > fileSize - entry.offset)
+            return fail(error, QStringLiteral("OPS 文件表越界：%1（偏移 %2 + 长度 %3）超出包大小 %4")
+                                   .arg(entry.name)
+                                   .arg(entry.offset)
+                                   .arg(entry.size)
+                                   .arg(fileSize));
+
+        const QString outPath = QDir(outDir).filePath(entry.name);
+        // 路径守卫先判后开: 两者相同时 Truncate 会毁掉包本体（spec §5 流式写保护）
+        if (sameFile(path, outPath))
+            return fail(error, QStringLiteral("输出路径与输入包相同，拒绝覆盖：%1").arg(outPath));
+
+        ProductWriter writer;
+        // Program 的 Sha256 只在非 sparse 时校验（L622）→ sparse 条目无需计算摘要
+        writer.wantSha256 = !entry.sha256Hex.isEmpty() && !entry.sparse;
+        writer.out.setFileName(outPath);
+        if (!writer.out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return fail(error, QStringLiteral("无法写入产物：%1").arg(outPath));
+
+        const bool written = writeOpsEntry(in, entry, info.mboxBlob, writer, error);
+        writer.out.close();
+        if (!written)
+            return false;   // 已写产物保留（spec §5: 不回滚已写文件）
+
+        if (!verifyOpsHash(writer, entry, error))
+            return false;   // 同上：校验失败亦不回滚，用户可重跑（wantSha256 判断在函数内）
+
+        done += entry.size;
+        if (progress) {
+            const int percent = total == 0 ? 100 : int(done * 100 / total);
+            // sparse 产物原样输出，仅在此标注（spec §4，同 extractOFP）
+            progress(entry.sparse
+                         ? QStringLiteral("%1（sparse 镜像，原样输出）").arg(entry.name)
+                         : entry.name,
                      percent);
         }
     }

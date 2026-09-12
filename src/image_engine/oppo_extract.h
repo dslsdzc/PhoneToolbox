@@ -37,4 +37,19 @@ using ExtractProgress = std::function<void(const QString &name, int percent)>;
 bool extractOFP(const QString &path, const QString &outDir,
                 const ExtractProgress &progress, QString *error);
 
+// 解包整个 OPS 包到 outDir（条目来自 settings.xml 清单，见 oppo_ops.h 的 OpsInfo）。
+// 搬运策略按组（opscrypto.py main() L589-638）:
+//   - SAHARA 组          → 整段 opsDecrypt() 解密（decryptfile() L423-437 同为整段读入）
+//   - UFS_PROVISION 组   → 原样拷贝（copyfile() L487-491）
+//   - Program 组（含两层 <program><Image/></program>）→ 原样拷贝 + Sha256 校验
+// 与 extractOFP 的差异（同口径处不复述）:
+//   - 摘要口径: Program 的 Sha256 按"整段 + 补零到 0x1000 边界"计算（calc_digest() L462-470，
+//     A10 附注），故不用 verifyHashes() 的整段口径；sparse="true" 跳过校验（L622）
+//   - 进度回调对 sparse 条目的文件名后加"（sparse 镜像，原样输出）"标注（spec §4）
+//   - 条目名不安全（空/含路径成分/".."）→ 跳过 + 中文 *error + 其余继续（A10）；
+//     于是同样可能出现"ok==true 且 *error 非空"（部分条目被跳过，调用方须落日志）
+//   - 校验失败 → false 且不回滚已写产物（spec §5）
+bool extractOPS(const QString &path, const QString &outDir,
+                const ExtractProgress &progress, QString *error);
+
 } // namespace imgopp

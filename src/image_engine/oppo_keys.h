@@ -53,6 +53,17 @@ bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QList<OpsKey
 
 // OPS 自定义流密码解密（非标准 AES）。data：密文；mboxBlob62：opsKeyCandidates()
 // 返回的 62B blob（外部导入同理）。
+// 契约：返回长度 == data 长度（参照 key_custom() 的输出在末块会补齐到 4/16 字节，
+// 由两个调用方截断 —— decryptfile() L433 写 length 字节、extractxml() L417 写
+// xmllength 字节 —— 本实现内部对齐后截断，等价于调用方实际写出的字节）。
+// 空输入返回空；mboxBlob62 不足 62 字节返回空（非法密钥材料，同 aes128CfbDecrypt 的
+// 失败契约，A9 豁免；调用方须在自己的中文错误分支收口）。
 QByteArray opsDecrypt(const QByteArray &data, const QByteArray &mboxBlob62);
+
+// 同密码的加密方向（key_custom(..., encrypt=True)）。与 opsDecrypt 在"等长"契约下
+// 严格互逆（opsDecrypt(opsEncrypt(x)) == x，任意长度）。产品路径是只读解包，不使用
+// 本函数；它的消费方是合成包测试夹具（tests/test_oppo_ops.cpp）—— 若把加密方向写进
+// 测试，就得在测试里重抄 2048B 扩展 S-box 常量，等于制造第二份易漂移的密码实现。
+QByteArray opsEncrypt(const QByteArray &data, const QByteArray &mboxBlob62);
 
 } // namespace imgopp
