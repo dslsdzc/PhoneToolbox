@@ -71,6 +71,9 @@ public:
     bool    ok() const { return m_missing.isEmpty(); }
     QString missing() const { return m_missing; }
 
+    // 供"非通用规则"的属性（如 start_sector：表达式合法、只认缺失）手工登记缺失
+    void noteMissing(const char *name) { note(false, name); }
+
 private:
     void note(bool ok, const char *name)
     {
@@ -81,6 +84,34 @@ private:
     QXmlStreamReader &m_reader;
     QString m_missing;
 };
+
+// start_sector 取值（program / patch / erase 同款规则）：
+//   纯十进制 → startSector=N；否则**原样**存入 startSectorExpr 且 startSector=0。
+//   表达式**不是错误**：不记 warning、不丢条目（qdl 把它当字符串读并原样下发：
+//   reference/qdl/src/program.c:261、src/patch.c:46；src/firehose.c:874-879 注释明确
+//   "解析它会把写入地址搞错"）。真机样本里 patch0.xml 的 Backup-GPT 头修补、
+//   rawprogram0.xml 的 label=BackupGPT 都是这一类 —— 丢掉即漏掉备份 GPT 头修补。
+//   只有属性**本身缺失**（或空串）才算错 → 记缺失（条目丢弃 + warning）。
+// 注：其它数值属性走 attrU64 的 base 0（同 qdl strtoul(...,0)）；start_sector 只认纯十进制，
+// 0x/表达式一律进原样透传分支，避免主机擅自改写下发形态。
+// required=false：属性可缺省（erase 标签缺省 = 整 LUN 擦，见 loadEraseTag），缺省不记错。
+void readStartSector(QXmlStreamReader &reader, PlanEntry &e, RequiredAttrs &attrs, bool required = true)
+{
+    bool present = false;
+    const QString raw = attrRaw(reader, "start_sector", &present);
+    if (!present || raw.isEmpty()) {
+        if (required)
+            attrs.noteMissing("start_sector");
+        return;
+    }
+    bool numOk = false;
+    const quint64 value = raw.toULongLong(&numOk, 10);
+    if (numOk) {
+        e.startSector = value;
+    } else {
+        e.startSectorExpr = raw;   // 表达式原样保留；startSector 保持 0（模型契约）
+    }
+}
 
 // 条目 LUN（XML 属性）与文件序号（调用方给出）不一致 → 告警但不改值：
 // 两个参照的刷写实现都**只读属性、不读文件名**（reference/qdl/src/program.c:259、
@@ -110,7 +141,7 @@ void loadProgramTag(QXmlStreamReader &reader, quint32 fileLun, const QString &xm
     e.partitionName = attrs.str("label");               // label → partitionName
     e.numSectors = attrs.u64("num_partition_sectors");  // 直接取 XML 值；sparse 展开由 Task 2 校验步骤做
     e.lun = attrs.u32("physical_partition_number");
-    e.startSector = attrs.u64("start_sector");
+    readStartSector(reader, e, attrs);                  // 十进制 → startSector；表达式 → startSectorExpr 原样保留
     attrs.u64("file_sector_offset");                    // 必需属性，但 spec §3.3 模型无对应字段：读出即弃
     if (!attrs.ok()) {
         warnings << QStringLiteral("rawprogram 条目被跳过：缺属性 %1（label=%2）")
@@ -145,7 +176,9 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
                         .arg(attrs.missing()).arg(fileLun);
         return;
     }
-    e.startSector = attrU64(reader, "start_sector", nullptr);          // 缺省 0 = 整 LUN
+    // 缺省 0 = 整 LUN；表达式同样原样保留。
+    // 注意（Task 5）：startSectorExpr 非空时不能按"numSectors==0 = 整 LUN"处理。
+    readStartSector(reader, e, attrs, /*required=*/false);
     e.numSectors = attrU64(reader, "num_partition_sectors", nullptr);  // 缺省 0 = 整 LUN
     warnLunMismatch(QStringLiteral("erase"), e, fileLun, warnings);
     out << e;
@@ -159,7 +192,7 @@ void loadPatchTag(QXmlStreamReader &reader, quint32 fileLun,
     RequiredAttrs attrs(reader);
     PlanEntry e;
     e.action = PlanEntry::Action::Patch;
-    e.startSector = attrs.u64("start_sector");
+    readStartSector(reader, e, attrs);  // 十进制 → startSector；表达式 → startSectorExpr 原样保留
     e.byteOffset = attrs.u64("byte_offset");
     e.lun = attrs.u32("physical_partition_number");
     e.sizeInBytes = attrs.u32("size_in_bytes");

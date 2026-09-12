@@ -13,7 +13,10 @@ struct PlanEntry {
     QString partitionName;      // rawprogram: label；patch: filename（供日志）
     QString imageFile;          // 绝对路径；Patch 为 "DISK" 时表示下发设备
     quint32 lun = 0;            // physical_partition_number
-    quint64 startSector = 0;
+    quint64 startSector = 0;    // 纯十进制时填此值
+    QString startSectorExpr;    // start_sector 非纯十进制时原样保留（firehose 表达式，如 "NUM_DISK_SECTORS-5."）；
+                                // 非空时 startSector==0，且发送方必须原样透传该串
+                                // （reference/qdl/src/firehose.c:874-879 明确"解析会写错地址"）
     quint64 numSectors = 0;     // Program/Erase：sparse 展开后的 raw 扇区数
     quint32 sectorSize = 4096;  // 逐条目 SECTOR_SIZE_IN_BYTES
     bool    sparse = false;

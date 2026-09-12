@@ -24,6 +24,8 @@ private slots:
     void parsesPatchEntriesAndSkipsNonDisk();
     void eraseTagWithoutRangeMeansWholeLun();
     void malformedXmlReportsPathAndReaderError();
+    void keepsExpressionStartSector();
+    void keepsExpressionStartSectorInProgram();
 };
 
 void TestFlashPlan::parsesProgramEntries()
@@ -140,6 +142,49 @@ void TestFlashPlan::malformedXmlReportsPathAndReaderError()
     QVERIFY(err.contains(xml));         // 带文件名，便于定位
     QVERIFY(!err.isEmpty());            // 含 reader.errorString()（文本随 Qt 版本变化，只判非空）
     QVERIFY(!err.contains(QLatin1String("(null)")));   // errorString() 必须真的拼进来了
+}
+
+// lead 裁决补充：patch 的 start_sector 是 firehose 表达式 → 条目不丢、原样保留、不记 warning
+// （形态取自真实样本 reference/qdl/tests/data/patch0.xml 的 Backup-GPT 头修补条目）
+void TestFlashPlan::keepsExpressionStartSector()
+{
+    QTemporaryDir dir;
+    const QString xml = writeFile(dir.path(), "patch0.xml",
+        "<patches>\n"
+        "  <patch SECTOR_SIZE_IN_BYTES=\"4096\" byte_offset=\"168\" filename=\"DISK\"\n"
+        "         physical_partition_number=\"0\" size_in_bytes=\"8\"\n"
+        "         start_sector=\"NUM_DISK_SECTORS-5.\" value=\"NUM_DISK_SECTORS-6.\"\n"
+        "         what=\"Update last partition 2 with actual size in Backup Header.\" />\n"
+        "</patches>\n");
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY2(edl::parsePatchXml(xml, 0, out, warn, &err), qPrintable(err));
+    QCOMPARE(out.size(), 1);                                                  // 表达式条目不再被丢弃
+    QCOMPARE(warn.size(), 0);                                                 // 表达式不是错误
+    QCOMPARE(out[0].startSectorExpr, QStringLiteral("NUM_DISK_SECTORS-5."));  // 原样保留
+    QCOMPARE(out[0].startSector, quint64(0));                                 // 契约：expr 非空时 startSector==0
+    QCOMPARE(out[0].value, QStringLiteral("NUM_DISK_SECTORS-6."));
+    QCOMPARE(out[0].imageFile, QStringLiteral("DISK"));
+}
+
+// program 侧同款（真实样本 rawprogram0.xml 的 label=BackupGPT）
+void TestFlashPlan::keepsExpressionStartSectorInProgram()
+{
+    QTemporaryDir dir;
+    const QString xml = writeFile(dir.path(), "rawprogram0.xml",
+        "<data>\n"
+        "  <program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"gpt_backup0.bin\" label=\"BackupGPT\"\n"
+        "           num_partition_sectors=\"5\" physical_partition_number=\"0\"\n"
+        "           start_sector=\"NUM_DISK_SECTORS-5.\" file_sector_offset=\"0\" />\n"
+        "</data>\n");
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY2(edl::parseRawprogramXml(xml, 0, out, warn, &err), qPrintable(err));
+    QCOMPARE(out.size(), 1);                                                  // 表达式条目不再被丢弃
+    QCOMPARE(warn.size(), 0);
+    QCOMPARE(out[0].startSectorExpr, QStringLiteral("NUM_DISK_SECTORS-5."));
+    QCOMPARE(out[0].startSector, quint64(0));
+    QCOMPARE(out[0].partitionName, QStringLiteral("BackupGPT"));
+    QCOMPARE(out[0].numSectors, quint64(5));
+    QCOMPARE(out[0].imageFile, dir.path() + "/gpt_backup0.bin");
 }
 
 QTEST_APPLESS_MAIN(TestFlashPlan)
