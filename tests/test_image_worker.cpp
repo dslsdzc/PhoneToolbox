@@ -38,6 +38,8 @@ private slots:
     void opsTailAlsoMatchesOfpQcJudge();
     void unpackOfpWritesOutputs();
     void unpackOfpPartialSuccessReportsWarning();
+    void unpackMisnamedOfpReportsEngineError();
+    void unpackMissingFileReportsError();
 };
 
 // ==================== 通用小工具 ====================
@@ -316,5 +318,52 @@ void TestImageWorker::unpackOfpPartialSuccessReportsWarning()
 // 注: 必须用 QTEST_MAIN（而非本仓其它测试的 QTEST_APPLESS_MAIN）—— 本文件经
 // QSignalSpy::wait() 驱动事件循环等 worker 的 queued 结果，无 QCoreApplication
 // 时 QEventLoop 无法使用（本目标未链 Qt6 Gui/Widgets → QTEST_MAIN 建 QCoreApplication）。
+// 失败路径 (1)：扩展名兜底判成 OFP，但包体不是 OFP（尾页探测不命中）→ 解包必须
+// 以 ok=false + 引擎的中文错误上抛（面板显示"解包失败: <reason>"），不得静默产空目录。
+void TestImageWorker::unpackMisnamedOfpReportsEngineError()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = writeBlob(dir.filePath(QStringLiteral("garbage.ofp")),
+                                   QByteArray(0x2000, '\x5A'));
+    QVERIFY(!path.isEmpty());
+
+    ImageWorker worker;
+    imgreg::Detected detected;
+    QString why;
+    QVERIFY2(detectFile(worker, path, &detected, &why), qPrintable(why));
+    // 尾页探测不命中 → 仅扩展名给出候选（这是"误命名/损坏包"的典型识别结果）
+    QCOMPARE(detected.format, imgreg::Format::OFP);
+    QCOMPARE(detected.detail, QStringLiteral("按扩展名识别"));
+
+    const QString outDir = dir.filePath(QStringLiteral("out"));
+    const UnpackOutcome outcome = unpackFile(worker, path, detected, outDir);
+    QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
+    QVERIFY(!outcome.ok);
+    QVERIFY(!outcome.error.isEmpty()); // 引擎中文文案原样上抛（§5：不得空 error）
+    QVERIFY2(outcome.error.contains(QStringLiteral("OFP")), qPrintable(outcome.error));
+    QVERIFY(outcome.outputs.isEmpty()); // 失败即无产物清单
+}
+
+// 失败路径 (2)：路径不存在（面板拖入后文件被删/移动等防御路径）→ 不崩溃、不空 error。
+// 不走 runDetect（识别本身也会失败），直接投喂伪造的 Detected 走 doUnpack 分派。
+void TestImageWorker::unpackMissingFileReportsError()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    imgreg::Detected forged;
+    forged.format = imgreg::Format::OFP;
+
+    ImageWorker worker;
+    const UnpackOutcome outcome = unpackFile(
+        worker, dir.filePath(QStringLiteral("nope.ofp")), forged,
+        dir.filePath(QStringLiteral("out")));
+    QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
+    QVERIFY(!outcome.ok);
+    QVERIFY(!outcome.error.isEmpty());
+    QVERIFY2(outcome.error.contains(QStringLiteral("无法打开")), qPrintable(outcome.error));
+    QVERIFY(outcome.outputs.isEmpty());
+}
+
 QTEST_MAIN(TestImageWorker)
 #include "test_image_worker.moc"
