@@ -53,9 +53,9 @@ bool parsePatchXml(const QString &xmlPath, quint32 lun,
 void finalizePlan(FlashPlan &plan);
 
 // 就地归一化（**会修改 plan**）：把"镜像文件事实"变成最终下发值 ——
-//   * Program + sparse：读文件头 → rawBytes = 去 sparse 后字节数；与 XML 声明的
-//     numSectors × sectorSize 不符 → 以文件头为准修正 numSectors + warning
-//     （Task 1 模型契约：rawBytes 由本步骤回填，flash_plan.cpp:155 注释）
+//   * Program + sparse：读文件头 → rawBytes = 去 sparse 后字节数；与 XML 声明的扇区数不符 →
+//     以文件头为准修正 numSectors + warning
+//     （Task 1 模型契约：rawBytes 由本步骤回填，见 flash_plan.cpp `loadProgramTag` 的注释）
 //   * 标记 sparse 但文件头不是 sparse：文件大小与声明一致 → 翻转 sparse=false + warning
 //     （reference/qdl/src/program.c:79-93）；对不上 → 失败
 //   * 镜像缺失/不可打开、sectorSize 为 0 无法换算 → 失败

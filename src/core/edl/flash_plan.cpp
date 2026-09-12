@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QXmlStreamReader>
 #include <algorithm>
+#include <limits>
 
 namespace edl {
 
@@ -30,12 +31,12 @@ QString attrRaw(QXmlStreamReader &reader, const char *name, bool *ok)
 }
 
 // 数值属性：base 0 解析（识别 0x 前缀），与 qdl strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）。
+// 缺失、空串、不可解析一律 *ok=false（同 qdl attr_as_* 的 errors++ → 丢弃该条目）。
 //
-// 注意 start_sector：qdl 把它读成**字符串**（reference/qdl/src/program.c:261、src/patch.c:46），
-// 因为真机 XML 里它可能是 firehose 表达式（如 "NUM_DISK_SECTORS-5."，src/firehose.c:874-879
-// 明确注释"解析它会把写入地址搞错"）。本项目模型按 spec §3.3 用 quint64，表达式无法表示，
-// 故此处把"存在但不可解析"与"缺失"同等处理（丢弃条目 + warning）——
-// 宁可少条目并告警，也不把表达式静默当成 0 而写到扇区 0。
+// **适用范围（与 readSectorAttr 的分工，勿混用）**：只用于 program/patch 的**纯数值**属性
+// （SECTOR_SIZE_IN_BYTES / num_partition_sectors / physical_partition_number / byte_offset /
+// size_in_bytes）。可能承载 firehose 表达式的扇区属性（start_sector、erase 的
+// num_partition_sectors）一律走 readSectorAttr —— 那里有"缺失 / 十进制 / 表达式"三态语义。
 quint64 attrU64(QXmlStreamReader &reader, const char *name, bool *ok)
 {
     bool present = false;
@@ -44,6 +45,63 @@ quint64 attrU64(QXmlStreamReader &reader, const char *name, bool *ok)
     const quint64 value = raw.toULongLong(&numOk, 0);
     if (ok) *ok = present && numOk;
     return numOk ? value : 0;
+}
+
+// ---- 扇区类属性的统一三态（start_sector 与 erase 的 num_partition_sectors 共用）----
+//
+// 为什么单独一套：真机 XML 里这些属性可能是 firehose 表达式（如 "NUM_DISK_SECTORS-5."），
+// 参照实现把 start_sector 读成**字符串**原样下发（reference/qdl/src/program.c:261、src/patch.c:46；
+// src/firehose.c:874-879 注释明确"解析它会把写入地址搞错"），而 attrU64 的 base 0 数值语义
+// （识别 0x）与"原样透传"冲突 —— 合并成一套会让主机擅自改写 0x 形态的下发值。
+//
+// 三态与各调用点的处置（**逐态行为写在这里，两个调用点都不得自行分叉**）：
+//   Missing     属性**不存在**：
+//                 · start_sector（program/patch，required=true）→ 记缺失、丢弃该条目；
+//                 · start_sector（erase，required=false）→ 保持 0；
+//                 · erase 的 num_partition_sectors → 0 = **整 LUN 擦**（唯一保留该语义的形态）。
+//   Empty       属性存在但为空串：qdl attr_as_string 遇空串返回 NULL（reference/qdl/src/util.c:101-102），
+//                等同缺失处理 —— 但对**破坏性**的 erase 计数一律 fail-closed 丢弃（见 loadEraseTag）：
+//                空串被当作"0 扇区"会静默放大成整 LUN 擦。
+//   Decimal     纯十进制：取数值。
+//   NonDecimal  存在但按该属性的 base 解析不出来（firehose 表达式如 "NUM_DISK_SECTORS-5."、
+//                 base=10 时的 "0x800"、或 "abc"）：
+//                 · start_sector（base=10）→ **原样**存 startSectorExpr，**不是错误**、不丢条目；
+//                 · erase 的 num_partition_sectors（base=0）→ 丢弃条目 + warning（无法当定点擦范围）。
+enum class SectorAttrKind { Missing, Empty, Decimal, NonDecimal };
+
+struct SectorAttr {
+    SectorAttrKind kind = SectorAttrKind::Missing;
+    quint64 value = 0;   // Decimal 时有效
+    QString raw;         // NonDecimal 时的原样串；Empty 时为空串
+};
+
+// 读取扇区类属性。**唯一的分类实现**（present/empty/解析三件事只写一遍），逐调用点只差一个 base：
+//   base=10（start_sector）：只认纯十进制 —— 0x 与表达式一样进 NonDecimal 原样透传，
+//          避免主机改写下发形态（spec §3.3 契约：startSector 只填"纯十进制"值）；
+//   base=0 （erase 的 num_partition_sectors）：识别 0x/0 前缀，与 qdl 的数值属性
+//          attr_as_unsigned → strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）——
+//          它是纯数值属性，0x800 这种十六进制形态必须当数值接受，而不是当"表达式"丢弃。
+SectorAttr readSectorAttr(QXmlStreamReader &reader, const char *name, int base = 10)
+{
+    SectorAttr out;
+    bool present = false;
+    out.raw = attrRaw(reader, name, &present);
+    if (!present)
+        return out;                                     // Missing（raw 为空）
+    if (out.raw.isEmpty()) {
+        out.kind = SectorAttrKind::Empty;
+        return out;
+    }
+    bool numOk = false;
+    const quint64 value = out.raw.toULongLong(&numOk, base);
+    if (numOk) {
+        out.kind = SectorAttrKind::Decimal;
+        out.value = value;
+        out.raw.clear();
+    } else {
+        out.kind = SectorAttrKind::NonDecimal;
+    }
+    return out;
 }
 
 // 必需属性收集器：任一必需属性缺失/空/不可解析 → 该条目被丢弃并记 warning。
@@ -90,31 +148,27 @@ private:
     QString m_missing;
 };
 
-// start_sector 取值（program / patch / erase 同款规则）：
-//   纯十进制 → startSector=N；否则**原样**存入 startSectorExpr 且 startSector=0。
-//   表达式**不是错误**：不记 warning、不丢条目（qdl 把它当字符串读并原样下发：
-//   reference/qdl/src/program.c:261、src/patch.c:46；src/firehose.c:874-879 注释明确
-//   "解析它会把写入地址搞错"）。真机样本里 patch0.xml 的 Backup-GPT 头修补、
-//   rawprogram0.xml 的 label=BackupGPT 都是这一类 —— 丢掉即漏掉备份 GPT 头修补。
-//   只有属性**本身缺失**（或空串）才算错 → 记缺失（条目丢弃 + warning）。
-// 注：其它数值属性走 attrU64 的 base 0（同 qdl strtoul(...,0)）；start_sector 只认纯十进制，
-// 0x/表达式一律进原样透传分支，避免主机擅自改写下发形态。
+// start_sector 取值（program / patch / erase 同款策略，三态判定统一走 readSectorAttr）：
+//   纯十进制 → startSector=N；表达式/0x → **原样**存入 startSectorExpr 且 startSector=0（模型契约）。
+//   表达式**不是错误**：不记 warning、不丢条目（Backup-GPT 头修补条目就在这一类，丢掉即漏修补；
+//   reference/qdl/src/program.c:261、src/patch.c:46、src/firehose.c:874-879）。
+//   缺失或空串 → 必需时记缺失（条目丢弃 + warning）。
 // required=false：属性可缺省（erase 标签缺省 = 整 LUN 擦，见 loadEraseTag），缺省不记错。
 void readStartSector(QXmlStreamReader &reader, PlanEntry &e, RequiredAttrs &attrs, bool required = true)
 {
-    bool present = false;
-    const QString raw = attrRaw(reader, "start_sector", &present);
-    if (!present || raw.isEmpty()) {
+    const SectorAttr a = readSectorAttr(reader, "start_sector");
+    switch (a.kind) {
+    case SectorAttrKind::Decimal:
+        e.startSector = a.value;
+        return;
+    case SectorAttrKind::NonDecimal:
+        e.startSectorExpr = a.raw;   // 表达式原样保留；startSector 保持 0（模型契约）
+        return;
+    case SectorAttrKind::Missing:
+    case SectorAttrKind::Empty:
         if (required)
             attrs.noteMissing("start_sector");
         return;
-    }
-    bool numOk = false;
-    const quint64 value = raw.toULongLong(&numOk, 10);
-    if (numOk) {
-        e.startSector = value;
-    } else {
-        e.startSectorExpr = raw;   // 表达式原样保留；startSector 保持 0（模型契约）
     }
 }
 
@@ -193,26 +247,25 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
     // 注意（Task 5）：startSectorExpr 非空时不能按"numSectors==0 = 整 LUN"处理。
     readStartSector(reader, e, attrs, /*required=*/false);
 
-    bool countPresent = false;
-    const QString countRaw = attrRaw(reader, "num_partition_sectors", &countPresent);
-    if (!countPresent) {
-        // 属性缺失 = 整 LUN 擦（唯一保留该语义的形态）
-        e.numSectors = 0;
+    // 三态判定统一走 readSectorAttr（与 start_sector 同源），处置按注释里的策略逐态分发：
+    // 只有**属性缺失**才是整 LUN 擦；Empty/NonDecimal/显式 0 一律丢弃（fail-closed）
+    const SectorAttr count = readSectorAttr(reader, "num_partition_sectors", /*base=*/0);
+    if (count.kind == SectorAttrKind::Decimal && count.value > 0) {
+        e.numSectors = count.value;
+    } else if (count.kind == SectorAttrKind::Missing) {
+        e.numSectors = 0;   // 属性缺失 = 整 LUN 擦（唯一保留该语义的形态）
     } else {
-        bool countOk = false;
-        const quint64 count = countRaw.toULongLong(&countOk, 0);
-        if (!countOk || count == 0) {
-            warnings << QStringLiteral("rawprogram erase 条目被跳过：num_partition_sectors=\"%1\" %2"
-                                       "（lun=%3，start_sector=%4）—— 按 0 处理会把定点擦放大成整 LUN 擦")
-                            .arg(countRaw,
-                                 countOk ? QStringLiteral("不是有效的定点擦范围（整 LUN 擦请省略该属性）")
-                                         : QStringLiteral("不可解析"))
-                            .arg(e.lun)
-                            .arg(e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
-                                                             : e.startSectorExpr);
-            return;
-        }
-        e.numSectors = count;
+        const bool isZero = count.kind == SectorAttrKind::Decimal;   // 走到这里 Decimal 只剩 0
+        const QString shown = isZero ? QString::number(count.value) : count.raw;
+        warnings << QStringLiteral("rawprogram erase 条目被跳过：num_partition_sectors=\"%1\" %2"
+                                   "（lun=%3，start_sector=%4）—— 按 0 处理会把定点擦放大成整 LUN 擦")
+                        .arg(shown,
+                             isZero ? QStringLiteral("不是有效的定点擦范围（整 LUN 擦请省略该属性）")
+                                    : QStringLiteral("不可解析"))
+                        .arg(e.lun)
+                        .arg(e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
+                                                         : e.startSectorExpr);
+        return;
     }
     warnLunMismatch(QStringLiteral("erase"), e, fileLun, warnings);
     out << e;
@@ -344,14 +397,21 @@ int actionRank(PlanEntry::Action a)
 }
 
 // 报错/告警里的条目标识：program/patch 用 label（patch 无 label，解析层已用 filename 填
-// partitionName），erase 在 XML 里没有名字 → 用动作名。保证非空，文案里永远能定位到条目。
+// partitionName）；erase 在 XML 里没有名字 → 带 LUN 与起始扇区，多条 erase 才分得开
+// （整 LUN 擦写"整 LUN"）。保证非空，文案里永远能定位到条目。
 QString entryName(const PlanEntry &e)
 {
     if (!e.partitionName.isEmpty())
         return e.partitionName;
     if (!e.imageFile.isEmpty())
         return e.imageFile;
-    return e.action == PlanEntry::Action::Erase ? QStringLiteral("erase") : QStringLiteral("(未命名)");
+    if (e.action != PlanEntry::Action::Erase)
+        return QStringLiteral("(未命名)");
+    if (e.startSector == 0 && e.numSectors == 0 && e.startSectorExpr.isEmpty())
+        return QStringLiteral("erase(lun=%1, 整 LUN)").arg(e.lun);
+    return QStringLiteral("erase(lun=%1, start=%2)")
+            .arg(e.lun)
+            .arg(e.startSectorExpr.isEmpty() ? QString::number(e.startSector) : e.startSectorExpr);
 }
 
 // normalizePlan 的 Program 侧：镜像在不在、sparse 头声明的扇区数是多少。
@@ -379,16 +439,21 @@ void normalizeProgramImage(PlanEntry &e, QStringList &warnings, QStringList &fai
         // 标了 sparse="true" 但文件里没有 sparse 头。qdl 先例（reference/qdl/src/program.c:79-93）：
         // 若 文件大小 == SECTOR_SIZE_IN_BYTES × num_partition_sectors，判为"标记写错"，改按非 sparse
         // 处理并告警；对不上则失败 —— 宁可拒刷，也不猜文件结构。
-        const quint64 declared = e.numSectors * e.sectorSize;
-        if (declared != 0 && static_cast<quint64>(f.size()) == declared) {
+        // 无回绕写法：乘法两边都是 u64 量级，改为"先除后比"（fileSize % sectorSize == 0 且商相等）
+        const quint64 fileSize = static_cast<quint64>(f.size());
+        const bool sizeMatches = e.sectorSize != 0 && fileSize != 0
+                                 && fileSize % e.sectorSize == 0
+                                 && e.numSectors == fileSize / e.sectorSize;
+        if (sizeMatches) {
             e.sparse = false;
             warnings << QStringLiteral("条目 %1 标记 sparse=\"true\" 但文件头不是 sparse（文件 %2 字节"
-                                       " == 声明 %3 字节）—— 按非 sparse 处理（参照 reference/qdl/src/program.c:79-93）")
-                            .arg(entryName(e)).arg(f.size()).arg(declared);
+                                       " == 声明 %3 扇区 × %4 字节）—— 按非 sparse 处理"
+                                       "（参照 reference/qdl/src/program.c:79-93）")
+                            .arg(entryName(e)).arg(fileSize).arg(e.numSectors).arg(e.sectorSize);
         } else {
             failures << QStringLiteral("条目 %1 标记 sparse 但文件头不是 sparse 格式：%2（文件 %3 字节，"
                                        "声明 %4 扇区）")
-                            .arg(entryName(e), e.imageFile).arg(f.size()).arg(e.numSectors);
+                            .arg(entryName(e), e.imageFile).arg(fileSize).arg(e.numSectors);
         }
         return;
     }
@@ -399,18 +464,14 @@ void normalizeProgramImage(PlanEntry &e, QStringList &warnings, QStringList &fai
                         .arg(entryName(e));
         return;
     }
-    const quint64 declared = e.numSectors * e.sectorSize;
-    if (declared != rawBytes) {
-        // 不足整扇区的尾巴向上取整：firehose 只能按扇区下发（协议速查 §1）
-        const quint64 corrected = (rawBytes + e.sectorSize - 1) / e.sectorSize;
-        if (e.numSectors != corrected) {
-            warnings << QStringLiteral("条目 %1 的 sparse 头声明 %2 字节（%3 扇区），与 XML 的 %4 扇区"
-                                       "（%5 字节）不符 —— 以文件头为准修正 numSectors")
-                                .arg(entryName(e)).arg(rawBytes).arg(corrected)
-                                .arg(e.numSectors).arg(declared);
-            e.numSectors = corrected;
-        }
-        // numSectors 已等于 corrected（重复归一化，或 rawBytes 不是扇区整数倍）→ 只回填 rawBytes、不重复告警
+    // 无回绕比较：不比 numSectors × sectorSize（u64 可能溢出而被小值蒙混），改比**扇区数** ——
+    // 不足整扇区的尾巴向上取整（firehose 只能按扇区下发，协议速查 §1）
+    const quint64 fromHeader = rawBytes / e.sectorSize + (rawBytes % e.sectorSize != 0 ? 1 : 0);
+    if (e.numSectors != fromHeader) {
+        warnings << QStringLiteral("条目 %1 的 sparse 头声明 %2 字节（%3 扇区），与 XML 的 %4 扇区"
+                                   "不符 —— 以文件头为准修正 numSectors")
+                            .arg(entryName(e)).arg(rawBytes).arg(fromHeader).arg(e.numSectors);
+        e.numSectors = fromHeader;
     }
     e.rawBytes = rawBytes;   // Task 1 模型契约：rawBytes（去 sparse 后字节数）由归一化步骤回填
 }
@@ -430,11 +491,19 @@ void finalizePlan(FlashPlan &plan)
                          return a.startSector < b.startSector;
                      });
 
+    // 无回绕累加（预览路径也会调本函数，此时未必过校验）：乘法饱和 + 求和饱和，
+    // 保证 totalBytes 不会回绕成垃圾进度分母（这类条目会被 validatePlan 拒掉，见规则 1）。
+    const quint64 maxU64 = std::numeric_limits<quint64>::max();
     quint64 total = 0;
     for (const PlanEntry &e : plan.entries) {
         if (e.action != PlanEntry::Action::Program)
             continue;                                    // Erase/Patch 不进进度分母
-        total += e.rawBytes ? e.rawBytes : e.numSectors * e.sectorSize;
+        quint64 bytes = e.rawBytes;
+        if (bytes == 0) {
+            const quint64 ss = e.sectorSize ? e.sectorSize : 1;
+            bytes = e.numSectors > maxU64 / ss ? maxU64 : e.numSectors * ss;
+        }
+        total = bytes > maxU64 - total ? maxU64 : total + bytes;
     }
     plan.totalBytes = total;
 }
@@ -497,10 +566,19 @@ PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)
             }
             continue;
         }
-        const quint64 end = e.startSector + e.numSectors;      // 半开区间 [start, end)
-        if (end > it->totalBlocks) {
-            chk.errors << QStringLiteral("条目 %1 越界：LUN %2 需要扇区 %3..%4，设备仅 %5")
-                              .arg(entryName(e)).arg(e.lun).arg(e.startSector).arg(end).arg(it->totalBlocks);
+        // 规则 1：半开区间 [startSector, startSector + numSectors) 必须落在设备容量内。
+        // **无回绕写法**（参照式）：先判 startSector 本身，再用减法避免 startSector + numSectors 溢出
+        // （损坏 XML 里 numSectors 取极大值时，回绕会让越界条目蒙混过关）。
+        const bool oob = e.startSector > it->totalBlocks
+                         || e.numSectors > it->totalBlocks - e.startSector;
+        if (oob) {
+            // 文案里的结束扇区只用于显示：溢出时给出 "start+num（溢出）" 而不是回绕后的垃圾值
+            const bool endOverflows = e.numSectors > std::numeric_limits<quint64>::max() - e.startSector;
+            const QString need = endOverflows
+                    ? QStringLiteral("%1+%2（溢出 u64）").arg(e.startSector).arg(e.numSectors)
+                    : QStringLiteral("%1..%2").arg(e.startSector).arg(e.startSector + e.numSectors);
+            chk.errors << QStringLiteral("条目 %1 越界：LUN %2 需要扇区 %3，设备仅 %4")
+                              .arg(entryName(e)).arg(e.lun).arg(need).arg(it->totalBlocks);
         }
         // 规则 2：重叠只在 Program 条目之间判（同 LUN 区间相交）。整 LUN 擦本来就会覆盖后续 program
         // 的范围，patch 打的是任意磁盘偏移 —— 二者都不参与（spec §3.5）。
@@ -508,11 +586,19 @@ PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)
             continue;
         for (int j : programsByLun.value(e.lun)) {
             const PlanEntry &prev = plan.entries[j];
-            const quint64 prevEnd = prev.startSector + prev.numSectors;
-            if (e.startSector < prevEnd && prev.startSector < end) {
+            // **无回绕判交**：较晚的起点 < 较早起点的区间长度（不计算 end，避免 u64 回绕）
+            const quint64 s1 = e.startSector, n1 = e.numSectors;
+            const quint64 s2 = prev.startSector, n2 = prev.numSectors;
+            const bool overlap = s1 <= s2 ? (s2 - s1 < n1) : (s1 - s2 < n2);
+            if (overlap) {
+                // 区间终点仅用于显示：饱和加法，溢出时显示 u64 上限（越界条目另有 error）
+                const auto satEnd = [](quint64 s, quint64 n) {
+                    return n > std::numeric_limits<quint64>::max() - s
+                               ? std::numeric_limits<quint64>::max() : s + n;
+                };
                 chk.errors << QStringLiteral("条目 %1 与 %2 重叠：LUN %3 区间 [%4,%5) 与 [%6,%7)")
                                   .arg(entryName(e), entryName(prev)).arg(e.lun)
-                                  .arg(e.startSector).arg(end).arg(prev.startSector).arg(prevEnd);
+                                  .arg(s1).arg(satEnd(s1, n1)).arg(s2).arg(satEnd(s2, n2));
             }
         }
         programsByLun[e.lun].append(i);

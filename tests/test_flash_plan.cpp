@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QFile>
 #include <QTemporaryDir>
+#include <limits>
 #include "core/edl/flash_plan.h"
 #include "image_engine/sparse_image.h"
 
@@ -57,6 +58,9 @@ private slots:
     void validateSparseCorrectionFeedsBoundsCheck();
     void normalizeMissingImageFails();
     void normalizeAcceptsSparseFlagOnRawFile();
+    void normalizeRejectsWraparoundSparseDeclaration();
+    void validateRejectsWraparoundGeometry();
+    void errorNamesEraseEntryUniquely();
     void sparseNumSectorsFromHeader();
 };
 
@@ -236,14 +240,20 @@ void TestFlashPlan::eraseWithUnparseableCountIsDropped()
         "         start_sector=\"4096\" num_partition_sectors=\"NUM_DISK_SECTORS-1.\" />\n"  // 表达式
         "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"1\"\n"
         "         start_sector=\"8192\" num_partition_sectors=\"0\" />\n"                    // 显式 0
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "         start_sector=\"65536\" num_partition_sectors=\"0x800\" />\n"               // 十六进制
         "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" />\n"        // 缺失 = 整 LUN
         "</data>\n");
     QList<edl::PlanEntry> out; QStringList warn; QString err;
     QVERIFY2(edl::parseRawprogramXml(xml, 0, out, warn, &err), qPrintable(err));
-    QCOMPARE(out.size(), 1);                       // 只剩"属性确实缺失"的那条
+    QCOMPARE(out.size(), 2);                       // 十六进制计数 + "属性确实缺失"的整 LUN 各一条
     QCOMPARE(out[0].action, edl::PlanEntry::Action::Erase);
     QCOMPARE(out[0].lun, quint32(0));
-    QCOMPARE(out[0].numSectors, quint64(0));       // 0/0 = 整 LUN（由会话层解释）
+    // 计数是**纯数值属性**：base 0 解析（0x 前缀当数值接受），与 qdl attr_as_unsigned →
+    // strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）—— 别把它当"表达式"丢掉
+    QCOMPARE(out[0].numSectors, quint64(0x800));
+    QCOMPARE(out[1].lun, quint32(0));
+    QCOMPARE(out[1].numSectors, quint64(0));       // 0/0 = 整 LUN（由会话层解释）
     QCOMPARE(warn.size(), 3);                      // 三条被丢弃，每条都有 warning
     for (const QString &w : warn)
         QVERIFY(w.contains(QStringLiteral("num_partition_sectors")));
@@ -377,6 +387,11 @@ void TestFlashPlan::validateMissingLunGeometryIsError()
 
 // 表达式条目（startSectorExpr 非空）：跳过规则 1/2，且汇总成**一条** warning（不是每条一次）。
 // 两条 expression 条目的 startSector 都是 0 —— 若参与几何校验会互相判为重叠。
+//
+// **回归钉死（lead 审查 Important）**：规则 3（sectorSize）/ 规则 6（sha256）**不受**规则 7 影响，
+// 表达式条目照样要记 —— 所以这里给 expr 条目配上"扇区不符 + sha256"，并按**内容**逐条断言。
+// 若把 expr 的 continue 提到规则 3/6 之前（pre-fix 顺序），sectorWarn/shaWarn 会掉到 0，本用例必红；
+// 旧写法只断言 `warnings.size() == 1`，退回 pre-fix 顺序照样通过，等于没钉住。
 void TestFlashPlan::validateSkipsExpressionEntries()
 {
     QTemporaryDir dir;
@@ -386,7 +401,8 @@ void TestFlashPlan::validateSkipsExpressionEntries()
     edl::FlashPlan plan;
     edl::PlanEntry a; a.action = edl::PlanEntry::Action::Program;
     a.partitionName = QStringLiteral("BackupGPT"); a.imageFile = img;
-    a.lun = 0; a.numSectors = 5; a.sectorSize = 4096;
+    a.lun = 0; a.numSectors = 5; a.sectorSize = 512;                 // 与设备 blockSize 4096 不符 → 规则 3
+    a.sha256 = QStringLiteral("abcdef0123456789abcdef0123456789");   // → 规则 6
     a.startSectorExpr = QStringLiteral("NUM_DISK_SECTORS-5.");
     edl::PlanEntry b = a; b.partitionName = QStringLiteral("BackupGPT2");
     b.startSectorExpr = QStringLiteral("NUM_DISK_SECTORS-11.");
@@ -394,15 +410,33 @@ void TestFlashPlan::validateSkipsExpressionEntries()
 
     QStringList nwarn; QString nerr;
     QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
-    QCOMPARE(nwarn.size(), 0);
+    QCOMPARE(nwarn.size(), 0);                                       // 归一化不管这些（非 sparse、文件在）
 
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});
     const edl::PlanCheck chk = edl::validatePlan(plan, dev);
-    QVERIFY2(chk.ok, qPrintable(chk.errors.join(QStringLiteral(" | "))));
-    QCOMPARE(chk.warnings.size(), 1);
-    QVERIFY(chk.warnings[0].contains(QStringLiteral("2 个条目")));
-    QVERIFY(chk.warnings[0].contains(QStringLiteral("表达式")));
+    QVERIFY2(chk.ok, qPrintable(chk.errors.join(QStringLiteral(" | "))));   // 表达式条目不是 error
+
+    int sectorWarn = 0, shaWarn = 0, exprWarn = 0;
+    for (const QString &w : chk.warnings) {
+        if (w.contains(QStringLiteral("sectorSize"))) {
+            ++sectorWarn;
+            QVERIFY(w.contains(QStringLiteral("512")) && w.contains(QStringLiteral("4096")));
+        }
+        if (w.contains(QStringLiteral("sha256"))) {
+            ++shaWarn;
+            QVERIFY(w.contains(QStringLiteral("abcdef012345")));     // 截断哈希可定位到条目
+        }
+        if (w.contains(QStringLiteral("表达式"))) {
+            ++exprWarn;
+            QVERIFY(w.contains(QStringLiteral("2 个条目")));
+            QVERIFY(w.contains(QStringLiteral("未参与设备几何校验")));
+        }
+    }
+    QCOMPARE(sectorWarn, 2);        // 规则 3：两条 expr 条目各一条（不是 0 —— 见上面的回归说明）
+    QCOMPARE(shaWarn, 2);           // 规则 6：同上
+    QCOMPARE(exprWarn, 1);          // 规则 7：汇总一条，不是每条一次
+    QCOMPARE(chk.warnings.size(), 5);
 }
 
 // 规则 5：sparse 头声明的去 sparse 大小与 XML 的 numSectors × sectorSize 不符 →
@@ -524,6 +558,89 @@ void TestFlashPlan::normalizeAcceptsSparseFlagOnRawFile()
     QVERIFY(!edl::normalizePlan(bad, w2, &e2));
     QVERIFY(e2.contains(QStringLiteral("xbl")));
     QVERIFY(e2.contains(QStringLiteral("sparse")));
+}
+
+// 规则 1 的回绕防护（lead 审查 Minor）：损坏 XML 里 startSector/numSectors 取极大值时
+// `startSector + numSectors` 会回绕成**小值**（max-5 + 10 → 4），旧写法会判"不越界"而放行；
+// 现在改用减法/先除后比，必须拒绝，并且文案给"（溢出 u64）"而不是回绕后的垃圾数字。
+void TestFlashPlan::validateRejectsWraparoundGeometry()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // 18446744073709551610 = 2^64-6（max-5）；+10 回绕成 4 < totalBlocks
+    const QString xml = writeFile(dir.path(), "rawprogram0.xml",
+        "<data>\n"
+        "  <program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"wrap.img\" label=\"wrap\"\n"
+        "           num_partition_sectors=\"10\" physical_partition_number=\"0\"\n"
+        "           start_sector=\"18446744073709551610\" file_sector_offset=\"0\" />\n"
+        "</data>\n");
+    QVERIFY(!xml.isEmpty());
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY2(edl::parseRawprogramXml(xml, 0, out, warn, &err), qPrintable(err));
+    QCOMPARE(out.size(), 1);
+    QCOMPARE(out[0].startSector, std::numeric_limits<quint64>::max() - 5);
+    QCOMPARE(out[0].numSectors, quint64(10));
+    QVERIFY(!writeFile(dir.path(), "wrap.img", QByteArray(4096, '\0')).isEmpty());   // 文件在 → 归一化不拦
+
+    edl::FlashPlan plan;
+    plan.entries = out;
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
+
+    QList<edl::StorageInfo> dev;
+    dev.append({0, 1000, 4096});
+    const edl::PlanCheck chk = edl::validatePlan(plan, dev);
+    QVERIFY(!chk.ok);                                   // 回绕不能让越界条目蒙混过关
+    QCOMPARE(chk.errors.size(), 1);
+    QVERIFY(chk.errors[0].contains(QStringLiteral("越界")));
+    QVERIFY(chk.errors[0].contains(QStringLiteral("溢出")));
+    QVERIFY(chk.errors[0].contains(QStringLiteral("wrap")));
+}
+
+// 乘法侧的回绕防护：XML 声明 numSectors = 2^52+1、sectorSize 4096 → 真值 2^64+4096 超出 u64，
+// 写出会回绕成 4096 == 文件大小，旧写法（numSectors × sectorSize == 文件大小）会误判成
+// "sparse 标记写错"而**放行**。现在按扇区数比（先除后比）→ 必须失败。
+void TestFlashPlan::normalizeRejectsWraparoundSparseDeclaration()
+{
+    QTemporaryDir dir;
+    const QString img = writeFile(dir.path(), "wrap.img", QByteArray(4096, '\x11'));  // 原始文件，非 sparse
+    QVERIFY(!img.isEmpty());
+
+    edl::FlashPlan plan;
+    edl::PlanEntry a; a.action = edl::PlanEntry::Action::Program;
+    a.partitionName = QStringLiteral("wrap"); a.imageFile = img; a.sparse = true;
+    a.lun = 0; a.startSector = 0; a.sectorSize = 4096;
+    a.numSectors = (std::numeric_limits<quint64>::max() / 4096) + 2;   // ×4096 回绕成 4096 = 文件大小
+    plan.entries = {a};
+
+    QStringList nwarn; QString nerr;
+    QVERIFY(!edl::normalizePlan(plan, nwarn, &nerr));
+    QVERIFY(nerr.contains(QStringLiteral("wrap")));
+    QVERIFY(nerr.contains(QStringLiteral("sparse")));
+    QVERIFY(plan.entries[0].sparse);      // 没有被"容错"分支翻转成非 sparse 而放行
+}
+
+// lead 审查 Minor：erase 在 XML 里没有名字，文案要带 LUN 与起始扇区（整 LUN 擦写"整 LUN"），
+// 多条 erase 才分得清是哪一条。
+void TestFlashPlan::errorNamesEraseEntryUniquely()
+{
+    edl::FlashPlan plan;
+    edl::PlanEntry e1; e1.action = edl::PlanEntry::Action::Erase;
+    e1.lun = 0; e1.startSector = 10; e1.numSectors = 5; e1.sectorSize = 4096;        // 正常，无告警
+    edl::PlanEntry e2 = e1; e2.lun = 1; e2.startSector = 0; e2.numSectors = 0;       // 整 LUN
+    e2.sectorSize = 512;                                                             // → 规则 3 warning
+    edl::PlanEntry e3 = e1; e3.lun = 0; e3.startSector = 900000; e3.numSectors = 10; // → 越界 error
+    plan.entries = {e1, e2, e3};
+
+    QList<edl::StorageInfo> dev;
+    dev.append({0, 1000, 4096});
+    dev.append({1, 1000, 4096});
+    const edl::PlanCheck chk = edl::validatePlan(plan, dev);
+    QVERIFY(!chk.ok);
+    QCOMPARE(chk.errors.size(), 1);
+    QVERIFY(chk.errors[0].contains(QStringLiteral("erase(lun=0, start=900000)")));
+    QCOMPARE(chk.warnings.size(), 1);
+    QVERIFY(chk.warnings[0].contains(QStringLiteral("erase(lun=1, 整 LUN)")));
 }
 
 void TestFlashPlan::sparseNumSectorsFromHeader()
