@@ -96,7 +96,9 @@ struct PlanEntry {
     QString partitionName;      // label / patch 条目标识
     QString imageFile;          // 包内绝对路径；Patch 时可能是 "DISK"
     quint32 lun = 0;            // physical_partition_number
-    quint64 startSector = 0;
+    quint64 startSector = 0;    // 纯十进制时的值
+    QString startSectorExpr;    // start_sector 非纯十进制时原样保留（firehose 表达式），
+                                // 非空时 startSector==0 且发送方必须原样透传（§2 已定"主机不解释表达式"）
     quint64 numSectors = 0;     // Program/Erase：**sparse 展开后的 raw 扇区数**
     quint32 sectorSize = 4096;  // 逐条目 SECTOR_SIZE_IN_BYTES
     bool    sparse = false;
@@ -140,6 +142,7 @@ PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device);
 - 条目 `sectorSize` 与设备 `block_size` 不一致 → **warning 而非 error**（参照允许逐条目 `SECTOR_SIZE_IN_BYTES` 覆盖全局值，以条目值为准；qdl 即如此）
 - 镜像文件存在且可读；`sparse` 条目与文件头一致性
 - 有 `sha256` 时：默认**边写边算、写完即校**；可选"刷前完整校验"
+- **`startSectorExpr` 非空的条目跳过上面第 1、2 条**（表达式无法在主机侧求值，参照也不解释），并记一条汇总 warning
 - **任何 `errors` 非空 → 拒刷**；`warnings` 只进预览与日志
 
 ## 4. 执行流与错误处理（`edl_session.cpp`）

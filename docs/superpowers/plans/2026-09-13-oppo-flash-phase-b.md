@@ -75,7 +75,10 @@ struct PlanEntry {
     QString partitionName;      // rawprogram: label；patch: filename（供日志）
     QString imageFile;          // 绝对路径；Patch 为 "DISK" 时表示下发设备
     quint32 lun = 0;            // physical_partition_number
-    quint64 startSector = 0;
+    quint64 startSector = 0;    // 纯十进制时填此值
+    QString startSectorExpr;    // start_sector 非纯十进制时**原样保留**（firehose 表达式，如 "NUM_DISK_SECTORS-5."）；
+                                // 非空时 startSector==0，且发送方必须原样透传该串
+                                // （reference/qdl/src/firehose.c:874-879 明确"解析会写错地址"）
     quint64 numSectors = 0;     // Program/Erase：sparse 展开后的 raw 扇区数
     quint32 sectorSize = 4096;  // 逐条目 SECTOR_SIZE_IN_BYTES
     bool    sparse = false;
@@ -112,6 +115,7 @@ bool parsePatchXml(const QString &xmlPath, quint32 lun,
 - `imageFile` = XML 所在目录 + `filename`（绝对化）。`num_partition_sectors` 直接取 XML 值（sparse 的换算在 Task 2 的校验步骤做，见下）。
 - `rawprogram` 里的 `<erase>` 标签 → `PlanEntry{Action::Erase}`（`src/program.c:343-344`）。
 - patch `<patch>` 必需属性：`start_sector`/`byte_offset`/`physical_partition_number`/`size_in_bytes`/`value`/`filename`/`SECTOR_SIZE_IN_BYTES`/`what`（`src/patch.c:41-48`）。`filename != "DISK"` → **跳过 + warning**（参照两实现都跳过，协议速查 §2）。`value` **原样保留**（不解释 `NUM_DISK_SECTORS-6.`/`CRC32(...)`）。`what` 存进模型但代码里注明"只进日志"。
+- **`start_sector` 允许表达式**（`program` 与 `patch` 都有）：先按纯十进制解析，成功 → `startSector=N`；**失败不算错** → 原样存入 `startSectorExpr` 且 `startSector=0`。**绝不因此丢弃条目**（参照 qdl 把它当字符串读并原样下发：`program.c:261`/`patch.c:46`/`firehose.c:874-879`）。qdl 真实样本 `reference/qdl/tests/data/patch0.xml` 的 Backup-GPT 条目、`rawprogram0.xml` 的 `label=BackupGPT` 就是这一类 —— 丢弃它们等于漏掉备份 GPT 头修补。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -283,7 +287,8 @@ git commit -m "feat(edl): 计划层模型 + rawprogram/patch XML 解析（参照
 4. 镜像文件存在且可读（`Action::Program` 且非 sparse 时直接查；Patch 的 `imageFile=="DISK"` 不查文件）
 5. sparse 条目：读文件头 → `sparseRawSizeFromHeader` → 若 `rawBytes` 与 `numSectors × sectorSize` 不符 → **以头为准修正 `numSectors` 并记 warning**（参照按去 sparse 后大小算，协议速查 §1）
 6. 有 `sha256` 的条目 → 该字段非空即记入 `warnings`（"刷前完整校验"由 Task 8 的可选项驱动；此处不读整个文件）
-7. `errors` 非空 → `ok=false`
+7. **`startSectorExpr` 非空的条目跳过规则 1 与规则 2**（表达式无法在主机侧求值，参照也不解释），并在 warnings 里记一条汇总：`"N 个条目的 start_sector 为表达式，未参与设备几何校验（按参照原样下发）"`
+8. `errors` 非空 → `ok=false`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -758,6 +763,7 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
 
 **要点（逐条照协议速查，注释标行号）**
 - `xmlProgram`：属性顺序与集合 = `SECTOR_SIZE_IN_BYTES`/`num_partition_sectors`/`physical_partition_number`/`start_sector`，**`filename` 非空时追加**（`reference/qdl/src/firehose.c:1021-1030`）。
+- **`start_sector` 的取值（program 与 patch 同款）**：`e.startSectorExpr` 非空 → **原样输出该串**；否则输出十进制 `e.startSector`（`reference/qdl/src/firehose.c:874-879` 明确主机侧解析表达式会写错地址）。
 - `xmlPatch`：`SECTOR_SIZE_IN_BYTES`/`byte_offset`/`filename`/`physical_partition_number`/`size_in_bytes`/`start_sector`/`value`，**不发 `what`**（`firehose.c:1408,1410-1424`）。
 - `xmlErase`：`numSectors==0` → `<erase SECTOR_SIZE_IN_BYTES=".." physical_partition_number=".." />`（整 LUN）；否则带 `num_partition_sectors`+`start_sector`（`firehose.c:611-628`）。
 - `xmlConfigure`：`MemoryName`/`MaxPayloadSizeToTargetInBytes`/`Verbose="0"`/`ZlpAwareHost="1"`/`SkipStorageInit="0"`（`firehose.c:510-515`）；`maxPayloadBytes==0` 时省略该属性。
