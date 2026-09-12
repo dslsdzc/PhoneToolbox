@@ -78,6 +78,9 @@ inline QByteArray tailOf(const QByteArray &blob, quint64 n)
 // QC 组策略涉及的常量（与本模块解析层同源，供测试对照）
 inline constexpr quint64 kQcPartialDecryptSize = 0x40000;  // decryptitem() L253 decryptsize
 inline constexpr quint64 kQcA57LengthAdjust = 0x57;        // extract_xml() L132-133
+// 清单长度字段可信下限：低于此值解析层走 A57 重算分支（extract_xml() L132-133；
+// oppo_ofp.cpp parseQc() 同判据），见 buildQcPackage() 末尾的护栏
+inline constexpr quint64 kQcShortXmlThreshold = 200;
 
 // ==================== QC 合成包 ====================
 
@@ -199,6 +202,12 @@ inline QcPackage buildQcPackage(const QList<QcFileSpec> &files, const QcBuildOpt
 
     const QByteArray encXml = imgopp::aes128CfbEncrypt(xml.toUtf8(), pkg.key, pkg.iv);
     if (encXml.isEmpty())
+        return QcPackage();
+    // 护栏（Task 4 补）：清单长度 < 200 时解析层会走 A57 长度重算分支
+    // （extract_xml() L132-133 / oppo_ofp.cpp parseQc()），只有 a57XmlLengthHack 模式是
+    // 刻意构造。其余情况直接拒绝构造 → 调用方以 isValid() 拦住，避免"夹具无意造出短清单
+    // → 解析走错路径 → 断言恒真/恒假"的假测试。
+    if (!opts.a57XmlLengthHack && quint64(encXml.size()) < kQcShortXmlThreshold)
         return QcPackage();
     const quint64 xmlOffset = quint64(opts.xmlOffsetPages) * opts.pageSize;
     const quint64 xmlEnd = xmlOffset + quint64(encXml.size());
