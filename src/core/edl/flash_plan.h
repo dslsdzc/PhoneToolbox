@@ -48,15 +48,27 @@ bool parsePatchXml(const QString &xmlPath, quint32 lun,
 // 排序 + 统计（spec §3.3/§3.5）：Erase 一律在前，Program 按 (lun, startSector) 升序，Patch 一律最后；
 // 同键保持解析顺序（stable_sort）。填 totalBytes = Program 条目 rawBytes（为 0 时退化为
 // numSectors × sectorSize）之和 —— 进度分母，Patch/Erase 不计入。
-// **调用顺序**：validatePlan 会就地修正 sparse 条目的 numSectors/rawBytes，故应由
-// "finalizePlan → validatePlan → finalizePlan（或校验通过后重算）"保证 totalBytes 与最终下发值一致。
+// **调用顺序**：normalizePlan 会按镜像文件事实修正 numSectors/rawBytes，故 totalBytes 应在
+// normalizePlan 之后再算（`parse* → normalizePlan → finalizePlan → validatePlan`）。
 void finalizePlan(FlashPlan &plan);
 
-// 刷前校验（spec §3.5 七条规则；在 getstorageinfo 之后、进入写入之前调用）。
-// **会就地修正 plan**：sparse 条目按文件头回填 rawBytes、并在与 XML 不符时以头为准修正 numSectors
-// （Task 1 的模型契约：rawBytes 由校验步骤填充，flash_plan.cpp:155 注释）。
-// 因此参数是**非 const** 引用 —— 调用方传入的必须是可写的 FlashPlan。
+// 就地归一化（**会修改 plan**）：把"镜像文件事实"变成最终下发值 ——
+//   * Program + sparse：读文件头 → rawBytes = 去 sparse 后字节数；与 XML 声明的
+//     numSectors × sectorSize 不符 → 以文件头为准修正 numSectors + warning
+//     （Task 1 模型契约：rawBytes 由本步骤回填，flash_plan.cpp:155 注释）
+//   * 标记 sparse 但文件头不是 sparse：文件大小与声明一致 → 翻转 sparse=false + warning
+//     （reference/qdl/src/program.c:79-93）；对不上 → 失败
+//   * 镜像缺失/不可打开、sectorSize 为 0 无法换算 → 失败
+// warnings 只追加（不动调用方已有内容）；失败返回 false 并把全部失败**逐行合并**进 *error
+// （每条带条目名与路径，便于一次性修包）。非 Program 条目不改不查。
+// 调用链：`parse* → normalizePlan → validatePlan`（Task 3 的 buildPlanFromDir 内部完成前两步）；
+// 必须先归一化再校验 —— 否则 XML 少报的扇区数会绕过越界判定（见 validateSparseCorrectionFeedsBoundsCheck）。
+bool normalizePlan(FlashPlan &plan, QStringList &warnings, QString *error);
+
+// 刷前校验（spec §3.5 规则 1/2/3/6/7/8；在 getstorageinfo 之后、进入写入之前调用）。
+// **纯函数：不改入参**（唯一入参是 const 引用 —— 归一化已在 normalizePlan 里完成）。
+// 规则 4/5（文件与 sparse）由 normalizePlan 负责，见上面的调用链。
 // errors 非空 → ok=false（拒刷，绝不放行）；warnings 只进预览与日志。
-PlanCheck validatePlan(FlashPlan &plan, const QList<StorageInfo> &device);
+PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device);
 
 } // namespace edl

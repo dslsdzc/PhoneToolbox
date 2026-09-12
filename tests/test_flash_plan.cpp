@@ -55,7 +55,8 @@ private slots:
     void validateSkipsExpressionEntries();
     void validateSparseHeaderCorrectsNumSectors();
     void validateSparseCorrectionFeedsBoundsCheck();
-    void validateMissingImageIsError();
+    void normalizeMissingImageFails();
+    void normalizeAcceptsSparseFlagOnRawFile();
     void sparseNumSectorsFromHeader();
 };
 
@@ -332,9 +333,15 @@ void TestFlashPlan::validateAcceptsPlanAtCapacityAndAdjacent()
     last.startSector = 900; last.numSectors = 100;             // [900,1000) 恰好顶到容量
     plan.entries = {a, b, last};
 
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));   // 调用链：normalize → validate
+    QCOMPARE(nwarn.size(), 0);                                 // 无 sparse、文件都在 → 无归一化告警
+
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});
-    const edl::PlanCheck chk = edl::validatePlan(plan, dev);
+    // 归一化后是纯校验：把 plan 当 const 传，钉死"validatePlan 不改入参"的签名契约
+    const edl::FlashPlan constPlan = plan;
+    const edl::PlanCheck chk = edl::validatePlan(constPlan, dev);
     QVERIFY2(chk.ok, qPrintable(chk.errors.join(QStringLiteral(" | "))));
     QVERIFY(chk.errors.isEmpty());
     QCOMPARE(chk.warnings.size(), 1);                          // 仅 sha256 提示
@@ -355,6 +362,9 @@ void TestFlashPlan::validateMissingLunGeometryIsError()
     a.lun = 3; a.startSector = 0; a.numSectors = 1; a.sectorSize = 4096;
     edl::PlanEntry b = a; b.partitionName = QStringLiteral("b2");
     plan.entries = {a, b};
+
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
 
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});                               // 只有 LUN 0 的几何
@@ -382,6 +392,10 @@ void TestFlashPlan::validateSkipsExpressionEntries()
     b.startSectorExpr = QStringLiteral("NUM_DISK_SECTORS-11.");
     plan.entries = {a, b};
 
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
+    QCOMPARE(nwarn.size(), 0);
+
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});
     const edl::PlanCheck chk = edl::validatePlan(plan, dev);
@@ -391,7 +405,8 @@ void TestFlashPlan::validateSkipsExpressionEntries()
     QVERIFY(chk.warnings[0].contains(QStringLiteral("表达式")));
 }
 
-// 规则 5：sparse 头声明的去 sparse 大小与 XML 的 numSectors × sectorSize 不符 → 以头为准修正 + warning。
+// 规则 5：sparse 头声明的去 sparse 大小与 XML 的 numSectors × sectorSize 不符 →
+// normalizePlan 以头为准修正 numSectors + warning（回填 rawBytes）；validatePlan 不改 plan。
 void TestFlashPlan::validateSparseHeaderCorrectsNumSectors()
 {
     QTemporaryDir dir;
@@ -405,18 +420,22 @@ void TestFlashPlan::validateSparseHeaderCorrectsNumSectors()
     a.lun = 0; a.startSector = 0; a.numSectors = 10; a.sectorSize = 4096;   // XML 声明 10 扇区（错）
     plan.entries = {a};
 
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
+    QCOMPARE(plan.entries[0].numSectors, quint64(100));                    // 头声明 100 扇区
+    QCOMPARE(plan.entries[0].rawBytes, quint64(100 * 4096));               // 顺带回填 rawBytes
+    QCOMPARE(nwarn.size(), 1);
+    QVERIFY(nwarn[0].contains(QStringLiteral("system")));
+    QVERIFY(nwarn[0].contains(QStringLiteral("100")));
+
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});
     const edl::PlanCheck chk = edl::validatePlan(plan, dev);
     QVERIFY2(chk.ok, qPrintable(chk.errors.join(QStringLiteral(" | "))));
-    QCOMPARE(plan.entries[0].numSectors, quint64(100));                    // 头声明 100 扇区
-    QCOMPARE(plan.entries[0].rawBytes, quint64(100 * 4096));               // 顺带回填 rawBytes
-    QCOMPARE(chk.warnings.size(), 1);
-    QVERIFY(chk.warnings[0].contains(QStringLiteral("system")));
-    QVERIFY(chk.warnings[0].contains(QStringLiteral("100")));
+    QVERIFY(chk.warnings.isEmpty());                                       // 修正已在归一化阶段报过，不重复
 }
 
-// 修正后的扇区数必须**参与**几何校验（先换算、后 bounds）：
+// 归一化后的扇区数必须**参与**几何校验（先 normalize、后 validate）：
 // 头声明 2000 扇区 > LUN 0 的 1000 扇区 → 越界；若按 XML 的 10 扇区放行，下盘就会写穿分区。
 void TestFlashPlan::validateSparseCorrectionFeedsBoundsCheck()
 {
@@ -430,6 +449,10 @@ void TestFlashPlan::validateSparseCorrectionFeedsBoundsCheck()
     a.lun = 0; a.startSector = 0; a.numSectors = 10; a.sectorSize = 4096;
     plan.entries = {a};
 
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
+    QCOMPARE(plan.entries[0].numSectors, quint64(2000));
+
     QList<edl::StorageInfo> dev;
     dev.append({0, 1000, 4096});
     const edl::PlanCheck chk = edl::validatePlan(plan, dev);
@@ -440,8 +463,9 @@ void TestFlashPlan::validateSparseCorrectionFeedsBoundsCheck()
     QVERIFY(hasOob);
 }
 
-// 规则 4：Program 条目的镜像文件必须存在可读；Patch 的 imageFile=="DISK" 是"打设备磁盘"哨兵，不查文件。
-void TestFlashPlan::validateMissingImageIsError()
+// 规则 4：Program 条目的镜像文件必须存在可读 → 归一化阶段失败（error 里逐行列出全部失败条目）。
+// Patch 的 imageFile=="DISK" 是"打设备磁盘"哨兵，不是本地文件，不查也不报。
+void TestFlashPlan::normalizeMissingImageFails()
 {
     QTemporaryDir dir;
     edl::FlashPlan plan;
@@ -454,13 +478,52 @@ void TestFlashPlan::validateMissingImageIsError()
     pat.lun = 0; pat.startSector = 1; pat.byteOffset = 8; pat.sizeInBytes = 4;
     plan.entries = {miss, pat};
 
-    QList<edl::StorageInfo> dev;
-    dev.append({0, 1000, 4096});
-    const edl::PlanCheck chk = edl::validatePlan(plan, dev);
-    QVERIFY(!chk.ok);
-    QCOMPARE(chk.errors.size(), 1);                            // 只有缺文件那条；Patch DISK 不查文件
-    QVERIFY(chk.errors[0].contains(QStringLiteral("gone")));
-    QVERIFY(chk.errors[0].contains(QStringLiteral("nope.img")));
+    QStringList nwarn; QString nerr;
+    QVERIFY(!edl::normalizePlan(plan, nwarn, &nerr));
+    QVERIFY(nerr.contains(QStringLiteral("gone")));            // 带条目名
+    QVERIFY(nerr.contains(QStringLiteral("nope.img")));        // 带路径
+    QVERIFY(!nerr.contains(QStringLiteral("DISK")));           // Patch DISK 不查文件
+
+    // 只有 Patch DISK 时归一化必须成功（哨兵不是本地文件）
+    edl::FlashPlan patchOnly;
+    patchOnly.entries = {pat};
+    QStringList w2; QString e2;
+    QVERIFY2(edl::normalizePlan(patchOnly, w2, &e2), qPrintable(e2));
+    QCOMPARE(w2.size(), 0);
+    QCOMPARE(e2, QString());
+}
+
+// 规则 5 的 qdl 先例分支（reference/qdl/src/program.c:79-93）：XML 标了 sparse="true" 但文件不是
+// sparse —— 文件大小与 SECTOR_SIZE_IN_BYTES × num_partition_sectors 相等 → 判为标记写错，
+// 翻转 sparse=false + warning；对不上 → 归一化失败（不猜文件结构）。
+void TestFlashPlan::normalizeAcceptsSparseFlagOnRawFile()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString img = writeFile(dir.path(), "xbl.img", QByteArray(4096 * 8, '\x5A'));
+    QVERIFY(!img.isEmpty());
+
+    edl::FlashPlan plan;
+    edl::PlanEntry a; a.action = edl::PlanEntry::Action::Program;
+    a.partitionName = QStringLiteral("xbl"); a.imageFile = img; a.sparse = true;   // 标记错
+    a.lun = 0; a.startSector = 0; a.numSectors = 8; a.sectorSize = 4096;           // 8×4096 == 文件大小
+    plan.entries = {a};
+
+    QStringList nwarn; QString nerr;
+    QVERIFY2(edl::normalizePlan(plan, nwarn, &nerr), qPrintable(nerr));
+    QVERIFY(!plan.entries[0].sparse);                          // 翻转标记
+    QCOMPARE(nwarn.size(), 1);
+    QVERIFY(nwarn[0].contains(QStringLiteral("xbl")));
+    QVERIFY(nwarn[0].contains(QStringLiteral("非 sparse")));
+
+    // 大小对不上 → 失败（同一份文件、声明 9 扇区）
+    edl::FlashPlan bad = plan;
+    bad.entries[0].sparse = true;
+    bad.entries[0].numSectors = 9;
+    QStringList w2; QString e2;
+    QVERIFY(!edl::normalizePlan(bad, w2, &e2));
+    QVERIFY(e2.contains(QStringLiteral("xbl")));
+    QVERIFY(e2.contains(QStringLiteral("sparse")));
 }
 
 void TestFlashPlan::sparseNumSectorsFromHeader()
