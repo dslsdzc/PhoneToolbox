@@ -29,6 +29,11 @@ Format byExtension(const QString &name)
     if (lower.endsWith(".img") || lower.endsWith(".raw")) return Format::RawImage;
     // pac 旧格式无魔数（divinebird C 版，头 1220B 无魔数）→ 按扩展名兜底
     if (lower.endsWith(".pac")) return Format::Pac;
+    // OFP/OPS 同样无头魔数（判据在尾页：OFP-QC/OPS 共用 +0x10 的 0x7CEF，
+    // OFP-MTK 靠首 16B 试解 "MMM"）→ 此处只按扩展名兜底，尾页二次探测
+    // 见 ImageWorker::doDetect（A11：先 OPS 后 OFP）
+    if (lower.endsWith(".ofp")) return Format::OFP;
+    if (lower.endsWith(".ops")) return Format::OPS;
     // 华为 update.bin（L2 型分区表）：无魔数 —— 文件头是签名头（解析靠文件名，
     // 见 imghw::parseUpdateBin 的 L2 型），文件名以 "update.bin" 结尾是唯一信号。
     // 注意顺序：真实 OTA 的 update.bin 常带 "CrAU"/ext4/sparse 等魔数，先走
@@ -104,6 +109,9 @@ Detected detect(const QByteArray &header, const QString &fileName)
         static_cast<uchar>(header[1080]) == 0x53 && static_cast<uchar>(header[1081]) == 0xEF)
         return {Format::Ext4, "ext4 文件系统"};
     // 兜底: 扩展名
+    // 注: OFP/OPS 无头魔数 —— 本函数只能按扩展名给出候选（Format::OFP/OPS），
+    // 包体合法性（尾页 0x7CEF / 首 16B "MMM" / OPS version+flags）需读文件尾页
+    // 做二次探测，由 ImageWorker::doDetect 承担（探测顺序先 OPS 后 OFP，A11）
     return {byExtension(fileName), "按扩展名识别"};
 }
 

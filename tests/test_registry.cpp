@@ -1,6 +1,8 @@
 #include <QtTest>
 #include "image_engine/registry.h"
 #include "image_engine/fs/fs_image.h"
+#include "image_engine/oppo_ofp.h"
+#include "image_engine/oppo_ops.h"
 
 static void put16(QByteArray &d, int off, quint32 v)
 {
@@ -20,6 +22,8 @@ private slots:
     void detectByMagic();
     void detectByExtension();
     void detectVendorMagic();
+    void detectOppoByExtension();
+    void oppoTailProbeOrderPremise();
     void openFsImageDispatch();
 };
 
@@ -103,6 +107,45 @@ void TestRegistry::detectVendorMagic()
     QByteArray pac2(2124, 0);
     pac2[2116] = '\xFA'; pac2[2117] = '\xFF'; pac2[2118] = '\xFA'; pac2[2119] = '\xFF';
     QCOMPARE(imgreg::detect(pac2, "f.bin").format, imgreg::Format::Pac);
+}
+
+void TestRegistry::detectOppoByExtension()
+{
+    // OFP/OPS 无头魔数（判据在尾页）→ registry 只做扩展名兜底，变体/合法性由
+    // ImageWorker::doDetect 的尾页二次探测判定（先 OPS 后 OFP，见 A11）。
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "firmware.ofp").format, imgreg::Format::OFP);
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "firmware.ops").format, imgreg::Format::OPS);
+    // 扩展名大小写不敏感（byExtension 统一 toLower）
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "FIRMWARE.OFP").format, imgreg::Format::OFP);
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "OnePlus.OPS").format, imgreg::Format::OPS);
+    // 魔数优先于扩展名：payload OTA 命名为 .ofp 仍按魔数识别（与 pac/update.bin 同款顺序）
+    QCOMPARE(imgreg::detect(QByteArray("CrAU"), "payload.ofp").format,
+             imgreg::Format::Payload);
+    // 兜底不误伤：无关扩展名/无扩展名仍 Unknown
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "firmware.bin").format,
+             imgreg::Format::Unknown);
+    QCOMPARE(imgreg::detect(QByteArray(64, 0), "ofp").format, imgreg::Format::Unknown);
+}
+
+void TestRegistry::oppoTailProbeOrderPremise()
+{
+    // A11 前提（钉住"探测必须先 OPS 后 OFP"的排序必要性）：OPS 尾页的判据是
+    // OFP-QC 判据的严格加强 —— 同一份 OPS 尾页同时满足 detectOFP 的 QC 分支。
+    // 若 doDetect 按"先 OFP 后 OPS"探测，真实 .ops 包会被判成 OFP-QC（随后
+    // parseOFP 用 QC 密钥试解必然失败 → 误报"密钥未知或文件损坏"）。
+    QByteArray opsTail(0x200, '\0');
+    put32(opsTail, 0x00, 2);        // version（OPS 独有）
+    put32(opsTail, 0x04, 1);        // flags（OPS 独有）
+    put32(opsTail, 0x10, 0x7CEF);   // magic（与 OFP-QC 共用）
+    QVERIFY(imgopp::detectOPS(opsTail, 0x2000));
+    imgopp::OfpVariant variant = imgopp::OfpVariant::Unknown;
+    // head 取非 "MMM" 明文（MTK 试解不命中）→ 只可能走 QC 分支
+    QVERIFY(imgopp::detectOFP(QByteArray(16, '\0'), opsTail, 0x2000, variant));
+    QCOMPARE(variant, imgopp::OfpVariant::Qc);
+    // 反向：只带 OFP-QC 魔数的尾页（version=0）不被 OPS 认领 —— 两判据确有交集但不等价
+    QByteArray qcTail(0x200, '\0');
+    put32(qcTail, 0x10, 0x7CEF);
+    QVERIFY(!imgopp::detectOPS(qcTail, 0x2000));
 }
 
 void TestRegistry::openFsImageDispatch()

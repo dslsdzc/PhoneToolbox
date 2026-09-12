@@ -21,6 +21,9 @@
 #include "image_engine/disk_image.h"
 #include "image_engine/twrp_image.h"
 #include "image_engine/fs/fs_image.h"
+#include "image_engine/oppo_ofp.h"
+#include "image_engine/oppo_ops.h"
+#include "image_engine/oppo_extract.h"
 
 namespace {
 
@@ -314,6 +317,13 @@ void ImageWorker::doDetect(const QString &path)
     }
     // 魔数判定最大读取 2120B（pac 辅助信号 @2116），4096 一次覆盖全部判定点
     const QByteArray header = file.read(4096);
+    // OPPO OFP/OPS 无头魔数（判据在文件尾页）→ 需末 0x1000 做二次探测。
+    // 文件不足一整页 0x1000 时读不到完整尾页 → 跳过探测（不误判：真实包体
+    // 至少一页起步，见 oppo_ofp.cpp kQcMinFileSize / detectOPS 的 fileSize 门禁）。
+    const qint64 fileSize = file.size();
+    QByteArray tail;
+    if (fileSize >= 0x1000 && file.seek(fileSize - 0x1000))
+        tail = file.read(0x1000);
     file.close();
 
     if (header.isEmpty()) {
@@ -324,6 +334,29 @@ void ImageWorker::doDetect(const QString &path)
     }
 
     result = imgreg::detect(header, QFileInfo(path).fileName());
+
+    // 尾页二次探测（仅 OPPO 族候选：扩展名兜底命中 OFP/OPS 或未识别时）。
+    // 探测顺序固定"先 OPS 后 OFP"（修订 A11）：OFP-QC 与 OPS 共用尾页 +0x10 的
+    // 0x7CEF，OPS 判据是其严格加强（额外要求 +0x00 version==2、+0x04 flags==1）；
+    // 反序会把真实 .ops 判成 OFP-QC → parseOFP 用 QC 密钥试解必然失败。
+    // 全限定名调用：本文件与 imgreg::detect 同名函数无歧义，但不引入
+    // `using namespace imgopp`（registry.cpp 的同款约束）。
+    if ((result.format == imgreg::Format::Unknown ||
+         result.format == imgreg::Format::OFP ||
+         result.format == imgreg::Format::OPS) &&
+        tail.size() >= 0x200) { // 不足一页时 detectOPS/detectOFP 均无法判定
+        imgopp::OfpVariant variant = imgopp::OfpVariant::Unknown;
+        if (imgopp::detectOPS(tail, quint64(fileSize))) {
+            result.format = imgreg::Format::OPS;
+            result.detail = QStringLiteral("OnePlus OPS 固件包");
+        } else if (imgopp::detectOFP(header, tail, quint64(fileSize), variant)) {
+            result.format = imgreg::Format::OFP;
+            result.detail = (variant == imgopp::OfpVariant::Mtk)
+                ? QStringLiteral("OPPO/realme OFP 固件包 (MTK)")
+                : QStringLiteral("OPPO/realme OFP 固件包 (QC)");
+        }
+    }
+
     emit progress(100, QStringLiteral("识别中"));
     emit detectFinished(path, result);
 }
@@ -341,10 +374,16 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
     // 无流式接口的格式（Super/Boot/Dat/Kdz/UpdateApp/Sin/Pac/DiskGpt/
     // TwrpWin）无论大小保持旧内存路径。
     const bool stream = ImageWorker::useStreamPath(path, detected.format);
+    // OFP/OPS（Phase A）：两个引擎都是"路径 + 1 MiB 分块"的文件级接口
+    // （oppo_extract.h），不消费也不应预载整文件 —— 真实固件包数 GB，预载即
+    // 峰值内存≈包体；文件不可读/过小由引擎自身的 parse* 中文错误文案覆盖
+    //（A9：模块级 API 承担错误上报）。
+    const bool pathBased = detected.format == imgreg::Format::OFP ||
+                           detected.format == imgreg::Format::OPS;
 
     QString error;
     QByteArray data;
-    if (!stream) {
+    if (!stream && !pathBased) {
         // 仅旧内存路径整文件读入 —— 流式路径各引擎随机读/分块读，避免
         // 64MB+ 文件双读 + 峰值内存≈文件大小（G1-G5 内存 O(chunk) 目标）
         data = readFile(path, &error);
@@ -362,6 +401,10 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
     }
 
     QStringList outputs;
+    // A10：非致命警告（ok==true 且引擎 *error 非空 = 部分条目被跳过）。与上面的
+    // 致命 error 分开持有 —— 收尾按 error.isEmpty() 决定 ok，警告则随
+    // unpackFinished 的 error 参数回传，由面板落日志（不得丢弃）。
+    QString warning;
     switch (detected.format) {
     // ---- sparse：单产物 raw 镜像 ----
     case imgreg::Format::Sparse: {
@@ -852,6 +895,36 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
         break;
     }
 
+    // ---- OPPO 固件包（Phase A）：OFP（QC/MTK 双变体）/ OPS —— 两引擎同为
+    // "路径 + 进度回调 + 1 MiB 分块"的文件级接口（oppo_extract.h），逐条写 outDir ----
+    case imgreg::Format::OFP:
+    case imgreg::Format::OPS: {
+        const bool ops = detected.format == imgreg::Format::OPS;
+        // 进度回调：引擎按"已完成字节 / 计划提取总字节"回调（最后一个文件必为 100），
+        // 中途封顶 99 与其它分支同口径（100 仅由本函数收尾发射，防面板提前隐藏进度条）
+        const auto cb = [this](const QString &, int percent) {
+            emit progress(qBound(0, percent, 99), QStringLiteral("解包中"));
+        };
+        // 产物清单：引擎只回调条目名（sparse 条目还带标注后缀）不回产物路径 →
+        // 与 tar 流式分支同款"解包前快照 + 完成后差集"（同名覆盖不计数，仅日志用）
+        const QSet<QString> before = snapshotFiles(outDir);
+        QString oerr;
+        const bool ok = ops ? imgopp::extractOPS(path, outDir, cb, &oerr)
+                            : imgopp::extractOFP(path, outDir, cb, &oerr);
+        if (!ok) {
+            error = oerr.isEmpty()
+                ? (ops ? QStringLiteral("OPS 解包失败") : QStringLiteral("OFP 解包失败"))
+                : oerr;
+            break;
+        }
+        // A10：ok==true 且 *error 非空 = 部分条目被跳过（不可解包条目名/截断等），
+        // 文案随 unpackFinished 回传由面板落日志 —— 静默部分解包的唯一防线
+        if (!oerr.isEmpty())
+            warning = oerr;
+        outputs = diffFiles(outDir, before);
+        break;
+    }
+
     // ---- 后端缺口：解析器存在但无"解包到目录"产出，UI 侧优雅降级 ----
     case imgreg::Format::Zip:
         error = QStringLiteral("Zip 解包未实现（image_engine 无 zip 引擎，后端扩展待办）");
@@ -884,7 +957,9 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
     }
 
     emit progress(100, QStringLiteral("解包中"));
-    emit unpackFinished(error.isEmpty(), outputs, error);
+    // 收尾口径：error 非空 = 致命失败；warning 非空 = 部分成功（A10，ok 仍为 true，
+    // 文案经 error 参数回传落日志；两者不会同时非空 —— 报错分支都不设 warning）
+    emit unpackFinished(error.isEmpty(), outputs, error.isEmpty() ? warning : error);
 }
 
 void ImageWorker::doPack(const QString &outPath, const QStringList &inputs,

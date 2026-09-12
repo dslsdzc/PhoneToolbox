@@ -55,11 +55,13 @@ public:
     // 流式路径几乎不占额外内存（G4 基准：~14MB）。
     static constexpr qint64 kStreamThreshold = 64LL * 1024 * 1024;
 
-    // 识别镜像格式（读文件头魔数 + 扩展名兜底，见 imgreg::detect）。
+    // 识别镜像格式（读文件头魔数 + 扩展名兜底，见 imgreg::detect；OFP/OPS
+    // 无头魔数 → 追加末 0x1000 尾页二次探测，顺序先 OPS 后 OFP，见 .cpp）。
     // 完成时发 detectFinished；读取失败时 detail 以"读取失败"开头。
     void runDetect(const QString &path);
 
-    // 解包镜像到 outDir（按 detected 格式分派到对应引擎；D3 实现）
+    // 解包镜像到 outDir（按 detected 格式分派到对应引擎；D3 实现，
+    // OFP/OPS 见 Phase A 接线）。
     void runUnpack(const QString &path, const QString &outDir,
                    const imgreg::Detected &detected);
 
@@ -95,6 +97,8 @@ public:
 
 signals:
     void detectFinished(const QString &path, imgreg::Detected detected);
+    // ok=false → error 为致命错误文案；ok=true 且 error 非空 → 部分成功警告
+    //（A10：部分条目被跳过，调用方必须把文案落日志，不得丢弃）
     void unpackFinished(bool ok, const QStringList &outputs, const QString &error);
     void packFinished(bool ok, const QString &output, const QString &error);
     void convertFinished(bool ok, const QString &output, const QString &error);

@@ -62,6 +62,9 @@ QString formatName(imgreg::Format f)
     case imgreg::Format::Brotli:     return QStringLiteral("Brotli 压缩流");
     case imgreg::Format::Dat:        return QStringLiteral("Dat 系统分区");
     case imgreg::Format::Pac:        return QStringLiteral("PAC 固件");
+    // OPPO 系（Phase A）：与 worker doDetect 尾页探测的 detail 文案同源
+    case imgreg::Format::OFP:        return QStringLiteral("OPPO/realme 固件包");
+    case imgreg::Format::OPS:        return QStringLiteral("OnePlus 固件包");
     case imgreg::Format::Kdz:        return QStringLiteral("KDZ 固件");
     case imgreg::Format::UpdateApp:  return QStringLiteral("Update.app 固件");
     case imgreg::Format::UpdateBin:  return QStringLiteral("Update.bin 固件");
@@ -1071,7 +1074,9 @@ void ImageToolPanel::updateButtonsFor(const imgreg::Detected &detected)
                             f == imgreg::Format::Kdz || f == imgreg::Format::UpdateApp ||
                             f == imgreg::Format::Sin ||
                             f == imgreg::Format::DiskGpt || f == imgreg::Format::TwrpWin ||
-                            f == imgreg::Format::Erofs || f == imgreg::Format::Ext4);
+                            f == imgreg::Format::Erofs || f == imgreg::Format::Ext4 ||
+                            // OPPO 系（Phase A）：extractOFP/extractOPS 解包到目录
+                            f == imgreg::Format::OFP || f == imgreg::Format::OPS);
     // 打包（D6 接线）：按"后端可用打包接口"enable —— sparse→raw（simg2img 逆向）、
     // raw→sparse（img2simg）、Tar/TarMd5→.img 集合打 tar/tar.md5（appendMd5Footer）。
     // Payload 不 enable：imgpayload 无打包接口（buildFullPayload 不存在，后端待办，
@@ -1307,6 +1312,10 @@ void ImageToolPanel::onUnpackFinished(bool ok, const QStringList &outputs, const
         appendLog(QStringLiteral("解包失败: %1").arg(error), true);
         return;
     }
+    // A10：ok=true 但 error 非空 = 部分条目被跳过（OFP/OPS 的不可解包条目名等）
+    // —— 必须落日志，不得丢弃（静默部分解包会误导刷机场景）
+    if (!error.isEmpty())
+        appendLog(QStringLiteral("解包警告（部分条目被跳过）: %1").arg(error), true);
     appendLog(QStringLiteral("解包完成: 共 %1 个产物").arg(outputs.size()));
     const int shown = qMin(outputs.size(), 50);
     for (int i = 0; i < shown; ++i)
