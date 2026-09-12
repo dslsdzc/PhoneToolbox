@@ -10,7 +10,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 | 设备信息 | ADB / Fastboot | 型号、Android 版本、SDK、安全补丁级别、Bootloader 锁定状态等 |
 | 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
 | 死砖恢复 | EDL / MTK DA | 自动匹配分区文件、校验镜像大小、备份关键分区、支持失败重试 |
-| **镜像处理** | 本地 | **27 种格式拖放识别、17 格式解包、sparse 转换、打包、文件系统浏览** |
+| **镜像处理** | 本地 | **29 种格式拖放识别、17 格式解包、sparse 转换、打包、文件系统浏览** |
 | **Root 修补** | 本地 | **8 个方案入口全覆盖（Magisk 系 / KernelSU 系 / APatch），boot/init_boot 修补** |
 | 系统工具 | ADB | 性能监控（CPU/GPU/内存/温度）、界面定制、分区管理、应用管理、安全隐私、开发调试、**维修诊断** |
 | 漏洞扫描 | ADB | 加载本地漏洞库 JSON，自动匹配设备版本，执行检测脚本发现已知漏洞 |
@@ -115,6 +115,11 @@ PhoneToolbox/
 │   │   ├── huawei_image.cpp    # update.app/update.bin + 签名材料接口
 │   │   ├── sin_image.cpp       # 索尼 SIN v3
 │   │   ├── pac_image.cpp       # SPD .pac
+│   │   ├── oppo_crypto.cpp     # OPPO 系密码核心（AES-128 自实现 + OPS 自定义流密码）
+│   │   ├── oppo_keys.cpp       # OPPO 密钥库（QC/MTK triplet 派生 + OPS mbox, 外部 JSON 追加）
+│   │   ├── oppo_ofp.cpp        # OPPO/realme OFP（QC 尾页清单 / MTK 混淆头 + 文件表）
+│   │   ├── oppo_ops.cpp        # OnePlus OPS（尾页 + settings.xml 判据）
+│   │   ├── oppo_extract.cpp    # OFP/OPS 流式解包 + 摘要校验
 │   │   ├── fs/                 # EROFS/ext4 文件系统
 │   │   └── ...
 │   ├── root_patcher/           # Root 修补层（8 入口, 自研装配）
