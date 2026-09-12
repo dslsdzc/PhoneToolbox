@@ -42,12 +42,14 @@ QList<OpsKey> opsKeyCandidates();
 // 从 JSON 文件追加外部密钥（密钥库兜底：用户为新包导入密钥）。格式：
 //   {"qc":[{"id":"...","mc":"hex16","userkey":"hex16","iv":"hex16"}],
 //    "ops":[{"id":"...","key":"hex62"}]}
-// qc 条目与内置表同款派生（给 mc/userkey/iv 三元素，key/iv 由本函数算出）；
-// ops 条目按 A3 语义存 62B blob（OppoKeyPair::iv 置空）。
-// 成功时结果追加进 out（不清空调用方已有条目），error 置空。
-// 文件不可读 / JSON 非法 / 字段缺失或 hex 长度不符 → 写 *error（中文）返回 false，
-// 且 out 保持不变（解析失败不产生半截列表）。error 允许为 nullptr。
-bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QString *error);
+// qc 条目与内置表同款派生（给 mc/userkey/iv 三元素，key/iv 由本函数算出）→ 追加进 out；
+// ops 条目按 A3 语义收 62B mbox blob → 追加进 opsOut，Task 5 可直接喂
+// opsDecrypt(data, blob)。两路出参各自追加，均不清空调用方已有条目。
+// 成功时 error 置空；文件不可读 / JSON 非法 / 字段缺失或 hex 长度不符（qc 16B、ops 62B）
+// → 写 *error（中文）返回 false，且 out 与 opsOut 均保持不变（解析失败不产生半截列表）。
+// error 允许为 nullptr。
+bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QList<OpsKey> &opsOut,
+                      QString *error);
 
 // OPS 自定义流密码解密（非标准 AES）。data：密文；mboxBlob62：opsKeyCandidates()
 // 返回的 62B blob（外部导入同理）。

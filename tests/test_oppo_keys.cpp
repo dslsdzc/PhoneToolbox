@@ -7,6 +7,21 @@
 #include <QTemporaryDir>
 #include "image_engine/oppo_keys.h"
 
+// A3 的 OPS mbox 常量（逐字核对 reference/oppo_decrypt/opscrypto.py L55-78：
+// 16B 轮密钥素材 + 44×00 填充 + 末 2B "0A00" = 62B）
+static const char kMbox5Hex[] =
+    "608A3F2D686BD423510CD095BB40E976"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0A00";
+static const char kMbox6Hex[] =
+    "AA69829E5DDEB13D30BB81A34665A3E1"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0A00";
+static const char kMbox4Hex[] =
+    "C45D057199DDBBEE29A16DC7ADBFA43F"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0A00";
+
 // OPPO 密钥库断言。派生期望值出自 docs/superpowers/specs/oppo-format-notes.md
 // 的"派生自测断言"行（QC 全部 6 条 / MTK1 / MTK5）与速查表常量；速查表未列出的
 // MTK2/3/4/6/7 由参照实现 reference/oppo_decrypt/ofp_mtk_decrypt.py
@@ -101,20 +116,9 @@ void TestOppoKeys::opsKeyCandidates()
     QCOMPARE(keys[1].keyId, QStringLiteral("mbox6"));
     QCOMPARE(keys[2].keyId, QStringLiteral("mbox4"));
 
-    // 逐字核对 reference/oppo_decrypt/opscrypto.py L55-78：
-    // 16B 轮密钥素材 + 44×00 + 末 2B "0A00"（asbox[0x3C] = 轮数 0x0A）
-    const QByteArray mbox5 = QByteArray::fromHex(
-        "608A3F2D686BD423510CD095BB40E976"
-        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        "0A00");
-    const QByteArray mbox6 = QByteArray::fromHex(
-        "AA69829E5DDEB13D30BB81A34665A3E1"
-        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        "0A00");
-    const QByteArray mbox4 = QByteArray::fromHex(
-        "C45D057199DDBBEE29A16DC7ADBFA43F"
-        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        "0A00");
+    const QByteArray mbox5 = QByteArray::fromHex(kMbox5Hex);
+    const QByteArray mbox6 = QByteArray::fromHex(kMbox6Hex);
+    const QByteArray mbox4 = QByteArray::fromHex(kMbox4Hex);
     QCOMPARE(mbox5.size(), 62);  // A3：62B 全量 blob（非 brief 原 16B 写法）
     QCOMPARE(mbox6.size(), 62);
     QCOMPARE(mbox4.size(), 62);
@@ -128,44 +132,62 @@ void TestOppoKeys::opsKeyCandidates()
     QCOMPARE(keys[0].mboxBlob.at(0x3C), char(0x0A));  // 轮数
 }
 
-// 外部 JSON 追加：成功路径复用 QC 派生断言（证明导入的是派生值而非原样 hex）；
-// 失败路径必须写中文 error 并返回 false。
+// 外部 JSON 追加（A3b：两路出参——out = qc 派生条目，opsOut = ops 62B blob 条目）。
+// 成功路径复用 QC 派生断言（证明导入的是派生值而非原样 hex）；
+// 失败路径必须写中文 error 并返回 false，且两个出参都保持调用方原样。
 void TestOppoKeys::loadOppoKeysJson()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
 
-    // 成功：qc 段（V1.7.2 triplet）+ 追加语义（不清空 out）
+    // 成功：qc 段（V1.7.2 triplet）+ ops 段（mbox5 62B blob）
     const QString okPath = dir.filePath(QStringLiteral("keys.json"));
     {
         QFile f(okPath);
         QVERIFY(f.open(QIODevice::WriteOnly));
-        const QByteArray json = R"({
-            "qc": [{"id": "V1.7.2", "mc": "8FB8FB261930260BE945B841AEFA9FD4",
-                    "userkey": "E529E82B28F5A2F8831D860AE39E425D",
-                    "iv": "8A09DA60ED36F125D64709973372C1CF"}]
-        })";
+        const QJsonObject qcEntry{{QStringLiteral("id"), QStringLiteral("V1.7.2")},
+                                  {QStringLiteral("mc"),
+                                   QStringLiteral("8FB8FB261930260BE945B841AEFA9FD4")},
+                                  {QStringLiteral("userkey"),
+                                   QStringLiteral("E529E82B28F5A2F8831D860AE39E425D")},
+                                  {QStringLiteral("iv"),
+                                   QStringLiteral("8A09DA60ED36F125D64709973372C1CF")}};
+        const QJsonObject opsEntry{{QStringLiteral("id"), QStringLiteral("mbox5")},
+                                   {QStringLiteral("key"), QString::fromLatin1(kMbox5Hex)}};
+        const QJsonObject root{{QStringLiteral("qc"), QJsonArray{qcEntry}},
+                               {QStringLiteral("ops"), QJsonArray{opsEntry}}};
+        const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
         QVERIFY(f.write(json) == json.size());
     }
     QList<imgopp::OppoKeyPair> out;
     out.append(imgopp::OppoKeyPair{QStringLiteral("已有条目"), QByteArray(16, 'x'), QByteArray(16, 'y')});
+    QList<imgopp::OpsKey> opsOut;
+    opsOut.append(imgopp::OpsKey{QStringLiteral("已有条目"), QByteArray(62, 'w')});
     QString error;
-    QVERIFY(imgopp::loadOppoKeysJson(okPath, out, &error));
+    QVERIFY(imgopp::loadOppoKeysJson(okPath, out, opsOut, &error));
     QVERIFY(error.isEmpty());
-    QCOMPARE(out.size(), 2);  // 追加，不清空调用方已有条目
+    // qc 路：追加语义（不清空调用方已有条目）+ 派生值与 qcDerivation 同源
+    QCOMPARE(out.size(), 2);
     QCOMPARE(out[1].keyId, QStringLiteral("V1.7.2"));
-    QCOMPARE(out[1].key, QByteArray("3398699acebda0da"));  // 与 qcDerivation 同源断言
+    QCOMPARE(out[1].key, QByteArray("3398699acebda0da"));
     QCOMPARE(out[1].iv, QByteArray("b39a46f5cc4f0d45"));
+    // ops 路：62B blob 原样进 opsOut（Task 5 可直接喂 opsDecrypt(data, blob)）
+    QCOMPARE(opsOut.size(), 2);
+    QCOMPARE(opsOut[1].keyId, QStringLiteral("mbox5"));
+    QCOMPARE(opsOut[1].mboxBlob, QByteArray::fromHex(kMbox5Hex));
 
-    // 失败 1：文件不存在（error 中文文案；out 保持调用方原样）
+    // 失败 1：文件不存在
     QList<imgopp::OppoKeyPair> outMissing;
     outMissing.append(imgopp::OppoKeyPair{QStringLiteral("哨兵"), QByteArray(16, 'z'), QByteArray(16, 'z')});
+    QList<imgopp::OpsKey> opsMissing;
+    opsMissing.append(imgopp::OpsKey{QStringLiteral("哨兵"), QByteArray(62, 'z')});
     QString errorMissing;
     QVERIFY(!imgopp::loadOppoKeysJson(dir.filePath(QStringLiteral("nope.json")),
-                                      outMissing, &errorMissing));
+                                      outMissing, opsMissing, &errorMissing));
     QVERIFY(errorMissing.startsWith(QStringLiteral("密钥文件")));
     QCOMPARE(outMissing.size(), 1);
     QCOMPARE(outMissing[0].keyId, QStringLiteral("哨兵"));
+    QCOMPARE(opsMissing.size(), 1);
 
     // 失败 2：非法 JSON
     const QString badJsonPath = dir.filePath(QStringLiteral("bad.json"));
@@ -177,12 +199,13 @@ void TestOppoKeys::loadOppoKeysJson()
     }
     QList<imgopp::OppoKeyPair> outBad;
     outBad.append(imgopp::OppoKeyPair{QStringLiteral("哨兵"), QByteArray(16, 'z'), QByteArray(16, 'z')});
+    QList<imgopp::OpsKey> opsBad;
     QString errorBad;
-    QVERIFY(!imgopp::loadOppoKeysJson(badJsonPath, outBad, &errorBad));
+    QVERIFY(!imgopp::loadOppoKeysJson(badJsonPath, outBad, opsBad, &errorBad));
     QVERIFY(errorBad.startsWith(QStringLiteral("密钥文件")));
     QCOMPARE(outBad.size(), 1);
 
-    // 失败 3：hex 字段长度不是 16 字节（mc 少一字节）
+    // 失败 3：qc 段 hex 字段长度不是 16 字节（mc 少一字节）
     const QString badHexPath = dir.filePath(QStringLiteral("badhex.json"));
     {
         QFile f(badHexPath);
@@ -196,11 +219,32 @@ void TestOppoKeys::loadOppoKeysJson()
     }
     QList<imgopp::OppoKeyPair> outBadHex;
     outBadHex.append(imgopp::OppoKeyPair{QStringLiteral("哨兵"), QByteArray(16, 'z'), QByteArray(16, 'z')});
+    QList<imgopp::OpsKey> opsBadHex;
     QString errorBadHex;
-    QVERIFY(!imgopp::loadOppoKeysJson(badHexPath, outBadHex, &errorBadHex));
+    QVERIFY(!imgopp::loadOppoKeysJson(badHexPath, outBadHex, opsBadHex, &errorBadHex));
     QVERIFY(errorBadHex.startsWith(QStringLiteral("密钥文件")));
     QVERIFY(errorBadHex.contains(QStringLiteral("mc")));  // 指认出错字段
     QCOMPARE(outBadHex.size(), 1);
+
+    // 失败 4：ops 段 hex 长度不是 62 字节（16B hex 混入 → 必须拒收，A3b 回归保护点）
+    const QString badOpsPath = dir.filePath(QStringLiteral("badops.json"));
+    {
+        QFile f(badOpsPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        const QByteArray json =
+            R"({"ops": [{"id": "mbox5", "key": "608A3F2D686BD423510CD095BB40E976"}]})";
+        QVERIFY(f.write(json) == json.size());
+    }
+    QList<imgopp::OppoKeyPair> outBadOps;
+    outBadOps.append(imgopp::OppoKeyPair{QStringLiteral("哨兵"), QByteArray(16, 'z'), QByteArray(16, 'z')});
+    QList<imgopp::OpsKey> opsBadOps;
+    opsBadOps.append(imgopp::OpsKey{QStringLiteral("哨兵"), QByteArray(62, 'z')});
+    QString errorBadOps;
+    QVERIFY(!imgopp::loadOppoKeysJson(badOpsPath, outBadOps, opsBadOps, &errorBadOps));
+    QVERIFY(errorBadOps.startsWith(QStringLiteral("密钥文件")));
+    QVERIFY(errorBadOps.contains(QStringLiteral("key")));
+    QCOMPARE(outBadOps.size(), 1);
+    QCOMPARE(opsBadOps.size(), 1);  // 半截结果不得进 opsOut
 }
 
 QTEST_APPLESS_MAIN(TestOppoKeys)

@@ -179,7 +179,8 @@ QList<OpsKey> opsKeyCandidates()
     };
 }
 
-bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QString *error)
+bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QList<OpsKey> &opsOut,
+                      QString *error)
 {
     // 统一错误出口：中文文案 + 前缀文件路径（error 允许为 nullptr）
     auto fail = [&](const QString &reason) {
@@ -206,8 +207,9 @@ bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QString *err
     if (!root.contains(QStringLiteral("qc")) && !root.contains(QStringLiteral("ops")))
         return fail(QStringLiteral("没有 qc/ops 段"));
 
-    // 解析进临时列表：任一环节失败则不改动调用方的 out（避免半截密钥列表）
-    QList<OppoKeyPair> parsed;
+    // 解析进临时列表：任一环节失败则不改动调用方的出参（避免半截密钥列表）
+    QList<OppoKeyPair> parsedQc;
+    QList<OpsKey> parsedOps;
 
     const QJsonValue qcValue = root.value(QStringLiteral("qc"));
     if (!qcValue.isUndefined()) {
@@ -233,7 +235,8 @@ bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QString *err
             if (iv.isEmpty())
                 return fail(reason);
             // 外部只提供 triplet，key/iv 与内置表同款派生（不直接收 key/iv）
-            parsed.append(OppoKeyPair{id, deriveQcLikeKeyIv(mc, userkey), deriveQcLikeKeyIv(mc, iv)});
+            parsedQc.append(OppoKeyPair{id, deriveQcLikeKeyIv(mc, userkey),
+                                        deriveQcLikeKeyIv(mc, iv)});
         }
     }
 
@@ -251,15 +254,16 @@ bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QString *err
             const QString id = idField(entry, where, reason);
             if (id.isEmpty())
                 return fail(reason);
-            // A3：OPS 密钥材料是 62B mbox blob
+            // A3：OPS 密钥材料是 62B 全量 mbox blob（长度显式校验，回归保护点）
             const QByteArray blob = hexField(entry, QStringLiteral("key"), 62, where, reason);
             if (blob.isEmpty())
                 return fail(reason);
-            parsed.append(OppoKeyPair{id, blob, QByteArray()});
+            parsedOps.append(OpsKey{id, blob});
         }
     }
 
-    out.append(parsed);
+    out.append(parsedQc);
+    opsOut.append(parsedOps);
     if (error)
         error->clear();
     return true;
