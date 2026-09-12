@@ -153,8 +153,13 @@ QString idField(const QJsonObject &obj, const QString &where, QString &reason)
 // 4/16 字节"的长度（尾路按 4B 词补齐、块路按 16B 块补齐），两个调用方都只取前
 // length / xmllength 字节（decryptfile() L433、extractxml() L417）→ 本实现直接返回
 // "输入多长输出多长"（内部按参照补齐后截断），与参照实际写出的字节完全一致。
-// 附带收益: 在"等长"契约下两个方向严格互逆 —— 参照那条边角特性（15B 加密走尾路产出
-// 16B，再整段解密却走块路）在本契约下不出现，因为截断到 15B 后解密同样走尾路。
+//
+// 分支与迭代次数按**先补齐到 4 的倍数（pad4）之后**的长度算：参照的文件流调用方
+// （decryptfile() L428-430、encryptsubsub() L440-446、encryptitem() L494-521）在调用
+// key_custom() 之前就把数据 pad4 了，于是 0 < n ≤ 0xF 的判定用的是 pad4(n) —— 这就是
+// SizeInByteInSrc ∈ {13,14,15} 时参照走**块路**（pad4 = 16B > 0xF）的原因，不是尾路。
+// 注意：只有裸调 helper（不 pad4）才会在 13..15B 上翻转分支，那是审计陷阱而非目标语义；
+// 本机复算 len 1..41 证明两口径仅在 13/14/15 三档不同，其余长度逐字节一致。
 
 // 扩展 S-box: 2048B = 256 项 × 8B（每项在字节流中重复两次，故 gsbox(x*8) 与 gsbox(x*8+4)
 // 同值）。逐字抄 opscrypto.py L80-143 的 `sbox = bytes.fromhex(...)`，未重算。
@@ -305,12 +310,15 @@ QByteArray keyCustom(const QByteArray &inp, const QByteArray &mbox, bool encrypt
     quint32 rkey[4] = {0x9ee3b5d1u, 0x9d04ea5eu, 0xabd51d67u, 0xafcbafd2u};
     outp.reserve(len);
 
-    // 参照用 length 记录"剩余待处理字节数"：块路每轮减 0x10，由它决定是否进尾路
-    qsizetype length = len;
+    // 参照调用方先 pad4（decryptfile() L428-430 / encryptsubsub() L440-446），key_custom()
+    // 内部的 length = len(pad4 后的数据) —— 分支与迭代次数都按它算；超出 len 的补齐字节
+    // 由 leWordAt() 的零扩展提供（等价于参照切片/显式补零），输出最后统一截回 len。
+    const qsizetype pad4 = (len + 3) & ~qsizetype(3);
+    qsizetype length = pad4;
     if (length > 0xF) {
         // L373 `for ptr in range(0, length, 0x10)`: range 在循环创建时求值 →
-        // 迭代次数 = ceil(原始长度/16)，循环体内对 length 的递减不改变迭代次数
-        for (qsizetype ptr = 0; ptr < len; ptr += 0x10) {
+        // 迭代次数 = ceil(pad4/16)，循环体内对 length 的递减不改变迭代次数
+        for (qsizetype ptr = 0; ptr < pad4; ptr += 0x10) {
             keyUpdate(rkey, mbox);
             // L375-378: pos 恒为 0（outlength=0）→ slen = ((0xf - 0) >> 2) + 1 = 4
             quint32 tmp[4];
@@ -329,8 +337,8 @@ QByteArray keyCustom(const QByteArray &inp, const QByteArray &mbox, bool encrypt
         }
     }
     if (length != 0) {
-        // L384-401: 尾路（0 < 原始长度 ≤ 0xF）。块路走完后 length ≤ 0 → while 体一次
-        // 都不执行（参照仍会调用 key_update(rkey, sbox)，其结果随即被丢弃 → 无观测差异，
+        // L384-401: 尾路（0 < pad4 ≤ 0xF，即 len ≤ 12）。块路走完后 length ≤ 0 → while 体
+        // 一次都不执行（参照仍会调用 key_update(rkey, sbox)，其结果随即被丢弃 → 无观测差异，
         // 为可审性保留原样）。
         keyUpdate(rkey, opsSBox());
         qsizetype m = 0;

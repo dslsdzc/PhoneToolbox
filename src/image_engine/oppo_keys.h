@@ -54,8 +54,11 @@ bool loadOppoKeysJson(const QString &path, QList<OppoKeyPair> &out, QList<OpsKey
 // OPS 自定义流密码解密（非标准 AES）。data：密文；mboxBlob62：opsKeyCandidates()
 // 返回的 62B blob（外部导入同理）。
 // 契约：返回长度 == data 长度（参照 key_custom() 的输出在末块会补齐到 4/16 字节，
-// 由两个调用方截断 —— decryptfile() L433 写 length 字节、extractxml() L417 写
-// xmllength 字节 —— 本实现内部对齐后截断，等价于调用方实际写出的字节）。
+// 由调用方截断 —— decryptfile() L433 写 length 字节、extractxml() L417 写 xmllength
+// 字节 —— 本实现按调用方口径内部补齐后截断，等价于参照实际写出的字节）。
+// 注意分支按"先补齐到 4 的倍数（pad4）之后"的长度定：参照调用方在调 key_custom() 前就
+// pad4（decryptfile() L428-430、encryptsubsub() L440-446）→ 13..15 字节走块路（pad4 = 16B）。
+// 裸调 helper（不 pad4）会在 13..15 上翻转分支，那是审计陷阱，不是文件流语义。
 // 空输入返回空；mboxBlob62 不足 62 字节返回空（非法密钥材料，同 aes128CfbDecrypt 的
 // 失败契约，A9 豁免；调用方须在自己的中文错误分支收口）。
 QByteArray opsDecrypt(const QByteArray &data, const QByteArray &mboxBlob62);

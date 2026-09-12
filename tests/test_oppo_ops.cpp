@@ -138,9 +138,23 @@ static const char kCtBlock512Mbox5[] =
 static const char kCtTail8[] = "0aefec71200abac0";   // 明文 "OpsTail!"
 static const char kCtTail5[] = "74adac117463d6e1";   // 明文 "12345"（末词 1 字节）
 static const char kCtTail2[] = "04dd9f25";           // 明文 "AB"（末词 2 字节）
-// 15B 边界：参照加密走尾路产出 16B；按"截断到输入长度"口径解密仍走尾路 → 明文完整
-// （参照在"整段 16B"口径下解不回来，这正是 opsDecrypt() 采用等长契约的原因）
-static const char kCtLen15[] = "03f6f9512406b8a33bef979448927965";
+
+// 13/14/15B：**按参照文件流口径**（先用零补齐到 4 的倍数再 key_custom，再截断到原长）。
+// 参照调用方 decryptfile() L428-430 / encryptsubsub() L440-446 都先 pad4 → 这三档落在
+// **块路**（pad4 = 16B > 0xF），与本实现的 pad4 分支判定一致；裸调 helper 会在这三档走
+// 尾路、结果完全不同（本机复算 len 1..41，仅 13/14/15 两口径不同）。
+static const char kPtLen13[] = "ThirteenBytes";      // 13B
+static const char kPtLen14[] = "FourteenBytes!";     // 14B
+static const char kPtLen15[] = "FifteenBytes123";    // 15B
+static const char kCtLen13Mbox5[] = "62738c4e7dfb09ff74d57d52d8";
+static const char kCtLen13Mbox6[] = "e516842eb7ba880de50a3e313d";
+static const char kCtLen13Mbox4[] = "984d3de06b4df52a4287c6be25";
+static const char kCtLen14Mbox5[] = "7074904e7dfb09ff74d57d52d807";
+static const char kCtLen14Mbox6[] = "f711982eb7ba880de50a3e313df5";
+static const char kCtLen14Mbox4[] = "8a4a21e06b4df52a4287c6be25dd";
+static const char kCtLen15Mbox5[] = "707283486cfb02d34fd86c449a1486";
+static const char kCtLen15Mbox6[] = "f7178b28a6ba8321de072f277fe6c5";
+static const char kCtLen15Mbox4[] = "8a4c32e67a4dfe06798ad7a867ce66";
 
 // ==================== 合成 OPS 包 ====================
 //
@@ -360,10 +374,26 @@ void TestOppoOps::opsCipherAgainstPython()
              QByteArrayLiteral("12345"));
     QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtTail2).left(2), keys.at(0).mboxBlob),
              QByteArrayLiteral("AB"));
+    // ---- 13/14/15B：参照文件流口径（pad4 后落块路），三个候选各自的密文 ----
+    // 这三档是"分支按 pad4 定"与"按裸长度定"唯一不同的长度区间（本机复算 len 1..41 确认）：
+    // 若分支写成裸长度，下面 9 条会全部解出垃圾（SAHARA 段没有 Sha256 兜底 → 静默产出坏文件）。
+    const QByteArray pt13 = QByteArrayLiteral("ThirteenBytes");
+    const QByteArray pt14 = QByteArrayLiteral("FourteenBytes!");
     const QByteArray pt15 = QByteArrayLiteral("FifteenBytes123");
+    QCOMPARE(pt13.size(), 13);
+    QCOMPARE(pt14.size(), 14);
     QCOMPARE(pt15.size(), 15);
-    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen15).left(15), keys.at(0).mboxBlob),
-             pt15);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen13Mbox5), keys.at(0).mboxBlob), pt13);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen13Mbox6), keys.at(1).mboxBlob), pt13);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen13Mbox4), keys.at(2).mboxBlob), pt13);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen14Mbox5), keys.at(0).mboxBlob), pt14);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen14Mbox6), keys.at(1).mboxBlob), pt14);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen14Mbox4), keys.at(2).mboxBlob), pt14);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen15Mbox5), keys.at(0).mboxBlob), pt15);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen15Mbox6), keys.at(1).mboxBlob), pt15);
+    QCOMPARE(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen15Mbox4), keys.at(2).mboxBlob), pt15);
+    // 跨候选解不出（同 16B 块路的反向断言：这三档现在真的用到了 mbox 轮密钥材料）
+    QVERIFY(imgopp::opsDecrypt(QByteArray::fromHex(kCtLen15Mbox5), keys.at(1).mboxBlob) != pt15);
 
     // ---- 长度契约：任意输入等长输出；空输入空输出；blob 不足 62B → 空（A9 契约）----
     for (int n : {1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 64, 100})
@@ -376,9 +406,10 @@ void TestOppoOps::opsCipherAgainstPython()
     // 用例里以"包解不开"的模糊形态出现。
     QCOMPARE(imgopp::opsEncrypt(pt, keys.at(0).mboxBlob), QByteArray::fromHex(kCtBlockMbox5));
     QCOMPARE(imgopp::opsEncrypt(pt41, keys.at(0).mboxBlob), ct41Mbox5.left(41));
-    // 2..15 全覆盖（含 13/14/15：参照 decryptfile() 会把读入的密文补齐到 4 的倍数，
-    // 13..15 补齐后变 16B → 落入块路而加密走的是尾路，参照自身在此解不回来；本实现按
-    // 输入长度直接解密，等长契约下两个方向严格互逆）
+    // 2..15 全覆盖（含 13/14/15）：参照调用方在加密与解密两侧都先 pad4 → 这三档两侧
+    // 同为块路，文件流自洽；本实现按 pad4 定分支，与参照文件流逐字节一致（见上组定值向量）。
+    // 注意本往返用例**不能**单独证明分支口径正确（两侧用同一口径时自洽即可通过）——
+    // 定值向量才是权威；此处只做夹具与实体同源的自检。
     for (int n : {2, 3, 5, 8, 9, 12, 13, 14, 15, 16, 17, 41, 64, 100}) {
         const QByteArray x = pseudoRandom(n, 0xA5A5A5A5u);
         QCOMPARE(imgopp::opsDecrypt(imgopp::opsEncrypt(x, keys.at(0).mboxBlob), keys.at(0).mboxBlob), x);
