@@ -140,7 +140,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 21 个测试目标）
+├── tests/                      # 单元测试（Qt Test, 32 个测试目标）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
@@ -153,7 +153,7 @@ PhoneToolbox/
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build    # 21 个测试目标, 全绿
+ctest --test-dir build    # 33 个测试目标, 全绿
 ```
 
 ## ADB 获取策略
