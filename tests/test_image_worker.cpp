@@ -1,9 +1,12 @@
 #include <QtTest>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <memory>
 
+#include "core/resource_monitor.h"
 #include "ui/image_worker.h"
 #include "image_engine/oppo_ofp.h"
 #include "image_engine/oppo_ops.h"
@@ -28,10 +31,16 @@
 // 能真正解出尾页字段。密码实现的正确性由 test_oppo_ops::opsCipherAgainstPython
 // （对拍参照实产密文向量）兜底；本文件的 detail 断言只依赖尾页字段与清单条目数，
 // 与密码实现是否正确无关（密码错了这些用例只会走 parse 失败降级路径）。
-// 线程模型：ImageWorker 在工作线程执行，结果经 queued 信号投递 → 用 QSignalSpy
-// 的 wait() 驱动事件循环，必须有 application 对象 —— 本文件用 QTEST_MAIN 建立
-// QCoreApplication（QTEST_APPLESS_MAIN 不建 application 对象，切回去 spy.wait()
-// 会直接挂死；见文件末尾的宏选择说明）。
+// 线程模型：ImageWorker 在工作线程执行，结果经 queued 信号投递 → 必须有
+// application 对象 —— 本文件用 QTEST_MAIN 建立 QCoreApplication
+// （QTEST_APPLESS_MAIN 不建 application 对象，切回去等待会直接挂死；见文件末尾的
+// 宏选择说明）。等待一律走 waitForEmission()（不要直接 QSignalSpy::wait()）。
+// 负载稳健性（两道防线，见各自注释）：
+//   1. waitForEmission()：按"计数"判定而非 wait() 的返回值 —— 这是负载下 flake 的
+//      真正根因（高负载时 worker 可能先于主线程进入 wait 完成，wait() 会白等满整个
+//      超时返回 false，spy 里其实已有结果）；
+//   2. makeWorker()：切断 H1 优先级降级连接（防御性；本进程内监控未启动）。
+// 等待余量 60s 仅约束"真挂死"场景，与 flake 无关（改前 10s、改后 60s 都会失败）。
 class TestImageWorker : public QObject
 {
     Q_OBJECT
@@ -118,14 +127,62 @@ QString writeBlob(const QString &path, const QByteArray &data)
     return path;
 }
 
-// 驱动一次 runDetect；超时（含工作线程异常）返回 false 并填 why，由调用方 QVERIFY2
+// 构造 ImageWorker 并切断 H1 优先级降级对本测试的影响（全用例统一入口）。
+// 返回 unique_ptr：QObject 不可拷贝，且工厂集中保证"构造即切断"，避免今后新增用例
+// 忘了这一步而再次引入负载相关 flake。
+//
+// 被切断的链路（产品行为，本文件不改产品代码）：CPU >80% → ResourceMonitor::cpuHigh
+// → ImageWorker 构造函数里的 DirectConnection lambda 把工作线程降为 IdlePriority
+// （SCHED_IDLE；H1 的既有设计取舍）。本文件断言的是探测顺序/解包语义，与优先级策略
+// 无关，故断开该连接（注：本次 flake 的根因已验证为 wait() 语义，见 waitForEmission()，
+// 不是优先级 —— 线程探针实测卡住时工作线程为 SCHED_NORMAL 且在睡眠）。
+//
+// 事实核查（2026-09-13）：本测试目标只链 image_worker.cpp + resource_monitor.cpp
+// （CMakeLists.txt 的 test_image_worker 分支），而 ResourceMonitor::start() 的唯一
+// 调用点在 MainWindow（main_window.cpp）→ 本进程内采样 QTimer 从未启动、cpuHigh
+// 从未发射，故上述 lambda（全仓唯一调用 setPriority 处）实际不会执行。本行因此是
+// 防御性接线：将来若测试里启动了监控（或 start 时机变化），用例仍不受优先级影响。
+// disconnect 返回 false 会打印告警（连接本就存在，返回 false 说明 Qt 语义/构造变了）。
+std::unique_ptr<ImageWorker> makeWorker()
+{
+    auto worker = std::make_unique<ImageWorker>();
+    if (!QObject::disconnect(&ResourceMonitor::instance(), nullptr, worker.get(), nullptr))
+        qWarning("test_image_worker: H1 优先级降级连接未按预期断开 —— 出现负载相关等待"
+                 "超时时先查此处");
+    return worker;
+}
+
+// 等待 QSignalSpy 收到至少一次发射（限 timeoutMs）。**必须用本函数，不要直接
+// spy.wait()**：QSignalSpy 的槽是 DirectConnection（Qt 在跨线程发射时于发射线程内
+// 直接记录，内部带 mutex），而 QSignalSpy::wait() 只认"等待期间新增的发射"
+// （Qt 源码：进入前快照 origCount，返回 size() > origCount）。
+// → 若 worker 在主线程调用 wait() **之前**就完成并发射（负载高时主线程被抢占即会
+//   发生），信号其实已经记录在案，但 wait() 会白等满整个超时并返回 false。
+// 本函数先查计数、超时未到就继续等，把"早到"与"迟到"都当成功（实测：这正是
+// loadavg 25 下 detectFinished 整窗超时（且 spy.count()==1）、而改前 10s/改后 60s
+// 都一样失败的根因；超时值再大也救不了"信号早于 wait"）。
+bool waitForEmission(QSignalSpy &spy, int timeoutMs)
+{
+    QElapsedTimer clock;
+    clock.start();
+    while (spy.count() == 0) {
+        const qint64 left = qint64(timeoutMs) - clock.elapsed();
+        if (left <= 0)
+            return false;
+        spy.wait(int(left));   // 返回值不参与判定：循环条件已同时覆盖"早到/迟到"
+    }
+    return true;
+}
+
+// 驱动一次 runDetect；超时（含工作线程异常）返回 false 并填 why，由调用方 QVERIFY2。
+// 等待余量 60s：正常路径为毫秒级，该值是"真挂死"与"仅投递时序异常"的分界。
 bool detectFile(ImageWorker &worker, const QString &path, imgreg::Detected *out,
                 QString *why)
 {
     QSignalSpy spy(&worker, &ImageWorker::detectFinished);
     worker.runDetect(path);
-    if (!spy.wait(10000)) {
-        *why = QStringLiteral("detectFinished 超时（10s）");
+    if (!waitForEmission(spy, 60000)) {
+        *why = QStringLiteral("detectFinished 超时（60s）");
         return false;
     }
     *out = qvariant_cast<imgreg::Detected>(spy.at(0).at(1));
@@ -148,7 +205,8 @@ UnpackOutcome unpackFile(ImageWorker &worker, const QString &path,
     QSignalSpy unpackSpy(&worker, &ImageWorker::unpackFinished);
     QSignalSpy progressSpy(&worker, &ImageWorker::progress);
     worker.runUnpack(path, outDir, detected);
-    outcome.delivered = unpackSpy.wait(60000); // 超时（含工作线程异常）→ 空结果
+    // 同 detectFile：必须用 waitForEmission（spy.wait() 会漏掉"早于 wait 的发射"）
+    outcome.delivered = waitForEmission(unpackSpy, 60000); // 超时（含工作线程异常）→ 空结果
     if (!outcome.delivered)
         return outcome;
     outcome.ok = unpackSpy.at(0).at(0).toBool();
@@ -176,10 +234,10 @@ void TestImageWorker::detectOpsPackageByTail()
                                    opsShapedBlob());
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
     QCOMPARE(r.detail, QStringLiteral("OnePlus OPS 固件包"));
 }
@@ -196,10 +254,10 @@ void TestImageWorker::detectOpsDetailCarriesTailFields()
                                               QStringLiteral("guacamoles_31_O.09_190820")));
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
     // spec §4「分区数」按条目数收口（措辞「条目」：Program/UFS_PROVISION 等组未必是分区）
     QCOMPARE(r.detail,
@@ -211,7 +269,7 @@ void TestImageWorker::detectOpsDetailCarriesTailFields()
                                                  QStringLiteral("guacamoles_31_O.09_190820"),
                                                  false));
     QVERIFY(!noEntry.isEmpty());
-    QVERIFY2(detectFile(worker, noEntry, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, noEntry, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
     QCOMPARE(r.detail,
              QStringLiteral("OnePlus OPS 固件包 · 18801 · guacamoles_31_O.09_190820"));
@@ -226,10 +284,10 @@ void TestImageWorker::detectOpsTailWithUnknownExtension()
                                    opsShapedBlob());
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
 }
 
@@ -247,10 +305,10 @@ void TestImageWorker::detectQcPackage()
     const QString path = writeBlob(dir.filePath(QStringLiteral("qc.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OFP);
     // QC 无 project/version 字段，但清单文件表有条目 → detail 尾部带条目数
     QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (QC) · 2 个条目"));
@@ -275,10 +333,10 @@ void TestImageWorker::detectMtkPackage()
     const QString path = writeBlob(dir.filePath(QStringLiteral("mtk.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OFP);
     QCOMPARE(r.detail,
              QStringLiteral("OPPO/realme OFP 固件包 (MTK) · CPH1827 · UFS · 2 个条目"));
@@ -304,10 +362,10 @@ void TestImageWorker::detectMtkDetailUtf8FieldSemantics()
     const QString utf8Path = writeBlob(dir.filePath(QStringLiteral("utf8.ofp")), utf8Pkg.blob);
     QVERIFY(!utf8Path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, utf8Path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, utf8Path, &r, &why), qPrintable(why));
     QCOMPARE(r.detail,
              QStringLiteral("OPPO/realme OFP 固件包 (MTK) · 测试项目 · UFS · 1 个条目"));
 
@@ -319,7 +377,7 @@ void TestImageWorker::detectMtkDetailUtf8FieldSemantics()
     QVERIFY(nulPkg.isValid());
     const QString nulPath = writeBlob(dir.filePath(QStringLiteral("nul.ofp")), nulPkg.blob);
     QVERIFY(!nulPath.isEmpty());
-    QVERIFY2(detectFile(worker, nulPath, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, nulPath, &r, &why), qPrintable(why));
     QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (MTK) · ABCD · UFS · 1 个条目"));
 }
 
@@ -332,10 +390,10 @@ void TestImageWorker::detectTinyFileSkipsTailProbe()
                                    QByteArray(0x200, '\0'));
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS); // 扩展名给出候选
     QCOMPARE(r.detail, QStringLiteral("按扩展名识别"));
 }
@@ -351,12 +409,12 @@ void TestImageWorker::detectUnknownBytesStaysUnknown()
                                    QByteArray("hello, not a firmware image"));
     QVERIFY(!filler.isEmpty() && !text.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected r;
     QString why;
-    QVERIFY2(detectFile(worker, filler, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, filler, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::Unknown);
-    QVERIFY2(detectFile(worker, text, &r, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, text, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::Unknown);
 }
 
@@ -395,14 +453,14 @@ void TestImageWorker::unpackOfpWritesOutputs()
     const QString path = writeBlob(dir.filePath(QStringLiteral("pkg.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected detected;
     QString why;
-    QVERIFY2(detectFile(worker, path, &detected, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &detected, &why), qPrintable(why));
     QCOMPARE(detected.format, imgreg::Format::OFP);
 
     const QString outDir = dir.filePath(QStringLiteral("out"));
-    const UnpackOutcome outcome = unpackFile(worker, path, detected, outDir);
+    const UnpackOutcome outcome = unpackFile(*worker, path, detected, outDir);
     QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
     QVERIFY2(outcome.ok, qPrintable(outcome.error));
     QVERIFY(outcome.error.isEmpty()); // 完整成功：无警告文案
@@ -432,13 +490,13 @@ void TestImageWorker::unpackOfpPartialSuccessReportsWarning()
     const QString path = writeBlob(dir.filePath(QStringLiteral("unsafe.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected detected;
     QString why;
-    QVERIFY2(detectFile(worker, path, &detected, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &detected, &why), qPrintable(why));
 
     const QString outDir = dir.filePath(QStringLiteral("out"));
-    const UnpackOutcome outcome = unpackFile(worker, path, detected, outDir);
+    const UnpackOutcome outcome = unpackFile(*worker, path, detected, outDir);
     QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
     QVERIFY(outcome.ok); // 部分成功不得被误报成致命失败
     QVERIFY2(outcome.error.contains(QStringLiteral("文件名")), qPrintable(outcome.error));
@@ -460,16 +518,16 @@ void TestImageWorker::unpackMisnamedOfpReportsEngineError()
                                    QByteArray(0x2000, '\x5A'));
     QVERIFY(!path.isEmpty());
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     imgreg::Detected detected;
     QString why;
-    QVERIFY2(detectFile(worker, path, &detected, &why), qPrintable(why));
+    QVERIFY2(detectFile(*worker, path, &detected, &why), qPrintable(why));
     // 尾页探测不命中 → 仅扩展名给出候选（这是"误命名/损坏包"的典型识别结果）
     QCOMPARE(detected.format, imgreg::Format::OFP);
     QCOMPARE(detected.detail, QStringLiteral("按扩展名识别"));
 
     const QString outDir = dir.filePath(QStringLiteral("out"));
-    const UnpackOutcome outcome = unpackFile(worker, path, detected, outDir);
+    const UnpackOutcome outcome = unpackFile(*worker, path, detected, outDir);
     QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
     QVERIFY(!outcome.ok);
     QVERIFY(!outcome.error.isEmpty()); // 引擎中文文案原样上抛（§5：不得空 error）
@@ -489,9 +547,9 @@ void TestImageWorker::unpackMissingFileReportsError()
     imgreg::Detected forged;
     forged.format = imgreg::Format::OFP;
 
-    ImageWorker worker;
+    auto worker = makeWorker();
     const UnpackOutcome outcome = unpackFile(
-        worker, dir.filePath(QStringLiteral("nope.ofp")), forged,
+        *worker, dir.filePath(QStringLiteral("nope.ofp")), forged,
         dir.filePath(QStringLiteral("out")));
     QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
     QVERIFY(!outcome.ok);
