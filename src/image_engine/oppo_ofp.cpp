@@ -126,11 +126,16 @@ QByteArray mtkShuffle(const QByteArray &stored)
     return out;
 }
 
-// 定长 C 字符串字段（cleancstring() L112-113: 去 0x00 后解码）
+// 定长 C 字符串字段（ofp_mtk_decrypt.py cleancstring() L112-113:
+// replace(b"\x00", b"").decode('utf-8') —— 去掉全部 0x00 后按 UTF-8 解码，
+// 不是首 NUL 截断 + Latin-1；仅非 ASCII 名可辨差异）
 QString cleanCString(const QByteArray &field)
 {
-    const qsizetype end = field.indexOf('\0');
-    return QString::fromLatin1(end < 0 ? field : field.left(end));
+    // 0x00 在 UTF-8 中只能是 U+0000 的编码（不参与任何多字节序列），故"解码后删
+    // U+0000"与"删 0x00 字节后解码"逐字节等价
+    QString out = QString::fromUtf8(field);
+    out.remove(QChar(u'\0'));
+    return out;
 }
 
 // QC 末页尺寸扫描（extract_xml() L119-123）: 末页 +0x10 LE32 == 0x7CEF。

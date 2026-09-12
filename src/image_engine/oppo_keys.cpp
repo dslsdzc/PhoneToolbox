@@ -68,7 +68,8 @@ const Triplet kQcTriplets[] = {
      "79051FD8D8B6297E2E4559E997F63B7F"},
 };
 
-// MTK triplet 表（ofp_mtk_decrypt.py keytables L46-85）。前 7 项与 QC 同派生方案，
+// MTK triplet 表（ofp_mtk_decrypt.py keytables L46-85）。前 8 项（MTK0-MTK7，即表中
+// 全部 triplet 行；keytables 只有 MTK8 一行是直接的 ASCII key/iv 对）与 QC 同派生方案，
 // 注意 MTK3 == QC V1.4.17、MTK0 == QC V1.5.13 是同一 triplet（交叉校验），
 // 而 MTK4 与 QC V1.6.6 族 triplet 相近但不同（3C4A…/87B13D29…/59B7A8E9…），不可混用。
 const Triplet kMtkTriplets[] = {

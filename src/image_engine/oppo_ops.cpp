@@ -45,12 +45,17 @@ quint32 le32(const QByteArray &buf, qsizetype off)
     return v;
 }
 
-// 定长 C 字符串字段（同 oppo_ofp.cpp cleanCString() L130-134 / opscrypto.py cleancstring() 语义：
-// 首个 0x00 截断后按 Latin-1 解码）
+// 定长 C 字符串字段（同 oppo_ofp.cpp cleanCString() L130-134；参照定义不在
+// opscrypto.py，而在 reference/oppo_decrypt/ofp_mtk_decrypt.py cleancstring()
+// L112-113: replace(b"\x00", b"").decode('utf-8') —— 去掉全部 0x00 后按 UTF-8
+// 解码，不是首 NUL 截断 + Latin-1）
 QString cleanCString(const QByteArray &field)
 {
-    const qsizetype end = field.indexOf('\0');
-    return QString::fromLatin1(end < 0 ? field : field.left(end));
+    // 0x00 在 UTF-8 中只能是 U+0000 的编码（不参与任何多字节序列），故"解码后删
+    // U+0000"与"删 0x00 字节后解码"逐字节等价
+    QString out = QString::fromUtf8(field);
+    out.remove(QChar(u'\0'));
+    return out;
 }
 
 // 16 字节向上取整（C# TryDecryptXml() L183-184 的 opsBlockSize 对齐）

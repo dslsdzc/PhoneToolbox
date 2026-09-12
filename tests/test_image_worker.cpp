@@ -22,14 +22,18 @@
 //   4. **A10**：extractOFP 可 ok==true 且 *error 非空（部分条目被跳过）→ worker
 //      必须把警告经 unpackFinished 回传，不得丢弃（静默部分解包是刷机场景大忌）。
 //
-// 夹具（合成包）来自 oppo_test_helpers.h：只按格式事实拼字节流，不调用被测代码。
+// 夹具（合成包）来自 oppo_test_helpers.h + 本文件内的 opsPackage()：只按格式事实拼
+// 字节流，不调用被测代码。
 // 线程模型：ImageWorker 在工作线程执行，结果经 queued 信号投递 → 用 QSignalSpy
-// 的 wait() 驱动事件循环（QTEST_APPLESS_MAIN 已提供 QCoreApplication）。
+// 的 wait() 驱动事件循环，必须有 application 对象 —— 本文件用 QTEST_MAIN 建立
+// QCoreApplication（QTEST_APPLESS_MAIN 不建 application 对象，切回去 spy.wait()
+// 会直接挂死；见文件末尾的宏选择说明）。
 class TestImageWorker : public QObject
 {
     Q_OBJECT
 private slots:
     void detectOpsPackageByTail();
+    void detectOpsDetailCarriesTailFields();
     void detectOpsTailWithUnknownExtension();
     void detectQcPackage();
     void detectMtkPackage();
@@ -59,6 +63,35 @@ QByteArray opsShapedBlob(quint64 size = 0x4000)
     put32(base + 0x00, 2);
     put32(base + 0x04, 1);
     put32(base + 0x10, 0x7CEF);
+    return blob;
+}
+
+// 合成 OPS 包（可被 parseOPS 完整解析的最小形态）：settings.xml（仅 BasicInfo 组、
+// 无文件条目）密文 + 尾页 0x200，尾页 +0x14 记 settings 扇区 / +0x18 记清单明文长度
+// / +0x1C/+0x2C 记 project id / firmware 名 —— 字段偏移与 test_oppo_ops.cpp 的
+// buildOpsPackage 及 oppo_ops.cpp 常量同源（该文件的夹具另含文件条目，本用例只需要
+// 尾页字段 → 不复用其完整夹具，避免跨文件耦合）。
+// 注: 包长取 0x1000（doDetect 只在 fileSize ≥ 0x1000 时才读尾页做二次探测）。
+QByteArray opsPackage(const QString &projectId, const QString &firmwareName)
+{
+    const QByteArray mboxBlob = imgopp::opsKeyCandidates().at(0).mboxBlob; // mbox5
+    const QByteArray xml = QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                                          "<ProFile>\n  <BasicInfo Project=\"%1\" Version=\"%2\"/>\n"
+                                          "</ProFile>\n").arg(projectId, firmwareName).toUtf8();
+    // 参照的补齐式 (0x10 - len%0x10) 在已对齐时也补一整块（同 test_oppo_ops.cpp）
+    const QByteArray padded = xml + QByteArray(0x10 - (xml.size() % 0x10), '\0');
+    const QByteArray cipher = imgopp::opsEncrypt(padded, mboxBlob);
+
+    QByteArray blob(0x1000, '\0');
+    blob.replace(0, cipher.size(), cipher);
+    const qsizetype tailBase = blob.size() - 0x200;
+    ofptest::putLE32(blob, tailBase + 0x00, 2);              // version（A11 判据）
+    ofptest::putLE32(blob, tailBase + 0x04, 1);              // flags（A11 判据）
+    ofptest::putLE32(blob, tailBase + 0x10, 0x7CEF);         // 魔数
+    ofptest::putLE32(blob, tailBase + 0x14, 0);              // settings 扇区位置 = 0
+    ofptest::putLE32(blob, tailBase + 0x18, quint32(xml.size())); // 清单明文长度
+    ofptest::putFixed(blob, tailBase + 0x1C, 16, projectId);
+    ofptest::putFixed(blob, tailBase + 0x2C, 32, firmwareName);
     return blob;
 }
 
@@ -117,6 +150,9 @@ UnpackOutcome unpackFile(ImageWorker &worker, const QString &path,
 
 // A11 实现级验证：OPS 形态的包必须判成 OPS。若 doDetect 按"先 OFP 后 OPS"探测，
 // 同一份尾页会被 detectOFP 的 QC 分支先认领 → 本用例得到 Format::OFP 而失败。
+// 兼作"信息卡字段解析失败优雅降级"用例：opsShapedBlob 只有尾页标记、没有可解析的
+// settings.xml（长度字段为 0）→ 追加字段的 parseOPS 必然失败 → 文案须保持基础形态
+// （既不得拼出空分隔符，也不得把已命中的探测结果降级成 Unknown）。
 void TestImageWorker::detectOpsPackageByTail()
 {
     QTemporaryDir dir;
@@ -131,6 +167,27 @@ void TestImageWorker::detectOpsPackageByTail()
     QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
     QCOMPARE(r.detail, QStringLiteral("OnePlus OPS 固件包"));
+}
+
+// spec §4 信息卡：探测命中 OPS 后，detail 须带上尾页 +0x1C 的 project id 与
+// +0x2C 的 firmware 名（parseOPS 成功时）。字段值由夹具显式给定，断言其确实来自
+// 尾页字段而非常量文案。
+void TestImageWorker::detectOpsDetailCarriesTailFields()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = writeBlob(dir.filePath(QStringLiteral("firmware.ops")),
+                                   opsPackage(QStringLiteral("18801"),
+                                              QStringLiteral("guacamoles_31_O.09_190820")));
+    QVERIFY(!path.isEmpty());
+
+    ImageWorker worker;
+    imgreg::Detected r;
+    QString why;
+    QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::OPS);
+    QCOMPARE(r.detail,
+             QStringLiteral("OnePlus OPS 固件包 · 18801 · guacamoles_31_O.09_190820"));
 }
 
 // 未知扩展名（.bin）：无头魔数、扩展名兜底也给不出候选 → 只能靠尾页探测命中
@@ -173,12 +230,16 @@ void TestImageWorker::detectQcPackage()
 
 // MTK 合成包（首 16B 试解出 "MMM"）→ OFP (MTK)。注：包体须 ≥ 0x1000 才会走尾页
 // 探测（doDetect 对小文件跳过尾页读取），故载荷取 0x2000。
+// spec §4 信息卡：detail 须带尾头项目名（prjname）与版本（flashtype）—— 值为夹具
+// 显式给定（非默认值），断言其确实来自解析结果。
 void TestImageWorker::detectMtkPackage()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
+    ofptest::MtkBuildOptions opts;
+    opts.prjname = QStringLiteral("CPH1827");
     const ofptest::MtkPackage pkg = ofptest::buildMtkPackage(
-        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')}});
+        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')}}, opts);
     QVERIFY(pkg.isValid());
     const QString path = writeBlob(dir.filePath(QStringLiteral("mtk.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
@@ -188,7 +249,7 @@ void TestImageWorker::detectMtkPackage()
     QString why;
     QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OFP);
-    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (MTK)"));
+    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (MTK) · CPH1827 · UFS"));
 }
 
 // 不足一页（0x200B）：读不到完整尾页 → 跳过尾页探测，仅扩展名兜底（不崩不误判）
@@ -341,7 +402,10 @@ void TestImageWorker::unpackMisnamedOfpReportsEngineError()
     QVERIFY2(outcome.delivered, "unpackFinished 超时（60s）");
     QVERIFY(!outcome.ok);
     QVERIFY(!outcome.error.isEmpty()); // 引擎中文文案原样上抛（§5：不得空 error）
-    QVERIFY2(outcome.error.contains(QStringLiteral("OFP")), qPrintable(outcome.error));
+    // 断言引擎原文（"不是有效的 OFP 包…"）：只查子串 "OFP" 无区分力 —— worker
+    // 兜底文案 "OFP 解包失败" 也含 OFP，引擎错误被吞掉时用例仍会绿
+    QVERIFY2(outcome.error.contains(QStringLiteral("不是有效的 OFP 包")),
+             qPrintable(outcome.error));
     QVERIFY(outcome.outputs.isEmpty()); // 失败即无产物清单
 }
 

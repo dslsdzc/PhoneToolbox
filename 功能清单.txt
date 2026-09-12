@@ -270,6 +270,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 参照库 (reference/, 不参与构建): GeekFlashCore (AGPL) / qdl (BSD-3)
     / Kirin-Tool (BSL 1.1) / unpack_huawei_package / HISuite-Proxy
     / spreadtrum_flash (Unlicense)
+[√] bkerler/oppo_decrypt (Python, 各脚本头 MIT) - OPPO OFP QC/MTK 与 OPS 格式的参照实现 (仅存 reference/, 不参与构建)
+[√] Uotan-Dev/FirmwareKit.Oppo (C#, MIT) - OPPO 格式的副参照 (仅存 reference/, 不参与构建)
 
 --- 展锐 ResearchDownload 刷写 (自研, 行为观察核实) ---
 [√] HDLC 帧层 (0x7E 帧 / type+len BE16 / 16-bit 求和 checksum / CRC16)

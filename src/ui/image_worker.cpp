@@ -349,11 +349,31 @@ void ImageWorker::doDetect(const QString &path)
         if (imgopp::detectOPS(tail, quint64(fileSize))) {
             result.format = imgreg::Format::OPS;
             result.detail = QStringLiteral("OnePlus OPS 固件包");
+            // spec §4 信息卡字段：尾页 +0x1C project id / +0x2C firmware 名。
+            // 探测命中后再 parse 一次（廉价：只读尾页 + settings.xml 试解）取字段；
+            // parse 失败（密钥未知/截断等）保持基础文案 —— 探测结果不得降级成
+            // Unknown/失败（探测与信息卡字段是两件事）。
+            imgopp::OpsInfo info;
+            if (imgopp::parseOPS(path, info, nullptr)) {
+                for (const QString &field : {info.projectId, info.firmwareName}) {
+                    if (!field.isEmpty())   // 空值不拼出空分隔符
+                        result.detail += QStringLiteral(" · ") + field;
+                }
+            }
         } else if (imgopp::detectOFP(header, tail, quint64(fileSize), variant)) {
             result.format = imgreg::Format::OFP;
             result.detail = (variant == imgopp::OfpVariant::Mtk)
                 ? QStringLiteral("OPPO/realme OFP 固件包 (MTK)")
                 : QStringLiteral("OPPO/realme OFP 固件包 (QC)");
+            // 同上：OFP-MTK 尾头项目名（prjname）/版本（flashtype）。QC 清单无这两个
+            // 字段 → parseQc 留空 → 文案与原来逐字一致（QC 不变）。
+            imgopp::OfpInfo info;
+            if (imgopp::parseOFP(path, info, nullptr)) {
+                for (const QString &field : {info.projectName, info.version}) {
+                    if (!field.isEmpty())
+                        result.detail += QStringLiteral(" · ") + field;
+                }
+            }
         }
     }
 
