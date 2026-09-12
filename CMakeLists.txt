@@ -291,7 +291,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_keys.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_ofp.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_extract.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_ops.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_ops.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_worker.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -327,6 +328,15 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
+                elseif(_test_stem STREQUAL "test_image_worker")
+                    # Task 6：ImageWorker 属 UI 层（src/ui，不编入任何静态库），且
+                    # 识别入口 doDetect 为私有槽 —— OFP/OPS 尾页探测顺序（A11）只能
+                    # 经公开入口 runDetect + detectFinished 信号验证。除被测源外还需：
+                    # resource_monitor.cpp（构造里接 CPU 降级信号）、root_patcher
+                    # （doPatch 调 patcher::patchFile，链接见下方按名追加）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/image_worker.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
                 elseif(_test_stem STREQUAL "test_pipeline")
                     # F5-2：flashChannelForMode 为 flash_tool.cpp 静态纯函数——整链编译 flash_tool
                     # 及其传递依赖（ADB 采集/EDL/MTK handler/SPD 路由）；插件符号（PluginManager）
@@ -344,6 +354,11 @@ if(ENABLE_IMAGE_TESTS)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
+                # ImageWorker 测试额外链 root_patcher（image_worker.cpp 的 doPatch 调
+                # patcher::patchFile；该库 PUBLIC 传递 image_engine，定义在本循环之前）。
+                if(_test_stem STREQUAL "test_image_worker")
+                    target_link_libraries(${_test_target} PRIVATE root_patcher)
+                endif()
                 set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
                 add_test(NAME ${_test_target} COMMAND ${_test_target})
                 # BROM 协议测试需要 libusb（image_engine 不传递）。
