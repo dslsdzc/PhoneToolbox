@@ -10,7 +10,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 | 设备信息 | ADB / Fastboot | 型号、Android 版本、SDK、安全补丁级别、Bootloader 锁定状态等 |
 | 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
 | 死砖恢复 | EDL / MTK DA | 自动匹配分区文件、校验镜像大小、备份关键分区、支持失败重试 |
-| **镜像处理** | 本地 | **27 种格式拖放识别、15 格式解包、sparse 转换、打包、文件系统浏览** |
+| **镜像处理** | 本地 | **27 种格式拖放识别、17 格式解包、sparse 转换、打包、文件系统浏览** |
 | **Root 修补** | 本地 | **8 个方案入口全覆盖（Magisk 系 / KernelSU 系 / APatch），boot/init_boot 修补** |
 | 系统工具 | ADB | 性能监控（CPU/GPU/内存/温度）、界面定制、分区管理、应用管理、安全隐私、开发调试、**维修诊断** |
 | 漏洞扫描 | ADB | 加载本地漏洞库 JSON，自动匹配设备版本，执行检测脚本发现已知漏洞 |
@@ -20,7 +20,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 
 | 类别 | 格式 |
 |------|------|
-| 解包 (15 种) | payload.bin（含增量 OTA diff）、sparse、boot/init_boot、tar/tar.md5、super 动态分区、system.new.dat 系、LG KDZ/DZ、华为 update.app/update.bin、索尼 SIN v3、SPD .pac、TWRP .win、GPT 整盘、EROFS、ext4 |
+| 解包 (17 种) | payload.bin（含增量 OTA diff）、sparse、boot/init_boot、tar/tar.md5、super 动态分区、system.new.dat 系、LG KDZ/DZ、华为 update.app/update.bin、索尼 SIN v3、SPD .pac、TWRP .win、GPT 整盘、EROFS、ext4、OPPO/realme OFP（QC/MTK 双变体）、OnePlus OPS（SAHARA/settings.xml 解密） |
 | 转换 | sparse ↔ raw 双向、压缩流解压（zstd/lz4/xz/gzip/brotli/bzip2） |
 | 打包 | .img 集合 → tar/tar.md5（Odin 兼容）、raw → sparse |
 | 浏览 | EROFS/ext4 目录树、文件提取、ext4 替换（metadata_csum 标注） |

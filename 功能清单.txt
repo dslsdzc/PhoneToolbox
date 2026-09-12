@@ -166,7 +166,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 后台线程执行 (worker 线程, UI 不卡顿) + 进度条 + 彩色日志
 [√] 大文件自动流式处理 (>64MB 走流式接口, 内存 O(chunk), 进度真实推进)
 
---- 解包 (15 种格式真实实现) ---
+--- 解包 (17 种格式真实实现) ---
 [√] payload.bin 解包 (含增量 OTA diff: bspatch / SOURCE_COPY, 手写 protobuf)
 [√] sparse 镜像 simg2img (RAW / FILL / DONTCARE, >2GB 防护)
 [√] boot / init_boot 解包 (header v0-v4 + ramdisk 压缩识别)
@@ -182,6 +182,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] GPT 整盘分区提取
 [√] EROFS 文件系统提取 (目录遍历 / flat 文件, mkfs.erofs 真镜像验证)
 [√] ext4 文件系统提取 (extent tree / inline data / 符号链接, mke2fs 真镜像验证)
+[√] OPPO/realme OFP 解包 (QC: 尾页清单 + AES-128-CFB 分组策略; MTK: 混淆头 + 文件表)
+[√] OnePlus OPS 解包 (尾页 + 自定义流密码, SAHARA/settings.xml 解密)
 
 --- 转换 / 打包 ---
 [√] sparse ↔ raw 双向转换 (img2simg / simg2img)
@@ -280,7 +282,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 
 规划中 (计划 F 剩余 + 后续)
 ------------------------
-[ ] OPPO/一加/realme EDL 刷机链 (OFP/OPS 解密 + Sahara/Firehose 自研, geekflashcore 参照)
+[ ] OPPO/一加/realme EDL 刷机链 (Phase B: 解包已交付, 刷写链待接线 — 需真机验证)
+[√] OPPO 固件解包引擎 (Phase A 已交付: OFP QC/MTK + OPS, 离线验证)
 [ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
 [ ] 三星 Heimdall 集成 (Odin 协议开源实现)
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)

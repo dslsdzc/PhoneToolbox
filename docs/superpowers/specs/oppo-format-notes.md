@@ -54,6 +54,17 @@
 - MSM 工具流程 = 标准高通 EDL 流: 9008 → Sahara 载 programmer → Firehose program/patch → 复位。Linux 上解密后可用 edl/qdl 刷。
 - Phase B 接入点: 现有 `EDLHandler`(Sahara/Firehose 自研已有) + 解出的 programmer + rawprogram 映射分区。
 
+## 实现期口径（Phase A 落地时确认/修正）
+
+以下为 C++ 引擎实现时经参照源与实测确认的口径，与本文件前文的早期描述有出入处**以本节为准**。
+
+1. **QC 与 MTK 的密钥派生是同一个函数**：`ofp_qc_decrypt.py::deobfuscate()` 与 `ofp_mtk_decrypt.py::mtk_shuffle2()` 恒等（`nibbleSwap(x ^ mc)`，XOR 可交换）。前文"MTK0-7 混淆 triplet 同 QC 派生方案但 shuffle 变体"易误解——**变体指的是另一个函数** `mtk_shuffle()`（MTK 尾部 0x6C 混淆头与文件表用：先摆半字节、再异或 key，方向反了会静默解出乱码）。
+2. **OPS 状态初值不来自 mbox**：`opscrypto.py:53` 是固定常量 `d1b5e39e5eea049d671dd5abd2afcbaf` 的 4 个 LE u32；62B mbox blob 只提供轮密钥材料（`asbox[0..3]` 参与首轮 XOR、`asbox[4..7]`、`asbox[8..]` 轮常量）与轮数 `asbox[0x3C] = 0x0A`。
+3. **`key_custom` 的分支由补齐到 4 倍数后的长度决定**：`pad4 > 0xF` → 块路（每 16B 先 `key_update(rkey, mbox_blob)`，末块不足 16B 的缺失词按 0 参与，输出按 16B 补齐、**由调用方截断**）；`0 < pad4 <= 0xF` → 尾路（`key_update(rkey, **sbox**)`，逐 4 字节词、不足 4B 补 0）。参照的两个调用方（`decryptfile()` L428-430、`encryptsubsub()` L440-446）都先补到 4 的倍数，故 13/14/15 字节的条目走**块路**；直接裸调 helper 这三档会翻转成尾路——是审计陷阱，不是格式特性。
+4. **settings.xml 的对齐**：`xmllength = LE32@尾页+0x18`；`xmlpad = 0x200 - (xmllength % 0x200)`（**恰为 0x200 倍数时 pad = 0x200，不是 0**）；数据段起点 `filesize - 0x200 - (xmllength + xmlpad)`；命中判定 `"xml "` 子串。
+5. **识别必须定序：先 OPS 后 OFP**。`.ops` 尾页与 OFP-QC 尾页**共用 +0x10 处的 `0x7CEF` 魔数**，OPS 只是额外要求 `+0x00 version==2`、`+0x04 flags==1`；若先判 OFP，真实 `.ops` 会被判成 OFP-QC 并在解析阶段误报"密钥未知"。OFP-MTK 用**文件首 16B 试解是否以 `MMM` 开头**判定，与尾页无关。
+6. **Phase A 诚实边界**：无真实 `.ofp`/`.ops` 样本验证（全部验证为离线：参照双源核对 + 合成包 + 参照实产密文对拍 + FIPS-197/NIST 向量）；2022+ 机型密钥未公开（未知密钥报明确中文错误，可导入外部密钥 JSON）；`+0x00/+0x04` 恰为 `02`/`01` 的真实 OFP-QC 包会被误判成 OPS（真包待验）；OPS 的 settings 偏移取尾页字段 `+0x14 × 0x200`，与参照的末端反算式在页对齐包上等价。
+
 ## 源码参照
 
 - bkerler/oppo_decrypt: `ofp_qc_decrypt.py`, `ofp_mtk_decrypt.py`, `opscrypto.py`, `ops_decrypt_frida.py`, `backdoor.py`(后两者仅背景知识, 不做)
