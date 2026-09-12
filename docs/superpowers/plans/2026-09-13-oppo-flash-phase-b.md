@@ -277,7 +277,8 @@ git commit -m "feat(edl): 计划层模型 + rawprogram/patch XML 解析（参照
 - Consumes: Task 1 的 `PlanEntry`/`FlashPlan`/`StorageInfo`/`PlanCheck`/`parseRawprogramXml`/`parsePatchXml`
 - Produces:
   - `void finalizePlan(FlashPlan &plan)` —— 排序（Erase → Program 按 `lun`,`startSector`；Patch 最后）+ 填 `totalBytes`
-  - `PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)`
+  - `bool normalizePlan(FlashPlan &plan, QStringList &warnings, QString *error)` —— **就地**归一化：sparse 条目按文件头回填 `rawBytes`/修正 `numSectors`（warnings 去重汇总）。调用时机：解析完成后、校验之前（`buildPlanFromDir` 内部会调它）
+  - `PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)` —— **纯校验、不改入参**（签名与 spec §3.3 一致）；"修正"归 `normalizePlan`
   - `imgsparse::sparseRawSizeFromHeader(const QByteArray &header, quint64 &rawBytes)`
 
 **校验规则（spec §3.5，逐条实现）**
@@ -328,14 +329,19 @@ void TestFlashPlan::validateRejectsAndWarns()
 
 void TestFlashPlan::sparseNumSectorsFromHeader()
 {
-    // 合成 sparse 头：magic 0xED26FF3A, version 1.0, header_sz 28, blk_sz 4096, total_blks 3
+    // 合成 sparse 头 —— **AOSP 真实布局**（reference/qdl/src/sparse.h:11-33、本仓既有 aospHeaderU16Layout）：
+    //   u32 magic@0; u16 major@4; u16 minor@6; u16 file_hdr_sz@8; u16 chunk_hdr_sz@10;
+    //   u32 blk_sz@12; u32 total_blks@16; u32 total_chunks@20; u32 image_checksum@24   （共 28B）
     QByteArray h(28, '\0');
     auto put32 = [&h](int off, quint32 v) {
         h[off] = char(v & 0xFF); h[off+1] = char((v >> 8) & 0xFF);
         h[off+2] = char((v >> 16) & 0xFF); h[off+3] = char((v >> 24) & 0xFF);
     };
-    put32(0, 0xED26FF3A); put32(4, 0x00010000); put32(8, 28);
-    put32(12, 12); put32(16, 28); put32(20, 4096); put32(24, 3);
+    auto put16 = [&h](int off, quint16 v) {
+        h[off] = char(v & 0xFF); h[off+1] = char((v >> 8) & 0xFF);
+    };
+    put32(0, 0xED26FF3A); put16(4, 1); put16(6, 0); put16(8, 28); put16(10, 12);
+    put32(12, 4096); put32(16, 3); put32(20, 1); put32(24, 0);
     quint64 raw = 0;
     QVERIFY(imgsparse::sparseRawSizeFromHeader(h, raw));
     QCOMPARE(raw, quint64(3 * 4096));
