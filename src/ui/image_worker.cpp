@@ -359,6 +359,11 @@ void ImageWorker::doDetect(const QString &path)
                     if (!field.isEmpty())   // 空值不拼出空分隔符
                         result.detail += QStringLiteral(" · ") + field;
                 }
+                // spec §4「分区数」：清单条目数。措辞用「条目」不用「分区」——
+                // Program/UFS_PROVISION 等组的条目未必是分区名。0（清单无条目）不拼，
+                // 避免"0 个条目"误导（parse 失败根本到不了这里）。
+                if (!info.entries.isEmpty())
+                    result.detail += QStringLiteral(" · %1 个条目").arg(info.entries.size());
             }
         } else if (imgopp::detectOFP(header, tail, quint64(fileSize), variant)) {
             result.format = imgreg::Format::OFP;
@@ -366,13 +371,17 @@ void ImageWorker::doDetect(const QString &path)
                 ? QStringLiteral("OPPO/realme OFP 固件包 (MTK)")
                 : QStringLiteral("OPPO/realme OFP 固件包 (QC)");
             // 同上：OFP-MTK 尾头项目名（prjname）/版本（flashtype）。QC 清单无这两个
-            // 字段 → parseQc 留空 → 文案与原来逐字一致（QC 不变）。
+            // 字段 → parseQc 留空（QC 的 detail 只多出条目数，见下）。
             imgopp::OfpInfo info;
             if (imgopp::parseOFP(path, info, nullptr)) {
                 for (const QString &field : {info.projectName, info.version}) {
                     if (!field.isEmpty())
                         result.detail += QStringLiteral(" · ") + field;
                 }
+                // spec §4「分区数」：清单文件表条目数（QC/MTK 同字段；措辞同 OPS 分支
+                // 用「条目」—— QC 清单含 Sahara/Config/Provision 等非分区组）。
+                if (!info.files.isEmpty())
+                    result.detail += QStringLiteral(" · %1 个条目").arg(info.files.size());
             }
         }
     }

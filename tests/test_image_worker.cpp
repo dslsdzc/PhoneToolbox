@@ -66,30 +66,40 @@ QByteArray opsShapedBlob(quint64 size = 0x4000)
     return blob;
 }
 
-// 合成 OPS 包（可被 parseOPS 完整解析的最小形态）：settings.xml（仅 BasicInfo 组、
-// 无文件条目）密文 + 尾页 0x200，尾页 +0x14 记 settings 扇区 / +0x18 记清单明文长度
-// / +0x1C/+0x2C 记 project id / firmware 名 —— 字段偏移与 test_oppo_ops.cpp 的
-// buildOpsPackage 及 oppo_ops.cpp 常量同源（该文件的夹具另含文件条目，本用例只需要
-// 尾页字段 → 不复用其完整夹具，避免跨文件耦合）。
+// 合成 OPS 包（可被 parseOPS 完整解析的最小形态）：settings.xml 密文 + 尾页 0x200，
+// 尾页 +0x14 记 settings 扇区 / +0x18 记清单明文长度 / +0x1C/+0x2C 记 project id /
+// firmware 名 —— 字段偏移与 test_oppo_ops.cpp 的 buildOpsPackage 及 oppo_ops.cpp 常量
+// 同源（该文件的夹具另含下标越界等恶意形态，本文件只需要"能解出字段"的最小包）。
+//   withEntry = true  → 清单含 1 条 Program 条目（boot.img@0，0x200B），settings 挪到扇区 1
+//   withEntry = false → 清单仅 BasicInfo（条目数 0，验证"0 不拼"路径）
 // 注: 包长取 0x1000（doDetect 只在 fileSize ≥ 0x1000 时才读尾页做二次探测）。
-QByteArray opsPackage(const QString &projectId, const QString &firmwareName)
+QByteArray opsPackage(const QString &projectId, const QString &firmwareName,
+                      bool withEntry = true)
 {
     const QByteArray mboxBlob = imgopp::opsKeyCandidates().at(0).mboxBlob; // mbox5
-    const QByteArray xml = QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-                                          "<ProFile>\n  <BasicInfo Project=\"%1\" Version=\"%2\"/>\n"
-                                          "</ProFile>\n").arg(projectId, firmwareName).toUtf8();
+    QString xml = QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                                 "<ProFile>\n  <BasicInfo Project=\"%1\" Version=\"%2\"/>\n")
+                      .arg(projectId, firmwareName);
+    if (withEntry) {
+        // 条目数据区在扇区 0（内容无关紧要：parseOPS 只按声明长度做越界校验）
+        xml += QStringLiteral("  <Program>\n    <program filename=\"boot.img\""
+                              " FileOffsetInSrc=\"0\" SizeInByteInSrc=\"512\"/>\n  </Program>\n");
+    }
+    xml += QStringLiteral("</ProFile>\n");
+    const QByteArray xmlBytes = xml.toUtf8();
     // 参照的补齐式 (0x10 - len%0x10) 在已对齐时也补一整块（同 test_oppo_ops.cpp）
-    const QByteArray padded = xml + QByteArray(0x10 - (xml.size() % 0x10), '\0');
+    const QByteArray padded = xmlBytes + QByteArray(0x10 - (xmlBytes.size() % 0x10), '\0');
     const QByteArray cipher = imgopp::opsEncrypt(padded, mboxBlob);
 
+    const qsizetype settingsOff = withEntry ? 0x200 : 0; // 条目数据区（扇区 0）之后
     QByteArray blob(0x1000, '\0');
-    blob.replace(0, cipher.size(), cipher);
+    blob.replace(settingsOff, cipher.size(), cipher);
     const qsizetype tailBase = blob.size() - 0x200;
     ofptest::putLE32(blob, tailBase + 0x00, 2);              // version（A11 判据）
     ofptest::putLE32(blob, tailBase + 0x04, 1);              // flags（A11 判据）
     ofptest::putLE32(blob, tailBase + 0x10, 0x7CEF);         // 魔数
-    ofptest::putLE32(blob, tailBase + 0x14, 0);              // settings 扇区位置 = 0
-    ofptest::putLE32(blob, tailBase + 0x18, quint32(xml.size())); // 清单明文长度
+    ofptest::putLE32(blob, tailBase + 0x14, quint32(settingsOff / 0x200)); // settings 扇区
+    ofptest::putLE32(blob, tailBase + 0x18, quint32(xmlBytes.size()));      // 清单明文长度
     ofptest::putFixed(blob, tailBase + 0x1C, 16, projectId);
     ofptest::putFixed(blob, tailBase + 0x2C, 32, firmwareName);
     return blob;
@@ -186,6 +196,18 @@ void TestImageWorker::detectOpsDetailCarriesTailFields()
     QString why;
     QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OPS);
+    // spec §4「分区数」按条目数收口（措辞「条目」：Program/UFS_PROVISION 等组未必是分区）
+    QCOMPARE(r.detail,
+             QStringLiteral("OnePlus OPS 固件包 · 18801 · guacamoles_31_O.09_190820 · 1 个条目"));
+
+    // 条目数 0（清单只有 BasicInfo）：不得拼出"0 个条目"（误导信息），尾页字段照常拼
+    const QString noEntry = writeBlob(dir.filePath(QStringLiteral("noentry.ops")),
+                                      opsPackage(QStringLiteral("18801"),
+                                                 QStringLiteral("guacamoles_31_O.09_190820"),
+                                                 false));
+    QVERIFY(!noEntry.isEmpty());
+    QVERIFY2(detectFile(worker, noEntry, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::OPS);
     QCOMPARE(r.detail,
              QStringLiteral("OnePlus OPS 固件包 · 18801 · guacamoles_31_O.09_190820"));
 }
@@ -225,13 +247,15 @@ void TestImageWorker::detectQcPackage()
     QString why;
     QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OFP);
-    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (QC)"));
+    // QC 无 project/version 字段，但清单文件表有条目 → detail 尾部带条目数
+    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (QC) · 2 个条目"));
 }
 
 // MTK 合成包（首 16B 试解出 "MMM"）→ OFP (MTK)。注：包体须 ≥ 0x1000 才会走尾页
 // 探测（doDetect 对小文件跳过尾页读取），故载荷取 0x2000。
-// spec §4 信息卡：detail 须带尾头项目名（prjname）与版本（flashtype）—— 值为夹具
-// 显式给定（非默认值），断言其确实来自解析结果。
+// spec §4 信息卡：detail 须带尾头项目名（prjname）/版本（flashtype）/条目数 —— 前两者
+// 为夹具显式给定（非默认值）、后者用两条目（数量非 1，断言来自真实计数），确认其
+// 确实来自解析结果。
 void TestImageWorker::detectMtkPackage()
 {
     QTemporaryDir dir;
@@ -239,7 +263,9 @@ void TestImageWorker::detectMtkPackage()
     ofptest::MtkBuildOptions opts;
     opts.prjname = QStringLiteral("CPH1827");
     const ofptest::MtkPackage pkg = ofptest::buildMtkPackage(
-        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')}}, opts);
+        {{QStringLiteral("boot"), QStringLiteral("boot.img"), QByteArray(0x2000, 'M')},
+         {QStringLiteral("system"), QStringLiteral("system.img"), QByteArray(0x2000, 'S')}},
+        opts);
     QVERIFY(pkg.isValid());
     const QString path = writeBlob(dir.filePath(QStringLiteral("mtk.ofp")), pkg.blob);
     QVERIFY(!path.isEmpty());
@@ -249,7 +275,8 @@ void TestImageWorker::detectMtkPackage()
     QString why;
     QVERIFY2(detectFile(worker, path, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::OFP);
-    QCOMPARE(r.detail, QStringLiteral("OPPO/realme OFP 固件包 (MTK) · CPH1827 · UFS"));
+    QCOMPARE(r.detail,
+             QStringLiteral("OPPO/realme OFP 固件包 (MTK) · CPH1827 · UFS · 2 个条目"));
 }
 
 // 不足一页（0x200B）：读不到完整尾页 → 跳过尾页探测，仅扩展名兜底（不崩不误判）
