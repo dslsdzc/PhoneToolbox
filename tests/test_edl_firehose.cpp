@@ -211,20 +211,28 @@ void TestEdlFirehose::eraseNumericRangeKeepsRange()
 }
 
 // patch 的 start_sector 同样允许表达式、同样必须原样透传
-// （reference/qdl/src/firehose.c:1420-1421 把 start_sector 与 value 一起原样下发；
-// 真实样本 reference/qdl/tests/data/patch1.xml 的 start_sector="NUM_DISK_SECTORS-5."）。
-// 逐字节断言：kills "表达式为空时发十进制 0"这类实现（模型契约 startSector==0）。
+// （reference/qdl/src/firehose.c:1420-1421 把 start_sector 与 value 一起原样下发）。
+// 夹具取真实样本 reference/qdl/tests/data/patch1.xml 的 **L9 整行原样**（start_sector 表达式那行）：
+//   start_sector="NUM_DISK_SECTORS-5." byte_offset="552" physical_partition_number="1"
+//   size_in_bytes="8" value="NUM_DISK_SECTORS-6." filename="DISK" SECTOR_SIZE_IN_BYTES="4096"
+//   what="Update last partition 5 'last_parti' with actual size in Backup Header."
+// （此前该用例的字段是**两行真实条目的混合**——start_sector 取自 L9、value="0" 与 what 取自 L30
+//  "Zero Out Header CRC..."，那组合在真包里不存在；混合不削弱断言强度，但让"这就是真包形态"的
+//  说法站不住，故按单行对齐。）
+// 逐字节断言：kills "表达式为空时发十进制 0"这类实现（模型契约 startSector==0）；同时钉住
+// value 表达式（NUM_DISK_SECTORS-6.）也原样透传、what 不进 XML（:1408 只进日志）。
 void TestEdlFirehose::patchXmlPassesStartSectorExprVerbatim()
 {
     edl::PlanEntry e; e.action = edl::PlanEntry::Action::Patch;
     e.lun = 1; e.startSector = 0; e.startSectorExpr = QStringLiteral("NUM_DISK_SECTORS-5.");
-    e.byteOffset = 0; e.sizeInBytes = 4; e.value = QStringLiteral("0"); e.sectorSize = 4096;
+    e.byteOffset = 552; e.sizeInBytes = 8; e.value = QStringLiteral("NUM_DISK_SECTORS-6.");
+    e.sectorSize = 4096;
     e.imageFile = QStringLiteral("DISK");
-    e.what = QStringLiteral("Zero Out Header CRC in Backup Header.");
+    e.what = QStringLiteral("Update last partition 5 'last_parti' with actual size in Backup Header.");
     QCOMPARE(edl::xmlPatch(e),
-             QByteArray("<patch SECTOR_SIZE_IN_BYTES=\"4096\" byte_offset=\"0\" filename=\"DISK\" "
-                        "physical_partition_number=\"1\" size_in_bytes=\"4\" "
-                        "start_sector=\"NUM_DISK_SECTORS-5.\" value=\"0\"/>"));
+             QByteArray("<patch SECTOR_SIZE_IN_BYTES=\"4096\" byte_offset=\"552\" filename=\"DISK\" "
+                        "physical_partition_number=\"1\" size_in_bytes=\"8\" "
+                        "start_sector=\"NUM_DISK_SECTORS-5.\" value=\"NUM_DISK_SECTORS-6.\"/>"));
 }
 
 // 表达式条目即使 numSectors==0 也不是"整 LUN"（Task 1 报告 §6 标注的模型组合）：

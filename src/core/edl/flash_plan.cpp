@@ -37,7 +37,7 @@ QString attrRaw(QXmlStreamReader &reader, const char *name, bool *ok)
     return attrRawFrom(reader.attributes(), name, ok);
 }
 
-// 数值属性：base 0 解析（识别 0x 前缀），与 qdl strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）。
+// 数值属性：base 0 解析（识别 0x 前缀），与 qdl strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:85）。
 // 缺失、空串、不可解析一律 *ok=false（同 qdl attr_as_* 的 errors++ → 丢弃该条目）。
 //
 // **适用范围（与 readSectorAttr 的分工，勿混用）**：只用于 program/patch 的**纯数值**属性
@@ -92,7 +92,7 @@ struct SectorAttr {
 //   base=10（start_sector）：只认纯十进制 —— 0x 与表达式一样进 NonDecimal 原样透传，
 //          避免主机改写下发形态（spec §3.3 契约：startSector 只填"纯十进制"值）；
 //   base=0 （erase 的 num_partition_sectors）：识别 0x/0 前缀，与 qdl 的数值属性
-//          attr_as_unsigned → strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:80）——
+//          attr_as_unsigned → strtoul(value, NULL, 0) 一致（reference/qdl/src/util.c:85）——
 //          它是纯数值属性，0x800 这种十六进制形态必须当数值接受，而不是当"表达式"丢弃。
 SectorAttr readSectorAttrFrom(const QXmlStreamAttributes &attrs, const char *name, int base = 10)
 {
@@ -1012,10 +1012,18 @@ void appendOpsProgramEntry(const QXmlStreamAttributes &attrs, quint32 groupLun, 
         // `<program label="misc">`）在本项目里无法编程（没有镜像可写）⇒ 它不会进计划，
         // 用户必须知道"这个分区没被安排写入"。
         const QString label = attrs.value(QStringLiteral("label")).toString();
+        // 属性缺失（或空串）时印 "未知" 而不是空串：`（lun=）` 会被读成"lun 就是空/0"，而真实情况是
+        // **没写这个属性** —— 该条目的 lun 本会由组序号兜底（见下面 lunOk 分支），诊断文案必须区分
+        // 这两件事（PB-B5）。
+        const QString lunText = attrs.value(QStringLiteral("physical_partition_number")).toString();
+        const QString shownLun = lunText.isEmpty()
+                                     ? QStringLiteral("未知（未写或空的 physical_partition_number，"
+                                                      "组序号兜底）")
+                                     : lunText;
         if (!label.isEmpty())
             warnings << QStringLiteral("OPS 条目 %1（lun=%2）无 filename，不加入计划（没有镜像可写；"
                                        "参照 opscrypto.py:614-615 跳过空名）")
-                            .arg(label, attrs.value(QStringLiteral("physical_partition_number")).toString());
+                            .arg(label, shownLun);
         return;
     }
 

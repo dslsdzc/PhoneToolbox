@@ -29,9 +29,13 @@ using ExtractProgress = std::function<void(const QString &name, int percent)>;
 //     十六进制比较大小写不敏感）。不匹配 → *error = "校验失败: <name> sha256 不匹配" 并返回
 //     false；已写产物保留（spec §5：不回滚，可重跑）
 //   - 条目名不安全（空 / 含 '/'、'\\' / ".." 成分 / 绝对路径）→ 跳过该条目并把中文提示写入
-//     *error，其余条目继续提取（恶意输入防护；同 tar_image.cpp safeTarName() 的拒绝语义）。
+//     *error，其余条目继续提取（恶意输入防护；**比 tar_image.cpp safeTarName() 更严** ——
+//     tar 允许子目录，本模块的条目名是扁平分区分名，连 '/' 也拒绝，见 oppo_extract.cpp 的
+//     isSafeEntryName() 注释）。
 //     此时只要还有条目被提取成功即返回 true —— 返回 true 且 *error 非空表示"部分条目被
-//     跳过"，调用方应把 *error 一并展示；一个条目都没提取成功则返回 false
+//     跳过"，调用方应把 *error 一并展示；一个条目都没提取成功则返回 false。
+//     **跳过提示逐条累积**（换行分隔），且后续致命失败只**追加**不覆盖：返回 false 时
+//     *error 同时含"哪些条目被跳过"与最终失败原因
 //   - 产物路径与输入包路径相同 → 拒绝（spec §5 流式写保护；先判后开，包本体不被截断）
 //   - 清单为空（无可提取条目）→ 拒绝
 bool extractOFP(const QString &path, const QString &outDir,

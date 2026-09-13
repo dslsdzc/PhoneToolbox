@@ -54,6 +54,7 @@ private slots:
     void detectTinyFileSkipsTailProbe();
     void detectUnknownBytesStaysUnknown();
     void detectGpt4096LbaLayout();
+    void detectSuperGeometryAt4096();
     void opsTailAlsoMatchesOfpQcJudge();
     void unpackOfpWritesOutputs();
     void unpackOfpPartialSuccessReportsWarning();
@@ -460,6 +461,41 @@ void TestImageWorker::detectGpt4096LbaLayout()
     // 负向对照：同样尺寸但签名不在两处 → 仍是扩展名兜底（.img → RawImage），不误报成 GPT
     QByteArray notGpt(0x1200, '\x5A');
     const QString pathNot = writeBlob(dir.filePath(QStringLiteral("plain.img")), notGpt);
+    QVERIFY(!pathNot.isEmpty());
+    QVERIFY2(detectFile(*worker, pathNot, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::RawImage);
+}
+
+// super 的 geometry magic "gDla" @4096（PB-D1）：判据要求探测缓冲 ≥ 4100 字节
+// （registry.cpp 的 super 分支），而缓冲宽度只由 `ImageWorker::doDetect` 决定（8192）——
+// **必须走"文件 → worker"这条路**才能守护它：test_registry.cpp 的 super 用例直接把一个
+// 8192 字节的 QByteArray 喂给 detect()，缓冲改成 4096 它照样绿（它审的是判据，不是缓冲）。
+// 夹具 0x1200 = 4608 字节是刻意的（与 detectGpt4096LbaLayout 同款）：> 4096（改前缓冲）
+// 且 < 8192（现缓冲）⇒ 缓冲若退回 4096，header.size()=4096 < 4100，本用例必红
+// （整盘 super 会掉到扩展名兜底 .img → RawImage）。
+// 背景（②-b 顺带激活的行为变化）：缓冲 4096→8192 让这条判据**从恒不可达变为可达** ——
+// 改前任何文件都走不到它，故"整盘 super 被判成 RawImage"从未被记为缺陷；判据本身全是下界
+// （≥4100、四个字节相等），只激活、不关闭任何既有分类，此处只补用例 + 注释记明。
+void TestImageWorker::detectSuperGeometryAt4096()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QByteArray superImg(0x1200, 0);
+    superImg[4096] = 'g'; superImg[4097] = 'D';
+    superImg[4098] = 'l'; superImg[4099] = 'a';
+    const QString path = writeBlob(dir.filePath(QStringLiteral("super.img")), superImg);
+    QVERIFY(!path.isEmpty());
+
+    auto worker = makeWorker();
+    imgreg::Detected r;
+    QString why;
+    QVERIFY2(detectFile(*worker, path, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::Super);
+    QCOMPARE(r.detail, QStringLiteral("super 动态分区"));
+
+    // 对照：同样尺寸、偏移 4096 处换成别的字节 → 仍是扩展名兜底（不把 0x1000 附近当 super）
+    QByteArray notSuper(0x1200, '\x5A');
+    const QString pathNot = writeBlob(dir.filePath(QStringLiteral("plain-super.img")), notSuper);
     QVERIFY(!pathNot.isEmpty());
     QVERIFY2(detectFile(*worker, pathNot, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::RawImage);

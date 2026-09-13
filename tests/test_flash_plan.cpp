@@ -43,6 +43,7 @@ class TestFlashPlan : public QObject
 private slots:
     void parsesProgramEntries();
     void skipsMalformedEntryWithWarning();
+    void programAndPatchMissingStartSectorAreDropped();
     void parsesEraseTag();
     void parsesPatchEntriesAndSkipsNonDisk();
     void eraseTagWithoutRangeMeansWholeLun();
@@ -127,6 +128,50 @@ void TestFlashPlan::skipsMalformedEntryWithWarning()
     QCOMPARE(out.size(), 1);          // 只留合法条目
     QCOMPARE(warn.size(), 1);         // 缺属性条目被记 warning
     QVERIFY(warn[0].contains(QStringLiteral("filename")));
+}
+
+// A1 剩余缺口：`<program>` / `<patch>` 的 start_sector **缺失或为空** → 条目被丢弃 + warning。
+// 这两条与 erase 侧的 fail-closed 同源但**不同判据**：program/patch 的 start_sector 是**必需属性**
+// （reference/qdl/src/program.c:254-271；patch 8 属性全必需 reference/qdl/src/patch.c:41-48），
+// 缺失走 RequiredAttrs::noteMissing → attrs.ok()==false → 整条丢弃（flash_plan.cpp:190-191、
+// :246-247、:366-367）。空串同样按缺失处理（SectorAttrKind::Empty）。
+// **为什么必须丢弃而不能当 0**：start_sector 缺省=0 在 firehose 侧是合法地址（LBA0），
+// 主机替用户补 0 就是"静默写错地址"——与 erase 侧"起点不明就丢"是同一条原则。
+void TestFlashPlan::programAndPatchMissingStartSectorAreDropped()
+{
+    QTemporaryDir dir;
+    // ① program 缺 start_sector（其余必需属性齐全）→ 丢；空的 start_sector="" 同样丢
+    const QString rawXml = writeFile(dir.path(), "rawprogram3.xml",
+        "<data>\n"
+        "  <program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"good.img\" label=\"good\"\n"
+        "           num_partition_sectors=\"8\" physical_partition_number=\"0\"\n"
+        "           start_sector=\"16\" file_sector_offset=\"0\" />\n"
+        "  <program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"nogeo.img\" label=\"nogeo\"\n"
+        "           num_partition_sectors=\"8\" physical_partition_number=\"0\"\n"
+        "           file_sector_offset=\"0\" />\n"
+        "  <program SECTOR_SIZE_IN_BYTES=\"4096\" filename=\"empty.img\" label=\"empty\"\n"
+        "           num_partition_sectors=\"8\" physical_partition_number=\"0\"\n"
+        "           start_sector=\"\" file_sector_offset=\"0\" />\n"
+        "</data>\n");
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY(edl::parseRawprogramXml(rawXml, 0, out, warn, &err));
+    QCOMPARE(out.size(), 1);                       // 只留几何齐全的那条
+    QCOMPARE(out[0].partitionName, QStringLiteral("good"));
+    QCOMPARE(warn.size(), 2);                      // 两条各出一条 warning（丢条目必须可见）
+    for (const QString &w : warn)
+        QVERIFY2(w.contains(QStringLiteral("start_sector")), qPrintable(w));
+
+    // ② patch 缺 start_sector → 丢（值是表达式也救不了：属性本身缺失）
+    out.clear(); warn.clear();
+    const QString patchXml = writeFile(dir.path(), "patch3.xml",
+        "<patches>\n"
+        "  <patch SECTOR_SIZE_IN_BYTES=\"4096\" byte_offset=\"16\" filename=\"DISK\"\n"
+        "         physical_partition_number=\"0\" size_in_bytes=\"4\" value=\"0\" what=\"x\" />\n"
+        "</patches>\n");
+    QVERIFY(edl::parsePatchXml(patchXml, 0, out, warn, &err));
+    QCOMPARE(out.size(), 0);
+    QCOMPARE(warn.size(), 1);
+    QVERIFY2(warn[0].contains(QStringLiteral("start_sector")), qPrintable(warn[0]));
 }
 
 void TestFlashPlan::parsesEraseTag()
@@ -893,6 +938,9 @@ void TestFlashPlan::opsContainerFormChildWinsOverContainer()
         "           start_sector=\"1\" num_partition_sectors=\"1\">\n"
         "    <Image filename=\"\" sparse=\"false\" />\n"
         "  </program>\n"
+        // 无 filename 且**未写** physical_partition_number：告警里的 lun 必须写"未知"而不是留空
+        // （`（lun=）` 会被读成 lun=0/空值，而真相是属性缺失、lun 本会由组序号兜底 —— PB-B5）
+        "  <program label=\"nopn\"><Image filename=\"\" sparse=\"false\" /></program>\n"
         "</Program0></Firehose>";
     QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
     QVERIFY(writeBytes(dir.path() + "/persist.img", QByteArray(4096, '\x21')));
@@ -910,10 +958,18 @@ void TestFlashPlan::opsContainerFormChildWinsOverContainer()
     QCOMPARE(e.sparse, false);                                          // **子元素胜**（容器 true）
     QCOMPARE(e.sha256, QStringLiteral("ab"));                           // 子元素 Sha256
     bool miscWarned = false;
-    for (const QString &w : plan.warnings)
+    bool nopnWarned = false;
+    for (const QString &w : plan.warnings) {
         if (w.contains(QStringLiteral("misc")) && w.contains(QStringLiteral("无 filename")))
             miscWarned = true;
+        if (w.contains(QStringLiteral("nopn")) && w.contains(QStringLiteral("无 filename"))) {
+            nopnWarned = true;
+            QVERIFY2(w.contains(QStringLiteral("未知")), qPrintable(w));   // 不印空 lun（PB-B5）
+            QVERIFY2(!w.contains(QStringLiteral("（lun=）")), qPrintable(w));
+        }
+    }
     QVERIFY(miscWarned);
+    QVERIFY(nopnWarned);
 }
 
 // 诊断如实性：元数据**只缺 num** 时，start 也会被 GPT 值覆盖（对账末尾无条件写回两个字段）——

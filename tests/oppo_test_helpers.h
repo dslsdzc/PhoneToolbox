@@ -111,6 +111,11 @@ struct QcBuildOptions
                                     // 迫使解析走 (fileSize-page)-xmlOffset-0x57 重算分支
     QByteArray keyOverride;         // 非空 = 不用候选表，改用此外部 key（制造"密钥未知"包）
     QByteArray ivOverride;          // 与 keyOverride 配对
+    // 容器形态：把每个 `<File>` 再包一层无 Path/filename 的 `<Container>`（组语义取最外层的组）。
+    // 解析层的容器判据是"元素没有 Path/filename 属性"（oppo_ofp.cpp:289-302），**与元素名无关**；
+    // 参照 ofp_qc_decrypt.py L329-335 对无属性 item 也是下钻其 subitem 再按 child.tag 解释组 —
+    // 真实 ProFile.xml 的容器标签名未见样本，此处用清单里的 `<Container>` 表意。
+    bool wrapInContainer = false;
 };
 
 struct QcPackage
@@ -189,7 +194,9 @@ inline QcPackage buildQcPackage(const QList<QcFileSpec> &files, const QcBuildOpt
     for (qsizetype i = 0; i < files.size(); ++i) {
         const QcFileSpec &spec = files.at(i);
         const quint64 sector = (quint64(spec.plaintext.size()) + opts.pageSize - 1) / opts.pageSize;
-        QString elem = QStringLiteral("    <File Path=\"%1\" FileOffsetInSrc=\"%2\"")
+        const QString indent = opts.wrapInContainer ? QStringLiteral("      ")
+                                                    : QStringLiteral("    ");
+        QString elem = indent + QStringLiteral("<File Path=\"%1\" FileOffsetInSrc=\"%2\"")
                            .arg(spec.path)
                            .arg(offsets.at(i) / opts.pageSize);
         if (!spec.omitSizeInByteAttr)
@@ -198,8 +205,16 @@ inline QcPackage buildQcPackage(const QList<QcFileSpec> &files, const QcBuildOpt
                     .arg(sector)
                     .arg(spec.md5, spec.sha256,
                          spec.sparse ? QStringLiteral("true") : QStringLiteral("false"));
-        xml += QStringLiteral("  <%1>\n").arg(spec.group) + elem
-               + QStringLiteral("  </%1>\n").arg(spec.group);
+        if (opts.wrapInContainer) {
+            // 组 → <Container>（无 Path/filename，即解析层的容器判据）→ <File>；组名仍取最外层的组
+            xml += QStringLiteral("  <%1>\n").arg(spec.group)
+                   + QStringLiteral("    <Container>\n") + elem
+                   + QStringLiteral("    </Container>\n")
+                   + QStringLiteral("  </%1>\n").arg(spec.group);
+        } else {
+            xml += QStringLiteral("  <%1>\n").arg(spec.group) + elem
+                   + QStringLiteral("  </%1>\n").arg(spec.group);
+        }
     }
     xml += QStringLiteral("</ProFile>\n");
 

@@ -44,8 +44,10 @@ struct Triplet
 // QC triplet 表。表序 = 尝试顺序（ofp_qc_decrypt.py generatekey2() L54-92），
 // 每行机型注释取自参照实现同行注释。
 const Triplet kQcTriplets[] = {
-    // R9s/A57t
-    {"V1.4.17", "27827963787265EF89D126B69A495A21", "82C50203285A2CE7D8C3E198383CE94C",
+    // R9s/A57t。keyId 用参照原文 "V1.4.17/1.4.27"（ofp_qc_decrypt.py L56）—— 该串会出现在
+    // 诊断输出（OFP/OPS 命中的 keyId），必须与参照/速查表可逐字对上；本表既有 V1.6.6 一族也
+    // 用同一多版本写法。1.4.27 与该行是**同一 key triplet**（别名，非另一套密钥）。
+    {"V1.4.17/1.4.27", "27827963787265EF89D126B69A495A21", "82C50203285A2CE7D8C3E198383CE94C",
      "422DD5399181E223813CD8ECDF2E4D72"},
     // a3s
     {"V1.6.17", "E11AA7BB558A436A8375FD15DDD4651F", "77DDF6A0696841F6B74782C097835169",

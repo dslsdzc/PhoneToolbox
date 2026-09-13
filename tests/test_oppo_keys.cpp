@@ -45,7 +45,7 @@ void TestOppoKeys::qcDerivation()
     QCOMPARE(keys.size(), 6);
 
     // 速查表 §QC 派生自测断言（逐条）
-    QCOMPARE(keys[0].keyId, QStringLiteral("V1.4.17"));
+    QCOMPARE(keys[0].keyId, QStringLiteral("V1.4.17/1.4.27"));   // 参照原文 id（含 1.4.27 别名）
     QCOMPARE(keys[0].key, QByteArray("d154afeeaafa958f"));
     QCOMPARE(keys[0].iv, QByteArray("2c040f5786829207"));
     QCOMPARE(keys[1].keyId, QStringLiteral("V1.6.17"));

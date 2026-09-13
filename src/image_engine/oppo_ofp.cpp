@@ -54,16 +54,18 @@ constexpr quint64 kMtkEntrySize = 0x60;
 // 与 FirmwareKit OfpMtkHeader.Parse()（OppHeader.cs L93-101 注释）逐字段一致：
 //   prjname[46]@0 | u64@48 | reserved[4]@56 | cpu[7]@60 | flashtype[5]@67 | entries u16@72
 //   | prjinfo[32]@74 | crc u16@106
+// 本模块**只读** prjname / flashtype / entries（下面的常量）：u64@48、reserved、cpu[7]@60、
+// prjinfo、crc 都只是参照布局的记录，不设常量（曾有的 kMtkCpuOff/Len 全仓无人读，已删——
+// 留着会被误当"这里会解析 cpu"，而 cpu 字段在本项目中没有任何消费方）。
 constexpr qsizetype kMtkPrjNameOff = 0;
 constexpr qsizetype kMtkPrjNameLen = 46;
-constexpr qsizetype kMtkCpuOff = 60;
-constexpr qsizetype kMtkCpuLen = 7;
 constexpr qsizetype kMtkFlashTypeOff = 67;
 constexpr qsizetype kMtkFlashTypeLen = 5;
 constexpr qsizetype kMtkEntryCountOff = 72;
 
-// MTK 文件表条目字段偏移（main() L139 `unpack("<32s Q Q Q 32s Q")`）
-constexpr qsizetype kMtkEntryNameOff = 0;      // name[32]
+// MTK 文件表条目字段偏移（main() L139 `unpack("<32s Q Q Q 32s Q")`）。
+// 条目里有两个 32B 名字段：name[32]@0 与 filename[32]@56 —— 只有后者是落盘文件名（@:419 读取），
+// name[32]@0 全仓无人读，故不设常量（原 kMtkEntryNameOff 已删）。
 constexpr qsizetype kMtkEntryStartOff = 32;    // start u64
 constexpr qsizetype kMtkEntryLengthOff = 40;   // length u64（落盘总长）
 constexpr qsizetype kMtkEntryEncLenOff = 48;   // encrypted_length u64（需解密的前缀长度）

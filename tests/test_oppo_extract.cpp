@@ -26,6 +26,7 @@ private slots:
     void extractSparseAnnotation();
     void extractRejectsBadChecksum();
     void extractRejectsUnsafeNames();
+    void extractKeepsSkipNotesWhenFatal();
     void extractRejectsSamePathAndMissing();
 };
 
@@ -375,6 +376,31 @@ void TestOppoExtract::extractRejectsUnsafeNames()
     QString err3;
     QVERIFY(!imgopp::extractOFP(emptyPath, dir.filePath(QStringLiteral("out3")), {}, &err3));
     QVERIFY(!err3.isEmpty());
+}
+
+// 跳过清单在**致命失败**时不得被吞掉（清扫 PA6）：条目名净化的逐条提示累积在 *error（appendNote），
+// 若失败收口（fail）直接赋值，用户只会看到最后一句（本例："无法创建输出目录"），完全不知道包里还有
+// 条目被跳过 —— 而"包不完整/解不开"恰恰是最需要那份清单的场景。
+// 构造：一个不安全条目（先累积跳过提示）+ outDir 指向一个**已存在的普通文件**（mkpath 必失败 →
+// 触发后续致命错误），于是两条诊断必须同时在 *error 里。
+void TestOppoExtract::extractKeepsSkipNotesWhenFatal()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const ofptest::QcPackage pkg = ofptest::buildQcPackage(
+        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x80, 'B'), 0}});
+    QVERIFY(pkg.isValid());
+    const QString pkgPath = writePkg(dir.path(), QStringLiteral("notes.ofp"), pkg.blob);
+    QVERIFY(!pkgPath.isEmpty());
+
+    const QString blocked = dir.filePath(QStringLiteral("blocked"));
+    QVERIFY(!writePkg(dir.path(), QStringLiteral("blocked"), QByteArray("x")).isEmpty());
+
+    QString err;
+    QVERIFY(!imgopp::extractOFP(pkgPath, blocked, {}, &err));
+    QVERIFY2(err.contains(QStringLiteral("文件名不安全")), qPrintable(err));    // ← 跳过提示必须还在
+    QVERIFY2(err.contains(QStringLiteral("无法创建输出目录")), qPrintable(err));  // 致命原因也要在
 }
 
 // 路径守卫（spec §5）：产物路径 == 包路径 → 拒绝，且必须"先判后开"（包不被截断）

@@ -59,6 +59,11 @@ Detected detect(const QByteArray &header, const QString &fileName)
         return {Format::VendorBoot, "vendor_boot 镜像"};
     // super 动态分区: geometry magic 0x616c4467（"gDla"）小端落盘，位于偏移 4096
     // （LP_METADATA_GEOMETRY_OFFSET）；偏移 0 是保留区，"0PLA" metadata 头在偏移 8192。
+    // ⚠️ 本判据要求 header ≥ 4100 字节 ⇒ **依赖调用方的探测缓冲宽度**：`ImageWorker::doDetect`
+    // 读 8192（image_worker.cpp，与 GPT-4096 布局同一处决定）时可达；缓冲退回 4096 时对**任何**
+    // 文件都不可达（整盘 super 会掉到扩展名兜底 RawImage）。这条耦合由
+    // `tests/test_image_worker.cpp` 的 detectSuperGeometryAt4096 钉住（夹具 0x1200 字节：
+    // > 4096 且 < 8192，缓冲一变窄就红）。
     if (header.size() >= 4100 &&
         static_cast<uchar>(header[4096]) == 'g' && static_cast<uchar>(header[4097]) == 'D' &&
         static_cast<uchar>(header[4098]) == 'l' && static_cast<uchar>(header[4099]) == 'a')

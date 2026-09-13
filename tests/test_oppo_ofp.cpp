@@ -20,6 +20,7 @@ private slots:
     void detectRejectsRandomTail();
 
     void parseQcSynthetic();
+    void parseQcContainerChildInheritsGroup();
     void parseQcGroupPolicies();
     void parseQcA57XmlLengthHack();
     void parseMtkSynthetic();
@@ -109,8 +110,15 @@ void TestOppoOfp::detectRejectsRandomTail()
     QVERIFY(!imgopp::detectOFP(rnd.left(16), ofptest::tailOf(rnd, 0x1000), 0x1400, v));
     QCOMPARE(v, imgopp::OfpVariant::Unknown);
 
-    // 尾不足一页（0x100 < 0x200）
+    // 文件不足一页（0x100 < 0x200 = kQcMinFileSize）：**先撞的是 fileSize 门禁**
+    // （oppo_ofp.cpp:452），根本没走到"扫尾页找 QC 标记"—— 本行测的是文件尺寸判据，
+    // 不是尾页长度判据（注释原写"尾不足一页"，与实现的判据顺序不符）。
     QVERIFY(!imgopp::detectOFP(rnd.left(16), rnd.left(0x100), 0x100, v));
+    // 尾页短于一页但它确实是"文件末尾"（fileSize = 0x200 过门禁，tail 仅 0x100）：两个页尺寸候选
+    // 都因 `tail.size() < pageSize` 被跳过（qcPageSizeFromTail 的 continue）→ 判非 QC。
+    // 上面那行由 fileSize 门禁拦下，覆盖不到这条 continue。
+    QVERIFY(!imgopp::detectOFP(rnd.left(16), rnd.left(0x100), 0x200, v));
+    QCOMPARE(v, imgopp::OfpVariant::Unknown);
     // 头不足 16B（MTK 试解无法进行，QC 也不中）
     QVERIFY(!imgopp::detectOFP(rnd.left(4), ofptest::tailOf(rnd, 0x1000), 0x1400, v));
     // tail 比整个文件还大（调用方参数矛盾）
@@ -159,6 +167,35 @@ void TestOppoOfp::parseQcSynthetic()
     QCOMPARE(info.files[1].offset, quint64(10) * 0x200);
     QCOMPARE(info.files[1].size, quint64(0x180));   // 落盘长度取 SizeInByteInSrc
     QCOMPARE(info.files[1].encryptedSize, quint64(0));  // 明文组
+}
+
+// QC 清单的**容器形态**：`<Container>`（无 Path/filename 的元素）包住 `<File>`，子元素按**容器的组**
+// 处理（oppo_ofp.cpp:294-302）。这是 Phase A 审查点名的"唯一无覆盖控制流"——既有夹具只会生成
+// `<组><File/></组>` 扁平形态，容器分支的 4 行（下钻 + 按同组 appendQcFile）此前没有任何用例经过。
+// 参照：ofp_qc_decrypt.py L329-335 对"无 Path/filename 的 item"同样下钻 subitem，组语义取 child.tag。
+void TestOppoOfp::parseQcContainerChildInheritsGroup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ofptest::QcBuildOptions opts;
+    opts.wrapInContainer = true;
+    const ofptest::QcPackage pkg = ofptest::buildQcPackage(
+        {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"),
+          QByteArray(0x100, 'P'), 2}}, opts);
+    QVERIFY(pkg.isValid());
+    const QString path = writePkg(dir, QStringLiteral("qc-container.ofp"), pkg.blob);
+    QVERIFY(!path.isEmpty());
+
+    imgopp::OfpInfo info;
+    QString error;
+    QVERIFY2(imgopp::parseOFP(path, info, &error), qPrintable(error));
+    QCOMPARE(info.variant, imgopp::OfpVariant::Qc);
+    QCOMPARE(info.files.size(), 1);
+    QCOMPARE(info.files[0].name, QStringLiteral("prog_ufs_firehose_test.elf"));
+    QCOMPARE(info.files[0].group, QStringLiteral("Sahara"));    // ← 继承容器所在组的组语义
+    QCOMPARE(info.files[0].offset, quint64(2) * 0x200);         // 几何取自子元素自身
+    QCOMPARE(info.files[0].size, quint64(0x100));
+    QCOMPARE(info.files[0].encryptedSize, quint64(0x100));      // Sahara 全解密：容器形态不改组策略
 }
 
 // 组语义映射三条分支 + size 取 SizeInByteInSrc（非扇区对齐值）+ 校验属性透传

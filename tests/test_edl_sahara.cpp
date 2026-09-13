@@ -28,6 +28,12 @@ private slots:
     void handlesHelloSplitAcrossReads();
     void doesNotTruncate64BitOffset();
     void doesNotTruncate64BitLength();
+    void failsWhenHelloResponseWriteFails();
+    void failsWhenProgrammerWriteFails();
+    void failsWhenDoneReqWriteFails();
+    void parsesSecondFrameFromSameRead();
+    void stopsOnDeviceDeclaredCompletion();
+    void echoesDeviceVersionWithFallback();
 };
 
 void TestEdlSahara::servesProgrammerInRequestedSlices()
@@ -170,6 +176,126 @@ void TestEdlSahara::doesNotTruncate64BitLength()
     QVERIFY2(err.contains(QStringLiteral("越界")), qPrintable(err));
     QVERIFY2(err.contains(QStringLiteral("4294967296")), qPrintable(err));
     QCOMPARE(t.writes.size(), 1);
+}
+
+// ---- 写失败分支（PB-A2）：4 个写调用点各自的失败文案 ----
+// 写路径有 4 个**可独立失败**的调用点：HELLO_RSP（sendHelloResponse）／programmer 数据
+// （serveProgrammerChunk，READ_DATA 与 READ_DATA_64 两条分支共用）／DONE_REQ（sendDoneAndWait）。
+// 三者都经 IEdlTransport::write 上报，失败文案必须点明**是哪一段**发的（否则用户只看到
+// "注入的写失败"，无法定位卡在握手/数据/收尾的哪一步）。mock 的 failWriteAt 此前只被会话层用例
+// 用过（test_edl_session.cpp），Sahara 侧一处未用 ⇒ 这几条分支没有回归保护。
+
+// 调用点 ①：第 0 次写（HELLO_RSP）失败 → 带阶段名，且一个字节都没发出去
+void TestEdlSahara::failsWhenHelloResponseWriteFails()
+{
+    edl::MockEdlTransport t;
+    t.failWriteAt = 0;                                 // 第一次写就失败
+    t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0});
+    QString err;
+    QVERIFY(!edl::saharaLoadProgrammer(t, QByteArray("0123456789ABCDEF"), &err));
+    QVERIFY2(err.contains(QStringLiteral("HELLO_RSP 发送失败")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));   // 传输层原文保留
+    QCOMPARE(t.writes.size(), 0);
+}
+
+// 调用点 ②/③：programmer 数据写失败（READ_DATA 与 READ_DATA_64 两条分支各一次；
+// 同一条文案，但调用点不同 —— 只测其一无法排除"另一条分支没接错误"）
+void TestEdlSahara::failsWhenProgrammerWriteFails()
+{
+    const QByteArray prog("0123456789ABCDEF");
+    {   // READ_DATA（32 位）分支
+        edl::MockEdlTransport t;
+        t.failWriteAt = 1;                             // 第 0 次(HELLO_RSP)成功，数据段失败
+        t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+                << saharaFrame(edl::SAHARA_READ_DATA, {0, 0, 4, 0});
+        QString err;
+        QVERIFY(!edl::saharaLoadProgrammer(t, prog, &err));
+        QVERIFY2(err.contains(QStringLiteral("发送 programmer 数据失败")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));
+        QCOMPARE(t.writes.size(), 1);                  // 只有 HELLO_RSP
+        QCOMPARE(int(t.writes.at(0).at(0)), 0x02);
+    }
+    {   // READ_DATA_64 分支（同一 helper，但走 64 位取值路径）
+        edl::MockEdlTransport t;
+        t.failWriteAt = 1;
+        t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+                << saharaReadData64Frame(0, 4, 4);
+        QString err;
+        QVERIFY(!edl::saharaLoadProgrammer(t, prog, &err));
+        QVERIFY2(err.contains(QStringLiteral("发送 programmer 数据失败")), qPrintable(err));
+        QCOMPARE(t.writes.size(), 1);
+    }
+}
+
+// 调用点 ④：DONE_REQ 写失败（数据都发完了，收尾帧发不出去）—— 必须报 DONE_REQ 而不是前面任一段
+void TestEdlSahara::failsWhenDoneReqWriteFails()
+{
+    edl::MockEdlTransport t;
+    t.failWriteAt = 2;                                 // HELLO_RSP + 1 段数据之后
+    t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+            << saharaFrame(edl::SAHARA_READ_DATA, {0, 0, 4, 0})
+            << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0});
+    QString err;
+    QVERIFY(!edl::saharaLoadProgrammer(t, QByteArray("0123456789ABCDEF"), &err));
+    QVERIFY2(err.contains(QStringLiteral("DONE_REQ 发送失败")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));
+    QCOMPARE(t.writes.size(), 2);                      // HELLO_RSP + 数据（DONE_REQ 未记入）
+    QCOMPARE(t.writes.at(1), QByteArray("0123"));
+}
+
+// ---- 一次 read 含多帧：余量留给下一帧（PB-A3）----
+// PacketReader 的跨读缓冲（sahara.cpp:97-104）在"一次 bulk IN 同时给了两帧"时**不再向传输层要数据**，
+// 直接从 m_buf 切出第二帧。既有用例只覆盖了"半帧跨两次 read"的反方向（handlesHelloSplitAcrossReads），
+// 多帧同读这条路径没有测试 —— 而真机 bulk IN 一次给多帧是常态（帧都很小，见 kReadChunkBytes 注释）。
+// 断言两层：a) 第二帧被正确解析（否则会去读传输层、把 DONE_RSP 当 END_OF_IMAGE 用 → 流程失败）；
+// b) 传输层**只被读了 2 次**（HELLO+END_OF_IMAGE 一读、DONE_RSP 一读），即第二帧确实取自缓冲。
+void TestEdlSahara::parsesSecondFrameFromSameRead()
+{
+    edl::MockEdlTransport t;
+    t.reads << (saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+                + saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0}))    // ← 一次 read 两帧
+            << saharaFrame(edl::SAHARA_DONE_RSP, {});
+
+    QString err;
+    QVERIFY2(edl::saharaLoadProgrammer(t, QByteArray("0123456789ABCDEF"), &err), qPrintable(err));
+    QCOMPARE(t.writes.size(), 2);                                   // HELLO_RSP + DONE_REQ
+    QCOMPARE(int(t.writes.at(0).at(0)), int(edl::SAHARA_HELLO_RSP));
+    QCOMPARE(int(t.writes.at(1).at(0)), int(edl::SAHARA_DONE_REQ));
+    QCOMPARE(t.calls.count(QStringLiteral("read")), 2);              // 第二帧来自缓冲，不再读传输层
+}
+
+// 设备直接宣告完成（sahara.cpp:280-284 的 CMD_READY / DONE_RSP 分支）：多阶段/XML 配置流程里设备
+// 不需要我们的 DONE_REQ 就返回成功（bkerler sahara.py:741；既有 edl_handler.cpp:409-415 同）。
+// 这条 `return true` 此前无用例经过 —— 若被误改成"继续等下一帧"，真机会卡到超时。
+void TestEdlSahara::stopsOnDeviceDeclaredCompletion()
+{
+    for (const quint32 cmd : {quint32(edl::SAHARA_CMD_READY), quint32(edl::SAHARA_DONE_RSP)}) {
+        edl::MockEdlTransport t;
+        t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
+                << saharaFrame(cmd, {});
+        QString err;
+        QVERIFY2(edl::saharaLoadProgrammer(t, QByteArray("0123456789ABCDEF"), &err), qPrintable(err));
+        QCOMPARE(t.writes.size(), 1);            // 只有 HELLO_RSP：设备已宣告完成，不再发 DONE_REQ
+        QCOMPARE(int(t.writes.at(0).at(0)), int(edl::SAHARA_HELLO_RSP));
+    }
+}
+
+// HELLO_RSP 的 version 字段 = 设备上报值；设备报 0（异常/空字段）才退回主机 v2
+// （sahara.cpp:236-237 的三元；既有 edl_handler.cpp:549 与 bkerler sahara.py:656 都传设备版本）。
+// 两个方向都要钉：3（非默认值，证明是"回设备值"而不是写死 2）与 0（证明兜底生效）。
+void TestEdlSahara::echoesDeviceVersionWithFallback()
+{
+    const auto helloVersionField = [](quint32 deviceVersion) {
+        edl::MockEdlTransport t;
+        t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {deviceVersion, 1, 0, 0})
+                << saharaFrame(edl::SAHARA_CMD_READY, {});
+        QString err;
+        if (!edl::saharaLoadProgrammer(t, QByteArray("0123456789ABCDEF"), &err))
+            return quint32(0xFFFFFFFFu);         // 失败哨兵：调用点断言会立刻看出来
+        return le32(t.writes.at(0), 8);          // HELLO_RSP 的 version 字段（+8）
+    };
+    QCOMPARE(helloVersionField(3), quint32(3));  // ≥1：回设备上报值
+    QCOMPARE(helloVersionField(0), quint32(2));  // 0：退回主机 kHostVersion
 }
 
 QTEST_APPLESS_MAIN(TestEdlSahara)

@@ -22,14 +22,7 @@ constexpr quint64 kStreamChunk = 0x100000;
 
 // ==================== 错误收口（A9：失败必带中文文案） ====================
 
-bool fail(QString *error, const QString &message)
-{
-    if (error)
-        *error = message;
-    return false;
-}
-
-// 追加提示（多个条目被跳过时逐条累积，不用后者覆盖前者）
+// 追加一条诊断（多个条目被跳过时逐条累积，不用后者覆盖前者；换行分隔）
 void appendNote(QString *error, const QString &message)
 {
     if (!error)
@@ -37,6 +30,16 @@ void appendNote(QString *error, const QString &message)
     if (!error->isEmpty())
         *error += QLatin1Char('\n');
     *error += message;
+}
+
+// 失败收口（A9：失败必带中文文案）。**追加而非覆盖**（清扫 PA6）：致命失败常发生在"已经跳过了
+// 若干条目"之后 —— 跳过用上面的 appendNote 累积，若这里直接赋值，`*error` 会把"哪几个条目被跳过"
+// 整段吞掉；而包不完整/解不开时，恰恰最需要那份清单（否则用户只看到最后一句"无法创建输出目录"
+// 之类，误以为包本身没问题）。追加后仍保持"一条诊断一行"的既有格式。
+bool fail(QString *error, const QString &message)
+{
+    appendNote(error, message);
+    return false;
 }
 
 // ==================== 条目名净化（spec §5 恶意输入防护） ====================

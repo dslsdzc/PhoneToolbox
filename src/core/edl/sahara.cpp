@@ -5,11 +5,11 @@
 // END_OF_IMAGE → DONE 序列），差异只有三点（Task 4 brief Step 3）：
 //   1. 走 IEdlTransport（不内联 libusb）；
 //   2. SAHARA_READ_DATA_64 用 quint64 偏移（修既有 edl_handler.cpp（重写前 515cc57）:302-312 的 32 位截断缺陷）；
-//      注意 DONE 对的方向是 **host 主动**（发 DONE_REQ、收 DONE_RSP，与其余四条"设备主动"相反），
-//      细节见下方 sendDoneAndWait() 注释；
 //   3. 失败文案中文且带阶段名。
-// 协议参照：edl/edlclient/Library/sahara.py:105-135（HELLO_RSP 布局）、:650-747（服务循环）、
-// :453-459（DONE_REQ/DONE_RSP）；Qualcomm Sahara 协议。
+// 另注（方向陷阱，不属上面三点差异）：DONE 对的方向是 **host 主动**（发 DONE_REQ、收 DONE_RSP，与
+// 其余四条"设备主动"相反），细节见下方 sendDoneAndWait() 注释。
+// 协议参照：edl/edlclient/Library/sahara.py:104-108（cmd_hello：HELLO_RSP 布局与 version 默认值）、
+// :650-747（服务循环）、:453-459（DONE_REQ/DONE_RSP）；Qualcomm Sahara 协议。
 #include "sahara.h"
 
 namespace edl {
@@ -28,9 +28,9 @@ const quint32 kHelloResponseLen = 0x30;
 const quint32 kMinHelloPayload = 16;
 // 单包总长上限：防伪造长度导致大分配（真机最大也就 HELLO_REQ 的 0x30）
 const quint32 kMaxPacketBytes = 1u << 20;
-// HELLO_RSP 里声明的"主机支持的最低协议版本"（兼容 1；bkerler sahara.py:105 version_min=1）
+// HELLO_RSP 里声明的"主机支持的最低协议版本"（兼容 1；bkerler sahara.py:104 形参 version_min=1）
 const quint32 kVersionSupportedMin = 1;
-// 本项目主机协议版本（bkerler sahara.py:105 version 默认 2）
+// 本项目主机协议版本（bkerler sahara.py:104 形参 version 默认 2）
 const quint32 kHostVersion = 2;
 const quint32 kStatusSuccess = 0x00;
 

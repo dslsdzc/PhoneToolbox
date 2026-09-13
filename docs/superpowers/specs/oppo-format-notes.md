@@ -19,7 +19,7 @@
 
 | KeyId | mc | userkey | ivec | 机型（注释） |
 |---|---|---|---|---|
-| V1.4.17 | 27827963787265EF89D126B69A495A21 | 82C50203285A2CE7D8C3E198383CE94C | 422DD5399181E223813CD8ECDF2E4D72 | R9s/A57t |
+| V1.4.17/1.4.27 | 27827963787265EF89D126B69A495A21 | 82C50203285A2CE7D8C3E198383CE94C | 422DD5399181E223813CD8ECDF2E4D72 | R9s/A57t |
 | V1.6.17 | E11AA7BB558A436A8375FD15DDD4651F | 77DDF6A0696841F6B74782C097835169 | A739742384A44E8BA45207AD5C3700EA | a3s |
 | V1.5.13 | 67657963787565E837D226B69A495D21 | F6C50203515A2CE7D8C3E1F938B7E94C | 42F2D5399137E2B2813CD8ECDF2F4D72 | legacy |
 | V1.6.6/1.6.9/1.6.17/1.6.24/1.6.26/1.7.6 | 3C2D518D9BF2E4279DC758CD535147C3 | 87C74A29709AC1BF2382276C4E8DF232 | 598D92E967265E9BCABE2469FE4A915E | R15 Pro/Find X/R17/Reno 系/A5 2020/K3/Realme 3 Pro |
@@ -61,7 +61,7 @@
 1. **QC 与 MTK 的密钥派生是同一个函数**：`ofp_qc_decrypt.py::deobfuscate()` 与 `ofp_mtk_decrypt.py::mtk_shuffle2()` 恒等（`nibbleSwap(x ^ mc)`，XOR 可交换）。前文"MTK0-7 混淆 triplet 同 QC 派生方案但 shuffle 变体"易误解——**变体指的是另一个函数** `mtk_shuffle()`（MTK 尾部 0x6C 混淆头与文件表用：先摆半字节、再异或 key，方向反了会静默解出乱码）。
 2. **OPS 状态初值不来自 mbox**：`opscrypto.py:53` 是固定常量 `d1b5e39e5eea049d671dd5abd2afcbaf` 的 4 个 LE u32；62B mbox blob 只提供轮密钥材料（`asbox[0..3]` 参与首轮 XOR、`asbox[4..7]`、`asbox[8..]` 轮常量）与轮数 `asbox[0x3C] = 0x0A`。
 3. **`key_custom` 的分支由补齐到 4 倍数后的长度决定**：`pad4 > 0xF` → 块路（每 16B 先 `key_update(rkey, mbox_blob)`，末块不足 16B 的缺失词按 0 参与，输出按 16B 补齐、**由调用方截断**）；`0 < pad4 <= 0xF` → 尾路（`key_update(rkey, **sbox**)`，逐 4 字节词、不足 4B 补 0）。参照的两个调用方（`decryptfile()` L428-430、`encryptsubsub()` L440-446）都先补到 4 的倍数，故 13/14/15 字节的条目走**块路**；直接裸调 helper 这三档会翻转成尾路——是审计陷阱，不是格式特性。
-4. **settings.xml 的对齐**：`xmllength = LE32@尾页+0x18`；`xmlpad = 0x200 - (xmllength % 0x200)`（**恰为 0x200 倍数时 pad = 0x200，不是 0**）；数据段起点 `filesize - 0x200 - (xmllength + xmlpad)`；命中判定 `"xml "` 子串。
+4. **settings.xml 的对齐**：`xmllength = LE32@尾页+0x18`；`xmlpad = 0x200 - (xmllength % 0x200)`（**恰为 0x200 倍数时 pad = 0x200，不是 0**）；数据段起点 `filesize - 0x200 - (xmllength + xmlpad)`（**本式是参照的末端反算式，不是本项目的实现口径**：实现取尾页字段 `+0x14 × 0x200`，两者在页对齐包上等价，差异与适用边界见第 6 条）；命中判定 `"xml "` 子串。
 5. **识别必须定序：先 OPS 后 OFP**。`.ops` 尾页与 OFP-QC 尾页**共用 +0x10 处的 `0x7CEF` 魔数**，OPS 只是额外要求 `+0x00 version==2`、`+0x04 flags==1`；若先判 OFP，真实 `.ops` 会被判成 OFP-QC 并在解析阶段误报"密钥未知"。OFP-MTK 用**文件首 16B 试解是否以 `MMM` 开头**判定，与尾页无关。
 6. **Phase A 诚实边界**：无真实 `.ofp`/`.ops` 样本验证（全部验证为离线：参照双源核对 + 合成包 + 参照实产密文对拍 + FIPS-197/NIST 向量）；2022+ 机型密钥未公开（未知密钥报明确中文错误，可导入外部密钥 JSON）；`+0x00/+0x04` 恰为 `02`/`01` 的真实 OFP-QC 包会被误判成 OPS（真包待验）；OPS 的 settings 偏移取尾页字段 `+0x14 × 0x200`，与参照的末端反算式在页对齐包上等价。**MTK 变体无任何完整性校验**：条目表 `crc`（u64@88）与参照一样只解析不使用，MTK 侧也没有 md5/sha256 属性，故密文损坏/密钥不符时会**静默落盘乱码**（QC/OPS 有 sha256 兜底路径）；真机使用者需自行比对产物。
 
