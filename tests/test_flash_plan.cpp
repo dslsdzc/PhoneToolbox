@@ -74,6 +74,8 @@ private slots:
     void opsReportsTruncated512Gpt();
     void opsKeepsMetadataWhenGptLacksPartition();
     void opsAcceptsMetadataConsistentWithGpt();
+    void opsReconcilesWhenSectorUnitMatches();
+    void opsSkipsReconcileWhenSectorUnitDiffers();
     void opsPatchGroupsAndMissingPatchWarning();
     void opsGroupTagAndUfsProvisionGiveLun();
     void dirPrefersRawprogramAndFallsBackWhenEmpty();
@@ -1026,6 +1028,76 @@ void TestFlashPlan::opsAcceptsMetadataConsistentWithGpt()
         QVERIFY2(!w.contains(QStringLiteral("不一致")), qPrintable(w));
         QVERIFY2(!w.contains(QStringLiteral("回填")), qPrintable(w));
     }
+}
+
+// 跨单位对账防护 · 用例①**单位一致 → 对账照常**：元数据声明 SECTOR_SIZE_IN_BYTES="4096"、包内
+// gpt_main0.bin 也是 4096 字节 LBA（真实包形态）→ 元数据故意写错的几何必须**仍被 GPT 修正**。
+// 这条与用例②成对：② 钉"单位不同要跳过"，① 钉"跳过只针对单位不同，别把正常对账一起关掉"
+// （只写 ② 的话，一个"永不比对"的实现也能全绿）。
+void TestFlashPlan::opsReconcilesWhenSectorUnitMatches()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"super.img\" label=\"super\" sparse=\"false\" "
+        "SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" "
+        "start_sector=\"2048\" num_partition_sectors=\"16\" />"           // 元数据故意写错几何
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("super", 4096, 12287, /*lbaSize=*/4096)));
+    QVERIFY(writeBytes(dir.path() + "/super.img", QByteArray(4096, '\x51')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    QCOMPARE(plan.entries[0].sectorSize, quint32(4096));
+    QCOMPARE(plan.entries[0].startSector, quint64(4096));   // 元数据 2048 → 以 GPT 为准
+    QCOMPARE(plan.entries[0].numSectors, quint64(12287 - 4096 + 1));
+    bool mismatchWarned = false;
+    for (const QString &w : plan.warnings) {
+        QVERIFY2(!w.contains(QStringLiteral("单位不同")), qPrintable(w));   // 单位一致不得报单位冲突
+        if (w.contains(QStringLiteral("不一致")) && w.contains(QStringLiteral("gpt_main0.bin")))
+            mismatchWarned = true;
+    }
+    QVERIFY(mismatchWarned);                                // 对账确实发生
+}
+
+// 跨单位对账防护 · 用例②**单位不同 → 跳过对账 + 保留元数据值**（本用例守护的是"静默写错刷写地址"）：
+// 元数据声明 SECTOR_SIZE_IN_BYTES="512"（于是它的 start/num 是 512 字节 LBA 编号），包内
+// gpt_main0.bin 却是 4096 字节 LBA（它的 4096 是"4096 个 4096 字节块"，不是"4096 个 512 字节块"）。
+// 两串编号不可比：若照旧比对，100/8 会被判成"与 GPT 不一致"并被改写成 4096/8192 —— 而按元数据声明的
+// 单位读，4096/8192 是另一片区域，**不崩不报错，只是把镜像写到错误地址**。故必须整个条目跳过对账。
+// 判别力：去掉 flash_plan.cpp 里的 haveSectorSize/单位比较，本用例立刻变红（startSector 会被改成
+// 4096），已按清单要求做过"去掉即红、恢复即绿"的自证（见清扫报告）。
+void TestFlashPlan::opsSkipsReconcileWhenSectorUnitDiffers()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"xbl.img\" label=\"xbl\" sparse=\"false\" "
+        "SECTOR_SIZE_IN_BYTES=\"512\" physical_partition_number=\"0\" "
+        "start_sector=\"100\" num_partition_sectors=\"8\" />"            // 512 字节单位的编号
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("xbl", 4096, 12287, /*lbaSize=*/4096)));  // 4096 字节单位
+    QVERIFY(writeBytes(dir.path() + "/xbl.img", QByteArray(4096, '\x52')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);
+    const edl::PlanEntry &e = plan.entries[0];
+    QCOMPARE(e.sectorSize, quint32(512));                   // 元数据声明的单位本身不改写
+    QCOMPARE(e.startSector, quint64(100));                  // 保留元数据值（未被 GPT 的 4096 覆盖）
+    QCOMPARE(e.numSectors, quint64(8));                     // 同上（未被 GPT 的 8192 覆盖）
+    bool unitWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("gpt_main0.bin")) && w.contains(QStringLiteral("单位不同"))
+            && w.contains(QStringLiteral("512")) && w.contains(QStringLiteral("4096"))
+            && w.contains(QStringLiteral("核对")))
+            unitWarned = true;
+    QVERIFY2(unitWarned, "必须告警说明单位不同、保留元数据、提示核对包");
 }
 
 // <Patch{N}> 组 → Action::Patch（8 属性同 patch XML，直接复用 loadPatchTag 的规则：非 DISK 跳过）。

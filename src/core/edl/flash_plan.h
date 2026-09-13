@@ -78,6 +78,8 @@ bool buildPlanFromDir(const QString &dir, FlashPlan &plan, QString *error);
 // 几何：元数据有 `start_sector`/`num_partition_sectors` 则取用，随后用包内 `gpt_main{N}.bin`
 // 的 LBA 表**对账**（一致 → 静默；不一致 → warning 且**以 GPT 为准**；GPT 里查不到 → 保留元数据
 // + warning）。`start_sector` 为 firehose 表达式时**不参与对账**（表达式由设备侧求值）。
+// **跨单位不比对**：元数据声明了 `SECTOR_SIZE_IN_BYTES` 且与 `gpt_main{N}.bin` 的 LBA 尺寸不同
+// → 两边 LBA 编号单位不同、不可比较，整个条目跳过对账（保留元数据值 + warning），不做 ×8/÷8 换算。
 // **忽略包内偏移字段** `FileOffsetInSrc`/`SizeInByteInSrc`/`SizeInSectorInSrc` —— 它们只描述文件在
 // 包内的位置与长度，与设备扇区无关（协议速查 §5）。
 // `packageDir`：包内文件所在目录（imageFile 与 gpt_main{N}.bin 的基准；通常 = settings.xml 所在目录）。

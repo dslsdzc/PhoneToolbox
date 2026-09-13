@@ -772,6 +772,10 @@ struct GptTable {
     bool loaded = false;             // 本 LUN 是否已尝试加载（失败也只告警一次）
     bool ok = false;
     QString fileName;                // gpt_main{N}.bin
+    // 本表 LBA 编号的**字节单位**（512/4096，由 imgdisk::parseGpt 按签名偏移识别）。放在表级而非
+    // 逐分区：一张表的所有 LBA 同单位（DiskInfo::sectorSize 是整盘属性），逐条复制只会给"日后
+    // 某处只改了其中一份"留漂移空间。对账用它拒绝跨单位比较，见 reconcileWithGpt。
+    quint32 sectorSize = 0;
     QList<GptPartition> parts;
 };
 
@@ -805,9 +809,11 @@ QString gptFailureReason(const QByteArray &bytes)
 //   * reference/qdl/tests/data/rawprogram1.xml:12 的 `gpt_main1.bin num_partition_sectors="6"`
 //     ⇒ 6 × 4096 = 24576 字节，与上者吻合；
 //   * bkerler 读盘时 512/4096 都试（edl/edlclient/Library/gpt.py:526-531）。
-// 本函数**不做任何单位换算**，直接回传解析器给的 LBA 编号（单位 = 该盘 LBA 尺寸）；对账层按同单位
-// 比较（reconcileWithGpt —— OPS 包的 SECTOR_SIZE_IN_BYTES 与 GPT 的 LBA 尺寸同值，见上面 qdl 样本行）。
-bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString *error)
+// 本函数**不做任何单位换算**，直接回传解析器给的 LBA 编号（单位 = 该盘 LBA 尺寸，由 out.sectorSize
+// 一并回传）。对账层拿到这个单位后**先比对再比较**（reconcileWithGpt）—— "OPS 的
+// SECTOR_SIZE_IN_BYTES 与 GPT 的 LBA 尺寸同值"是**该行 qdl 样本的经验，不是可依赖的不变量**：
+// 元数据与 GPT 分属打包侧与设备侧两份产物，任一侧写错就会让两串 LBA 编号落在不同单位上。
+bool readGptPartitions(const QString &gptPath, GptTable &out, QString *error)
 {
     QFile f(gptPath);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -823,7 +829,8 @@ bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString
         return false;
     }
     for (const imgdisk::Partition &p : info.partitions)
-        out.append({p.name, p.startSector, p.numSectors});
+        out.parts.append({p.name, p.startSector, p.numSectors});
+    out.sectorSize = quint32(info.sectorSize);   // 512/4096：上面那串 LBA 编号的字节单位
     return true;
 }
 
@@ -847,7 +854,7 @@ const GptTable &gptTableForLun(quint32 lun, const QString &packageDir, QHash<qui
         return t;
     }
     QString gptErr;
-    if (!readGptPartitions(path, t.parts, &gptErr)) {
+    if (!readGptPartitions(path, t, &gptErr)) {
         warnings << QStringLiteral("LUN %1 的 %2 不可用：%3 —— 该 LUN 的几何仅来自元数据、未做 GPT 对账")
                         .arg(lun).arg(t.fileName, gptErr);
         return t;
@@ -874,8 +881,10 @@ const GptPartition *matchGptPartition(const PlanEntry &e, const GptTable &gpt)
     return nullptr;
 }
 
-// 逐条目对账（spec §3.4 规则 2；协议速查 §5 的"唯一有开源实证的几何来源"）。四态：
+// 逐条目对账（spec §3.4 规则 2；协议速查 §5 的"唯一有开源实证的几何来源"）。五态：
 //   * 该 LUN 的 GPT 不可用 → 静默返回（LUN 级告警已在 gptTableForLun 出过，见那里）；
+//   * **两边 LBA 单位不同**（元数据声明了 SECTOR_SIZE_IN_BYTES 且与 GPT 的 LBA 尺寸不等）
+//     → 保留元数据值 + warning，**不比对也不改写**（见下面"跨单位"注释）；
 //   * GPT 里查不到该分区名 → 保留元数据值 + warning；
 //   * 元数据**没有**提供该几何值 → 用 GPT 回填 + warning（"值来自 GPT"必须可见）；
 //   * 两边都有但不一致 → warning + **以 GPT 为准**（brief 明文）；
@@ -883,8 +892,8 @@ const GptPartition *matchGptPartition(const PlanEntry &e, const GptTable &gpt)
 // 例外：startSectorExpr 非空（firehose 表达式，如 "NUM_DISK_SECTORS-5."）的条目**不参与对账** ——
 // 表达式由设备侧求值、主机不得改写（reference/qdl/src/firehose.c:874-879），拿包内 GPT 的具体数字
 // 替换会把"盘尾"语义写死成这个包的大小；只记一条"未对账"warning。
-void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, const GptTable &gpt,
-                      QStringList &warnings)
+void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSectorSize,
+                      const GptTable &gpt, QStringList &warnings)
 {
     if (!gpt.ok)
         return;
@@ -892,6 +901,25 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, const GptTab
         warnings << QStringLiteral("条目 %1（lun=%2）的 start_sector 是表达式 \"%3\"，按参照原样下发、"
                                    "不参与 GPT 对账（reference/qdl/src/firehose.c:874-879）")
                         .arg(entryName(e), QString::number(e.lun), e.startSectorExpr);
+        return;
+    }
+    // **跨单位比较防护**：LBA 编号只在同一字节单位下可比。元数据的 SECTOR_SIZE_IN_BYTES 同时是
+    // "start_sector/num_partition_sectors 这两个数的单位"（它随 program 命令一起下发，就是给设备解释
+    // 这两个数的），GPT 的编号单位是包内那张表的 LBA 尺寸 —— 两者不等时，`7 vs 4096` 这种比较既不能
+    // 证明一致、也不能证明不一致，改写更是把**包内表的单位**当成**设备侧的单位**写下去：这正是本函数
+    // 要防的"静默写错刷写地址"。故一旦发现单位不同就**整个条目退出对账**、保留元数据值并告警。
+    // 不做跨单位换算（×8 / ÷8）：换算要假定"哪一侧是权威单位"，而元数据与 GPT 恰好在这一点上互相
+    // 矛盾 —— 按矛盾的假设换算出来的地址，错得比不改写更难发现。
+    // haveSectorSize = false（元数据没写该属性）**不**走这条：没有声明的单位就没有"单位冲突"的证据，
+    // 而 OPS 元数据的几何惯例与设备 LBA 同单位 —— 此处维持既有口径（照常对账），不借本次修复
+    // 扩大行为变化面；若日后要收紧，那是"缺单位时 fail-closed"的独立决定，见清扫报告。
+    if (haveSectorSize && gpt.sectorSize != e.sectorSize) {
+        warnings << QStringLiteral("条目 %1（lun=%2）的 SECTOR_SIZE_IN_BYTES=%3 与 %4 的 LBA 尺寸 %5 "
+                                   "不同 —— 两边 LBA 编号单位不同、不可比较，跳过对账并保留元数据几何"
+                                   "（start=%6、num=%7）；请核对包内元数据与 GPT 是否配套")
+                        .arg(entryName(e), QString::number(e.lun))
+                        .arg(e.sectorSize).arg(gpt.fileName).arg(gpt.sectorSize)
+                        .arg(e.startSector).arg(e.numSectors);
         return;
     }
     const GptPartition *hit = matchGptPartition(e, gpt);
@@ -962,7 +990,8 @@ QXmlStreamAttributes mergeAttrs(const QXmlStreamAttributes &container, const QXm
 //   label    → partitionName（缺失时用文件名主干兜底：条目标识必须非空，见 entryName()）
 //   sparse   → sparse（"true"（不区分大小写）或 "1"；同 Phase A 清单口径 oppo_ops.cpp:157-159）
 //   Sha256   → sha256（字段名见 opscrypto.py:614 的 `item.attrib["Sha256"]`；元数据有的原样带走）
-//   SECTOR_SIZE_IN_BYTES → sectorSize（缺失保持 PlanEntry 默认值）
+//   SECTOR_SIZE_IN_BYTES → sectorSize（缺失保持 PlanEntry 默认值；**是否声明过**另记 haveSectorSize，
+//       供对账层拒绝跨单位比较 —— 见 reconcileWithGpt 的跨单位注释）
 //   physical_partition_number → lun（**属性优先**：参照对每条带 filename 的 <program> 硬读该属性，
 //       edl/edlclient/Library/firehose_client.py:950；缺失才用组序号 Program{N} → N）
 //   start_sector / num_partition_sectors → startSector / numSectors（"强推断存在"，依据同上的硬读
@@ -1002,9 +1031,14 @@ void appendOpsProgramEntry(const QXmlStreamAttributes &attrs, quint32 groupLun, 
                || sparse == QLatin1String("1");
     e.sha256 = attrs.value(QStringLiteral("Sha256")).toString();
 
-    bool ok = false;
-    const quint64 sectorSize = attrU64From(attrs, "SECTOR_SIZE_IN_BYTES", &ok);
-    if (ok && sectorSize > 0 && sectorSize <= std::numeric_limits<quint32>::max())
+    // sectorSize 的"声明"与"取值"必须分开记：取值恒有（PlanEntry 默认 4096），但只有元数据**写了**
+    // 该属性时才知道它声明了自己的 LBA 单位 —— 对账层要靠这个区分"单位冲突"与"未声明单位"
+    // （见 reconcileWithGpt 的跨单位注释）。
+    bool sectorSizeOk = false;
+    const quint64 sectorSize = attrU64From(attrs, "SECTOR_SIZE_IN_BYTES", &sectorSizeOk);
+    const bool haveSectorSize = sectorSizeOk && sectorSize > 0
+                                && sectorSize <= std::numeric_limits<quint32>::max();
+    if (haveSectorSize)
         e.sectorSize = quint32(sectorSize);
 
     bool lunOk = false;
@@ -1030,7 +1064,7 @@ void appendOpsProgramEntry(const QXmlStreamAttributes &attrs, quint32 groupLun, 
     // GPT 回填 + 对账（brief 明文：不一致 → 以 GPT 为准）
     const GptTable &gpt = gptTableForLun(e.lun, packageDir, gptCache, warnings);
     reconcileWithGpt(e, startAttr.kind == SectorAttrKind::Decimal,
-                     countAttr.kind == SectorAttrKind::Decimal, gpt, warnings);
+                     countAttr.kind == SectorAttrKind::Decimal, haveSectorSize, gpt, warnings);
 
     warnLunMismatch(QStringLiteral("OPS program"), e, groupLun, warnings);
     out << e;
