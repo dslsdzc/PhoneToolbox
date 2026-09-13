@@ -1194,6 +1194,8 @@ git commit -m "feat(edl): libusb 传输实现 + EDLHandler 退化薄封装（顺
 **Task 7 交接的两点（本任务须处理）**：
 1. **FRP 清除路径**（`src/core/flash_tool.cpp:918/982-986`）按**分区名**找 `"frp"`，而 Firehose 只给得出 `lun<N>`（`EdlSession::listPartitions` 无法枚举分区名）→ 该路径在 EDL 通道下会走"未找到 FRP 分区"。**做法**：让 FRP 动作改为**从刷写计划里取条目**（计划里有 `label=frp` 就能定位），或在拿不到计划时**明确报错并提示"请用计划方式"**，不要静默失败。
 2. `beginFirehose`/`writePlan` 目前只被 `run()` 的既有用例**间接**覆盖，缺"设备已在 Firehose → 不打 Sahara、不发 reset"的直接断言 → 补一条直接用例（本任务或 Task 8 均可，但**必须有**）。
+3. **EDL 的"目录批量刷写"路径已确定性失效**（Task 7 审查发现，属我们 Q2 改动引入的 UI 级回归）：`FlashPanel::writePartitionWithRetry`（`src/ui/flash_panel.cpp:1780-1792`）拿镜像 basename（如 `boot`）比 `EDLPartition::name`，而分区名现在只剩 `lun<N>` → 四个判据全不命中、每个镜像都报"EDL 未能匹配分区 X"；读取路径（`:735`/`:914`）同理。**处置二选一并在报告里说明理由**：(a) 该路径改为**从刷写计划取条目**（分区名以计划/GPT 为准）；(b) 该路径**明确报错并提示"EDL 请改用刷写计划"**（不静默失败）。单选分区刷写（列表项即 `lun<N>`）仍可用，不要动它。
+4. **Task 7 审查的 4 条 Minor 顺手清掉**（单独一笔提交，标注"Task 7 Minor 清理"）：`src/core/edl/firehose.cpp:484-495` 六行 ZLP 注释**整段重复**（并发合并残留，删一份）；`EDLHandler::disconnect()`（`src/core/modes/edl_handler.cpp:142`）发 reset 前补 `drainResidual`（与 `:193` 口径一致）；`writeImageEntry` 那条"余量将按数据面规则补零"的警告在 `normalizePlan` 改小 `numSectors` 后不再成立（改为条件化或删）；`src/core/edl/edl_session.cpp:585` 用了 `std::numeric_limits` 但无 `#include <limits>`（补上）。
 
 **Interfaces:**
 - Consumes: Task 3 `buildPlanFromDir`、Task 6 `EdlSession`、Task 7 `LibusbEdlTransport`/`EDLHandler`
