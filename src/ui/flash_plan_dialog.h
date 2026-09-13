@@ -48,8 +48,16 @@ public:
     // 整包入口（.ofp/.ops）：Phase A 的 extractOFP/extractOPS 解包到 **tempDir**（由调用方持有：
     // 解包产物必须活过对话框与随后的刷写，本函数不销毁它）→ 走同一预览。
     // 失败/取消语义同 buildAndShow（解包的部分跳过告警并入预览 warnings）。
+    //
+    // PB-B6：解包在**工作线程**（OppoExtractWorker）执行，模态进度条由工作线程的进度信号驱动
+    // 真实推进、界面保持响应；用户可取消，但取消是**条目（文件）边界**生效的（当前文件会跑完
+    // 并校验完才停，按钮文案已写明这一点）。取消路径 = 返回 false 且 *error 为空（与"用户取消"
+    // 同口径：调用方据此回收临时目录），细节写入可选的 **cancelNote**（如"已完成 N/M 个文件"），
+    // 供调用方如实落日志；传 nullptr 则不需要该详情。
+    // 成功/失败语义不变：成功由调用方回收临时目录；构建/解包失败**保留**临时目录并告知路径。
     static bool buildAndShowPackage(const QString &packagePath, QWidget *parent,
-                                    QTemporaryDir *tempDir, QString *outDir, QString *error);
+                                    QTemporaryDir *tempDir, QString *outDir, QString *error,
+                                    QString *cancelNote = nullptr);
 
 public slots:
     // 唯一置位 confirmed() 的路径（「开始刷写」→ accept；取消/关闭 → reject）

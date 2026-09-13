@@ -1161,6 +1161,7 @@ void FlashPanel::onEdlPlanFlash()
 
     QString planDir;
     QString error;
+    QString cancelNote;                 // 取消详情（仅整包入口会填；见 buildAndShowPackage 注释）
     bool picked = false;
     if (box.clickedButton() == dirBtn) {
         const QString dir = QFileDialog::getExistingDirectory(
@@ -1186,8 +1187,10 @@ void FlashPanel::onEdlPlanFlash()
             emit outputMessage(QStringLiteral("无法创建解包临时目录，已取消"), true);
             return;
         }
+        // cancelNote：解包被取消时的如实详情（"已完成 N/M 个文件"等；PB-B6 —— 取消在条目
+        // 边界生效，日志要能说明停在哪，而不是只说一句"已取消"）
         picked = FlashPlanDialog::buildAndShowPackage(pkg, this, m_edlPlanTempDir.get(),
-                                                      &planDir, &error);
+                                                      &planDir, &error, &cancelNote);
     } else {
         return;                            // 取消
     }
@@ -1200,7 +1203,13 @@ void FlashPanel::onEdlPlanFlash()
     //   * 下一次选包会整体替换（旧目录随 unique_ptr 析构删除）。
     if (!picked) {
         if (error.isEmpty()) {
-            emit outputMessage(QStringLiteral("已取消 EDL 刷写计划"), false);
+            // 取消（含整包解包期间的取消：那时临时目录里可能已有半套产物）→ 立即回收。
+            // cancelNote 把"取消发生在哪一步"如实带上（PB-B6：解包的取消在条目边界生效）。
+            emit outputMessage(cancelNote.isEmpty()
+                                   ? QStringLiteral("已取消 EDL 刷写计划")
+                                   : QStringLiteral("已取消 EDL 刷写计划（%1）；解包临时目录已回收")
+                                         .arg(cancelNote),
+                               false);
             if (m_edlPlanTempDir)
                 m_edlPlanTempDir.reset();
         } else {

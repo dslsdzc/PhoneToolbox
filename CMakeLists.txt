@@ -404,8 +404,12 @@ if(ENABLE_IMAGE_TESTS)
                     # Phase B Task 8：对话框（src/ui，不编入任何静态库）被测源 + 它调用的计划层
                     # （buildPlanFromDir 的整链在 flash_plan.cpp；OFP/OPS 解包走 image_engine）。
                     # 额外链 Qt6::Widgets 与 offscreen 平台，见下方 if 块。
+                    # PB-B6：对话框的整包入口把解包搬到 OppoExtractWorker（同样属 src/ui，
+                    # 不编入任何静态库）—— 用例直接驱动该 worker 验证"工作线程 + 真实进度 +
+                    # 条目边界取消"，故一并编入本目标。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/flash_plan_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/oppo_extract_worker.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})

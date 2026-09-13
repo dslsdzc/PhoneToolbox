@@ -5,6 +5,8 @@
 // 本对文件承载 OFP 与 OPS 两个解包入口：Task 4 实现 extractOFP，Task 5 在同一 .cpp 追加
 // extractOPS —— 路径守卫 / 分块搬运 / 摘要校验这些通用构件放在 oppo_extract.cpp 的匿名
 // 命名空间内，两入口共用，勿把本节实现写成只服务 OFP 的形状。
+// PB-B6：两入口均接受一个**条目边界生效**的取消询问（见 ExtractCancel）—— UI 侧在解包
+// 期间的唯一停止手段；"整个包跑完"与"半途停在文件中间"都被明确排除。
 //
 // 提取策略（由 parseOFP 归一到 OfpFile 字段，语义出处 ofp_qc_decrypt.py main() L340-347）:
 //   - fullDecrypt == true                → 整段 CFB 解密（Sahara 组）
@@ -24,6 +26,14 @@ namespace imgopp {
 // sparse 条目在文件名后带标注 "<name>（sparse 镜像，原样输出）"（spec §4，仅标注不转 raw）。
 using ExtractProgress = std::function<void(const QString &name, int percent)>;
 
+// 取消询问（PB-B6）：返回 true = 请求取消。**只在条目（文件）边界被询问** —— 上一个文件已写完
+// 并通过校验、下一个文件开始之前。文件内部不设取消点：半途停下会留下长度与摘要都对不上的
+// 半截产物，比写完更危险（与"校验失败不回滚"同一取舍，spec §5）。
+// 被取消时：返回 false 且 *error 记录 `用户取消：已完成 N/M 个文件（已写产物保留，未回滚）` ——
+// 已写产物一律保留，调用方自行决定是否清理输出目录。
+// 空函数（默认）= 不响应取消，行为与加本参数前完全一致。
+using ExtractCancel = std::function<bool()>;
+
 // 解包整个包到 outDir。产物: outDir/<file.name>（同名产物覆盖；outDir 不存在时自动创建）。
 //   - 清单/文件表中 md5、sha256 非空即校验（写出的字节增量喂 QCryptographicHash，不二次读盘；
 //     十六进制比较大小写不敏感）。不匹配 → *error = "校验失败: <name> sha256 不匹配" 并返回
@@ -38,8 +48,10 @@ using ExtractProgress = std::function<void(const QString &name, int percent)>;
 //     *error 同时含"哪些条目被跳过"与最终失败原因
 //   - 产物路径与输入包路径相同 → 拒绝（spec §5 流式写保护；先判后开，包本体不被截断）
 //   - 清单为空（无可提取条目）→ 拒绝
+// 取消：见 ExtractCancel（条目边界生效；被取消返回 false + 用户取消文案，已写产物保留）。
 bool extractOFP(const QString &path, const QString &outDir,
-                const ExtractProgress &progress, QString *error);
+                const ExtractProgress &progress, QString *error,
+                const ExtractCancel &cancel = {});
 
 // 解包整个 OPS 包到 outDir（条目来自 settings.xml 清单，见 oppo_ops.h 的 OpsInfo）。
 // 搬运策略按组（opscrypto.py main() L589-638）:
@@ -53,7 +65,9 @@ bool extractOFP(const QString &path, const QString &outDir,
 //   - 条目名不安全（空/含路径成分/".."）→ 跳过 + 中文 *error + 其余继续（A10）；
 //     于是同样可能出现"ok==true 且 *error 非空"（部分条目被跳过，调用方须落日志）
 //   - 校验失败 → false 且不回滚已写产物（spec §5）
+// 取消：同 extractOFP（见 ExtractCancel：条目边界生效、已写产物保留）。
 bool extractOPS(const QString &path, const QString &outDir,
-                const ExtractProgress &progress, QString *error);
+                const ExtractProgress &progress, QString *error,
+                const ExtractCancel &cancel = {});
 
 } // namespace imgopp

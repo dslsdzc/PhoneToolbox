@@ -252,7 +252,7 @@ bool verifyOpsHash(ProductWriter &writer, const OpsEntry &entry, QString *error)
 } // namespace
 
 bool extractOFP(const QString &path, const QString &outDir, const ExtractProgress &progress,
-                QString *error)
+                QString *error, const ExtractCancel &cancel)
 {
     QFile in(path);
     if (!in.open(QIODevice::ReadOnly))
@@ -291,7 +291,15 @@ bool extractOFP(const QString &path, const QString &outDir, const ExtractProgres
         total += file.size;
 
     quint64 done = 0;
+    int doneFiles = 0;   // 已写完并通过校验的条目数（取消文案要如实报"完成到哪"，见 ExtractCancel）
     for (const OfpFile &file : entries) {
+        // 取消点 = **条目边界**（ExtractCancel 契约）：上一轮循环已把前一个文件写完并校验完，
+        // 从此处返回不会留下半截产物；文件内部不设取消点。
+        if (cancel && cancel()) {
+            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（已写产物保留，未回滚）")
+                                  .arg(doneFiles).arg(entries.size()));
+            return false;
+        }
         // 读前复核包内区间（parseOFP 已校验；解析后被截断/改写的包在此兜底）
         if (file.offset > fileSize || file.size > fileSize - file.offset)
             return fail(error, QStringLiteral("文件表越界：%1（偏移 %2 + 长度 %3）超出包大小 %4")
@@ -321,6 +329,7 @@ bool extractOFP(const QString &path, const QString &outDir, const ExtractProgres
             return false;   // 同上：校验失败亦不回滚，用户可重跑
 
         done += file.size;
+        ++doneFiles;
         if (progress) {
             const int percent = total == 0 ? 100 : int(done * 100 / total);
             // sparse 产物原样输出，仅在此标注（spec §4: 不自动转 raw，转换由镜像引擎另行处理）
@@ -335,7 +344,7 @@ bool extractOFP(const QString &path, const QString &outDir, const ExtractProgres
 
 // OPS 解包入口（流程与 extractOFP 同构：解析 → 条目名净化 → 逐条搬运 → 校验 → 进度）
 bool extractOPS(const QString &path, const QString &outDir, const ExtractProgress &progress,
-                QString *error)
+                QString *error, const ExtractCancel &cancel)
 {
     QFile in(path);
     if (!in.open(QIODevice::ReadOnly))
@@ -374,7 +383,15 @@ bool extractOPS(const QString &path, const QString &outDir, const ExtractProgres
         total += entry.size;
 
     quint64 done = 0;
+    int doneFiles = 0;   // 同 extractOFP：取消文案要如实报"完成到哪"
     for (const OpsEntry &entry : entries) {
+        // 取消点 = **条目边界**（ExtractCancel 契约，同 extractOFP）：上一个文件已写完并校验完
+        // 才走到这里，返回时不会留下半截产物。
+        if (cancel && cancel()) {
+            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（已写产物保留，未回滚）")
+                                  .arg(doneFiles).arg(entries.size()));
+            return false;
+        }
         // 读前复核包内区间（parseOPS 已校验；解析后被截断/改写的包在此兜底）
         if (entry.offset > fileSize || entry.size > fileSize - entry.offset)
             return fail(error, QStringLiteral("OPS 文件表越界：%1（偏移 %2 + 长度 %3）超出包大小 %4")
@@ -404,6 +421,7 @@ bool extractOPS(const QString &path, const QString &outDir, const ExtractProgres
             return false;   // 同上：校验失败亦不回滚，用户可重跑（wantSha256 判断在函数内）
 
         done += entry.size;
+        ++doneFiles;
         if (progress) {
             const int percent = total == 0 ? 100 : int(done * 100 / total);
             // sparse 产物原样输出，仅在此标注（spec §4，同 extractOFP）

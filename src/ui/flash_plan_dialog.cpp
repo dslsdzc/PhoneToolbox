@@ -1,7 +1,6 @@
 #include "flash_plan_dialog.h"
 
 #include <QCheckBox>
-#include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
@@ -16,7 +15,7 @@
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 
-#include "image_engine/oppo_extract.h"
+#include "oppo_extract_worker.h"
 
 namespace {
 
@@ -215,7 +214,8 @@ bool FlashPlanDialog::buildAndShow(const QString &dir, QWidget *parent,
 }
 
 bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *parent,
-                                          QTemporaryDir *tempDir, QString *outDir, QString *error)
+                                          QTemporaryDir *tempDir, QString *outDir, QString *error,
+                                          QString *cancelNote)
 {
     if (!tempDir || !tempDir->isValid()) {
         if (error)
@@ -232,28 +232,72 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
         return false;
     }
 
-    // 模态进度条（引擎是同步一整趟写完的，没有取消钩子 —— 半途停下比写完更危险，
-    // 故不给取消按钮，只报进度）
-    QProgressDialog progress(QStringLiteral("正在解包固件包…"), QString(), 0, 100, parent);
+    // PB-B6：解包在工作线程执行（OppoExtractWorker），进度经 queued 信号回到本线程 →
+    // 进度条**真实推进**，而模态对话框自己的事件循环让界面保持响应（旧实现是"GUI 线程
+    // 同步跑 + 手动 processEvents(ExcludeUserInputEvents) 泵"，GB 级包全程不可交互）。
+    // 模态仍是 WindowModal：**响应 ≠ 可重入** —— 解包期间不放行主窗口输入（与旧实现的
+    // ExcludeUserInputEvents 同一安全口径），用户能做的只有"看进度 / 取消"。
+    OppoExtractWorker worker;
+    // 取消文案必须诚实：解包引擎没有"半途停"的钩子，取消在**条目（文件）边界**生效 ——
+    // 当前文件还会写完并校验完，然后才停（oppo_extract.h 的 ExtractCancel / worker 类注释）。
+    QProgressDialog progress(QStringLiteral("正在解包固件包…"),
+                             QStringLiteral("取消（当前文件完成后生效）"), 0, 100, parent);
     progress.setWindowTitle(QStringLiteral("解包"));
     progress.setWindowModality(Qt::WindowModal);
-    progress.setCancelButton(nullptr);
     progress.setMinimumDuration(0);
-    const auto cb = [&progress](const QString &name, int percent) {
-        progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
-        progress.setValue(percent);
-        // 同步引擎 + 模态进度条：手动泵事件；**排除用户输入**（只重绘）—— 解包没有取消钩子，
-        // 让点击进来只会制造"看着像能取消"的假象（与面板侧刷写期间的泵法同一口径）
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    };
+    // autoClose/autoReset 一律关掉：进度条达到 100（或取消）时不让 QProgressDialog 自己
+    // hide/reset —— 关不关它都拦不住"取消时 hide"（见下面 handler 里的 show()），但关掉能
+    // 让"跑完"的收尾完全由本函数控制（先 progress.close() 再取结果），语义只有一处。
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
 
-    QString extractErr;
-    const bool ok = ops ? imgopp::extractOPS(packagePath, tempDir->path(), cb, &extractErr)
-                        : imgopp::extractOFP(packagePath, tempDir->path(), cb, &extractErr);
+    connect(&worker, &OppoExtractWorker::progress, &progress,
+            [&progress](const QString &name, int percent) {
+                progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
+                progress.setValue(percent);
+            });
+    // DirectConnection：接收者与发射者都在 GUI 线程、lambda 只置原子标志 + 改本线程的控件，
+    // 不需要（也不能）经工作线程的事件队列 —— 那边正忙于解包，排队等于取消永不生效。
+    connect(&progress, &QProgressDialog::canceled, &progress,
+            [&worker, &progress] {
+                worker.requestCancel();       // 原子标志；引擎在下一个条目边界读到
+                progress.setLabelText(QStringLiteral("正在取消…（当前文件完成后停止）"));
+                progress.setCancelButton(nullptr);   // 请求已发出，再点没有意义
+                // Qt 的 QProgressDialog 在取消时会自己 reset()+hide()（**与 autoClose/autoReset
+                // 无关**：实测 6.11 上取消按钮点击 → visible 变 false、value 回 -1），而"取消
+                // 只在文件边界生效"恰恰要求这段时间**看得见** —— 故把它拉回屏幕，让用户看到
+                // "说明"而不是一个凭空消失、稍后又被进度更新弹回来的对话框。
+                progress.show();
+            },
+            Qt::DirectConnection);
+
+    QEventLoop loop;
+    connect(&worker, &OppoExtractWorker::finished, &loop, &QEventLoop::quit);
+    worker.start(packagePath, tempDir->path());
+    progress.show();
+    // 守卫循环：queued 的 finished 可能早于 exec() 到达（模态进度条的 show()/setValue()
+    // 内部会自己 processEvents）—— 那时 quit() 对尚未运行的循环是空操作，裸 exec() 会
+    // 一直等下去。用 isFinished() 兜住"已完成但 quit 早到"的情形。
+    while (!worker.isFinished())
+        loop.exec();
     progress.close();
+    worker.waitForFinished();       // 取结果前 join（结果字段由工作线程写）
+
+    if (worker.cancelRequested()) {
+        // 取消路径与既有口径一致：*error 为空 = 用户取消（调用方据此回收临时目录）。
+        // 详情走 cancelNote：这一趟被停在哪（完成 N/M 个文件）对日志与用户都有意义。
+        if (cancelNote)
+            *cancelNote = worker.ok()
+                ? QStringLiteral("取消请求到达时解包已跑完（产物未使用）")
+                : (worker.error().isEmpty() ? QStringLiteral("解包已取消") : worker.error());
+        if (error) error->clear();
+        return false;
+    }
+
+    const QString extractErr = worker.error();
     // 与 ImageWorker 同款约定（oppo_extract.h 顶部）：ok==true 且 *error 非空 =
     // **部分条目被跳过**（不安全文件名/截断等）—— 必须让用户在预览里看见，不得静默
-    if (!ok) {
+    if (!worker.ok()) {
         if (error)
             *error = extractErr.isEmpty()
                 ? QStringLiteral("固件包解包失败：%1").arg(QFileInfo(packagePath).fileName())
