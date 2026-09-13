@@ -74,8 +74,10 @@ FirehoseResponse parseFirehoseResponse(const QByteArray &xml);
 // getstorageinfo 响应 → 设备几何。JSON 口径见 reference/qdl/src/firehose.c:1874-1884
 // （storage_info.total_blocks / block_size）；回退认 bkerler 的文本键
 // （edl/edlclient/Library/firehose.py:1272-1275 的 SECTOR_SIZE_IN_BYTES /
-// num_physical_partitions，键值分隔见 :1303-1317）。两条来源都拿不到几何 → false + 中文 *error
-// （**不返回带默认值的假几何**：totalBlocks==0 会让 validatePlan 的越界判定恒定拒绝）。
+// num_physical_partitions，键值分隔见 :1303-1317）—— 文本键只补扇区大小。
+// **成功判据 = totalBlocks > 0**（唯一来源 storage_info.total_blocks）：只拿到扇区大小返回 false
+// + 中文 *error，绝不返回带默认值的假几何 —— totalBlocks==0 会让 validatePlan 的越界判定
+// 把每条 Program 报成"越界"而非"LUN 无设备几何"（见实现处注释）。
 bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, QString *error);
 
 // ---- 会话级小工具（需要传输）----
@@ -92,7 +94,7 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
                          int timeoutMs, QString *error);
 
 // configure 协商（reference/qdl/src/firehose.c:534-548 两轮；bkerler 同：
-// edl/edlclient/Library/firehose.py:917-940）：
+// edl/edlclient/Library/firehose.py:917-940）——**最多两次发送**（重发后再报的新值只采纳不再发）：
 //   1. 发 xmlConfigure → 等 ACK；响应带 MaxPayloadSizeToTargetInBytesSupported → 用该值**重发一次**；
 //   2. NAK 且文案含 "Not support configure MemoryName" → 换另一存储类型**重试一次**（入参 memoryName 同步改写）；
 //   3. NAK 且文案含 "Only nop and sig tag can be" → 设备要求 EDL 鉴权：**直接失败、不重试**

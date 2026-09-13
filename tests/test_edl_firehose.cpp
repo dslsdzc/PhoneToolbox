@@ -18,11 +18,13 @@ private slots:
     void eraseWholeLunOmitsRange();
     void responseAckAndNakAreStrict();
     void configureNegotiatesMaxPayload();
+    void configureStopsAfterOneNegotiationRound();
 
     // —— 以下为本任务补充的用例（brief 的 5 条之外的边界）——
     void programXmlMatchesReferenceExactly();
     void programXmlPassesStartSectorExprVerbatim();
     void patchXmlMatchesReferenceExactly();
+    void patchXmlPassesStartSectorExprVerbatim();
     void eraseNumericRangeKeepsRange();
     void eraseWithExprKeepsRange();
     void configureXmlHasReferenceAttrSet();
@@ -39,6 +41,7 @@ private slots:
     void parseStorageInfoAcceptsPageSize();
     void parseStorageInfoFallsBackToTextKeys();
     void parseStorageInfoFailsWithoutGeometry();
+    void parseStorageInfoFailsWithoutTotalBlocks();
 };
 
 void TestEdlFirehose::programXmlHasFourRequiredAttrs()
@@ -101,6 +104,22 @@ void TestEdlFirehose::configureNegotiatesMaxPayload()
     QVERIFY(t.writes[1].contains("MaxPayloadSizeToTargetInBytes=\"1048576\""));
 }
 
+// 协商**最多两次发送**：设备每轮回报不同的 Supported 时，第二轮之后只采纳不再发
+// （qdl 恰好两次 send：reference/qdl/src/firehose.c:534-548；否则每轮 10s 预算会无限重发=挂死）。
+void TestEdlFirehose::configureStopsAfterOneNegotiationRound()
+{
+    edl::MockEdlTransport t;
+    t.reads << QByteArray("<response value=\"ACK\" MaxPayloadSizeToTargetInBytesSupported=\"1048576\" />")
+            << QByteArray("<response value=\"ACK\" MaxPayloadSizeToTargetInBytesSupported=\"2097152\" />")
+            << QByteArray("<response value=\"ACK\" MaxPayloadSizeToTargetInBytesSupported=\"4194304\" />");
+    QString name = QStringLiteral("ufs"); quint32 maxPayload = 0; QString err;
+    QVERIFY2(edl::firehoseConfigure(t, name, maxPayload, &err), qPrintable(err));
+    QCOMPARE(t.writes.size(), 2);                              // 只发了两次
+    QVERIFY(t.writes[1].contains("MaxPayloadSizeToTargetInBytes=\"1048576\""));  // 第二次用首轮协商值
+    QCOMPARE(maxPayload, quint32(2097152));                    // 第二轮回报值被采纳（不再重发）
+    QCOMPARE(t.reads.size(), 1);                               // 第三条响应没被消费 = 确实没有第三轮
+}
+
 // ---------------------------------------------------------------------------
 // 补充用例
 // ---------------------------------------------------------------------------
@@ -155,6 +174,23 @@ void TestEdlFirehose::eraseNumericRangeKeepsRange()
     QCOMPARE(edl::xmlErase(e),
              QByteArray("<erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" "
                         "num_partition_sectors=\"2048\" start_sector=\"6\"/>"));
+}
+
+// patch 的 start_sector 同样允许表达式、同样必须原样透传
+// （reference/qdl/src/firehose.c:1420-1421 把 start_sector 与 value 一起原样下发；
+// 真实样本 reference/qdl/tests/data/patch1.xml 的 start_sector="NUM_DISK_SECTORS-5."）。
+// 逐字节断言：kills "表达式为空时发十进制 0"这类实现（模型契约 startSector==0）。
+void TestEdlFirehose::patchXmlPassesStartSectorExprVerbatim()
+{
+    edl::PlanEntry e; e.action = edl::PlanEntry::Action::Patch;
+    e.lun = 1; e.startSector = 0; e.startSectorExpr = QStringLiteral("NUM_DISK_SECTORS-5.");
+    e.byteOffset = 0; e.sizeInBytes = 4; e.value = QStringLiteral("0"); e.sectorSize = 4096;
+    e.imageFile = QStringLiteral("DISK");
+    e.what = QStringLiteral("Zero Out Header CRC in Backup Header.");
+    QCOMPARE(edl::xmlPatch(e),
+             QByteArray("<patch SECTOR_SIZE_IN_BYTES=\"4096\" byte_offset=\"0\" filename=\"DISK\" "
+                        "physical_partition_number=\"1\" size_in_bytes=\"4\" "
+                        "start_sector=\"NUM_DISK_SECTORS-5.\" value=\"0\"/>"));
 }
 
 // 表达式条目即使 numSectors==0 也不是"整 LUN"（Task 1 报告 §6 标注的模型组合）：
@@ -336,22 +372,40 @@ void TestEdlFirehose::parseStorageInfoAcceptsPageSize()
 }
 
 // 文本键回退（edl/edlclient/Library/firehose.py:1272-1275 的 SECTOR_SIZE_IN_BYTES /
-// num_physical_partitions，:1303-1317 用 "=" 或 ":" 分隔）。num_physical_partitions
-// 是 LUN 数、StorageInfo 里没有对应字段，故只验证扇区大小被取用。
+// num_physical_partitions，:1303-1317 用 "=" 或 ":" 分隔）：只补**扇区大小**并覆盖默认 4096，
+// total_blocks 仍必须来自 JSON。num_physical_partitions 是 LUN 数、StorageInfo 无对应字段。
 void TestEdlFirehose::parseStorageInfoFallsBackToTextKeys()
 {
     edl::FirehoseResponse r;
+    r.storageInfoJson = QStringLiteral("{\"storage_info\":{\"total_blocks\":61079552}}");
     r.errorText = QStringLiteral("SECTOR_SIZE_IN_BYTES=512\nnum_physical_partitions=6");
     edl::StorageInfo info; QString err;
     QVERIFY2(edl::parseStorageInfo(r, 1, info, &err), qPrintable(err));
     QCOMPARE(info.lun, quint32(1));
-    QCOMPARE(info.blockSize, quint32(512));
+    QCOMPARE(info.totalBlocks, quint64(61079552));
+    QCOMPARE(info.blockSize, quint32(512));                          // 文本键覆盖默认 4096
 
     edl::FirehoseResponse r2;
+    r2.storageInfoJson = QStringLiteral("{\"storage_info\":{\"total_blocks\":8192}}");
     r2.errorText = QStringLiteral("SECTOR_SIZE_IN_BYTES: 4096");     // bkerler 的另一种分隔
     edl::StorageInfo info2; QString err2;
     QVERIFY2(edl::parseStorageInfo(r2, 0, info2, &err2), qPrintable(err2));
+    QCOMPARE(info2.totalBlocks, quint64(8192));
     QCOMPARE(info2.blockSize, quint32(4096));
+}
+
+// 只拿到扇区大小（无 total_blocks）**不得**算成功：totalBlocks==0 会让 validatePlan 的越界判定
+// （flash_plan.cpp:608-609）把**每条 Program 条目**报成"越界"而非"LUN 无设备几何"——
+// 假几何比"几何不可用"难查得多，宁可在此失败并说清缺什么。
+void TestEdlFirehose::parseStorageInfoFailsWithoutTotalBlocks()
+{
+    edl::FirehoseResponse r;
+    r.storageInfoJson = QStringLiteral("{\"storage_info\":{\"page_size\":4096}}");
+    r.errorText = QStringLiteral("SECTOR_SIZE_IN_BYTES=512");
+    edl::StorageInfo info; QString err;
+    QVERIFY(!edl::parseStorageInfo(r, 0, info, &err));
+    QVERIFY(err.contains(QStringLiteral("total_blocks")));            // 文案要点名缺的东西
+    QCOMPARE(info.totalBlocks, quint64(0));                           // 不给假几何
 }
 
 // 两条来源都拿不到几何 → 失败 + 中文 error（绝不返回"默认 4096 全 0"的假几何：

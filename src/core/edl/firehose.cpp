@@ -367,8 +367,7 @@ bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, 
     out = StorageInfo();                 // 先归零：blockSize 的 4096 默认值不得冒充"读到了"
     out.lun = lun;
 
-    bool gotBlocks = false;
-    bool gotSector = false;
+    bool gotSector = false;   // 仅用于"文本键回退是否还需要跑"（成败判据见函数末尾）
 
     // ① JSON 口径（reference/qdl/src/firehose.c:1874-1884）
     if (!r.storageInfoJson.isEmpty()) {
@@ -382,10 +381,8 @@ bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, 
                 si = arr.first().toObject();
         }
         quint64 n = 0;
-        if (jsonU64(si, QStringLiteral("total_blocks"), &n)) {
+        if (jsonU64(si, QStringLiteral("total_blocks"), &n))
             out.totalBlocks = n;
-            gotBlocks = true;
-        }
         if (jsonU64(si, QStringLiteral("block_size"), &n)) {
             out.blockSize = quint32(n);
             gotSector = true;
@@ -399,8 +396,7 @@ bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, 
     // ② 文本键回退（bkerler：edl/edlclient/Library/firehose.py:1272-1275 的
     //    SECTOR_SIZE_IN_BYTES / num_physical_partitions；分隔符形态见 :1303-1317）。
     //    注意 num_physical_partitions 是 **LUN 数**，StorageInfo 无对应字段（LUN 集合来自计划），
-    //    故只用 SECTOR_SIZE_IN_BYTES。缺 block_size 时保留默认 4096 —— validatePlan 只用
-    //    blockSize 做一致性 warning（flash_plan.cpp:580-582），不参与越界判定。
+    //    故只用 SECTOR_SIZE_IN_BYTES；它只补扇区大小，**不能**单独构成"几何可用"。
     if (!gotSector) {
         QString v;
         if (textKeyValue(r.errorText, QStringLiteral("SECTOR_SIZE_IN_BYTES"), &v)) {
@@ -413,15 +409,22 @@ bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, 
         }
     }
 
-    if (gotBlocks || gotSector)
+    // 成功判据 = **totalBlocks > 0**，唯一来源是 storage_info.total_blocks
+    // （qdl 口径 reference/qdl/src/firehose.c:1880-1883）。只拿到扇区大小不算成功：
+    // totalBlocks==0 会让 validatePlan 的越界判定（flash_plan.cpp:608-609 的
+    // `e.startSector > it->totalBlocks || e.numSectors > it->totalBlocks - e.startSector`）
+    // 把**每条 Program 条目**报成"越界"，而不是报"LUN 无设备几何"——假几何比"几何不可用"
+    // 难查得多，宁可在此失败。缺 block_size 时保留默认 4096（validatePlan 只用 blockSize
+    // 做一致性 warning，flash_plan.cpp:580-582，不参与越界判定）。
+    if (out.totalBlocks > 0)
         return true;
 
     if (error) {
         QString detail = r.storageInfoJson.isEmpty() ? r.errorText : r.storageInfoJson;
         if (detail.isEmpty())
             detail = r.raw;
-        *error = QStringLiteral("getstorageinfo 未返回可用存储几何（LUN %1：响应里既无 "
-                                "storage_info.total_blocks/block_size，也无文本键 SECTOR_SIZE_IN_BYTES）")
+        *error = QStringLiteral("getstorageinfo 未返回可用存储几何（LUN %1：需要 "
+                                "storage_info.total_blocks > 0；只拿到扇区大小不足以判越界）")
                      .arg(lun);
         if (!detail.isEmpty())
             *error += QStringLiteral("；设备返回：%1").arg(excerpt(detail));
@@ -477,7 +480,8 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
 
 bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloadBytes, QString *error)
 {
-    bool switchedStorage = false;
+    bool switchedStorage = false;   // 换存储类型最多一次（firehose.py:936-940）
+    bool negotiated = false;        // 载荷协商最多重发一次（qdl：恰好两次发送，firehose.c:534-548）
     quint32 payload = maxPayloadBytes;
 
     for (;;) {
@@ -515,21 +519,24 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
                 *error = QStringLiteral("configure 失败（设备返回 NAK）：%1").arg(excerpt(text));
             return false;
         }
-        if (!resp.ack) {
-            if (error)
-                *error = QStringLiteral("configure 未得到 ACK/NAK 响应；设备返回：%1")
-                             .arg(excerpt(resp.raw));
-            return false;
-        }
+        // 走到这里必为 ACK：firehoseSendCommand 只在 ack||nak 时返回 true（见其注释），
+        // NAK 已在上方分支处理，故不再有"既非 ACK 也非 NAK"的第三条路。
 
         // 两轮协商：响应带 MaxPayloadSizeToTargetInBytesSupported → 用该值重发一次
         // （reference/qdl/src/firehose.c:534-548；bkerler 同，edl/edlclient/Library/firehose.py:926-935）。
-        // 重发后设备若再报同一个值则收敛（supported == payload → 不再重发），不会打转。
+        // **最多两次发送**：negotiated 落地后即使设备再报新值也只采纳、不再发（与 qdl 一致 ——
+        // 它第二次 send 后直接 `qdl->max_payload_size = size` 收尾，:544-548）；
+        // 否则"每轮回报不同值"会让 10s 预算的循环无限重发，等于挂死。
         const quint32 supported =
             responseAttrU32(resp.raw, QStringLiteral("MaxPayloadSizeToTargetInBytesSupported"));
         if (supported > 0 && supported != payload) {
-            payload = supported;
-            continue;
+            if (negotiated) {
+                payload = supported;    // 已重发过一次：采纳设备最新值，就此定案
+            } else {
+                negotiated = true;
+                payload = supported;
+                continue;               // 第二次（也是最后一次）发送
+            }
         }
 
         maxPayloadBytes = payload;
