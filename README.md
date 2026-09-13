@@ -106,12 +106,12 @@ PhoneToolbox/
 │   │   ├── engineer_mode.cpp   # 维修诊断: 工程模式入口映射（12 品牌）
 │   │   ├── modes/              # EDL/MTK 通讯协议实现
 │   │   ├── edl/                # EDL 刷写链（自研 Sahara/Firehose）
-│   │   │   ├── edl_transport.h        # 可注入传输接口
+│   │   │   ├── edl_transport.h          # 可注入传输接口
 │   │   │   ├── edl_libusb_transport.cpp # libusb 传输实现（超时换算/重枚举）
-│   │   │   ├── edl_session.cpp        # 会话编排 + 数据面（分块/ZLP）
-│   │   │   ├── sahara.cpp             # Sahara 协议（programmer 上传）
-│   │   │   ├── firehose.cpp           # Firehose 协议（configure/program/patch）
-│   │   │   └── flash_plan.cpp         # 刷写计划构建（rawprogram/patch + GPT 回填）
+│   │   │   ├── edl_session.cpp          # 会话编排 + 数据面（分块/ZLP）
+│   │   │   ├── sahara.cpp               # Sahara 协议（programmer 上传）
+│   │   │   ├── firehose.cpp             # Firehose 协议（configure/program/patch）
+│   │   │   └── flash_plan.cpp           # 刷写计划构建（rawprogram/patch + GPT 回填）
 │   │   └── ...
 │   ├── image_engine/           # 镜像格式引擎（纯库, 全自研）
 │   │   ├── payload_image.cpp   # payload.bin（手写 protobuf + 增量 diff）
@@ -148,7 +148,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 32 个测试目标）
+├── tests/                      # 单元测试（Qt Test, 38 个测试目标）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
@@ -161,7 +161,7 @@ PhoneToolbox/
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build    # 33 个测试目标, 全绿
+ctest --test-dir build    # 39 个测试目标, 全绿
 ```
 
 ## ADB 获取策略
