@@ -53,6 +53,7 @@ private slots:
     void detectMtkDetailUtf8FieldSemantics();
     void detectTinyFileSkipsTailProbe();
     void detectUnknownBytesStaysUnknown();
+    void detectGpt4096LbaLayout();
     void opsTailAlsoMatchesOfpQcJudge();
     void unpackOfpWritesOutputs();
     void unpackOfpPartialSuccessReportsWarning();
@@ -416,6 +417,52 @@ void TestImageWorker::detectUnknownBytesStaysUnknown()
     QCOMPARE(r.format, imgreg::Format::Unknown);
     QVERIFY2(detectFile(*worker, text, &r, &why), qPrintable(why));
     QCOMPARE(r.format, imgreg::Format::Unknown);
+}
+
+// ==================== 1b. GPT 双 LBA 布局的探测缓冲（②-b） ====================
+
+// 4096 字节 LBA 的整盘 GPT：头签名 `EFI PART` 在 0x1000（UFS/真包形态）。doDetect 的
+// 探测缓冲**必须 ≥ 0x1008 字节**才看得到它 —— 否则 registry 只按 0x200 判、落到扩展名
+// 兜底（.img → RawImage），UI 的 DiskGpt 分支永远进不去（改前 buffer=4096 时正是如此：
+// 症状是"已识别: RawImage"而非"GPT 解析失败"）。
+// 夹具尺寸 0x1200 = 4608 是**刻意**的：> 4096（改前缓冲）且 < 8192（改后缓冲）⇒
+// 缓冲若退回 4096，本用例必红（这就是它的判别力所在）。
+// 内容只需签名：探测不解析 GPT（解析器另由 tests/test_disk.cpp 的 4096 用例守护，
+// 对账另由 test_flash_plan 的两条用例守护），保护 MBR 写上只为形态真实。
+void TestImageWorker::detectGpt4096LbaLayout()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QByteArray disk4096(0x1200, 0);
+    disk4096[446 + 4] = char(0xEE);
+    disk4096[510] = char(0x55); disk4096[511] = char(0xAA);
+    disk4096.replace(0x1000, 8, "EFI PART");
+    const QString path4096 = writeBlob(dir.filePath(QStringLiteral("disk4096.img")), disk4096);
+    QVERIFY(!path4096.isEmpty());
+
+    auto worker = makeWorker();
+    imgreg::Detected r;
+    QString why;
+    QVERIFY2(detectFile(*worker, path4096, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::DiskGpt);
+    QCOMPARE(r.detail, QStringLiteral("GPT 磁盘镜像"));
+
+    // 对照：512 字节 LBA（签名在 0x200）= 既有行为，不被拓宽影响
+    QByteArray disk512(1024, 0);
+    disk512[446 + 4] = char(0xEE);
+    disk512[510] = char(0x55); disk512[511] = char(0xAA);
+    disk512.replace(512, 8, "EFI PART");
+    const QString path512 = writeBlob(dir.filePath(QStringLiteral("disk512.img")), disk512);
+    QVERIFY(!path512.isEmpty());
+    QVERIFY2(detectFile(*worker, path512, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::DiskGpt);
+
+    // 负向对照：同样尺寸但签名不在两处 → 仍是扩展名兜底（.img → RawImage），不误报成 GPT
+    QByteArray notGpt(0x1200, '\x5A');
+    const QString pathNot = writeBlob(dir.filePath(QStringLiteral("plain.img")), notGpt);
+    QVERIFY(!pathNot.isEmpty());
+    QVERIFY2(detectFile(*worker, pathNot, &r, &why), qPrintable(why));
+    QCOMPARE(r.format, imgreg::Format::RawImage);
 }
 
 // 前提断言（"为什么顺序敏感"钉在测试里；完整版见 test_registry.cpp 的

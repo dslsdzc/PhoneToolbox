@@ -80,8 +80,17 @@ Detected detect(const QByteArray &header, const QString &fileName)
     if (header.size() >= 2 && static_cast<uchar>(header[0]) == 0x55 &&
         static_cast<uchar>(header[1]) == 0xAA)
         return {Format::UpdateApp, "华为 update.app 固件"};
-    // GPT: 主分区表头 "EFI PART" 位于 LBA1（偏移 512）
-    if (header.size() >= 520 && header.mid(512, 8) == QByteArrayLiteral("EFI PART"))
+    // GPT: 主分区表头 "EFI PART" 位于 LBA1，而 LBA1 的字节偏移随 LBA 尺寸变：
+    //   512 字节 LBA（eMMC/离线镜像）→ LBA1 = 0x200；
+    //   4096 字节 LBA（UFS/真实 EDL 包 gpt_main{N}.bin）→ LBA1 = 0x1000。
+    // 两个偏移都认（bkerler 读取端同样两布局都试：edl/edlclient/Library/gpt.py:526-531；
+    // 真样本 edl/edlclient/Library/TestFiles/gpt_sm8180x.bin 的签名只在 0x1000）。
+    // 只加"或"，不改本函数其它判据的相对顺序；解析仍由 imgdisk::parseGpt 自己识别布局
+    //（disk_image.cpp 的 detectGptLayout），这里只是"是不是 GPT"的粗判。
+    // ⚠️ 调用方给的探测缓冲必须 ≥ 0x1008 字节，否则 0x1000 分支永不触发
+    //（ImageWorker::doDetect 读 8192 字节）。
+    if ((header.size() >= 520 && header.mid(512, 8) == QByteArrayLiteral("EFI PART")) ||
+        (header.size() >= 0x1008 && header.mid(0x1000, 8) == QByteArrayLiteral("EFI PART")))
         return {Format::DiskGpt, "GPT 磁盘镜像"};
     // TWRP 备份: 头魔数 "TWRP"（imgtwrp::isTwrpBackup 同判定）
     if (header.size() >= 4 && header.left(4) == QByteArrayLiteral("TWRP"))

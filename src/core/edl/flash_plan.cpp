@@ -9,7 +9,6 @@
 #include <QHash>
 #include <QSet>
 #include <QXmlStreamReader>
-#include <QtEndian>
 #include <algorithm>
 #include <limits>
 
@@ -762,10 +761,10 @@ void detectStorageType(const QString &dir, FlashPlan &plan)
                                     "MemoryName 时会换类型重试一次）");
 }
 
-// ---- GPT：文件 → 分区名/LBA 表（复用既有解析器 + 布局适配）----
+// ---- GPT：文件 → 分区名/LBA 表（复用共享解析器；512/4096 双布局由解析器原生支持）----
 
 // GPT 分区项：只取对账需要的三个字段。用 numSectors 而不是 lastLba —— PlanEntry 按扇区数建模，
-// 少一次 ±1 换算就少一处 off-by-one（last-first+1 已由解析层做，disk_image.cpp:80）。
+// 少一次 ±1 换算就少一处 off-by-one（last-first+1 已由解析层做，disk_image.cpp:125）。
 struct GptPartition { QString name; quint64 firstLba = 0; quint64 numSectors = 0; };
 
 // 单个 LUN 的 GPT 加载结果（含失败文本，供"未对账"告警引用）
@@ -776,35 +775,38 @@ struct GptTable {
     QList<GptPartition> parts;
 };
 
-// GPT 文件 → 分区名/LBA 表。**复用既有解析器** imgdisk::parseGpt（src/image_engine/disk_image.cpp:46-88），
-// 不重写解析逻辑（硬要求 2）：它的接口本就给出"分区名 → (startSector, numSectors)"（disk_image.h:8-9）。
+// 解析失败的原因文案。三分层（修包方向不同 —— 把"文件被截断"说成"表坏了"会误导，文案被
+// tests/test_flash_plan.cpp 的 opsReportsTruncated512Gpt 钉住）：
+//   1) 头既不在 0x200 也不在 0x1000 → 不是 GPT / 布局不认识；
+//   2) 头在，但整盘不足"保护 MBR + 头"（512 布局 < 1024、4096 布局 < 8192）→ **文件被截断**；
+//   3) 其余 → 表项数组越界或 entrySize < 128。
+// 布局判据复用解析器自己的 imgdisk::detectGptLayout（只回答"头读自哪个字节偏移"，不做解析）——
+// 不在此处重抄 0x200/0x1000 判据，免得两处漂移。
+QString gptFailureReason(const QByteArray &bytes)
+{
+    quint64 lbaSize = 0;
+    if (!imgdisk::detectGptLayout(bytes, lbaSize))
+        return QStringLiteral("\"EFI PART\" 既不在 0x200 也不在 0x1000"
+                              "（本解析器只支持 512/4096 字节 LBA 两种布局）");
+    if (static_cast<quint64>(bytes.size()) < 2 * lbaSize)
+        return QStringLiteral("文件过短（%1 字节）：%2 字节 LBA 的 GPT 至少需要 %3 字节"
+                              "（保护 MBR + 头）").arg(bytes.size()).arg(lbaSize).arg(2 * lbaSize);
+    return QStringLiteral("GPT 解析失败（表项数组越界或表项大小 <128）");
+}
+
+// GPT 文件 → 分区名/LBA 表。**复用既有解析器** imgdisk::parseGpt（src/image_engine/disk_image.cpp），
+// 不重写解析逻辑（硬要求 2）：它的接口本就给出"分区名 → (startSector, numSectors)"（disk_image.h:9）。
 //
-// **布局适配（真包必需）**：parseGpt 硬编码 512 字节 LBA —— 在文件偏移 512 处找头、按 `表LBA × 512`
-// 定位表项数组（disk_image.cpp:8,50-63）。而真实 EDL 包的 gpt_main{N}.bin 是 **4096 字节 LBA**：
-//   * edl/edlclient/Library/TestFiles/gpt_sm8180x.bin 实测 24576 字节、`EFI PART` 在 0x1000、
-//     part_entry_lba=2、32 项 ×128B（本仓内的真实样本）；
+// **布局：本处无需任何适配** —— 512/4096 字节 LBA 由解析器原生识别（签名在 0x200 → 512、在 0x1000
+// → 4096，见 imgdisk::detectGptLayout）。这里曾有的"把 92 字节头块搬到偏移 512、表 LBA ×8"的局部适配
+// 已随共享解析器修好而下撤（那是绕过，不是修复）。4096 布局是真包必需，证据三源：
+//   * edl/edlclient/Library/TestFiles/gpt_sm8180x.bin：24576 字节、`EFI PART` 在 0x1000、
+//     part_entry_lba=2、32 项 ×128B；
 //   * reference/qdl/tests/data/rawprogram1.xml:12 的 `gpt_main1.bin num_partition_sectors="6"`
 //     ⇒ 6 × 4096 = 24576 字节，与上者吻合；
 //   * bkerler 读盘时 512/4096 都试（edl/edlclient/Library/gpt.py:526-531）。
-// 只支持 512 会让 OPS 路径在真机（UFS）上永远拿不到 GPT 几何 ⇒ 回填/对账整体失效。
-// 适配只搬运字节布局、不碰解析语义：把 92 字节头块搬到偏移 512，并把头里的"表项数组 LBA"字段按
-// (lbaSize/512) 放大 —— 表项数组的**字节偏移不变**，parseGpt 随后读到的 LBA 与分区名与文件完全一致。
-// 头既不在 512 也不在 4096 → 直接失败（不猜布局，交给调用方记"未对账"告警）。
-//
-// **CRC32：解析器完全不校验，故本适配无需重算任何校验和**（适用边界就写在这里，后人不必猜）：
-//   `imgdisk::parseGpt`/`isGpt` 只读四处 —— 偏移 512 处的 8 字节签名、头 +72（表 LBA）、+80（表项数）、
-//   +84（表项大小），加表项内 +32/+40/+56；`src/image_engine/disk_image.cpp` 内**没有任何 CRC 代码**
-//   （grep 无命中），头 +16（header CRC32）与 +88（表 CRC32）连读都没读。因此把改过的头块写到 512
-//   不会触发"校验和不符"。**若将来 parseGpt 加上 CRC 校验**，本适配必须同步处理（重算 header CRC，
-//   92 字节范围的口径见 reference/qdl/tests/data/patch1.xml:27 的 `CRC32(1,92)`），或改为在
-//   disk_image 内实现双布局 —— 否则 4096 包会开始解析失败。
-//
-// **为什么适配在这里、而不改 disk_image**：本次改动的范围最小，且**不动镜像引擎既有行为** ——
-// `imgdisk::parseGpt` 还被 UI 的"GPT 磁盘镜像提取"用着（src/ui/image_worker.cpp:788-791）。
-// 共享解析器若要支持双布局，应在 `disk_image` 内做（bkerler 同款：按 512/4096 逐次尝试，
-// edl/edlclient/Library/gpt.py:526-531）；那是独立后续项。顺便记一笔**本任务之前就存在**的限制：
-// 同一个 512-only 解析器让 UI 的 GPT 整盘提取对 **4096-LBA 的 GPT 磁盘**同样解析失败（`image_worker.cpp`
-// 报"GPT 解析失败"），非本任务引入。
+// 本函数**不做任何单位换算**，直接回传解析器给的 LBA 编号（单位 = 该盘 LBA 尺寸）；对账层按同单位
+// 比较（reconcileWithGpt —— OPS 包的 SECTOR_SIZE_IN_BYTES 与 GPT 的 LBA 尺寸同值，见上面 qdl 样本行）。
 bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString *error)
 {
     QFile f(gptPath);
@@ -815,44 +817,9 @@ bool readGptPartitions(const QString &gptPath, QList<GptPartition> &out, QString
     QByteArray bytes = f.readAll();
     f.close();
 
-    constexpr int kHeaderBytes = 92;         // UEFI 头最小 92 字节（parseGpt 只读到头 +88）
-    if (imgdisk::isGpt(bytes.mid(512, 8)) && bytes.size() < 2 * 512) {
-        // 512 布局的长度早退（与下面 4096 分支同款）：parseGpt 的第一道门槛是"整盘 ≥ 2 个 512 扇区"
-        // （disk_image.cpp:48-49，头在 LBA1、表项数组从 LBA2 起才有意义）。少了这一条，520–1023 字节的
-        // **截断文件**会一路落到下游那句"表项数组越界或表项大小 <128"，把"包内 GPT 被截断"诊断成
-        // "表坏了"（误导修包方向）。
-        if (error)
-            *error = QStringLiteral("文件过短（%1 字节）：512 字节 LBA 的 GPT 至少需要 1024 字节"
-                                    "（保护 MBR + 头 + 表项数组起点）").arg(bytes.size());
-        return false;
-    }
-    if (!imgdisk::isGpt(bytes.mid(512, 8))) {
-        if (!imgdisk::isGpt(bytes.mid(4096, 8))) {
-            if (error)
-                *error = QStringLiteral("\"EFI PART\" 既不在 0x200 也不在 0x1000"
-                                        "（本解析器只支持 512/4096 字节 LBA 两种布局）");
-            return false;
-        }
-        constexpr quint64 kLbaSize = 4096;
-        if (bytes.size() < qint64(kLbaSize + kHeaderBytes)) {
-            if (error)
-                *error = QStringLiteral("文件过短（%1 字节），容不下 0x1000 处的 GPT 头").arg(bytes.size());
-            return false;
-        }
-        QByteArray head = bytes.mid(kLbaSize, kHeaderBytes);
-        const quint64 tableLba = qFromLittleEndian<quint64>(head.constData() + 72);
-        // 字节偏移 = tableLba × 4096 = (tableLba × 8) × 512 —— 换算成 512 单位后交回 parseGpt
-        if (tableLba > std::numeric_limits<quint64>::max() / (kLbaSize / 512)) {
-            if (error) *error = QStringLiteral("分区表 LBA 字段溢出（%1）").arg(tableLba);
-            return false;
-        }
-        qToLittleEndian<quint64>(tableLba * (kLbaSize / 512), head.data() + 72);
-        bytes.replace(512, kHeaderBytes, head);   // 头搬到 512：parseGpt 只在这里找头
-    }
-
     imgdisk::DiskInfo info;
     if (!imgdisk::parseGpt(bytes, info)) {
-        if (error) *error = QStringLiteral("GPT 解析失败（表项数组越界或表项大小 <128）");
+        if (error) *error = gptFailureReason(bytes);
         return false;
     }
     for (const imgdisk::Partition &p : info.partitions)

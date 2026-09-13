@@ -315,8 +315,11 @@ void ImageWorker::doDetect(const QString &path)
         emit detectFinished(path, result);
         return;
     }
-    // 魔数判定最大读取 2120B（pac 辅助信号 @2116），4096 一次覆盖全部判定点
-    const QByteArray header = file.read(4096);
+    // 魔数判定最远读取：pac 辅助信号 @2116、super 几何 @4096、GPT 头签名 @0x1000
+    //（4096 字节 LBA 的布局，判据需 ≥ 0x1008 字节 —— 见 registry.cpp 的 GPT 分支）。
+    // 8192 一次覆盖全部判定点：此前只读 4096，4096-LBA 的 GPT 头签名读不到 ⇒ 整盘
+    // GPT 被扩展名兜底判成 RawImage。小文件照旧短读（各判据本就带 header.size() 门禁）。
+    const QByteArray header = file.read(8192);
     // OPPO OFP/OPS 无头魔数（判据在文件尾页）→ 需末 0x1000 做二次探测。
     // 文件不足一整页 0x1000 时读不到完整尾页 → 跳过探测（不误判：真实包体
     // 至少一页起步，见 oppo_ofp.cpp kQcMinFileSize / detectOPS 的 fileSize 门禁）。
@@ -797,7 +800,9 @@ void ImageWorker::doUnpack(const QString &path, const QString &outDir,
         }
         for (const imgdisk::Partition &p : info.partitions) {
             QByteArray raw;
-            if (!imgdisk::extractPartition(data, p, raw)) {
+            // 换算按 info.sectorSize（512 或 4096，由 parseGpt 按头所在偏移识别）——
+            // 用默认的 512 会在 4096 字节 LBA 的盘上静默取错字节区段。
+            if (!imgdisk::extractPartition(data, p, raw, info.sectorSize)) {
                 error = QStringLiteral("分区 %1 提取失败").arg(p.name);
                 break;
             }

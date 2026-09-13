@@ -87,10 +87,20 @@ void TestRegistry::detectVendorMagic()
              imgreg::Format::UpdateApp);
     QCOMPARE(imgreg::detect(QByteArray("\x55\x00", 2), "update.app").format,
              imgreg::Format::Unknown);
-    // GPT: 主分区表头 "EFI PART" 位于 LBA1（偏移 512）
+    // GPT: 主分区表头 "EFI PART" 位于 LBA1，偏移随 LBA 尺寸变 —— 512 字节 LBA 在 0x200
     QByteArray gpt(520, 0);
     gpt.replace(512, 8, "EFI PART");
     QCOMPARE(imgreg::detect(gpt, "disk.img").format, imgreg::Format::DiskGpt);
+    // 4096 字节 LBA（UFS/真实 EDL 包 gpt_main{N}.bin）在 0x1000。长度取 0x1200（> 0x1008，
+    // 与 ImageWorker::doDetect 的 8192 探测缓冲同量级）；两布局都有守护。
+    QByteArray gpt4096(0x1200, 0);
+    gpt4096.replace(0x1000, 8, "EFI PART");
+    QCOMPARE(imgreg::detect(gpt4096, "disk.img").format, imgreg::Format::DiskGpt);
+    // 边界：缓冲不足 0x1008 字节 → 0x1000 分支不触发（不越界读、也不误判成 GPT）；
+    // 落到扩展名兜底（f.bin 无规则 → Unknown，与下面 notGpt 同款）
+    QByteArray gptShort(0x1004, 0);
+    gptShort.replace(0x1000, 4, "EFI ");
+    QCOMPARE(imgreg::detect(gptShort, "f.bin").format, imgreg::Format::Unknown);
     QByteArray notGpt(520, 0);
     QCOMPARE(imgreg::detect(notGpt, "f.bin").format, imgreg::Format::Unknown);
     // TWRP 备份: "TWRP" @0

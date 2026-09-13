@@ -8,15 +8,16 @@
 
 // 合成带 **一个非空分区项**（其余表项留空）的 GPT 字节 —— 文件名 `gpt_main{N}.bin` 的模拟物。
 //
-// == 构造依据：先读 `src/image_engine/disk_image.cpp:41-88`（parseGpt）的实际接受条件 ==
-//   * 签名 `"EFI PART"`：parseGpt 在**字节偏移 512** 处找头（`disk_image.cpp:8,50`，
-//     `isGpt(disk.mid(kSector, 8))`）；整盘 < 1024 字节直接拒绝（:48-49）。
+// == 构造依据：先读 `src/image_engine/disk_image.cpp`（parseGpt，函数体 :88-133）的实际接受条件 ==
+//   * 签名 `"EFI PART"`：头读自哪个字节偏移**由 LBA 布局决定** —— 签名在 0x200 → 512 字节 LBA、
+//     在 0x1000 → 4096 字节 LBA（`detectGptLayout`，:57-70，先试 512）；识别后整盘 < 2×lbaSize
+//     直接拒绝（:95：512 布局 < 1024 字节、4096 布局 < 8192 字节）。
 //   * 头字段只读三个：分区表起始 LBA（u64 LE @+72）、表项数（u32 LE @+80）、表项大小
-//     （u32 LE @+84，**必须 ≥128**，否则 return false）；另有 `表LBA > size/512` 的越界拒绝（:59）。
+//     （u32 LE @+84，**必须 ≥128**，否则 return false）；另有 `表LBA > size/lbaSize` 的越界拒绝（:104）。
 //   * 表项：firstLBA u64 LE @+32、lastLBA u64 LE @+40、分区名 UTF-16LE @+56（取 72 字节，首个
-//     NUL 处截断，:81-84）；**空项判据 = type GUID 全零 且 first==last==0**（:73-76）。
+//     NUL 处截断，:126-129）；**空项判据 = type GUID 全零 且 first==last==0**（:118-121）。
 //   * **不校验**：头 CRC32 / 表 CRC32 / 备份头 / 其余保留字段；**type GUID 也不要求非零**
-//     （:73-76 注释明确"全零 GUID 的合法分区须保留"）—— 故这些字段按真实 GPT 形态写上，
+//     （:118-121 注释明确"全零 GUID 的合法分区须保留"）—— 故这些字段按真实 GPT 形态写上，
 //     但**不参与判定**，不要以为它们在起作用。
 //   * parseGpt **不检查**分区扇区范围是否落在文件内 —— 本夹具因此可以只含 GPT 区域本身
 //     （真实 `gpt_main{N}.bin` 就是这样：它是"GPT 区域"的镜像，不是整盘镜像）。
@@ -33,8 +34,8 @@
 //       - `reference/qdl/tests/data/rawprogram1.xml:12`：`gpt_main1.bin num_partition_sectors="6"`
 //         —— 6 × 4096 = 24576，与上者完全吻合；
 //       - bkerler 读盘时**同时试 512 与 4096**（`edl/edlclient/Library/gpt.py:526-531`）。
-//     `imgdisk::parseGpt` 只按 512 定位 → 该布局由 `buildPlanFromDir` 内的**布局适配**
-//     （`flash_plan.cpp` 的 readGptPartitions）归一化后再交给 parseGpt。
+//     `imgdisk::parseGpt` **原生识别**该布局（`detectGptLayout`：签名在 0x1000 → LBA=4096）——
+//     `flash_plan.cpp` 的 readGptPartitions 不做任何字节搬迁/换算（旧局部适配已下撤）。
 //     用例：`opsReconcilesGptLayout4096`。
 // ⚠️ **测试绝不读真实样本 `gpt_sm8180x.bin`**：它属 `edl/` 子模块，未初始化的克隆（CI/新机器）里不存在
 //    → 测试会挂。上面两条只是**证据引用**；4096 布局的夹具是本函数用同样布局手写出来的字节。
@@ -81,7 +82,7 @@ inline QByteArray buildGptWithPartition(const QByteArray &name, quint64 firstLba
     put32(hdr + 84, entrySize);              // ← 表项大小（解析器**读**）
     put32(hdr + 88, 0);                      // 表 CRC32：**不校验**（见上）
 
-    // 第一个表项 = 目标分区；其余保持全零（= 空项，parseGpt 跳过：:73-76）
+    // 第一个表项 = 目标分区；其余保持全零（= 空项，parseGpt 跳过：:118-121）
     const quint64 e = 2 * lbaSize;
     for (int i = 0; i < 16; ++i)             // type GUID（不要求非零，写上求形态真实）
         g[int(e + i)] = char(0xA0 + i);

@@ -811,7 +811,9 @@ void TestFlashPlan::opsSourceUsesMetadataAndGpt()
 
 // 布局② **4096 字节 LBA = 真实包 `gpt_main{N}.bin` 的形态**（证据见 flash_plan_helpers.h 的 lbaSize
 // 注释：edl 子模块真实样本 gpt_sm8180x.bin 24576 B、EFI PART@0x1000；qdl 的 gpt_main1.bin = 6×4096）。
-// imgdisk::parseGpt 只按 512 定位 → 本用例钉住 buildPlanFromDir 内的**布局适配**（解析仍走 parseGpt）。
+// 该布局由 imgdisk::parseGpt **原生识别**（detectGptLayout：签名在 0x1000 → LBA=4096）——
+// buildPlanFromDir/readGptPartitions 内**没有**任何字节搬迁/换算，本用例因此守护
+// "解析器识别 + GPT 对账"这条完整链路。
 // 夹具是**手写字节**（buildGptWithPartition 的 lbaSize=4096），不读子模块里的真实样本。
 // 断言到"对账真的发生"：元数据故意写 2048/16 → 结果必须是 GPT 的 4096/8192 + 不一致告警。
 void TestFlashPlan::opsReconcilesGptLayout4096()
@@ -839,7 +841,7 @@ void TestFlashPlan::opsReconcilesGptLayout4096()
     QVERIFY(mismatchWarned);                                 // 对账确实发生（不是只 parse 成功）
 }
 
-// 布局① **512 字节 LBA = 解析器原生布局**（适配分支不介入，直接交 parseGpt）。与 4096 那条成对，
+// 布局① **512 字节 LBA**（解析器先试的布局，也是既有行为）。与 4096 那条成对，
 // 同样断言"对账真的发生"：元数据 7/2 与 GPT 6/901 不一致 → 以 GPT 为准 + 告警点名 gpt_main0.bin。
 // （数字取自 reference/qdl/tests/data/rawprogram1.xml:5 的真实 xbl_a 几何，便于对照。）
 void TestFlashPlan::opsReconcilesGptLayout512()
