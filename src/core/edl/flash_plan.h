@@ -80,6 +80,10 @@ bool buildPlanFromDir(const QString &dir, FlashPlan &plan, QString *error);
 // + warning）。`start_sector` 为 firehose 表达式时**不参与对账**（表达式由设备侧求值）。
 // **跨单位不比对**：元数据声明了 `SECTOR_SIZE_IN_BYTES` 且与 `gpt_main{N}.bin` 的 LBA 尺寸不同
 // → 两边 LBA 编号单位不同、不可比较，整个条目跳过对账（保留元数据值 + warning），不做 ×8/÷8 换算。
+// **未声明单位时是 warn-only**（元数据**没有** `SECTOR_SIZE_IN_BYTES`，而 GPT 的 LBA 尺寸不等于
+// 条目将采用的默认值 4096）→ 对账照常（值按现状，不换算、不丢弃），**另加一条中文告警**说明
+// "未声明单位 / 包内 GPT 的单位 / 条目将按多少下发"，请用户核对包 —— 该形态是否配套无法在主机侧
+// 判定，故不 fail-closed（会回归 `opsReconcilesGptLayout512`/`opsSourceUsesMetadataAndGpt` 的认定形态）。
 // **忽略包内偏移字段** `FileOffsetInSrc`/`SizeInByteInSrc`/`SizeInSectorInSrc` —— 它们只描述文件在
 // 包内的位置与长度，与设备扇区无关（协议速查 §5）。
 // `packageDir`：包内文件所在目录（imageFile 与 gpt_main{N}.bin 的基准；通常 = settings.xml 所在目录）。

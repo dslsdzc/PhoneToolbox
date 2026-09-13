@@ -77,6 +77,7 @@ private slots:
     void opsAcceptsMetadataConsistentWithGpt();
     void opsReconcilesWhenSectorUnitMatches();
     void opsSkipsReconcileWhenSectorUnitDiffers();
+    void opsWarnsWhenMetadataOmitsSectorUnit();
     void opsPatchGroupsAndMissingPatchWarning();
     void opsGroupTagAndUfsProvisionGiveLun();
     void dirPrefersRawprogramAndFallsBackWhenEmpty();
@@ -1154,6 +1155,46 @@ void TestFlashPlan::opsSkipsReconcileWhenSectorUnitDiffers()
             && w.contains(QStringLiteral("核对")))
             unitWarned = true;
     QVERIFY2(unitWarned, "必须告警说明单位不同、保留元数据、提示核对包");
+}
+
+// 跨单位防护的**残留尖角**（③ 复审）：元数据**未声明** SECTOR_SIZE_IN_BYTES（条目按 `PlanEntry` 的
+// 默认值 4096 下发）而包内 gpt_main0.bin 是 **512 字节 LBA** —— 上面那条跨单位拦截以"元数据声明过
+// 该属性"为前提，本形态因此落到"照常对账"：GPT 的 512 单位编号被写进将以 4096 解释的字段
+// （GPT 说 6：本意 6 × 512 = 3 KiB，落盘成了 6 × 4096 = 24 KiB）。
+// 本用例钉住**warn-only** 的处理方式，三件事一起断言：
+//   1) 告警必须出，且说清"元数据未声明单位 / 包内 GPT 是 512 / 条目将按 4096 下发 / 请核对包"；
+//   2) 条目**仍被保留**（不丢弃）；
+//   3) 值**按现状**（GPT 编号原样写回，不 ×8 换算、也不静默改正）。
+// 判别力：去掉 flash_plan.cpp 的 `!haveSectorSize && gpt.sectorSize != e.sectorSize` 分支 → 本用例
+// 立刻变红（告警缺失）；恢复后全绿。参考形态 `opsReconcilesGptLayout512` 与本条同一夹具家族，
+// 它断言的是"对账照常"，两条一起把"warn-only ≠ fail-closed"钉住。
+void TestFlashPlan::opsWarnsWhenMetadataOmitsSectorUnit()
+{
+    QTemporaryDir dir;
+    const QString settings =
+        "<Firehose><Program0>"
+        "<program filename=\"boot.img\" label=\"boot_a\" sparse=\"false\" "
+        "physical_partition_number=\"0\" start_sector=\"7\" num_partition_sectors=\"2\" />"  // 无 SECTOR_SIZE_IN_BYTES
+        "</Program0></Firehose>";
+    QVERIFY(writeBytes(dir.path() + "/settings.xml", settings.toUtf8()));
+    QVERIFY(writeBytes(dir.path() + "/gpt_main0.bin",
+                       buildGptWithPartition("boot_a", 6, 906, /*lbaSize=*/512)));  // 512 字节单位
+    QVERIFY(writeBytes(dir.path() + "/boot.img", QByteArray(4096, '\x13')));
+
+    edl::FlashPlan plan; QString err;
+    QVERIFY2(edl::buildPlanFromDir(dir.path(), plan, &err), qPrintable(err));
+    QCOMPARE(plan.entries.size(), 1);                       // 条目未被丢弃
+    const edl::PlanEntry &e = plan.entries[0];
+    QCOMPARE(e.sectorSize, quint32(4096));                  // 未声明 → 仍按模型默认值下发
+    QCOMPARE(e.startSector, quint64(6));                    // 值按现状（GPT 编号原样，未换算）
+    QCOMPARE(e.numSectors, quint64(901));                   // 906 - 6 + 1
+    bool unitWarned = false;
+    for (const QString &w : plan.warnings)
+        if (w.contains(QStringLiteral("未声明")) && w.contains(QStringLiteral("512"))
+            && w.contains(QStringLiteral("4096")) && w.contains(QStringLiteral("核对"))
+            && w.contains(QStringLiteral("gpt_main0.bin")))
+            unitWarned = true;
+    QVERIFY2(unitWarned, "元数据未声明单位 + GPT 为 512 字节 LBA → 必须告警（含 GPT 单位、将按多少下发、核对提示）");
 }
 
 // <Patch{N}> 组 → Action::Patch（8 属性同 patch XML，直接复用 loadPatchTag 的规则：非 DISK 跳过）。

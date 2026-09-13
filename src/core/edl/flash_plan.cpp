@@ -922,6 +922,9 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSec
     //      处理，会让对账对未写该属性的形态静默失效。
     // 若要收紧成"缺单位也 fail-closed"（跳过对账 + 告警），那是一个**独立决定**：它会改变上述既有
     // 用例的预期行为，且同样必须由用例钉住"缺单位 → 跳过"这条路径，不能顺手改判据。
+    // 与下面那条 warn-only 分支的分工：本分支 = "声明了单位且冲突 → 单位不可比，退出对账"；
+    // 下一条 = "没声明单位但 GPT 单位与将下发的默认值不同 → 数值照旧比对/写回，**另加一条
+    // 人工核对告警**"（既不跳过也不换算，见那里的完整理由）。
     if (haveSectorSize && gpt.sectorSize != e.sectorSize) {
         warnings << QStringLiteral("条目 %1（lun=%2）的 SECTOR_SIZE_IN_BYTES=%3 与 %4 的 LBA 尺寸 %5 "
                                    "不同 —— 两边 LBA 编号单位不同、不可比较，跳过对账并保留元数据几何"
@@ -930,6 +933,25 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSec
                         .arg(e.sectorSize).arg(gpt.fileName).arg(gpt.sectorSize)
                         .arg(e.startSector).arg(e.numSectors);
         return;
+    }
+    // **残留尖角（③ 复审）：元数据未声明单位 + GPT 的单位 ≠ 条目将采用的有效单位** —— 上面那条
+    // 只在元数据**声明过** SECTOR_SIZE_IN_BYTES 时才拦截；元数据省略该属性时条目按
+    // `PlanEntry::sectorSize` 的默认值（4096）下发，而对账照常进行 ⇒ 包内 GPT 的 LBA 编号会被
+    // 写进一个**将以 4096 解释**的字段（GPT 说 6：本意 6 × 512 = 3 KiB，落盘却是 6 × 4096 = 24 KiB）。
+    // **只告警，不 fail-closed、也不做 ×8/÷8 换算**，两个理由都不是"懒得管"：
+    //   * fail-closed（跳过对账）会真回归既有认定形态 `opsReconcilesGptLayout512` /
+    //     `opsSourceUsesMetadataAndGpt` —— 两条都是"元数据省略该属性 + 512 布局"，且都断言**对账
+    //     照常发生**（见上面 :913-924 的语义边界：默认 4096 是模型兜底值，不等价于"元数据声明了 4096"）；
+    //   * 换算要假定"哪一侧是权威单位"，而这一形态恰恰没有任何一侧声明过单位（默认值只是兜底），
+    //     按假设换算出来的地址错得比不改写更难发现（同上一分支的理由）。
+    // 所以这里只把"这个包需要人工核对"讲清楚：条目照常对账、值按现状保留，既不静默改正也不丢弃。
+    if (!haveSectorSize && gpt.sectorSize != e.sectorSize) {
+        warnings << QStringLiteral("条目 %1（lun=%2）的元数据未声明 SECTOR_SIZE_IN_BYTES —— 该条目将按 "
+                                   "%3 字节 LBA 下发，而包内 %4 的 LBA 尺寸是 %5：GPT 的 LBA 编号会被"
+                                   "按 %3 字节解释（数值未换算），落盘区域可能与 GPT 描述不符；"
+                                   "请核对包内元数据与 GPT 是否配套")
+                        .arg(entryName(e), QString::number(e.lun))
+                        .arg(e.sectorSize).arg(gpt.fileName).arg(gpt.sectorSize);
     }
     const GptPartition *hit = matchGptPartition(e, gpt);
     if (!hit) {
