@@ -105,6 +105,13 @@ PhoneToolbox/
 │   │   ├── flash_tool.cpp      # 刷机核心逻辑
 │   │   ├── engineer_mode.cpp   # 维修诊断: 工程模式入口映射（12 品牌）
 │   │   ├── modes/              # EDL/MTK 通讯协议实现
+│   │   ├── edl/                # EDL 刷写链（自研 Sahara/Firehose）
+│   │   │   ├── edl_transport.h        # 可注入传输接口
+│   │   │   ├── edl_libusb_transport.cpp # libusb 传输实现（超时换算/重枚举）
+│   │   │   ├── edl_session.cpp        # 会话编排 + 数据面（分块/ZLP）
+│   │   │   ├── sahara.cpp             # Sahara 协议（programmer 上传）
+│   │   │   ├── firehose.cpp           # Firehose 协议（configure/program/patch）
+│   │   │   └── flash_plan.cpp         # 刷写计划构建（rawprogram/patch + GPT 回填）
 │   │   └── ...
 │   ├── image_engine/           # 镜像格式引擎（纯库, 全自研）
 │   │   ├── payload_image.cpp   # payload.bin（手写 protobuf + 增量 diff）
@@ -133,6 +140,7 @@ PhoneToolbox/
 │   │   ├── tool_panel.cpp      # 左侧工具面板
 │   │   ├── image_tool_panel.cpp# 镜像工具面板（第 5 工具）
 │   │   ├── fs_browser_dialog.cpp # 文件系统浏览
+│   │   ├── flash_plan_dialog.cpp # 刷写计划预览（逐条目表格 + 未验证勾选门控）
 │   │   └── ...
 │   └── vuln_db/                # 漏洞数据库框架
 │       ├── vuln_entry.cpp      # 漏洞条目数据结构及 JSON 序列化

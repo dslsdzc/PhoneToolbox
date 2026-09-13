@@ -47,7 +47,7 @@
 - **唯一有开源实证的几何来源 = 包内 `gpt_main{N}.bin` 的 LBA 表**：OplusEdlTool（`https://github.com/salokrwhite/OplusEdlTool`）用 `Services/RawProgramXmlProcessor.cs:101-108` + `GptParser.cs:31-115` 回填 `start_sector`/`num_partition_sectors`/`start_byte_hex`/`size_in_KB`；社区一手清单确认 `.ops` 内含 `gpt_main0-5.bin`/`gpt_backup0-5.bin`。**`patch{N}.xml` 不能由 GPT 推出**（是 GPT 头定点修补 `NUM_DISK_SECTORS-*`，见 `reference/qdl/tests/data/patch1.xml`）。
 - **未解矛盾**：OplusEdlTool v2 解出 `.ops` 后**硬要求**目录里已有 `rawprogram*.xml` 否则报错退出，且它自己不生成（`Services/OpsDecryptor.cs:21-100` 只解载荷 + 写 `settings.xml`；`MainWindow.axaml.cs:715-740` 找不到即 `NoRawprogramFound`）→ 疑为新老世代差异，**未证实**。这支持"XML 优先、元数据回退"的顺序。
 - **`.ofp`-QC 侧无证据**：其元数据分组穷举只有 `Sahara`/`Config`/`Provision`/`ChainedTableOfDigests`/`DigestsToSign`/`Firmware`（`reference/oppo_decrypt/ofp_qc_decrypt.py:340-347`；`FirmwareKit.OfpReader/Parsers/OfpQcParser.cs:43-71` 结构一致），**没有 `Program`/`Patch` 分组**；产物里是否有可用 XML **待真包确认**。
-- ⚠️ **本项目文档需更正**：`docs/superpowers/specs/oppo-format-notes.md:53` 称"rawprogram/patch XML 在 Program/UFS_PROVISION 区域" —— 无证据支持。
+- ⚠️ **本项目文档需更正**：`docs/superpowers/specs/oppo-format-notes.md:53` 称"rawprogram/patch XML 在 Program/UFS_PROVISION 区域" —— 无证据支持。（Phase B 收尾已在该文件就地更正，见其"更正（Phase B 核查）"条；原行号即本清单触发更正的那一行。）
 
 ## 6. 本项目 `EDLHandler` 现状（5 处既有缺陷，全部非本次引入）
 
@@ -61,3 +61,12 @@
 
 - 主程序源 `file(GLOB_RECURSE "src/*.cpp" "src/core/*.cpp" "src/ui/*.cpp")`（`CMakeLists.txt:107-111`）→ `src/core/edl/*.cpp` **自动进主程序**；无 `CONFIGURE_DEPENDS` ⇒ 新增文件后需重跑一次 cmake 配置。
 - 测试源显式列举（`CMakeLists.txt:266-295` 等）；多源编入同一测试目标的范例：:318-321（mtk_brom+mtk_emmc）、:340-353（test_pipeline 九个源含 edl_handler.cpp）；libusb 按名补链（:367-371）。
+
+## 8. Phase B 实现期口径（落地时确认/裁定的口径，冲突时以本节为准）
+
+1. **ZLP 一条规则、一处责任**：传输层 `write()` **一律不补** ZLP（它无法区分命令帧与数据块，补了会让数据块被补两次）；**数据块**的 ZLP 由会话数据面负责（`edl_session.cpp` 的 `writeRaw`，规则 `len % maxPacketSize() == 0` → 追加一次 0 字节写，`reference/qdl/src/usb.c:548-553`）；**命令帧**的 ZLP 由 `firehoseSendCommand` 负责。三处注释必须一致（Phase B 落地前曾出现"两处注释互相推诿、实际都没做"的悬空责任）。
+2. **`read(timeoutMs == 0)` = 非阻塞轮询**（drain 语义）：libusb 的 `timeout = 0` 是**无限等待**（`libusb sync.c`："For an unlimited timeout, use value 0"），故 libusb 传输层必须把它换算成 ≥1ms（bkerler 同款：`edl/edlclient/Library/Connection/usblib.py:380-381` 的 `if timeout == 0: timeout = 1`）。
+3. **DONT_CARE 处**：qdl 跳过不发（per-chunk op 模型，`reference/qdl/src/program.c:139-170`），bkerler 补零（`sparse.py:148-151` 的 `0xCAC3 → 零填充`）。本项目选**补零**（一条目一 `<program>`；`startSectorExpr` 条目主机侧无法算子区间；落盘内容 == 该 sparse 镜像对应的 raw 内容），代价是 DONT_CARE 区也会写入（带宽换确定性）。
+4. **`listPartitions` 给不出分区名**：Firehose 无枚举分区名的命令，逐 LUN 的 `getstorageinfo` 只能给 `lun<N>` 与几何 —— 分区名必须以刷写计划/GPT 为准；UI 侧依赖"镜像 basename ↔ 分区名"匹配的旧路径（EDL 目录批量刷写）因此失效，已改为明确报错并指路刷写计划。
+5. **重枚举契约**：`waitReenumerate` 调用前须已 `close()`（不替调用方 close，fail-closed）、返回 true 时设备已重新 `open()`、首试前先等一个轮询间隔（3s，既有实现同 `msleep(3000)`）、总预算 45s（= 3s×15）。
+6. **sha256 口径待真包确认**：`.ops` 元数据的 `Sha256` 若实指**包内文件**（含 sparse 头）而非展开后镜像，sparse 条目会一致地报不符 —— 失败文案已按"计算值/期望值"如实打印，不称"文件损坏"；真包验证时优先确认此口径。

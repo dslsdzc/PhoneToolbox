@@ -281,10 +281,16 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] .pac 固件刷写路由 (B8 解包复用: 解析 → FDL 上传 → 逐分区 → 复位)
 [√] 诚实边界: FDL 二进制需用户提供; FDL1 CRC16 模式等真机待验证
 
+--- OPPO/一加/realme EDL 刷写 (Phase B 自研) ---
+[√] EDL 刷写计划构建 (rawprogram/patch XML + OPS 元数据 + GPT 回填对账, 越界/重叠/扇区校验)
+[√] Sahara/Firehose 协议栈 (可注入传输 + 严格 ACK; 无真机 mock 验证, 真机待验)
+[√] 刷写计划预览对话框 (逐条目表格 + 未验证勾选门控)
+[√] 诚实边界: 真机 USB 时序/ZLP/programmer 兼容性/真实 NAK/刷完能否开机 均未验证
+
 
 规划中 (计划 F 剩余 + 后续)
 ------------------------
-[ ] OPPO/一加/realme EDL 刷机链 (Phase B: 解包已交付, 刷写链待接线 — 需真机验证)
+[√] OPPO/一加/realme EDL 刷写链 (Phase B 代码就绪: 计划层/协议层/会话/通道/UI, mock 验证; **真机验证待持机人**)
 [√] OPPO 固件解包引擎 (Phase A 已交付: OFP QC/MTK + OPS, 离线验证)
 [ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
 [ ] 三星 Heimdall 集成 (Odin 协议开源实现)

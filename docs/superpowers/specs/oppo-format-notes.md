@@ -50,7 +50,7 @@
 ## 刷写衔接（Phase B 用）
 
 - Firehose programmer（`prog_ufs_firehose_*.elf` / `prog_emmc_firehose_*.elf`）= SAHARA 组文件（.ofp 中全解密; .ops 中仅此组加密）。
-- rawprogram/patch XML + 分区镜像在 Program/UFS_PROVISION 区域。
+- **更正（Phase B 核查）**: 前句"rawprogram/patch XML 在 Program/UFS_PROVISION 区域"**不成立** —— `.ops` 解包产物只有镜像与 `settings.xml`，rawprogram/patch XML 需从 `<Program{N}>`/`<Patch{N}>` 块生成；`.ofp`-QC 的元数据分组里连 `Program` 都没有。证据见 `oppo-flash-protocol-facts.md` §5。
 - MSM 工具流程 = 标准高通 EDL 流: 9008 → Sahara 载 programmer → Firehose program/patch → 复位。Linux 上解密后可用 edl/qdl 刷。
 - Phase B 接入点: 现有 `EDLHandler`(Sahara/Firehose 自研已有) + 解出的 programmer + rawprogram 映射分区。
 
