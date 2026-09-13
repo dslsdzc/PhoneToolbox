@@ -16,6 +16,8 @@ private slots:
     void md5FooterWithTrailingNewline(); // 真实三星 .tar.md5 带尾 \n
     void extractDirSymlink();           // dir/symlink 分支 + linkTarget
     void badSizeRejected();             // 坏 size → false
+    void md5FooterBinaryVariant();       // ␣* 分隔符（真 MODEM 包形态）
+    void md5FooterBinaryVariantRejects(); // ␣* 形态下篡改必须被拒
     // ---- Task G3: 流式接口 ----
     void streamBuildMatchesOld();       // buildTarStream 与 buildTar 逐字节一致
     void streamExtractMatchesOld();     // extractTarStream 与 extractTar 结果一致 + 穿越/符号链接防护
@@ -171,6 +173,67 @@ void TestTar::md5FooterWithTrailingNewline()
     QByteArray tar = buildTar();
     QByteArray withFooter = imgtar::appendMd5Footer(tar);
     QVERIFY(imgtar::verifyMd5Footer(withFooter + '\n'));
+}
+
+// 真包实证（reference/samsung-samples/sm-j110h/MODEM_*.tar.md5 尾部逐字节）：
+// 校验行分隔符是 `␣*`（md5sum 二进制模式），BL/CSC 是 `␣␣`（文本模式）。
+// 只认 `␣␣` 会让 MODEM 包落到"无校验行 → 跳过校验"分支（校验静默失效）。
+void TestTar::md5FooterBinaryVariant()
+{
+    const QByteArray tar = buildTar();
+    const QByteArray hex = QCryptographicHash::hash(tar, QCryptographicHash::Md5).toHex();
+    const QByteArray withFooter = tar + hex + " *" + QByteArray("MODEM_J110HDDU0AQF1.tar") + '\n';
+
+    // 整读接口：识别 + 校验通过
+    QVERIFY(imgtar::verifyMd5Footer(withFooter));
+
+    // 流式接口：hasFooter=true（**不是**"无校验行"）+ 校验通过
+    QTemporaryDir dir;
+    const QString p = dir.path() + QStringLiteral("/modem.tar.md5");
+    QVERIFY(writeFileBytes(p, withFooter));
+    bool hasFooter = false;
+    QString err;
+    QVERIFY2(imgtar::verifyMd5FooterStream(p, &hasFooter, &err), qPrintable(err));
+    QVERIFY(hasFooter);
+
+    // 解包自动校验：␣* 形态同样走"校验通过 → 正常解包"（不是跳过校验）
+    const QString outDir = dir.path() + QStringLiteral("/out");
+    QVERIFY(QDir().mkpath(outDir));
+    QVERIFY2(imgtar::extractTarStream(p, outDir, {}, &err), qPrintable(err));
+    QCOMPARE(readFileBytes(outDir + QStringLiteral("/test.txt")), QByteArray("hello"));
+
+    // 判别力：同一形态下改名/改数据 → 必须被拒（证明真的在校验，不是"识别了但没算"）
+    QByteArray renamed = withFooter;
+    renamed[renamed.size() - 20] = char(renamed[renamed.size() - 20] ^ 0x01); // 只改校验行里的文件名
+    const QString p2 = dir.path() + QStringLiteral("/modem2.tar.md5");
+    QVERIFY(writeFileBytes(p2, renamed));
+    QVERIFY(imgtar::verifyMd5FooterStream(p2, &hasFooter, &err)); // 文件名不参与 MD5 → 仍通过
+}
+
+void TestTar::md5FooterBinaryVariantRejects()
+{
+    const QByteArray tar = buildTar();
+    const QByteArray hex = QCryptographicHash::hash(tar, QCryptographicHash::Md5).toHex();
+    QByteArray tampered = tar;
+    tampered[100] = char(tampered[100] ^ 0x01);              // 改归档数据 → 校验行不再匹配
+    const QByteArray withFooter = tampered + hex + " *" + QByteArray("MODEM.tar") + '\n';
+
+    QVERIFY(!imgtar::verifyMd5Footer(withFooter));           // 整读接口拒绝
+
+    QTemporaryDir dir;
+    const QString p = dir.path() + QStringLiteral("/bad.tar.md5");
+    QVERIFY(writeFileBytes(p, withFooter));
+    bool hasFooter = false;
+    QString err;
+    QVERIFY(!imgtar::verifyMd5FooterStream(p, &hasFooter, &err));   // 流式接口拒绝
+    QVERIFY(hasFooter);                                            // 且确实识别成了校验行
+    QVERIFY(err.contains(QStringLiteral("MD5")));
+
+    const QString outDir = dir.path() + QStringLiteral("/out");
+    QVERIFY(QDir().mkpath(outDir));
+    err.clear();
+    QVERIFY(!imgtar::extractTarStream(p, outDir, {}, &err));        // 解包自动校验拒绝
+    QVERIFY(err.contains(QStringLiteral("MD5")));
 }
 
 void TestTar::extractDirSymlink()

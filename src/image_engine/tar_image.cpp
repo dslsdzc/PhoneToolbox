@@ -122,7 +122,13 @@ int scanMd5Footer(QFile &f, qint64 fileSize, qint64 &tarEnd, QString *error)
         return -2;
     }
     for (qint64 i = tailLen - 1; i >= 0; --i) {
-        if (i + 34 > tailLen || tail.at(int(i + 32)) != ' ' || tail.at(int(i + 33)) != ' ')
+        // 分隔符两变体（真包逐字节实证，reference/samsung-samples/sm-j110h/）：
+        //   md5sum 文本模式 -> "<hex>␣␣<name>"（BL_/CSC_ 包）
+        //   md5sum 二进制模式 -> "<hex>␣*<name>"（MODEM_ 包）
+        // 只认 "␣␣" 会让 MODEM 包落到"无校验行 → 跳过校验"分支 —— 损坏包被静默接受。
+        // 校验行名字区仍从 i+34 起（分隔符恒为 2 字节），下面的可打印 ASCII / 行尾判定不变。
+        if (i + 34 > tailLen || tail.at(int(i + 32)) != ' ' ||
+            (tail.at(int(i + 33)) != ' ' && tail.at(int(i + 33)) != '*'))
             continue;
         bool hex = true;
         for (qint64 k = i; k < i + 32; ++k)
@@ -261,9 +267,11 @@ bool verifyMd5Footer(const QByteArray &tarMd5)
     //   [tar]\n[32hex]  name\n       分隔 \n + 尾 \n 变体
     // 校验行前缀若是 '\n'（旧格式分隔符）则不计入归档；tar 内部即使含 32hex+空格
     // 也不会误判（真实校验行在文件尾，匹配位置最大）。
+    // 分隔符两种：md5sum 文本模式 "␣␣" 与二进制模式 "␣*"（MODEM_*.tar.md5 实测）。
     const QByteArray &s = tarMd5;
     for (int i = s.size() - 1; i >= 0; --i) {
-        if (i + 34 > s.size() || s[i + 32] != ' ' || s[i + 33] != ' ')
+        // 与 scanMd5Footer 同款两变体（"␣␣" / "␣*"），理由见该函数注释。
+        if (i + 34 > s.size() || s[i + 32] != ' ' || (s[i + 33] != ' ' && s[i + 33] != '*'))
             continue;
         bool hex = true;
         for (int k = i; k < i + 32; ++k)
