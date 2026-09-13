@@ -972,6 +972,8 @@ bool sparseWalk(const QString &inPath, const std::function<bool(const SparseChun
 }
 ```
 
+**Mock 扩展（Task 4 实现者提醒，本任务必做）**：`tests/mock_edl_transport.h` 目前只记录 writes，**不记录 `close`/`resetDevice`/`waitReenumerate` 的调用**（也不记录顺序）。本任务要断言"失败路径不发 reset""成功路径 reset 在最后"，因此先把 mock 扩成**记录调用序列**（如 `QStringList calls;` 追加 `"open"/"close"/"reset"/"waitReenumerate"`，并在 write 时追加 `"write"`），再据此断言。这是 §6 测试策略里"中止语义"的前置条件。
+
 **执行要点（spec §4 + 协议速查）**
 - 数据面分块：`chunkSectors = qMax(quint64(1), m_maxPayload / sectorSize)`；每块裸写 OUT（**无长度前缀**）；`len % t.maxPacketSize() == 0` 时补一次 0 字节写（ZLP，`reference/qdl/src/usb.c:548-553`）。
 - 每块发完 `firehoseSendCommand` 等 ACK？**不** —— 参照只在整条 `program` 的数据发完后等一个 ACK（`firehose.c:1132-1137`）；块间不额外等待。
