@@ -294,7 +294,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_ops.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_worker.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_sahara.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_sahara.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -362,6 +363,12 @@ if(ENABLE_IMAGE_TESTS)
                     # Phase B Task 4：Sahara 纯协议层（走 IEdlTransport，已 GLOB 编入主程序）
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp)
+                elseif(_test_stem STREQUAL "test_edl_firehose")
+                    # Phase B Task 5：Firehose 命令构造/响应解析（纯函数，只依赖 edl_transport.h）
+                    # + flash_plan.cpp（PlanEntry/StorageInfo 的定义与校验）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
