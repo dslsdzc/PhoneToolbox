@@ -910,9 +910,18 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSec
     // 要防的"静默写错刷写地址"。故一旦发现单位不同就**整个条目退出对账**、保留元数据值并告警。
     // 不做跨单位换算（×8 / ÷8）：换算要假定"哪一侧是权威单位"，而元数据与 GPT 恰好在这一点上互相
     // 矛盾 —— 按矛盾的假设换算出来的地址，错得比不改写更难发现。
-    // haveSectorSize = false（元数据没写该属性）**不**走这条：没有声明的单位就没有"单位冲突"的证据，
-    // 而 OPS 元数据的几何惯例与设备 LBA 同单位 —— 此处维持既有口径（照常对账），不借本次修复
-    // 扩大行为变化面；若日后要收紧，那是"缺单位时 fail-closed"的独立决定，见清扫报告。
+    // ⚠️ **本判据的语义边界（改这个条件前必读）**：`haveSectorSize == false`（元数据**没有写**
+    // SECTOR_SIZE_IN_BYTES）时**不**走这条，照常对账。这不是疏漏，是两个理由：
+    //   1) `PlanEntry::sectorSize` 的默认 4096 是**模型兜底值**，不等价于"元数据声明了 4096"。
+    //      若按"两边值不等就跳过"实现，凡是元数据省略该属性的包都会被跳过对账，并打出一条**假的**
+    //      "单位不同"告警 —— 把"模型默认值"当成了"元数据声明值"。这类包的几何惯例与设备 LBA 同
+    //      单位，对账本来是有意义的（既有用例 opsReconcilesGptLayout512 / opsSourceUsesMetadataAndGpt
+    //      正是这个形态）。
+    //   2) 真包确实恒带该属性（FirmwareKit 样本的 `<program>` 容器都是 SECTOR_SIZE_IN_BYTES="4096"，
+    //      OpsParserTests.cs:116-122），但那是**样本观察、不是格式保证**；凭它把"缺属性"当"单位冲突"
+    //      处理，会让对账对未写该属性的形态静默失效。
+    // 若要收紧成"缺单位也 fail-closed"（跳过对账 + 告警），那是一个**独立决定**：它会改变上述既有
+    // 用例的预期行为，且同样必须由用例钉住"缺单位 → 跳过"这条路径，不能顺手改判据。
     if (haveSectorSize && gpt.sectorSize != e.sectorSize) {
         warnings << QStringLiteral("条目 %1（lun=%2）的 SECTOR_SIZE_IN_BYTES=%3 与 %4 的 LBA 尺寸 %5 "
                                    "不同 —— 两边 LBA 编号单位不同、不可比较，跳过对账并保留元数据几何"
