@@ -298,7 +298,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_libusb_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -411,8 +412,17 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/flash_plan_dialog.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/oppo_extract_worker.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
+                elseif(_test_stem STREQUAL "test_pit")
+                    # Phase C：PIT 解析纯模块（src/core/odin 已 GLOB 编入主程序，不属任何静态库）
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
+                if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
+                    # 真样本在 reference/（gitignored）：只把**路径**编进来，用例内 QSKIP 兜底
+                    target_compile_definitions(${_test_target} PRIVATE
+                        ODIN_SAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/reference/samsung-samples")
+                endif()
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
                 # ImageWorker 测试额外链 root_patcher（image_worker.cpp 的 doPatch 调
                 # patcher::patchFile；该库 PUBLIC 传递 image_engine，定义在本循环之前）。
