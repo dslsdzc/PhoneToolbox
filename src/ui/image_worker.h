@@ -32,6 +32,12 @@ Q_DECLARE_METATYPE(QList<imgfs::FsEntry>)
 // 结果/进度经信号回传（跨线程 queued 投递到 UI 线程，接收方需处于事件循环）。
 // 全局契约：任何失败都不崩溃，以 ok=false + error 上报（识别失败编码在
 // Detected 内：format==Unknown 且 detail 以"读取失败"开头）。
+//
+// H1 降级策略（构造里接 ResourceMonitor::cpuHigh）：整体 CPU >80% 时本工作线程降为
+// **LowPriority**，恢复（<70%）回 NormalPriority。**不用 IdlePriority**：实测（Linux/Qt 6.11）
+// 它映射到 SCHED_IDLE 调度类，持续高负载下工作线程被饿死（10 秒级停滞实测）—— 降级的
+// 取舍是"让位而非停摆"，理由与实测数据见 image_worker.cpp 构造内的注释。
+//
 // 析构：quit()+wait() 等待工作线程退出后释放，防悬挂/泄漏。
 class ImageWorker : public QObject
 {

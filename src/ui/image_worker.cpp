@@ -209,9 +209,18 @@ ImageWorker::ImageWorker(QObject *parent)
     m_thread.setObjectName(QStringLiteral("image-worker"));
     m_thread.start();
 
-    // H1 降级接入：整体 CPU 使用率 >80% 时工作线程降为 IdlePriority（仅系统
-    // 空闲时被调度，解包/打包这类 CPU 密集任务让位给前台），恢复（<70%）后
-    // 回到 NormalPriority（恢复逻辑同此 lambda，未单独分派）。
+    // H1 降级接入：整体 CPU 使用率 >80% 时工作线程降为 **LowPriority**（低于普通
+    // 优先级：解包/打包这类 CPU 密集任务让位给前台），恢复（<70%）后回到
+    // NormalPriority（恢复逻辑同此 lambda，未单独分派）。
+    //
+    // **为什么不是 IdlePriority（H1 的原实现，已改）**：实测（Linux / Qt 6.11，本仓
+    // 环境）QThread::IdlePriority 会被映射到 **SCHED_IDLE** 调度类 —— 该类"仅在没有任何
+    // 其它线程可运行时才被调度"，持续高负载下这个工作线程会被**饿死**：实测到 10 秒级
+    // 停滞，同一机制也曾让 tests/test_image_worker 在负载下偶发失败。LowPriority 实测仍
+    // 留在 SCHED_OTHER 调度类（同一实测：Lowest/Low/Normal 三档在本平台同为 SCHED_OTHER，
+    // 只有 Idle 降到 SCHED_IDLE；Windows/macOS 上 LowPriority 才是真正低于 Normal 的优先级）。
+    // 即：**这是有意的产品取舍 —— 让位，而非停摆**。降级的目的是"别和前台抢 CPU"，
+    // 不是"前台忙时后台永不推进"：GB 级解包在持续高负载下仍必须能收敛（哪怕慢一些）。
     //
     // 审查修正（Important）：本对象已在上面 moveToThread(&m_thread)，若沿用
     // 默认 AutoConnection，lambda 会以 QueuedConnection 投递到工作线程事件
@@ -224,7 +233,9 @@ ImageWorker::ImageWorker(QObject *parent)
     // 本对象 → 析构时自动断开（发射方为单例，生命周期长于本对象，无悬挂）。
     connect(&ResourceMonitor::instance(), &ResourceMonitor::cpuHigh, this,
             [this](bool high, int) {
-                m_thread.setPriority(high ? QThread::IdlePriority
+                // high → LowPriority（不是 Idle：见上"让位而非停摆"），恢复 → NormalPriority。
+                // 该映射由 tests/test_image_worker 的 h1DowngradeUsesLowPriority() 钉住。
+                m_thread.setPriority(high ? QThread::LowPriority
                                           : QThread::NormalPriority);
             },
             Qt::DirectConnection);

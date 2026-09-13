@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <atomic>
 #include <memory>
 
 #include "core/resource_monitor.h"
@@ -40,6 +41,10 @@
 //      真正根因（高负载时 worker 可能先于主线程进入 wait 完成，wait() 会白等满整个
 //      超时返回 false，spy 里其实已有结果）；
 //   2. makeWorker()：切断 H1 优先级降级连接（防御性；本进程内监控未启动）。
+//      ⚠️ H1 降级本身已从 IdlePriority 改为 LowPriority（饿死实测，见 image_worker.cpp）：
+//      这条断开**不再**是"防 SCHED_IDLE 饿死 worker"的防线（那道机制已不复存在），
+//      保留它是为了让本文件的断言只依赖探测/解包语义，不被优先级策略扰动 —— 见
+//      makeWorker() 的注释与 h1DowngradeUsesLowPriority()（那条用例**故意**不断开）。
 // 等待余量 60s 仅约束"真挂死"场景，与 flake 无关（改前 10s、改后 60s 都会失败）。
 class TestImageWorker : public QObject
 {
@@ -60,6 +65,7 @@ private slots:
     void unpackOfpPartialSuccessReportsWarning();
     void unpackMisnamedOfpReportsEngineError();
     void unpackMissingFileReportsError();
+    void h1DowngradeUsesLowPriority();
 };
 
 // ==================== 通用小工具 ====================
@@ -134,10 +140,17 @@ QString writeBlob(const QString &path, const QByteArray &data)
 // 忘了这一步而再次引入负载相关 flake。
 //
 // 被切断的链路（产品行为，本文件不改产品代码）：CPU >80% → ResourceMonitor::cpuHigh
-// → ImageWorker 构造函数里的 DirectConnection lambda 把工作线程降为 IdlePriority
-// （SCHED_IDLE；H1 的既有设计取舍）。本文件断言的是探测顺序/解包语义，与优先级策略
-// 无关，故断开该连接（注：本次 flake 的根因已验证为 wait() 语义，见 waitForEmission()，
-// 不是优先级 —— 线程探针实测卡住时工作线程为 SCHED_NORMAL 且在睡眠）。
+// → ImageWorker 构造函数里的 DirectConnection lambda 调 m_thread.setPriority()。
+// 本文件断言的是探测顺序/解包语义，与优先级策略无关，故断开该连接。
+// ⚠️ 该断开的**理由已随 H1 修改而变化**：原实现降为 IdlePriority（Linux 实测映射到
+// SCHED_IDLE，高负载下会把工作线程饿死 —— 那曾是本文件负载相关失败的嫌疑对象），
+// 现改为 LowPriority（实测仍留在 SCHED_OTHER 调度类，见 image_worker.cpp 与
+// h1DowngradeUsesLowPriority()）。"防饿死"这一动因因此不复存在；仍然保留断开，
+// 是为了让本文件的所有用例都**不受优先级策略扰动**（将来的取值/时机变化也不会把
+// 负载相关的等待带回来），代价只有一次 disconnect。判别力由
+// h1DowngradeUsesLowPriority() 单独承担（那条用例故意不切断）。
+// 注：本次 flake 的根因已验证为 wait() 语义，见 waitForEmission()，不是优先级 ——
+// 线程探针实测卡住时工作线程为 SCHED_NORMAL 且在睡眠。
 //
 // 事实核查（2026-09-13）：本测试目标只链 image_worker.cpp + resource_monitor.cpp
 // （CMakeLists.txt 的 test_image_worker 分支），而 ResourceMonitor::start() 的唯一
@@ -639,6 +652,56 @@ void TestImageWorker::unpackMissingFileReportsError()
     QVERIFY(!outcome.error.isEmpty());
     QVERIFY2(outcome.error.contains(QStringLiteral("无法打开")), qPrintable(outcome.error));
     QVERIFY(outcome.outputs.isEmpty());
+}
+
+// H1 降级的产品取舍：整体 CPU >80% → 工作线程 **LowPriority**；恢复（<70%）→ NormalPriority。
+// **不许回到 IdlePriority**：Linux/Qt 6.11 实测 IdlePriority 映射到 SCHED_IDLE（"仅在没有任何
+// 其它可运行线程时才被调度"）→ 持续高负载下工作线程被**饿死**（实测 10 秒级停滞，该机制也曾
+// 让本文件在负载下偶发失败）。LowPriority 实测仍是 SCHED_OTHER（与 Normal 同类，见
+// image_worker.cpp 注释）—— 即"让位而非停摆"。
+//
+// 本用例是**本文件唯一不切断 H1 连接**的用例（其余经 makeWorker() 断开，理由见那里）：
+// 它要测的正是那条链路，故裸构造 ImageWorker，并用 QMetaObject::invokeMethod 直接发射
+// ResourceMonitor::cpuHigh 模拟"监控判定高负载"（本进程内监控的采样 QTimer 从未启动，
+// 这不是伪造状态，而是唯一能确定性地驱动该信号的手段）。
+// 优先级在工作线程里读（DirectConnection → 槽在发射线程执行）：`currentThread()->priority()`
+// 返回的正是 setPriority 存下的请求档位，即被测机制本身，与 OS 映射无关。
+void TestImageWorker::h1DowngradeUsesLowPriority()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = writeBlob(dir.filePath(QStringLiteral("probe.ops")), opsShapedBlob());
+    QVERIFY(!path.isEmpty());
+
+    ImageWorker worker;                          // 刻意不切断 H1（见上）
+    std::atomic<int> priorityInWorker{-1};
+    QObject::connect(&worker, &ImageWorker::detectFinished, &worker,
+                     [&priorityInWorker](const QString &, imgreg::Detected) {
+                         priorityInWorker.store(int(QThread::currentThread()->priority()));
+                     },
+                     Qt::DirectConnection);
+
+    // 跑一次探测并读回工作线程优先级。超时回 -1000（哨兵值：QCOMPARE 会带着实际值失败，
+    // 不必在 lambda 里 QVERIFY —— 那要求 lambda 返回 void）。
+    const auto detectAndReadPriority = [&]() -> int {
+        QSignalSpy spy(&worker, &ImageWorker::detectFinished);
+        worker.runDetect(path);
+        if (!waitForEmission(spy, 60000))
+            return -1000;                        // detectFinished 超时（60s）
+        return priorityInWorker.load();
+    };
+
+    // ① 高负载 → LowPriority（且绝不是 IdlePriority：SCHED_IDLE 会饿死工作线程）
+    QMetaObject::invokeMethod(&ResourceMonitor::instance(), "cpuHigh",
+                              Q_ARG(bool, true), Q_ARG(int, 95));
+    const int degraded = detectAndReadPriority();
+    QVERIFY2(degraded != int(QThread::IdlePriority), "H1 降级不得使用 IdlePriority（实测会饿死）");
+    QCOMPARE(degraded, int(QThread::LowPriority));
+
+    // ② 恢复 → NormalPriority（同一 lambda 的另一半，避免只钉降级）
+    QMetaObject::invokeMethod(&ResourceMonitor::instance(), "cpuHigh",
+                              Q_ARG(bool, false), Q_ARG(int, 10));
+    QCOMPARE(detectAndReadPriority(), int(QThread::NormalPriority));
 }
 
 QTEST_MAIN(TestImageWorker)
