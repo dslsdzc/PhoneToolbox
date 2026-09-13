@@ -1011,7 +1011,7 @@ static void queueSuccessfulSession(edl::MockEdlTransport &t, const QByteArray &p
     t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
             << saharaFrame(edl::SAHARA_READ_DATA, {0, 0, quint32(programmer.size()), 0})
             << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
-            << saharaFrame(edl::SAHARA_DONE_REQ, {})
+            << saharaFrame(edl::SAHARA_DONE_RSP, {})   // DONE 对是 host 主动：host 发 DONE_REQ、设备回 DONE_RSP
             << ack                                                                    // configure
             << QByteArray("<log value=\"{&quot;storage_info&quot;:{&quot;total_blocks&quot;:100000,"
                           "&quot;block_size&quot;:4096}}\" /><response value=\"ACK\" />") // getstorageinfo
