@@ -641,7 +641,8 @@ bool indexTarStream(const QString &tarPath, QList<TarIndexEntry> &out,
         }
         TarIndexEntry e;
         e.name = QString::fromLatin1(name);
-        while (e.name.endsWith(QLatin1Char('/')))   // 与 extractTar 的目录名口径一致
+        while (e.name.endsWith(QLatin1Char('/')))   // 去尾 '/'：extractTar 保留（目录得 "sub/"），本函数去掉
+                                                    // （计划层按分区/镜像名匹配，尾 '/' 会让目录条目对不上）
             e.name.chop(1);
         e.offset = quint64(dataStart);
         e.size = isDir ? 0 : quint64(size);

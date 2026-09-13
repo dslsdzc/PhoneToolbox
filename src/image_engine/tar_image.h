@@ -25,8 +25,12 @@ struct TarIndexEntry {
 };
 
 // 只读 tar 头块建立索引（`.tar.md5` 的校验行不计入；`tarEnd` 出参 = 归档区结束偏移）。
-// 名字规则与 extractTar 一致（ustar 前缀字段非空时拼成 "prefix/name"，尾部 '/' 去掉）。
-// 坏 size 字段 / 数据区越界 / 文件打不开 → false + 中文 *error（不返回半个索引）。
+// 名字规则**与 extractTar / extractTarStream 不同**（后两者取头块前 100 字节原样：不拼 ustar 前缀、
+// 不去尾 '/'，故目录条目得 "sub/"）。本函数：(a) 魔数处为 "ustar" 且前缀字段（345..500）非空时
+// 拼成 "prefix/name"；(b) 去掉尾部 '/'（目录条目得 "sub"）。
+// 调用方约束：与解包产物比对文件名时必须按本规则匹配（计划层按分区/镜像名匹配，以此为准）。
+// 坏 size 字段 / 数据区越界 / 文件打不开 → false + 中文 *error；false 时 out 与 *tarEnd 内容无意义
+// （可能是半成品索引），调用方不得使用。
 bool indexTarStream(const QString &tarPath, QList<TarIndexEntry> &out,
                     quint64 *tarEnd = nullptr, QString *error = nullptr);
 
