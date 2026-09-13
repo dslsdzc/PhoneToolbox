@@ -267,9 +267,10 @@ bool LibusbEdlTransport::write(const QByteArray &data, QString *error)
         return true;
     }
 
-    // 单块长度必须塞得进 libusb 的 `int length`。今天 QByteArray 自己就以 int 计长（上限 INT_MAX），
-    // 所以这条**目前不可达**；留着是因为上游的单块尺寸来自设备协商值（firehoseConfigure 已钳制，
-    // 见 kMaxNegotiatedPayloadBytes），一旦将来数据面改成 64 位缓冲，这里必须**拒绝**而不是窄化。
+    // 单块长度必须塞得进 libusb 的 `int length`。今天这条**不可达**的真实理由是**上游已钳制**：
+    // 单块尺寸来自设备协商值，`firehoseConfigure` 已把它钳到 `kMaxNegotiatedPayloadBytes`（8 MiB）。
+    // 留着是因为将来数据面若改用 64 位缓冲/更大块，这里必须**拒绝**而不是窄化。
+    // （注意：Qt6 的 `QByteArray::size()` 返回 `qsizetype`（64 位），**不能**拿它当"塞不进 int"的论据。）
     if (data.size() > std::numeric_limits<int>::max()) {
         setErr(error, QStringLiteral("写入失败：单块 %1 字节超过 libusb 的 int 长度上限")
                           .arg(data.size()));

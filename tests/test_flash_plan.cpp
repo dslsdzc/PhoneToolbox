@@ -51,6 +51,7 @@ private slots:
     void keepsExpressionStartSectorInProgram();
     void eraseWithUnparseableCountIsDropped();
     void eraseWithOnlyOneOfStartOrCountIsDropped();
+    void eraseWithEmptyStartIsDropped();
     void finalizePlanSortsAndSums();
     void validateRejectsAndWarns();
     void validateAcceptsPlanAtCapacityAndAdjacent();
@@ -322,6 +323,23 @@ void TestFlashPlan::eraseWithOnlyOneOfStartOrCountIsDropped()
 
     QCOMPARE(out[1].startSector, quint64(4096));   // ④ 双给不被误伤
     QCOMPARE(out[1].numSectors, quint64(100));
+}
+
+// <erase start_sector=""/> + 缺长度：空串算"声明过起点"（用户写了却无可用值）→ fail-closed 丢弃，
+// **不得**放行为整 LUN 擦（否则"起点不明"被静默放大成"整盘擦"）。终审复验的 Minor。
+void TestFlashPlan::eraseWithEmptyStartIsDropped()
+{
+    QTemporaryDir dir;
+    const QString xml = writeFile(dir.path(), "rawprogram0.xml",
+        "<data>\n"
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "         start_sector=\"\" />\n"          // 给了属性、空串、且缺 num_partition_sectors
+        "</data>\n");
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY2(edl::parseRawprogramXml(xml, 0, out, warn, &err), qPrintable(err));
+    QCOMPARE(out.size(), 0);                       // 丢弃：不得成为整 LUN 擦
+    QCOMPARE(warn.size(), 1);
+    QVERIFY(warn[0].contains(QStringLiteral("(空)")));   // 告警回显空串而非假装 0
 }
 
 // ---- Task 2：排序/统计 + validatePlan + sparse 扇区换算 ----

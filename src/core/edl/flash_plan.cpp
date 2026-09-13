@@ -298,12 +298,17 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
     // 三态判定统一走 readSectorAttr（与 start_sector 同源），处置按注释里的策略逐态分发：
     // 只有**起点与计数双双缺失**才是整 LUN 擦；Empty/NonDecimal/显式 0 一律丢弃（fail-closed）
     const SectorAttr count = readSectorAttr(reader, "num_partition_sectors", /*base=*/0);
-    // "声明过起点" = 十进制或表达式；Empty 按缺失处理（与 qdl attr_as_string 遇空串返回 NULL 一致，
-    // reference/qdl/src/util.c:101-102）。表达式非空 ⇒ 不能按"numSectors==0 = 整 LUN"解释（Task 5）。
-    const bool startGiven = start.kind == SectorAttrKind::Decimal
-                            || start.kind == SectorAttrKind::NonDecimal;
-    const QString shownStart = e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
-                                                           : e.startSectorExpr;
+    // "声明过起点" = 属性**存在**（Decimal 有值 / NonDecimal 表达式 / **Empty 空串**）。
+    // Empty 也算"声明过"：用户写了该属性却没给可用值，若按缺失处理，`start_sector=""` + 缺长度
+    // 会被当成"起点未给"→ 静默放行为整 LUN 擦（破坏性放大），与本文件对 erase 一律 fail-closed
+    // 的策略矛盾（见文件头三态表"Empty … 一律 fail-closed 丢弃"）。
+    // （qdl 的 attr_as_string 遇空串返回 NULL ⇒ 等同缺失，reference/qdl/src/util.c:101-102；
+    //   我们在**破坏性操作**上比参照更严，是刻意的。）
+    const bool startGiven = start.kind != SectorAttrKind::Missing;
+    // 告警里回显用户实际写的东西（空串显示 "(空)"，不假装是 0）
+    const QString shownStart = start.kind == SectorAttrKind::Decimal
+                                   ? QString::number(e.startSector)
+                                   : (start.raw.isEmpty() ? QStringLiteral("(空)") : start.raw);
     if (count.kind == SectorAttrKind::Decimal && count.value > 0) {
         if (!startGiven) {
             // ③ 给了长度、没给起点：xmlErase 会补 start_sector="0"，等于主机编一个起点
