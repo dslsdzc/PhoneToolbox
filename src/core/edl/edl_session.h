@@ -19,6 +19,11 @@ namespace edl {
 struct FlashOptions {
     bool verifyAfterWrite = true;      // 边写边算 sha256，写完比对（不符 → 错误，不回滚）
     bool fullVerifyBeforeWrite = false;// 刷前完整校验（GB 级慢，默认关）
+    // Sahara→Firehose 重枚举的**总预算**（传给 IEdlTransport::waitReenumerate）。
+    // 默认 45000 = 既有实现的 3s 初等 + 15 次重试（src/core/modes/edl_handler.cpp:589-614 的
+    // `msleep(3000)` + `retries=15`）。轮询间隔由传输实现决定；做成显式旋钮是为了让"预算"可配置、
+    // 可测，而不是散落的魔数。
+    int reenumerateTimeoutMs = 45000;
 };
 
 // 进度上报。`stage` 取值（Task 8 的 UI 依赖这组字符串）：

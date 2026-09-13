@@ -24,6 +24,8 @@ namespace edl {
 //   * `read(timeoutMs == 0)` = 非阻塞轮询（drain 语义）：只吐 `residual`，**不动** reads 队列；
 //     空返回 = 端点静默。真机侧对应 libusb_bulk_transfer(timeout=0) 立即返回（Task 7）。
 //     一次性 drain 若还有剩余，剩余留在队列里，下一次轮询再取。
+//   * `waitReenumerate` 按 edl_transport.h 的生命周期契约建模：成功时记录一次 `open`
+//     （"返回 true ⇒ 设备已重新 open()，会话不再 open"），失败时不记；预算存进 lastReenumTimeoutMs。
 // 既有用例（Task 4/5）不设 residual、不读 calls，行为与本文件历史版本逐字节一致。
 class MockEdlTransport : public IEdlTransport
 {
@@ -36,6 +38,7 @@ public:
     bool openResult = true;
     bool reenumerateResult = true;
     int  maxPacket = 1024;
+    int  lastReenumTimeoutMs = -1;    // 最近一次 waitReenumerate 收到的预算（断言"预算来自 FlashOptions"）
 
     bool open(QString *error) override { Q_UNUSED(error); calls << QStringLiteral("open"); return openResult; }
     void close() override { calls << QStringLiteral("close"); }
@@ -73,7 +76,15 @@ public:
     }
     bool resetDevice(QString *error) override { Q_UNUSED(error); calls << QStringLiteral("reset"); return true; }
     bool waitReenumerate(int timeoutMs, QString *error) override {
-        Q_UNUSED(timeoutMs); Q_UNUSED(error); calls << QStringLiteral("waitReenumerate"); return reenumerateResult;
+        Q_UNUSED(error);
+        lastReenumTimeoutMs = timeoutMs;
+        calls << QStringLiteral("waitReenumerate");
+        if (!reenumerateResult)
+            return false;                             // 设备没回来 → 会话必须中止且不发 reset
+        // 契约（edl_transport.h 顶部）：返回 true 时设备已重新 open() —— 重枚举后的重新打开由**传输**
+        // 完成，会话不再 open。mock 用一次 "open" 记录表示它，使"谁负责重开"在时序断言里可见。
+        calls << QStringLiteral("open");
+        return true;
     }
     int maxPacketSize() const override { return maxPacket; }
 };

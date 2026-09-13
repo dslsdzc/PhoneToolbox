@@ -95,6 +95,9 @@ private slots:
     void refusesWhenValidatePlanFails();
     void refusesEmptyPlan();
     void refusesProgramEntryWithoutSectors();
+    void stopsWithoutResetWhenReenumerateFails();
+    void passesReenumerateBudgetFromOptions();
+    void reportsUnacknowledgedResetInsteadOfFailing();
     void reportsProgressToHundred();
     void expandsSparseChunksIntoDataStream();
     void readsBackWithoutReset();
@@ -162,7 +165,16 @@ void TestEdlSession::writesImageDataAndResetsOnSuccess()
     QVERIFY(t.calls.indexOf(QStringLiteral("reset")) > t.calls.lastIndexOf(QStringLiteral("write")));
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
     QVERIFY(t.residual.isEmpty());
-    QVERIFY(t.calls.contains(QStringLiteral("waitReenumerate")));
+
+    // ③ 重枚举契约（edl_transport.h 顶部 / Task 6 控制方裁定）：
+    //    close 必须在 waitReenumerate 之前；返回 true 时设备已重新 open() —— 会话自己只在最开始
+    //    open 一次，重枚举后的 open 由传输负责（mock 在 waitReenumerate 成功时记录一次 "open"）
+    QVERIFY(t.calls.indexOf(QStringLiteral("close")) < t.calls.indexOf(QStringLiteral("waitReenumerate")));
+    QCOMPARE(t.calls.count(QStringLiteral("open")), 2);
+    QVERIFY(t.calls.indexOf(QStringLiteral("open")) < t.calls.indexOf(QStringLiteral("close")));
+    QVERIFY(t.calls.lastIndexOf(QStringLiteral("open")) > t.calls.indexOf(QStringLiteral("waitReenumerate")));
+    // 预算来自 FlashOptions（默认 45000 = 既有 3s×15）
+    QCOMPARE(t.lastReenumTimeoutMs, 45000);
 }
 
 void TestEdlSession::stopsWithoutResetOnNak()
@@ -552,6 +564,91 @@ void TestEdlSession::refusesProgramEntryWithoutSectors()
     for (const QByteArray &w : t.writes)
         QVERIFY(!w.contains(QByteArray("<program")));
     QVERIFY(!t.calls.contains(QStringLiteral("reset")));
+}
+
+// waitReenumerate 失败（设备没回到 Firehose）→ 中止 + 带阶段名的中文错误 + **不发 reset**。
+void TestEdlSession::stopsWithoutResetWhenReenumerateFails()
+{
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    edl::MockEdlTransport t;
+    t.reenumerateResult = false;                            // 设备没回来
+    const QByteArray programmer(16, '\x11');
+    queueBringUp(t, programmer, {0});                       // 后面的响应根本不该被消费
+
+    QString err;
+    edl::EdlSession s(t);
+    QVERIFY(!s.run(plan, programmer, edl::FlashOptions{}, &err));
+    QVERIFY(err.contains(QStringLiteral("重枚举")));          // 文案带阶段名
+    QVERIFY(err.contains(QStringLiteral("Sahara")));
+    QVERIFY(!t.calls.contains(QStringLiteral("reset")));
+    QVERIFY(t.calls.contains(QStringLiteral("close")));      // 句柄要释放
+    for (const QByteArray &w : t.writes)
+        QVERIFY(!w.contains(QByteArray("<program")));        // 未进入写入
+}
+
+// 重枚举预算是显式旋钮：FlashOptions::reenumerateTimeoutMs 原样传给 waitReenumerate。
+void TestEdlSession::passesReenumerateBudgetFromOptions()
+{
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    edl::MockEdlTransport t;
+    const QByteArray programmer(16, '\x11');
+    queueBringUp(t, programmer, {0});
+    t.reads << QByteArray(kAckXml) << QByteArray(kAckXml);
+
+    edl::FlashOptions opt;
+    opt.reenumerateTimeoutMs = 1234;
+    QString err;
+    edl::EdlSession s(t);
+    QVERIFY2(s.run(plan, programmer, opt, &err), qPrintable(err));
+    QCOMPARE(t.lastReenumTimeoutMs, 1234);
+}
+
+// reset 是 best-effort：设备没 ACK（真机常"先 ACK 再重启"或直接掉线）**不判失败**，
+// 但必须落一条日志说明实际情况（"不失败"不等于"不报告"）。
+void TestEdlSession::reportsUnacknowledgedResetInsteadOfFailing()
+{
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    edl::MockEdlTransport t;
+    const QByteArray programmer(16, '\x11');
+    queueBringUp(t, programmer, {0});
+    t.reads << QByteArray(kAckXml) << QByteArray(kAckXml);   // **没有** reset 的响应（设备已重启）
+
+    QList<edl::SessionProgress> seen;
+    QString err;
+    edl::EdlSession s(t, [&seen](const edl::SessionProgress &p) { seen.append(p); });
+    QVERIFY2(s.run(plan, programmer, edl::FlashOptions{}, &err), qPrintable(err));   // 仍算成功
+
+    bool logged = false;
+    for (const edl::SessionProgress &p : seen) {
+        if (p.stage == QStringLiteral("reset") && p.detail.contains(QStringLiteral("未收到 ACK")))
+            logged = true;
+    }
+    QVERIFY(logged);                                         // 不静默
+    QVERIFY(t.calls.contains(QStringLiteral("reset")));      // 复位命令确实发了
 }
 
 // 进度：percent = 已写字节 / plan.totalBytes，**最后必须到 100**；条目切换时 detail = 条目名。

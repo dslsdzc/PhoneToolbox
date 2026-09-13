@@ -42,7 +42,6 @@ constexpr quint32 kDefaultMaxPayloadBytes = 1024 * 1024;
 constexpr int kCmdTimeoutMs       = 10000;    // 命令响应等待（qdl 同量级：firehose.c:1217）
 constexpr int kDataAckTimeoutMs   = 120000;   // program 数据发完的 ACK（qdl：firehose.c:1132-1137）
 constexpr int kReadTimeoutMs      = 30000;    // 回读数据阶段单次读超时（qdl：firehose.c:1241）
-constexpr int kReenumTimeoutMs    = 30000;    // Sahara→Firehose 重枚举等待
 constexpr int kReadChunkBytes     = 4096;     // 单次 IN 传输读取上限（与 firehose.cpp:462 同款）
 constexpr int kMaxReadsPerResponse = 64;      // 读次数上限（防"永远不含 <response"时死循环）
 // drain 轮询的次数上限：每次轮询都是非阻塞的（0 超时），正常最多几次就静默；
@@ -353,18 +352,17 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
     }
     m_t.close();     // 设备随即重枚举为 Firehose（spec §4 步骤 1 末），旧句柄失效
 
-    // ② 等重枚举 → 重开
+    // ② 等重枚举：设备消失又回来。契约（edl_transport.h 顶部）：调用前须已 close()（上一行就是），
+    //    返回 true 时设备**已重新 open()** —— 故这里不再 open 一次（重复打开会拿到第二个句柄）。
+    //    预算来自 FlashOptions::reenumerateTimeoutMs（默认 45000 = edl_handler.cpp:589-614 的 3s×15）；
+    //    失败 → 中止 + 带阶段名的中文错误 + **不发 reset**（spec §4 错误矩阵）。
     report(QStringLiteral("reenumerate"), QStringLiteral("等待设备进入 Firehose"), 0);
     {
         QString reenumErr;
-        if (!m_t.waitReenumerate(kReenumTimeoutMs, &reenumErr)) {
+        if (!m_t.waitReenumerate(opt.reenumerateTimeoutMs, &reenumErr)) {
             m_t.close();
-            return fail(QStringLiteral("等待设备重枚举失败（Sahara→Firehose）：%1").arg(reenumErr));
-        }
-        QString openErr;
-        if (!m_t.open(&openErr)) {
-            m_t.close();
-            return fail(QStringLiteral("重枚举后无法打开 Firehose 设备：%1").arg(openErr));
+            return fail(QStringLiteral("等待设备重枚举失败（Sahara→Firehose，预算 %1 ms）：%2")
+                            .arg(opt.reenumerateTimeoutMs).arg(reenumErr));
         }
     }
 
@@ -464,9 +462,10 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
         break;   // 只发一次：取第一个匹配的 bootloader 分区（qdl 也只标记一个 LUN）
     }
 
-    // ⑧ reset：**仅成功路径发一次**。真机上设备往往先 ACK 再重启（或直接掉线），故这里 best-effort：
-    // 超时/NAK 只记日志，不把"已经刷完"判成失败（qdl 在这点上会返回错误码，见 firehose.c:1585-1598 ——
-    // 照抄会让每次成功刷机都以失败收场）。
+    // ⑧ reset：**仅成功路径发一次**。best-effort（控制方裁定）：真机上设备往往"先 ACK 再重启"
+    // 或直接掉线，故超时/NAK/传输错误都不把"已经刷完"判成失败 —— qdl 在这点上会记错并返回错误码
+    // （reference/qdl/src/firehose.c:1585-1598），照抄会让每次成功刷机都以失败收场。
+    // **但"不失败"不等于"不报告"**：两种结局都落一条日志说明实际情况。
     report(QStringLiteral("reset"), QStringLiteral("复位设备"), 100);
     {
         FirehoseResponse resp;
@@ -476,14 +475,18 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
             const QString why = sendErr.isEmpty()
                     ? (resp.errorText.isEmpty() ? resp.raw : resp.errorText) : sendErr;
             report(QStringLiteral("reset"),
-                   QStringLiteral("设备未确认复位请求（%1）—— 数据已全部写入，可手动重启").arg(why), 100);
+                   QStringLiteral("已发送复位命令（%1：未收到 ACK，设备可能已重启）—— "
+                                  "数据已全部写入，可手动重启").arg(why), 100);
+        } else {
+            report(QStringLiteral("reset"), QStringLiteral("复位命令已被设备确认"), 100);
         }
         // Firehose 的 <power value="reset"/> 只是"让设备重启"；句柄的退场由传输层负责
-        // （IEdlTransport::resetDevice）。同样 best-effort：设备此时多半已开始重启。
+        // （IEdlTransport::resetDevice）。同样 best-effort + 同样必须报告。
         QString resetErr;
         if (!m_t.resetDevice(&resetErr))
             report(QStringLiteral("reset"),
-                   QStringLiteral("传输层复位失败（%1）—— 设备可能已自行重启").arg(resetErr), 100);
+                   QStringLiteral("已请求传输层复位，但返回失败（%1）—— 设备可能已自行重启").arg(resetErr),
+                   100);
     }
     m_t.close();
     report(QStringLiteral("done"), QStringLiteral("刷写完成"), 100);
@@ -605,12 +608,17 @@ bool EdlSession::writeEntry(const PlanEntry &e, const FlashOptions &opt, QString
                                               [&pusher, &pushErr](const imgsparse::SparseChunk &c) {
             if (c.raw)   return pusher.push(c.data.constData(), c.data.size(), &pushErr);
             if (c.fill)  return pusher.pushFill(c.fillValue, c.rawBytes, &pushErr);
-            // DONT_CARE：**不产出数据但偏移照常推进**（SparseChunk 契约；reference/qdl/src/program.c:139-170）。
-            // 本项目按"一条 program 覆盖整段"下发（numSectors 由计划层算好，brief 硬要求 2），字节流没有
-            // 空洞可跳 —— 要让设备侧计数不错位，这一段必须补零发出去：写进设备的内容与"先 simg2img
-            // （DONT_CARE 零填充）再刷 raw"逐字节一致。qdl 走的是另一条路（per-chunk program op，
-            // DONT_CARE 完全不发、靠下一条 op 的 start_sector 跳过）—— spec §3.3 的文字描述的是那条路；
-            // 两条路落盘结果相同，本项目选前者是因为它与"计划层的 numSectors"和"一条目一 ACK"自洽。
+            // DONT_CARE：不产出数据、但偏移照常推进（`SparseChunk::dontCare` 契约；
+            // reference/qdl/src/program.c:139-170）。**下发时补零**——控制方裁定（方案 A），取舍如下：
+            //   * 两个参照在这一处本身就不一致：qdl 在**加载期**把 sparse 拆成 per-chunk program op，
+            //     DONT_CARE 干脆不发、靠下一条 op 的 start_sector 跳过（program.c:139-170）；
+            //     bkerler 的 QCSparse.unsparse() 对 0xCAC3 返回 `b'\x00' * chunk_sz * blk_sz`
+            //     （edl/edlclient/Library/sparse.py:148-151），即**补零**，随后照常下发。
+            //   * 本项目选 bkerler 口径，因为三条硬约束：① 我们的模型是"一条目一条 program、
+            //     numSectors 由计划层算好不重算"；② `startSectorExpr` 条目主机侧**无法**算子区间
+            //     （per-chunk 路线会直接卡死在这类条目上）；③ 补零后写进设备的内容 == 该 sparse 镜像
+            //     对应的 raw 内容（与"先 simg2img 再刷"逐字节相同），语义最可预测。
+            //   * 代价（明码标价）：DONT_CARE 区也会真的写入设备 —— 用带宽换确定性。
             return pusher.pushZeros(c.rawBytes, &pushErr);
         }, &walkErr);
         if (!ok) {
