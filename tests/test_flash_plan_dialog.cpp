@@ -234,14 +234,16 @@ struct DialogRunResult
     QString error;
     QString cancelNote;
     QStringList tempFiles;               // 对话框返回后临时目录里的文件（回收与否由调用方决定）
-    int ticksAfterInteract = 0;          // 交互之后的定时器拍数（"取消后还在等"确有窗口）
-    bool visibleAfterInteract = false;   // 其中至少一拍进度对话框仍可见 ⇒ 模态防线还在
+    bool visibleAfterInteract = false;   // 交互返回时进度对话框仍可见 ⇒ 模态防线还在（同步判定）
 };
 
 // 定时器手法（原为一次性冒烟，经审查建议入库）：1ms 一拍，进度对话框一旦可见就调用
-// interact()（点取消按钮 / 发 Esc），之后每拍记录它是否仍在屏幕上 —— 取消请求只在**条目
-// 边界**生效，"当前文件跑完"之前对话框必须一直可见（Qt 的取消/Esc 都会自己 hide 它，
-// 产品代码再把 show() 拉回来；若那段逻辑被删，本例可见性断言立刻变红）。
+// interact()（点取消按钮 / 发 Esc）—— 取消请求只在**条目**边界生效，"当前文件跑完"之前
+// 对话框必须保持可见（Qt 的取消/Esc 都会自己 hide 它，产品再把 show() 拉回来；若那段逻辑
+// 被删，本用例的可见性断言立刻变红）。
+// 可见性用**交互返回后的同步读**判定，不数"交互后还看到几拍"：交互与产品 handler 都在本
+// 线程内同步跑完（DirectConnection），返回时可见性已是最终值 —— 而拍数是时间量，在"取消
+// 落在 0/2"这类极快去程上余量不足，极端负载下可能一拍都没数到（偶发变红）。
 DialogRunResult runDialog(QTemporaryDir &tmp, const QString &pkg,
                           const std::function<void(QProgressDialog *)> &interact)
 {
@@ -252,19 +254,18 @@ DialogRunResult runDialog(QTemporaryDir &tmp, const QString &pkg,
     poll.setInterval(1);
     bool interacted = false;
     QObject::connect(&poll, &QTimer::timeout, &poll, [&] {
+        if (interacted)
+            return;
         if (!bar)
             bar = parent.findChild<QProgressDialog *>();
         if (!bar || !bar->isVisible())
             return;
-        if (!interacted) {
-            interacted = true;
-            if (interact)                // 传空 = 只观察、不交互（成功路径用例）
-                interact(bar);
+        interacted = true;
+        if (!interact)                   // 传空 = 不交互（成功路径用例）
             return;
-        }
-        ++r.ticksAfterInteract;
-        if (bar->isVisible())
-            r.visibleAfterInteract = true;
+        interact(bar);
+        r.visibleAfterInteract = bar->isVisible();   // 同步判定（见上）
+        poll.stop();
     });
     poll.start();
     QString outDir;
@@ -392,8 +393,7 @@ void TestFlashPlanDialog::dialogCancelButtonStopsAtFileBoundary()
     QVERIFY2(oneDone || r.cancelNote.contains(QStringLiteral("已完成 0/2")), qPrintable(r.cancelNote));
     QCOMPARE(r.tempFiles.contains(QStringLiteral("a.img")), oneDone);
     QVERIFY(!r.tempFiles.contains(QStringLiteral("b.img")));   // 下一个条目不再开始
-    // 取消之后、worker 结束之前：进度对话框仍在屏幕上（否则 WindowModal 失效 → 主窗口可交互）
-    QVERIFY(r.ticksAfterInteract > 0);
+    // 取消（或 Esc）返回时进度对话框仍在屏幕上（否则 WindowModal 失效 → 主窗口可交互）
     QVERIFY(r.visibleAfterInteract);
 }
 
@@ -424,8 +424,7 @@ void TestFlashPlanDialog::dialogEscapeAlsoRequestsCancel()
     QVERIFY2(oneDone || r.cancelNote.contains(QStringLiteral("已完成 0/2")), qPrintable(r.cancelNote));
     QCOMPARE(r.tempFiles.contains(QStringLiteral("a.img")), oneDone);
     QVERIFY(!r.tempFiles.contains(QStringLiteral("b.img")));
-    QVERIFY(r.ticksAfterInteract > 0);
-    QVERIFY(r.visibleAfterInteract);       // Esc 之后对话框必须仍可见（模态保持）
+    QVERIFY(r.visibleAfterInteract);       // Esc 返回时对话框必须仍可见（模态保持）
 }
 
 // **成功路径不得被误判成取消**（本轮自查发现的真 bug）：`QProgressDialog::closeEvent` 会发

@@ -238,6 +238,18 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
     // 模态仍是 WindowModal：**响应 ≠ 可重入** —— 解包期间不放行主窗口输入（与旧实现的
     // ExcludeUserInputEvents 同一安全口径），用户能做的只有"看进度 / 取消"。
     OppoExtractWorker worker;
+    // **收尾冻结标志**：循环退出（解包已结束）后置位，此后任何取消信号一律忽略。
+    // 非它不可的理由（实测 Qt 6.11）：`QProgressDialog::closeEvent` 会发 `canceled()`
+    // —— 没有这个标志，本函数末尾的 `progress.close()` 会把 cancelRequested 置位，
+    // 于是**每次成功解包都被误判成"取消到达时已跑完（产物未使用）"**（临时目录被回收、
+    // 刷写永不开始，且完全没有报错）。判别力由 dialogSuccessNotMisreadAsCancel() 钉住。
+    //
+    // **声明在 progress 之前是刻意的（生命周期，不是排版）**：局部对象按声明**逆序**析构，
+    // 故 settled 比 progress 活得久。下面两条取消连接的属主（context）正是 progress，
+    // 若它在自己的析构期间发出 canceled()/rejected()（实测不发出，属隐患而非现患），
+    // 处理函数会读这个标志 —— 声明在 progress 之后就是读一个已销毁的对象。
+    // 同理 worker 声明在最前（它也被 handler 捕获，必须活得比 progress 久）。
+    bool settled = false;
     // 取消文案必须诚实：解包引擎没有"半途停"的钩子，取消在**条目（文件）边界**生效 ——
     // 当前文件还会写完并校验完，然后才停（oppo_extract.h 的 ExtractCancel / worker 类注释）。
     QProgressDialog progress(QStringLiteral("正在解包固件包…"),
@@ -260,12 +272,6 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
                     progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
                 progress.setValue(percent);
             });
-    // **收尾冻结标志**：循环退出（解包已结束）后置位，此后任何取消信号一律忽略。
-    // 非它不可的理由（实测 Qt 6.11）：`QProgressDialog::closeEvent` 会发 `canceled()`
-    // —— 没有这个标志，本函数末尾的 `progress.close()` 会把 cancelRequested 置位，
-    // 于是**每次成功解包都被误判成"取消到达时已跑完（产物未使用）"**（临时目录被回收、
-    // 刷写永不开始，且完全没有报错）。判别力由 dialogSuccessNotMisreadAsCancel() 钉住。
-    bool settled = false;
     // 取消动作：**按钮点击（canceled()）与 Esc/关窗（rejected()）共用同一处理**。
     // 两个信号都必须接（实测 Qt 6.11）：Esc → `QDialog::reject()` 只发 `rejected()`、
     // **不发 `canceled()`**，且顺手 hide 对话框 —— 只接 canceled() 的话，Esc 会静默地把
