@@ -37,6 +37,7 @@ public:
     int  failWriteAt = -1;            // 第 N 次 write 失败（0 基），-1=不失败
     bool openResult = true;
     bool reenumerateResult = true;
+    bool resetDeviceResult = true;    // resetDevice() 的返回值（会话必须 best-effort 容忍 false）
     int  maxPacket = 1024;
     int  lastReenumTimeoutMs = -1;    // 最近一次 waitReenumerate 收到的预算（断言"预算来自 FlashOptions"）
 
@@ -74,7 +75,14 @@ public:
         if (reads.isEmpty()) { if (error) *error = QStringLiteral("读超时（mock 队列空）"); return {}; }
         return reads.takeFirst();
     }
-    bool resetDevice(QString *error) override { Q_UNUSED(error); calls << QStringLiteral("reset"); return true; }
+    bool resetDevice(QString *error) override {
+        calls << QStringLiteral("reset");
+        if (!resetDeviceResult) {
+            if (error) *error = QStringLiteral("注入的传输层复位失败");
+            return false;
+        }
+        return true;
+    }
     bool waitReenumerate(int timeoutMs, QString *error) override {
         Q_UNUSED(error);
         lastReenumTimeoutMs = timeoutMs;

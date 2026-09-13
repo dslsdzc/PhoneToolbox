@@ -127,9 +127,12 @@ bool waitResponse(IEdlTransport &t, FirehoseResponse &resp, int timeoutMs,
     return true;
 }
 
-// 裸写一块数据（无长度前缀、无帧头）+ ZLP（usb.c:548-553）
+// 裸写一块数据（无长度前缀、无帧头）+ ZLP（usb.c:548-553）。
+// **drain 在这里做**（而不是靠调用点记得）：本函数是数据面唯一的写出点，放在这一层则"每一块写之前
+// 都 drain"由结构保证 —— 数据推送循环里块间不会漏（审查发现过一处：只在首块之前 drain 过）。
 bool writeRaw(IEdlTransport &t, const QByteArray &data, QString *error)
 {
+    drainResidual(t);
     if (!t.write(data, error))
         return false;
     const int maxPacket = t.maxPacketSize();
@@ -471,12 +474,14 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
         FirehoseResponse resp;
         drainResidual(m_t);
         QString sendErr;
-        if (!firehoseSendCommand(m_t, xmlReset(), resp, kCmdTimeoutMs, &sendErr) || !resp.ack) {
-            const QString why = sendErr.isEmpty()
-                    ? (resp.errorText.isEmpty() ? resp.raw : resp.errorText) : sendErr;
+        if (!firehoseSendCommand(m_t, xmlReset(), resp, kCmdTimeoutMs, &sendErr)) {
             report(QStringLiteral("reset"),
                    QStringLiteral("已发送复位命令（%1：未收到 ACK，设备可能已重启）—— "
-                                  "数据已全部写入，可手动重启").arg(why), 100);
+                                  "数据已全部写入，可手动重启").arg(sendErr), 100);
+        } else if (resp.nak) {
+            report(QStringLiteral("reset"),
+                   QStringLiteral("复位命令被设备拒绝（NAK：%1）—— 数据已全部写入，可手动重启")
+                       .arg(resp.errorText.isEmpty() ? resp.raw : resp.errorText), 100);
         } else {
             report(QStringLiteral("reset"), QStringLiteral("复位命令已被设备确认"), 100);
         }
@@ -485,8 +490,8 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
         QString resetErr;
         if (!m_t.resetDevice(&resetErr))
             report(QStringLiteral("reset"),
-                   QStringLiteral("已请求传输层复位，但返回失败（%1）—— 设备可能已自行重启").arg(resetErr),
-                   100);
+                   QStringLiteral("复位调用失败（%1）—— 设备可能已自行重启；数据已全部写入")
+                       .arg(resetErr), 100);
     }
     m_t.close();
     report(QStringLiteral("done"), QStringLiteral("刷写完成"), 100);

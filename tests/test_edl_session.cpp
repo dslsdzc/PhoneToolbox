@@ -98,6 +98,9 @@ private slots:
     void stopsWithoutResetWhenReenumerateFails();
     void passesReenumerateBudgetFromOptions();
     void reportsUnacknowledgedResetInsteadOfFailing();
+    void drainsResidualBetweenDataChunks();
+    void reportsResetOutcomeWithoutFailing_data();
+    void reportsResetOutcomeWithoutFailing();
     void reportsProgressToHundred();
     void expandsSparseChunksIntoDataStream();
     void readsBackWithoutReset();
@@ -649,6 +652,92 @@ void TestEdlSession::reportsUnacknowledgedResetInsteadOfFailing()
     }
     QVERIFY(logged);                                         // 不静默
     QVERIFY(t.calls.contains(QStringLiteral("reset")));      // 复位命令确实发了
+}
+
+// 块间也要 drain：残留注入在第 1 个数据块**之后**（进度回调在每块冲出后触发），
+// 第 2 块写之前必须把残留清掉 —— mock 的 write() 在残留未清时直接失败，故"run 仍成功"就是
+// "块间 drain 发生了"的硬证据（现有的 drainsResidualBeforeNextWrite 只钉命令路径）。
+void TestEdlSession::drainsResidualBetweenDataChunks()
+{
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');                   // 2 扇区 = 2 块
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    edl::MockEdlTransport t;
+    t.maxPacket = 512;
+    const QByteArray programmer(16, '\x11');
+    queueBringUp(t, programmer, {0}, 4096);                 // 协商 4096 = 每块 1 扇区
+    t.reads << QByteArray(kAckXml) << QByteArray(kAckXml);
+
+    // stage="write"/detail="boot" 的进度事件：第 1 次 = 条目开始，第 2 次 = **第 1 块冲出之后**
+    int events = 0;
+    edl::ProgressFn hook = [&t, &events](const edl::SessionProgress &p) {
+        if (p.stage == QStringLiteral("write") && p.detail == QStringLiteral("boot") && ++events == 2)
+            t.residual << QByteArray("<log value=\"mid-chunk stray\" />");
+    };
+
+    QString err;
+    edl::EdlSession s(t, hook);
+    QVERIFY2(s.run(plan, programmer, edl::FlashOptions{}, &err), qPrintable(err));
+    QCOMPARE(events, 3);                                    // 注入确实发生在第 1 块之后、第 2 块之前
+    QVERIFY(t.residual.isEmpty());                          // 块间 drain 生效
+    QVERIFY(t.calls.indexOf(QStringLiteral("drain")) > 0);
+    QVERIFY(t.writes.last().contains(QByteArray("reset")));
+}
+
+// reset 的三种结局都**不判失败**（run 仍返回 true），但各有一句可区分的日志（"不许静默"）。
+void TestEdlSession::reportsResetOutcomeWithoutFailing_data()
+{
+    QTest::addColumn<int>("resetResponse");      // 0 = 无响应（超时）, 1 = NAK, 2 = ACK
+    QTest::addColumn<bool>("resetDeviceResult");
+    QTest::addColumn<QString>("expectText");
+    QTest::newRow("超时（设备直接重启）") << 0 << true  << QStringLiteral("未收到 ACK");
+    QTest::newRow("设备拒绝（NAK）")      << 1 << true  << QStringLiteral("被设备拒绝");
+    QTest::newRow("传输层复位失败")       << 2 << false << QStringLiteral("复位调用失败");
+}
+
+void TestEdlSession::reportsResetOutcomeWithoutFailing()
+{
+    QFETCH(int, resetResponse);
+    QFETCH(bool, resetDeviceResult);
+    QFETCH(QString, expectText);
+
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    edl::MockEdlTransport t;
+    t.resetDeviceResult = resetDeviceResult;
+    const QByteArray programmer(16, '\x11');
+    queueBringUp(t, programmer, {0});
+    t.reads << QByteArray(kAckXml) << QByteArray(kAckXml);   // program / 数据发完
+    if (resetResponse == 1) t.reads << QByteArray("<response value=\"NAK\" />");
+    else if (resetResponse == 2) t.reads << QByteArray(kAckXml);
+    // resetResponse == 0：队列不补 → reset 读到空 = 超时（真机常"先 ACK 再重启"或直接掉线）
+
+    QList<edl::SessionProgress> seen;
+    QString err;
+    edl::EdlSession s(t, [&seen](const edl::SessionProgress &p) { seen.append(p); });
+    QVERIFY2(s.run(plan, programmer, edl::FlashOptions{}, &err), qPrintable(err));   // **仍算成功**
+
+    bool logged = false;
+    for (const edl::SessionProgress &p : seen) {
+        if (p.stage == QStringLiteral("reset") && p.detail.contains(expectText))
+            logged = true;
+    }
+    QVERIFY2(logged, qPrintable(expectText));
+    QVERIFY(t.calls.contains(QStringLiteral("reset")));      // 复位命令确实发过
+    QVERIFY(t.calls.last() == QStringLiteral("close"));      // 句柄释放
 }
 
 // 进度：percent = 已写字节 / plan.totalBytes，**最后必须到 100**；条目切换时 detail = 条目名。
