@@ -934,8 +934,8 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSec
                         .arg(e.startSector).arg(e.numSectors);
         return;
     }
-    // **残留尖角（③ 复审）：元数据未声明单位 + GPT 的单位 ≠ 条目将采用的有效单位** —— 上面那条
-    // 只在元数据**声明过** SECTOR_SIZE_IN_BYTES 时才拦截；元数据省略该属性时条目按
+    // **残留尖角（③ 复审）：元数据未声明/不可用单位 + GPT 的单位 ≠ 条目将采用的有效单位** ——
+    // 上面那条只在元数据**给出可用** SECTOR_SIZE_IN_BYTES 时才拦截；属性省略（或为 0/不可解析）时条目按
     // `PlanEntry::sectorSize` 的默认值（4096）下发，而对账照常进行 ⇒ 包内 GPT 的 LBA 编号会被
     // 写进一个**将以 4096 解释**的字段（GPT 说 6：本意 6 × 512 = 3 KiB，落盘却是 6 × 4096 = 24 KiB）。
     // **只告警，不 fail-closed、也不做 ×8/÷8 换算**，两个理由都不是"懒得管"：
@@ -946,8 +946,8 @@ void reconcileWithGpt(PlanEntry &e, bool haveStart, bool haveCount, bool haveSec
     //     按假设换算出来的地址错得比不改写更难发现（同上一分支的理由）。
     // 所以这里只把"这个包需要人工核对"讲清楚：条目照常对账、值按现状保留，既不静默改正也不丢弃。
     if (!haveSectorSize && gpt.sectorSize != e.sectorSize) {
-        warnings << QStringLiteral("条目 %1（lun=%2）的元数据未声明 SECTOR_SIZE_IN_BYTES —— 该条目将按 "
-                                   "%3 字节 LBA 下发，而包内 %4 的 LBA 尺寸是 %5：GPT 的 LBA 编号会被"
+        warnings << QStringLiteral("条目 %1（lun=%2）的元数据 SECTOR_SIZE_IN_BYTES 未声明或不可用 —— "
+                                   "该条目将按 %3 字节 LBA 下发，而包内 %4 的 LBA 尺寸是 %5：GPT 的 LBA 编号会被"
                                    "按 %3 字节解释（数值未换算），落盘区域可能与 GPT 描述不符；"
                                    "请核对包内元数据与 GPT 是否配套")
                         .arg(entryName(e), QString::number(e.lun))

@@ -252,24 +252,43 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
     progress.setAutoReset(false);
 
     connect(&worker, &OppoExtractWorker::progress, &progress,
-            [&progress](const QString &name, int percent) {
-                progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
+            [&worker, &progress](const QString &name, int percent) {
+                // 已请求取消时**不再把提示覆盖回"解包中"**：引擎是"先回调进度、再到条目边界
+                // 查取消"，故当前文件完成时进度回调必然先到 —— 覆盖回去会让"正在取消…（当前
+                // 文件完成后停止）"一闪而过，用户以为取消没生效。进度条数值照走。
+                if (!worker.cancelRequested())
+                    progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
                 progress.setValue(percent);
             });
+    // **收尾冻结标志**：循环退出（解包已结束）后置位，此后任何取消信号一律忽略。
+    // 非它不可的理由（实测 Qt 6.11）：`QProgressDialog::closeEvent` 会发 `canceled()`
+    // —— 没有这个标志，本函数末尾的 `progress.close()` 会把 cancelRequested 置位，
+    // 于是**每次成功解包都被误判成"取消到达时已跑完（产物未使用）"**（临时目录被回收、
+    // 刷写永不开始，且完全没有报错）。判别力由 dialogSuccessNotMisreadAsCancel() 钉住。
+    bool settled = false;
+    // 取消动作：**按钮点击（canceled()）与 Esc/关窗（rejected()）共用同一处理**。
+    // 两个信号都必须接（实测 Qt 6.11）：Esc → `QDialog::reject()` 只发 `rejected()`、
+    // **不发 `canceled()`**，且顺手 hide 对话框 —— 只接 canceled() 的话，Esc 会静默地把
+    // 对话框藏起来：取消请求没置位（解包照跑）、WindowModal 随 hide 失效（主窗口重新可
+    // 交互，而 FlashPanel 没有 busy 门闩，模态是唯一防线），窗口期重入还会替换
+    // m_edlPlanTempDir，让"产物保留在：path"失真。两条信号都走同一 handler，也就没有
+    // "第二种静默退出路径"。
+    const auto handleCancel = [&worker, &progress, &settled] {
+        if (settled)                       // 收尾阶段（含 close() 发的 canceled()）：不是用户取消
+            return;
+        worker.requestCancel();            // 原子标志；引擎在下一个条目边界读到
+        progress.setLabelText(QStringLiteral("正在取消…（当前文件完成后停止）"));
+        progress.setCancelButton(nullptr); // 请求已发出，再点没有意义
+        // Qt 的 QProgressDialog 在取消时会自己 reset()+hide()（**与 autoClose/autoReset
+        // 无关**：实测取消按钮点击 → visible 变 false、value 回 -1；Esc 走 reject() 同样
+        // hide），而"取消只在文件边界生效"恰恰要求这段时间**看得见** —— 故把它拉回屏幕，
+        // 让用户看到说明，而不是一个凭空消失、稍后又被进度更新弹回来的对话框。
+        progress.show();
+    };
     // DirectConnection：接收者与发射者都在 GUI 线程、lambda 只置原子标志 + 改本线程的控件，
     // 不需要（也不能）经工作线程的事件队列 —— 那边正忙于解包，排队等于取消永不生效。
-    connect(&progress, &QProgressDialog::canceled, &progress,
-            [&worker, &progress] {
-                worker.requestCancel();       // 原子标志；引擎在下一个条目边界读到
-                progress.setLabelText(QStringLiteral("正在取消…（当前文件完成后停止）"));
-                progress.setCancelButton(nullptr);   // 请求已发出，再点没有意义
-                // Qt 的 QProgressDialog 在取消时会自己 reset()+hide()（**与 autoClose/autoReset
-                // 无关**：实测 6.11 上取消按钮点击 → visible 变 false、value 回 -1），而"取消
-                // 只在文件边界生效"恰恰要求这段时间**看得见** —— 故把它拉回屏幕，让用户看到
-                // "说明"而不是一个凭空消失、稍后又被进度更新弹回来的对话框。
-                progress.show();
-            },
-            Qt::DirectConnection);
+    connect(&progress, &QProgressDialog::canceled, &progress, handleCancel, Qt::DirectConnection);
+    connect(&progress, &QDialog::rejected, &progress, handleCancel, Qt::DirectConnection);
 
     QEventLoop loop;
     connect(&worker, &OppoExtractWorker::finished, &loop, &QEventLoop::quit);
@@ -280,6 +299,7 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
     // 一直等下去。用 isFinished() 兜住"已完成但 quit 早到"的情形。
     while (!worker.isFinished())
         loop.exec();
+    settled = true;                    // 先冻结取消交互，再收尾（见 settled 的注释）
     progress.close();
     worker.waitForFinished();       // 取结果前 join（结果字段由工作线程写）
 

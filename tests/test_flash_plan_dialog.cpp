@@ -5,10 +5,10 @@
 // set_tests_properties），因此这里只断言**控件状态与确认语义**，不做像素级渲染断言。
 //
 // PB-B6：整包入口的解包从 GUI 线程搬到 OppoExtractWorker（工作线程）+ 条目边界取消。
-// 对话框本体（buildAndShowPackage）会弹模态进度条并进入 exec()，在无人点击的环境里
-// **不能**直接驱动（旧用例 buildAndShowFailsBeforeShowingDialog 正是这条红线：失败必须在
-// 弹窗前返回）。故这里直接驱动它背后的 OppoExtractWorker —— 对话框与用例走的是同一段
-// 逻辑（同一个 worker + 同一个引擎取消钩子），覆盖边界见各用例注释与交接报告。
+// 对话框本体（buildAndShowPackage）会弹模态进度条并进入事件循环 —— 只要**有人在事件循环里
+// 与它交互**就能驱动（本文件用 1ms 定时器在进度条可见时点一次取消按钮 / 发一次 Esc），
+// 故取消路径已入库用例；仍然**不能**驱动的是"失败必须弹窗前返回"那条红线
+// （buildAndShowFailsBeforeShowingDialog：无人交互 ⇒ 一旦弹窗就是挂死）。
 #include <QtTest>
 #include <QCheckBox>
 #include <QCoreApplication>
@@ -17,12 +17,16 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QListWidget>
+#include <QPointer>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 
 #include <atomic>
+#include <functional>
 
 #include "core/edl/flash_plan.h"
 #include "ui/flash_plan_dialog.h"
@@ -41,6 +45,10 @@ private slots:
     // PB-B6：解包线程化（进度来自工作线程 / 条目边界取消）
     void packageExtractRunsOnWorkerThread();
     void packageExtractCancelStopsAtFileBoundary();
+    // PB-B6 审查修复：对话框本体的取消路径（点按钮 / 按 Esc）+ 成功路径不被误判为取消
+    void dialogCancelButtonStopsAtFileBoundary();
+    void dialogEscapeAlsoRequestsCancel();
+    void dialogSuccessNotMisreadAsCancel();
 };
 
 // 勾选框门控：未勾选 → startButton 禁用；勾选后可用；accept 之前 confirmed() 恒为 false。
@@ -182,6 +190,90 @@ bool writeOpsPackage(const QString &path, const QStringList &entryNames)
     return f.write(blob) == blob.size();
 }
 
+// 冒烟/入库用例共用：第一条目 bigFirstBytes 字节（解包耗时可见）、第二条 512B。
+// 与 writeOpsPackage 同一构造口径，只是把首条目撑大 —— "取消在条目边界生效"的对话框用例
+// 需要"交互发生时第一条目还在搬运"这个时间窗（定时器 1ms 一拍，64 MiB 的搬运远长于此）。
+bool writeOpsPackageBigFirst(const QString &path, qsizetype firstBytes)
+{
+    const QByteArray mboxBlob = imgopp::opsKeyCandidates().at(0).mboxBlob;
+    QString xml = QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                                 "<ProFile>\n  <BasicInfo Project=\"PB-B6\" Version=\"V1\"/>\n"
+                                 "  <Program>\n");
+    xml += QStringLiteral("    <program filename=\"a.img\" FileOffsetInSrc=\"0\""
+                          " SizeInByteInSrc=\"%1\"/>\n").arg(firstBytes);
+    xml += QStringLiteral("    <program filename=\"b.img\" FileOffsetInSrc=\"%1\""
+                          " SizeInByteInSrc=\"512\"/>\n").arg(firstBytes / 512);
+    xml += QStringLiteral("  </Program>\n</ProFile>\n");
+    const QByteArray xmlBytes = xml.toUtf8();
+    const QByteArray padded = xmlBytes + QByteArray(0x10 - (xmlBytes.size() % 0x10), '\0');
+    const QByteArray cipher = imgopp::opsEncrypt(padded, mboxBlob);
+
+    const qsizetype settingsOff = firstBytes;          // 条目数据之后（0x200 对齐）
+    QByteArray blob(settingsOff + 0x800, '\0');
+    blob.replace(0, firstBytes, QByteArray(firstBytes, 'A'));
+    blob.replace(settingsOff, cipher.size(), cipher);
+    blob.replace(firstBytes + 512, 512, QByteArray(512, 'B'));
+    const qsizetype tailBase = blob.size() - 0x200;
+    ofptest::putLE32(blob, tailBase + 0x00, 2);
+    ofptest::putLE32(blob, tailBase + 0x04, 1);
+    ofptest::putLE32(blob, tailBase + 0x10, 0x7CEF);
+    ofptest::putLE32(blob, tailBase + 0x14, quint32(settingsOff / 512));
+    ofptest::putLE32(blob, tailBase + 0x18, quint32(xmlBytes.size()));
+    ofptest::putFixed(blob, tailBase + 0x1C, 16, QStringLiteral("PB-B6"));
+    ofptest::putFixed(blob, tailBase + 0x2C, 32, QStringLiteral("V1"));
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return false;
+    return f.write(blob) == blob.size();
+}
+
+// 驱动**真实对话框入口**（buildAndShowPackage）并与进度对话框交互一次的结果快照。
+struct DialogRunResult
+{
+    bool ok = false;
+    QString error;
+    QString cancelNote;
+    QStringList tempFiles;               // 对话框返回后临时目录里的文件（回收与否由调用方决定）
+    int ticksAfterInteract = 0;          // 交互之后的定时器拍数（"取消后还在等"确有窗口）
+    bool visibleAfterInteract = false;   // 其中至少一拍进度对话框仍可见 ⇒ 模态防线还在
+};
+
+// 定时器手法（原为一次性冒烟，经审查建议入库）：1ms 一拍，进度对话框一旦可见就调用
+// interact()（点取消按钮 / 发 Esc），之后每拍记录它是否仍在屏幕上 —— 取消请求只在**条目
+// 边界**生效，"当前文件跑完"之前对话框必须一直可见（Qt 的取消/Esc 都会自己 hide 它，
+// 产品代码再把 show() 拉回来；若那段逻辑被删，本例可见性断言立刻变红）。
+DialogRunResult runDialog(QTemporaryDir &tmp, const QString &pkg,
+                          const std::function<void(QProgressDialog *)> &interact)
+{
+    DialogRunResult r;
+    QWidget parent;                      // 进度对话框的 parent：findChild 才能可靠定位它
+    QPointer<QProgressDialog> bar;
+    QTimer poll;
+    poll.setInterval(1);
+    bool interacted = false;
+    QObject::connect(&poll, &QTimer::timeout, &poll, [&] {
+        if (!bar)
+            bar = parent.findChild<QProgressDialog *>();
+        if (!bar || !bar->isVisible())
+            return;
+        if (!interacted) {
+            interacted = true;
+            if (interact)                // 传空 = 只观察、不交互（成功路径用例）
+                interact(bar);
+            return;
+        }
+        ++r.ticksAfterInteract;
+        if (bar->isVisible())
+            r.visibleAfterInteract = true;
+    });
+    poll.start();
+    QString outDir;
+    r.ok = FlashPlanDialog::buildAndShowPackage(pkg, &parent, &tmp, &outDir, &r.error, &r.cancelNote);
+    poll.stop();
+    r.tempFiles = QDir(tmp.path()).entryList(QDir::Files);
+    return r;
+}
+
 // 等待 worker 结束（用与产品代码同款的"守卫循环"：queued 的 finished 可能早于 exec() 到达，
 // 那时 quit() 是空操作 —— 裸 exec() 会一直等下去，故以 isFinished() 为准绳）。
 // 超时仅约束"真挂死"（正常路径毫秒级）：60s 到点仍未结束 → 返回 false 由调用方 QVERIFY2。
@@ -271,6 +363,94 @@ void TestFlashPlanDialog::packageExtractCancelStopsAtFileBoundary()
     QVERIFY(QFile::exists(outDir.filePath(QStringLiteral("a.img"))));   // 当前文件跑完并校验完才停
     QVERIFY(!QFile::exists(outDir.filePath(QStringLiteral("b.img"))));  // 下一个条目不再开始
     QVERIFY(QDir(outDir.path()).exists());                        // 产物目录保留（调用方决定回收）
+}
+
+// ==================== PB-B6 审查修复：对话框本体的取消/成功路径 ====================
+
+// **点取消按钮**驱动真实对话框入口：断言取消文案（停在条目边界）+ 临时目录内容与文案一致
+// + 交互之后进度对话框一直可见（模态防线没被 Qt 的 hide 吃掉）。
+// 判别力：把 handleCancel 的 show() 去掉 → visibleAfterInteract 变 false；把 canceled()
+// 的连接去掉 → 走不到取消路径（error 变成计划构建失败）。两种都试过（见报告）。
+void TestFlashPlanDialog::dialogCancelButtonStopsAtFileBoundary()
+{
+    QTemporaryDir tmp, pkgDir;
+    QVERIFY(tmp.isValid() && pkgDir.isValid());
+    const QString pkg = pkgDir.filePath(QStringLiteral("big.ops"));
+    QVERIFY(writeOpsPackageBigFirst(pkg, 64 * 1024 * 1024));
+
+    const DialogRunResult r = runDialog(tmp, pkg, [](QProgressDialog *bar) {
+        auto *btn = bar->findChild<QPushButton *>();
+        QVERIFY(btn);                       // 取消入口必须存在，否则本用例无意义
+        btn->click();
+    });
+
+    QVERIFY(!r.ok);
+    QVERIFY2(r.error.isEmpty(), qPrintable(r.error));      // *error 空 = 用户取消
+    QVERIFY2(r.cancelNote.contains(QStringLiteral("用户取消")), qPrintable(r.cancelNote));
+    // 取消 = 停在条目边界：完成数只能是 0 或 1（解包没跑完），且盘上文件必须与文案一致
+    const bool oneDone = r.cancelNote.contains(QStringLiteral("已完成 1/2"));
+    QVERIFY2(oneDone || r.cancelNote.contains(QStringLiteral("已完成 0/2")), qPrintable(r.cancelNote));
+    QCOMPARE(r.tempFiles.contains(QStringLiteral("a.img")), oneDone);
+    QVERIFY(!r.tempFiles.contains(QStringLiteral("b.img")));   // 下一个条目不再开始
+    // 取消之后、worker 结束之前：进度对话框仍在屏幕上（否则 WindowModal 失效 → 主窗口可交互）
+    QVERIFY(r.ticksAfterInteract > 0);
+    QVERIFY(r.visibleAfterInteract);
+}
+
+// **按 Esc**（不点按钮）：实测 Qt 6.11 下 Esc → QDialog::reject() 只发 rejected()、不发
+// canceled()，且顺手 hide 对话框 —— 只接 canceled() 的实现会让 Esc 静默绕过取消请求并
+// 丢掉模态（本轮审查抓到的口子）。本用例即那条口子的回归钉子：Esc 必须与点按钮**同效**。
+void TestFlashPlanDialog::dialogEscapeAlsoRequestsCancel()
+{
+    QTemporaryDir tmp, pkgDir;
+    QVERIFY(tmp.isValid() && pkgDir.isValid());
+    const QString pkg = pkgDir.filePath(QStringLiteral("big.ops"));
+    QVERIFY(writeOpsPackageBigFirst(pkg, 64 * 1024 * 1024));
+
+    const DialogRunResult r = runDialog(tmp, pkg, [](QProgressDialog *bar) {
+        // **必须直接投递 QKeyEvent，不能用 QTest::keyClick**：QtTest 的 keyClick 走的是
+        // 窗口系统注入路径，在 offscreen 下端到端的效果是"关窗"（→ closeEvent → **canceled()**），
+        // 于是即使产品没接 rejected() 用例也会绿 —— 那样就测不到本口子。真实桌面上的 Esc 是
+        // 投递给焦点控件的按键事件 → QDialog::keyPressEvent → reject() → 只发 rejected()
+        // （实测；见 qpd 探针），故这里按同样路由注入（sendEvent 与真实按键同一条 keyPressEvent）。
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(bar, &esc);
+    });
+
+    QVERIFY(!r.ok);
+    QVERIFY2(r.error.isEmpty(), qPrintable(r.error));      // 取消 ≠ 失败（空 error 是取消口径）
+    QVERIFY2(r.cancelNote.contains(QStringLiteral("用户取消")), qPrintable(r.cancelNote));
+    const bool oneDone = r.cancelNote.contains(QStringLiteral("已完成 1/2"));
+    QVERIFY2(oneDone || r.cancelNote.contains(QStringLiteral("已完成 0/2")), qPrintable(r.cancelNote));
+    QCOMPARE(r.tempFiles.contains(QStringLiteral("a.img")), oneDone);
+    QVERIFY(!r.tempFiles.contains(QStringLiteral("b.img")));
+    QVERIFY(r.ticksAfterInteract > 0);
+    QVERIFY(r.visibleAfterInteract);       // Esc 之后对话框必须仍可见（模态保持）
+}
+
+// **成功路径不得被误判成取消**（本轮自查发现的真 bug）：`QProgressDialog::closeEvent` 会发
+// `canceled()`，故本函数末尾的 `progress.close()` 会把 cancelRequested 置位 —— 若不把
+// "收尾阶段"与"用户取消"分开，每次**成功**解包都会返回"已取消（产物未使用）"：临时目录被
+// 回收、刷写永不开始，且没有任何报错（静默丢结果）。
+// 本用例不交互：让解包跑完 → 断言走的是**失败/成功**路径（本夹具的产物没有
+// rawprogram/settings.xml，所以是"解包成功、构建计划失败"= error 非空、无取消文案）。
+// 判别力：去掉 settled 冻结 → cancelNote 变成"取消请求到达时解包已跑完（产物未使用）"、
+// error 为空，本用例立刻变红。
+void TestFlashPlanDialog::dialogSuccessNotMisreadAsCancel()
+{
+    QTemporaryDir tmp, pkgDir;
+    QVERIFY(tmp.isValid() && pkgDir.isValid());
+    const QString pkg = pkgDir.filePath(QStringLiteral("fw.ops"));
+    QVERIFY(writeOpsPackage(pkg, {QStringLiteral("a.img"), QStringLiteral("b.img")}));
+
+    const DialogRunResult r = runDialog(tmp, pkg, {});     // 不交互：等它自己跑完
+
+    QVERIFY(!r.ok);
+    QVERIFY2(!r.error.isEmpty(), "解包成功后的计划构建失败必须给出 *error —— 空即被误判成取消");
+    QVERIFY(r.cancelNote.isEmpty());                       // 没有任何"取消"成分
+    QVERIFY2(r.tempFiles.contains(QStringLiteral("a.img"))
+                 && r.tempFiles.contains(QStringLiteral("b.img")),
+             qPrintable(r.tempFiles.join(QStringLiteral(","))));
 }
 
 QTEST_MAIN(TestFlashPlanDialog)

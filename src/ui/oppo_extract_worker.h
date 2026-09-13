@@ -55,7 +55,7 @@ public:
     // 用户是否请求过取消（请求过即视为"用户要停"：即使引擎恰好已跑完，调用方也不应再使用产物）
     bool cancelRequested() const { return m_cancelRequested.load(); }
     // 引擎文案：失败原因；成功但有条目被跳过时非空（= 部分成功警告，不得丢弃）；
-    // 被取消时为 `用户取消：已完成 N/M 个文件（已写产物保留，未回滚）`
+    // 被取消时为 `用户取消：已完成 N/M 个文件（当前文件已写完并校验完，已写产物未回滚）`
     QString error() const { return m_error; }
 
 signals:

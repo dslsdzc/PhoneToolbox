@@ -296,7 +296,7 @@ bool extractOFP(const QString &path, const QString &outDir, const ExtractProgres
         // 取消点 = **条目边界**（ExtractCancel 契约）：上一轮循环已把前一个文件写完并校验完，
         // 从此处返回不会留下半截产物；文件内部不设取消点。
         if (cancel && cancel()) {
-            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（已写产物保留，未回滚）")
+            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（当前文件已写完并校验完，已写产物未回滚）")
                                   .arg(doneFiles).arg(entries.size()));
             return false;
         }
@@ -388,7 +388,7 @@ bool extractOPS(const QString &path, const QString &outDir, const ExtractProgres
         // 取消点 = **条目边界**（ExtractCancel 契约，同 extractOFP）：上一个文件已写完并校验完
         // 才走到这里，返回时不会留下半截产物。
         if (cancel && cancel()) {
-            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（已写产物保留，未回滚）")
+            appendNote(error, QStringLiteral("用户取消：已完成 %1/%2 个文件（当前文件已写完并校验完，已写产物未回滚）")
                                   .arg(doneFiles).arg(entries.size()));
             return false;
         }
