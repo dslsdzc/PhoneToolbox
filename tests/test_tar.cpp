@@ -24,6 +24,8 @@ private slots:
     void streamMd5Footer();             // appendMd5FooterStream/verifyMd5FooterStream + 解包自动校验
     void streamLegacyFooterRecognized(); // 遗留格式（>4KB 归档 + 无尾 \n 校验行）正确识别
     void streamBadInputs();             // 坏 size/截断/重名/空归档 → 不崩溃且按契约报错
+    void indexTarStreamNamesOffsetsSizes();  // 名字/偏移/大小 + tarEnd
+    void indexTarStreamRejectsBadInput();    // 坏 size / 截断 / 不存在
 };
 
 static bool writeFileBytes(const QString &path, const QByteArray &data)
@@ -489,6 +491,100 @@ void TestTar::streamBadInputs()
     QVERIFY(!imgtar::buildTarStream({dir.path() + QStringLiteral("/nope.bin")},
                                     dir.path() + QStringLiteral("/nope.tar"), {}, &e));
     QVERIFY(!e.isEmpty());
+}
+
+// 流式索引：名字 → (数据区绝对偏移, 字节数)；tarEnd = 归档区结束（不含 .tar.md5 校验行）
+void TestTar::indexTarStreamNamesOffsetsSizes()
+{
+    QList<imgtar::TarEntry> in;
+    imgtar::TarEntry a; a.name = QStringLiteral("spl.img");   a.data = pattern(3000, 11);
+    imgtar::TarEntry d; d.name = QStringLiteral("sub/");      d.isDir = true;
+    imgtar::TarEntry b; b.name = QStringLiteral("sboot.bin"); b.data = pattern(512, 12); // 512 整数倍
+    in << a << d << b;
+    const QByteArray tar = imgtar::buildTar(in);
+    const QByteArray withFooter = imgtar::appendMd5Footer(tar);
+
+    QTemporaryDir dir;
+    const QString p = dir.path() + QStringLiteral("/idx.tar.md5");
+    QVERIFY(writeFileBytes(p, withFooter));
+
+    QList<imgtar::TarIndexEntry> idx;
+    quint64 tarEnd = 0;
+    QString err;
+    QVERIFY2(imgtar::indexTarStream(p, idx, &tarEnd, &err), qPrintable(err));
+    QCOMPARE(idx.size(), 3);
+    QCOMPARE(idx[0].name, QStringLiteral("spl.img"));
+    QCOMPARE(idx[0].size, quint64(3000));
+    QCOMPARE(idx[0].isDir, false);
+    QCOMPARE(idx[1].name, QStringLiteral("sub"));
+    QVERIFY(idx[1].isDir);
+    QCOMPARE(idx[2].name, QStringLiteral("sboot.bin"));
+    QCOMPARE(idx[2].size, quint64(512));
+    // 偏移自洽：按偏移读回文件，内容与构造一致（证明偏移是"数据区起点"而不是"头块起点"）
+    QCOMPARE(readFileBytes(p).mid(int(idx[0].offset), 3000), pattern(3000, 11));
+    QCOMPARE(readFileBytes(p).mid(int(idx[2].offset), 512), pattern(512, 12));
+    // tarEnd = 归档区结束（不含校验行）→ 其前 1024 字节是两个空块
+    QCOMPARE(tarEnd, quint64(tar.size()));
+    QCOMPARE(readFileBytes(p).mid(int(tarEnd) - 1024, 1024), QByteArray(1024, 0));
+
+    // 无校验行的裸 tar：tarEnd = 文件大小
+    const QString p2 = dir.path() + QStringLiteral("/idx.tar");
+    QVERIFY(writeFileBytes(p2, tar));
+    QList<imgtar::TarIndexEntry> idx2;
+    quint64 tarEnd2 = 0;
+    QVERIFY2(imgtar::indexTarStream(p2, idx2, &tarEnd2, &err), qPrintable(err));
+    QCOMPARE(idx2.size(), 3);
+    QCOMPARE(tarEnd2, quint64(tar.size()));
+
+    // 校验行**不符**的包：索引照建（位置已定），完整性判定归 verifyMd5FooterStream ——
+    // 这条分离是"用户刷改包"不被索引层拦死的前提（计划层报 verifyOk=false，不拒刷）
+    QByteArray tampered = tar;
+    tampered[600] = char(tampered[600] ^ 0x01);
+    const QByteArray bad = tampered + QCryptographicHash::hash(tar, QCryptographicHash::Md5).toHex()
+                           + QByteArray("  bad.tar\n");     // 校验行按**未篡改**数据算 → 必然不符
+    const QString p3 = dir.path() + QStringLiteral("/bad.tar.md5");
+    QVERIFY(writeFileBytes(p3, bad));
+    QList<imgtar::TarIndexEntry> idx3;
+    quint64 tarEnd3 = 0;
+    QVERIFY2(imgtar::indexTarStream(p3, idx3, &tarEnd3, &err), qPrintable(err));
+    QCOMPARE(idx3.size(), 3);
+    QCOMPARE(tarEnd3, quint64(tar.size()));
+    // 而完整性检查必须报"不符"
+    bool hasFooter = false;
+    QVERIFY(!imgtar::verifyMd5FooterStream(p3, &hasFooter, &err));
+    QVERIFY(hasFooter);
+}
+
+void TestTar::indexTarStreamRejectsBadInput()
+{
+    QTemporaryDir dir;
+    QList<imgtar::TarIndexEntry> idx;
+    quint64 tarEnd = 0;
+    QString err;
+
+    // 不存在
+    QVERIFY(!imgtar::indexTarStream(dir.path() + QStringLiteral("/nope.tar"), idx, &tarEnd, &err));
+    QVERIFY(!err.isEmpty());
+
+    // size 非八进制
+    const QString bad = dir.path() + QStringLiteral("/bad.tar");
+    QVERIFY(writeFileBytes(bad, buildTarBadSize()));
+    err.clear();
+    QVERIFY(!imgtar::indexTarStream(bad, idx, &tarEnd, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 数据区越界（截断）
+    // 注: 声明数据区必须大于被截掉的 88 字节，否则 600 字节截断仍完整包含数据区（只丢尾部补零/结束块，
+    //     与 extractTar/extractTarStream 一致地容忍）—— 用声明 3000 字节的条目复现"数据区中部截断"。
+    QList<imgtar::TarEntry> big;
+    imgtar::TarEntry f; f.name = QStringLiteral("big.bin"); f.data = pattern(3000, 13);
+    big << f;
+    const QByteArray whole = imgtar::buildTar(big);
+    const QString trunc = dir.path() + QStringLiteral("/trunc.tar");
+    QVERIFY(writeFileBytes(trunc, whole.left(600)));         // 头块 512 + 88 字节数据
+    err.clear();
+    QVERIFY(!imgtar::indexTarStream(trunc, idx, &tarEnd, &err));
+    QVERIFY(!err.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestTar)

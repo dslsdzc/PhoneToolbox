@@ -261,7 +261,7 @@ QByteArray appendMd5Footer(const QByteArray &tar)
 
 bool verifyMd5Footer(const QByteArray &tarMd5)
 {
-    // 兼容三种形态（校验行均在文件尾，由"32hex + 两个空格"定位，从尾部取最大匹配）:
+    // 兼容三种形态（校验行均在文件尾，由"32hex + 两字节分隔符（␣␣ / ␣*）"定位，从尾部取最大匹配）:
     //   [tar][32hex]  name\n         真实三星 .tar.md5（appendMd5Footer 现产物）
     //   [tar]\n[32hex]  name         旧 appendMd5Footer 产物（分隔 \n，无尾 \n）
     //   [tar]\n[32hex]  name\n       分隔 \n + 尾 \n 变体
@@ -574,6 +574,77 @@ bool verifyMd5FooterStream(const QString &tarMd5Path, bool *hasFooter, QString *
     if (hasFooter)
         *hasFooter = (ret == 0 || ret == -1);
     return ret != -1 && ret != -2;
+}
+
+bool indexTarStream(const QString &tarPath, QList<TarIndexEntry> &out,
+                    quint64 *tarEnd, QString *error)
+{
+    out.clear();
+    QFile f(tarPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        setErr(error, QStringLiteral("无法打开文件：%1").arg(tarPath));
+        return false;
+    }
+    const qint64 fileSize = f.size();
+    // 先用与解包同一条 footer 扫描确定归档区结束（同为 ␣␣/␣* 两变体，Task 1）
+    qint64 archiveEnd = fileSize;
+    const int scan = scanMd5Footer(f, fileSize, archiveEnd, error);
+    if (scan == -2)
+        return false;                    // IO/内存错误
+    // scan == -1（有校验行但校验不符）**不**在此拒绝：本函数只要校验行的**位置**（据此算出归档区结束），
+    // 「完整性是否通过」是 verifyMd5FooterStream 的职责（计划层的「校验」列）。这条职责分离是必须的 ——
+    // 否则"用户故意刷改包"（本场景常见）会被索引层直接拦死。scanMd5Footer 在 -1 路径上同样已置好 tarEnd。
+    if (tarEnd)
+        *tarEnd = quint64(archiveEnd);
+
+    qint64 pos = 0;
+    QByteArray hdr;
+    if (!allocFixed(512, hdr, error))
+        return false;
+    while (pos + 512 <= archiveEnd) {
+        if (!f.seek(pos) || !readExact(&f, hdr.data(), 512)) {
+            setErr(error, QStringLiteral("读取 tar 头块失败：偏移 %1").arg(pos));
+            return false;
+        }
+        if (hdr == QByteArray(512, 0))
+            break;                       // 结束块
+        QByteArray nameField = hdr.left(100).split('\0').first();
+        if (nameField.isEmpty())
+            break;
+        bool sizeOk = false;
+        const qint64 size = hdr.mid(124, 12).trimmed().toLongLong(&sizeOk, 8);
+        if (!sizeOk || size < 0) {
+            setErr(error, QStringLiteral("tar 条目 size 字段非法（偏移 %1）").arg(pos));
+            return false;
+        }
+        const char type = hdr[156];
+        const bool isDir = (type == '5');
+        // ustar 前缀字段（257 处魔数 "ustar" 且 345 处前缀非空）→ "prefix/name"
+        QByteArray name = nameField;
+        if (hdr.mid(257, 5) == QByteArray("ustar", 5)) {
+            const QByteArray prefix = hdr.mid(345, 155).split('\0').first();
+            if (!prefix.isEmpty())
+                name = prefix + '/' + name;
+        }
+        const qint64 dataStart = pos + 512;
+        if (!isDir && !(type == '2')) {           // 普通文件：数据区必须在归档区内
+            if (dataStart + size > archiveEnd) {
+                setErr(error, QStringLiteral("tar 条目数据越界（%1：需要 %2 字节，归档剩余 %3）")
+                                  .arg(QString::fromLatin1(name)).arg(size).arg(archiveEnd - dataStart));
+                return false;
+            }
+        }
+        TarIndexEntry e;
+        e.name = QString::fromLatin1(name);
+        while (e.name.endsWith(QLatin1Char('/')))   // 与 extractTar 的目录名口径一致
+            e.name.chop(1);
+        e.offset = quint64(dataStart);
+        e.size = isDir ? 0 : quint64(size);
+        e.isDir = isDir;
+        out.append(e);
+        pos = dataStart + ((size + 511) / 512) * 512;
+    }
+    return true;
 }
 
 } // namespace imgtar

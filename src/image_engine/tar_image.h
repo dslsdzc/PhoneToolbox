@@ -15,6 +15,21 @@ struct TarEntry {
     QString linkTarget;
 };
 
+// 流式条目索引（不读数据区，内存 O(1)）：offset = 该条目数据区在文件内的**绝对偏移**。
+// 目录/符号链接/零长度条目的 offset 无意义（等于其数据区起点，size=0）。
+struct TarIndexEntry {
+    QString name;
+    quint64 offset = 0;
+    quint64 size = 0;
+    bool isDir = false;
+};
+
+// 只读 tar 头块建立索引（`.tar.md5` 的校验行不计入；`tarEnd` 出参 = 归档区结束偏移）。
+// 名字规则与 extractTar 一致（ustar 前缀字段非空时拼成 "prefix/name"，尾部 '/' 去掉）。
+// 坏 size 字段 / 数据区越界 / 文件打不开 → false + 中文 *error（不返回半个索引）。
+bool indexTarStream(const QString &tarPath, QList<TarIndexEntry> &out,
+                    quint64 *tarEnd = nullptr, QString *error = nullptr);
+
 bool extractTar(const QByteArray &tar, QList<TarEntry> &entries);
 QByteArray buildTar(const QList<TarEntry> &entries);      // Task 11
 QByteArray appendMd5Footer(const QByteArray &tar);        // 三星 Odin 兼容尾部
