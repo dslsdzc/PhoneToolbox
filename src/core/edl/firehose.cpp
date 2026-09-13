@@ -201,6 +201,9 @@ QString excerpt(const QString &s, int maxLen = 200)
 
 constexpr int kMaxReadsPerResponse = 64;        // 读次数上限（防"永远不含 <response"时死循环）
 constexpr int kConfigureTimeoutMs  = 10000;     // configure 一次往返的超时预算
+// LUN 数防呆上限：设备报怪值（或日志里出现无关数字）时不得让调用方去发成千上万条 getstorageinfo。
+// 真实 eMMC/UFS 的 LUN 数 ≤ 6（bkerler 的 maxlun 同量级），8 只作上限、不是对设备的假设。
+constexpr quint32 kMaxProbedLuns = 8;
 
 } // namespace
 
@@ -432,6 +435,36 @@ bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, 
     return false;
 }
 
+// 设备上报的 LUN 数（listPartitions 据此逐个查几何）。三个键都是 bkerler 的存储信息文本键
+// （edl/edlclient/Library/firehose.py:1266-1275）；解析口径复用既有的 textKeyValue
+// （先 '=' 后 ':'，键值 trim、逐行）——与 SECTOR_SIZE_IN_BYTES 的回退同一条路，不另立一套。
+quint32 parseLunCount(const FirehoseResponse &r)
+{
+    struct KeySpec { const char *name; int base; };
+    static const KeySpec keys[] = {
+        {"num_physical_partitions", 10},   // bkerler:1274-1275
+        {"bNumberLu",               10},   // qdl/设备侧别名
+        {"UFS Total Active LU",     16},   // bkerler:1271-1272 用 int(x, 16)
+    };
+
+    for (const KeySpec &k : keys) {
+        QString v;
+        if (!textKeyValue(r.errorText, QString::fromLatin1(k.name), &v))
+            continue;
+        v = v.trimmed();
+        if (v.size() >= 2 && v.startsWith(QLatin1Char('"')) && v.endsWith(QLatin1Char('"')))
+            v = v.mid(1, v.size() - 2);                       // 设备可能带引号：`= "6"`
+        if (v.startsWith(QLatin1String("0x"), Qt::CaseInsensitive))
+            v = v.mid(2);                                     // 十六进制源常带 0x 前缀
+        bool ok = false;
+        const uint n = v.toUInt(&ok, k.base);
+        if (!ok || n == 0)
+            continue;                                         // 键在但值不可用 → 换下一个键
+        return quint32(qMin<uint>(n, kMaxProbedLuns));         // 防呆上限（见常量注释）
+    }
+    return 0;   // 没报 → 调用方按"只查 LUN 0"
+}
+
 // ---------------------------------------------------------------------------
 // 会话级小工具
 // ---------------------------------------------------------------------------
@@ -446,6 +479,29 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
             *error = QStringLiteral("firehose 命令发送失败：%1（命令：%2）")
                          .arg(ioErr, excerpt(QString::fromUtf8(payload), 120));
         return false;
+    }
+
+    // 命令帧的 ZLP：载荷长度恰为端点包长整数倍时，必须补一次 0 字节写 —— 否则设备侧的 bulk 读
+    // 看不到"短包"，会一直等下一批数据（真机上表现为卡住/超时）。qdl 的规则对**所有**写生效
+    // （reference/qdl/src/usb.c:548-553）；本项目的责任划分是"**发起该笔写的上层**补"：
+    // 数据块在 edl_session 的数据面（edl_session.cpp 不变量 3），命令帧在这里。
+    // 传输层是纯字节管道，不补（edl_libusb_transport.h 顶部）。
+    // 离线保护：tests/test_edl_firehose.cpp 的 addsZlpWhenCommandPayloadHitsPacketBoundary。
+    // 命令帧的 ZLP：载荷长度恰为端点包长整数倍时，必须补一次 0 字节写 —— 否则设备侧的 bulk 读
+    // 看不到"短包"，会一直等下一批数据（真机上表现为卡住/超时）。qdl 的规则对**所有**写生效
+    // （reference/qdl/src/usb.c:548-553）；本项目的责任划分是"**发起该笔写的上层**补"：
+    // 数据块在 edl_session 的数据面（edl_session.cpp 不变量 3），命令帧在这里。
+    // 传输层是纯字节管道，不补（edl_libusb_transport.h 顶部）。
+    // 离线保护：tests/test_edl_firehose.cpp 的 addsZlpWhenCommandPayloadHitsPacketBoundary。
+    const int maxPacket = t.maxPacketSize();
+    if (maxPacket > 0 && !payload.isEmpty() && payload.size() % maxPacket == 0) {
+        QString zlpErr;
+        if (!t.write(QByteArray(), &zlpErr)) {
+            if (error)
+                *error = QStringLiteral("firehose 命令帧 ZLP 发送失败（载荷 %1 字节恰为包长 %2 的整数倍）：%3")
+                             .arg(payload.size()).arg(maxPacket).arg(zlpErr);
+            return false;
+        }
     }
 
     // 读到 <response 才停：<log> 可能先到也可能后到（firehose.c:250-270），
@@ -541,6 +597,21 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
 
         maxPayloadBytes = payload;
         return true;
+    }
+}
+
+// 发命令前的 drain（共享实现：会话层与 EDLHandler 的命令都走它）。
+// 单次轮询上限 4096 字节、总次数上限 64：每次轮询都是 0 超时（非阻塞），正常几次就静默；
+// 上限的作用是"话痨日志"下不死循环（上限 64×4096 字节）。
+void drainResidual(IEdlTransport &t)
+{
+    constexpr int kDrainChunkBytes = 4096;
+    constexpr int kMaxDrainPolls   = 64;
+    QString ignored;
+    for (int i = 0; i < kMaxDrainPolls; ++i) {
+        // 0 超时 = 轮询（传输实现负责换算成"立即返回"，见 edl_transport.h 的 read 契约）
+        if (t.read(kDrainChunkBytes, 0, &ignored).isEmpty())
+            break;                       // 端点静默
     }
 }
 

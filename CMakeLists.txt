@@ -296,6 +296,7 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_sahara.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_libusb_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
@@ -354,7 +355,14 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp
+                        # Phase B Task 7：edl_handler.cpp 退化为薄封装（持有 LibusbEdlTransport +
+                        # EdlSession）后依赖 src/core/edl 整链 —— 不补这些源会在链接期炸（undef）。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_libusb_transport.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp)
                 elseif(_test_stem STREQUAL "test_flash_plan")
                     # Phase B Task 1：计划层（模型 + rawprogram/patch XML 解析）为纯函数模块，
                     # 位于 src/core/edl（已 GLOB 编入主程序，不属任何静态库）——按范例如入本目标。
@@ -381,6 +389,16 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/sparse_image.cpp)
+                elseif(_test_stem STREQUAL "test_edl_libusb_transport")
+                    # Phase B Task 7：真机传输（唯一的 libusb 依赖点）+ 它消费的整链
+                    # （会话/协议/计划）编入本目标 —— 使"传输实现只被 IEdlTransport 看见"
+                    # 在构建图上可见；libusb 按名补链，见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_libusb_transport.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
@@ -395,7 +413,8 @@ if(ENABLE_IMAGE_TESTS)
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
                 if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
-                   OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline")
+                   OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline"
+                   OR _test_stem STREQUAL "test_edl_libusb_transport")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
                 endif()

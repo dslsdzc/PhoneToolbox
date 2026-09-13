@@ -5,8 +5,8 @@
 #include <QString>
 #include <QStringList>
 
-struct libusb_context;
-struct libusb_device_handle;
+#include "core/edl/edl_libusb_transport.h"   // edl::LibusbEdlTransport（唯一的真机传输实现）
+#include "core/edl/edl_session.h"            // edl::EdlSession（Firehose 作业编排 + 数据面）
 
 struct EDLPartition {
     QString name;
@@ -17,6 +17,29 @@ struct EDLPartition {
     bool isReadOnly;
 };
 
+// EDL（9008）通道的**薄封装**（Phase B Task 7：由旧单体实现退化而来）。
+//
+// 公开 API 与两个信号与旧实现**逐字一致**（FlashTool/FlashPanel 的调用点不得改动），内部一律改走
+// `edl_libusb_transport`（libusb）+ `edl_session`（Firehose 作业编排 + 数据面）：
+//   connectSahara   → saharaLoadProgrammer（载 programmer）→ close → waitReenumerate（等重枚举）
+//   firehoseConnect → EdlSession::beginFirehose（configure 协商，**发完等响应**）
+//   listPartitions  → getstorageinfo（逐 LUN；Firehose **没有**枚举分区名的命令，见下）
+//   readPartition   → EdlSession::readBack（正确的 <read> 属性集 + 越界早拒）
+//   writePartition  → EdlSession::writePlan（<program> 含 physical_partition_number + 真实数据面）
+//   writeRaw        → 同上（单条目计划）
+//
+// 顺带修掉的 5 处既有缺陷（协议速查 §6，逐条）：
+//   1. 帧格式：不再有 4 字节长度前缀，**裸 XML**（两参照一致）；
+//   2. ACK 判定改严格（`parseFirehoseResponse` 的 `value=="ACK"`）——旧判定恒假，**旧写入路径从未成功过**；
+//   3. configure 改为发完等响应（旧实现只发不读）；
+//   4. `<program>` 补 `physical_partition_number`，并真正推送镜像数据（旧实现只发 XML、无数据面）；
+//   5. `<read>` 属性名改 `num_partition_sectors`、补 `physical_partition_number`、去掉 `filename`。
+//
+// ⚠️ 两条**行为约束**（不是缺陷，是 Firehose 协议本身的边界，调用方须知）：
+//   * `listPartitions()` 返回的是**逐 LUN 的卷**（`name = "lun<N>"`），不是分区名 —— Firehose 没有
+//     "列出分区"的命令，能问到的只有存储几何。分区名请以刷写计划 / GPT 为准（写路径的 LUN 从
+//     "lun<N>" 名称反解）。这也是既有 FRP 清除路径（按名字找 "frp" 分区）在本通道下的固有限制。
+//   * 写路径要求设备**已在 Firehose**（`connectSahara()` 结束即是）；本类不会替你重做 Sahara 引导。
 class EDLHandler : public QObject
 {
     Q_OBJECT
@@ -25,7 +48,7 @@ public:
     explicit EDLHandler(QObject *parent = nullptr);
     ~EDLHandler();
 
-    // Sahara: load programmer ELF, switch to Firehose
+    // Sahara: 载入 programmer ELF，并等设备重枚举为 Firehose（成功 ⇒ isConnected() == true）
     bool connectSahara(const QString &programmerPath);
     void disconnect();
 
@@ -34,6 +57,9 @@ public:
     QList<EDLPartition> listPartitions();
     bool readPartition(const EDLPartition &part, const QString &outputPath);
     bool writePartition(const EDLPartition &part, const QString &imagePath);
+    // ⚠️ 语义修正（Task 7 Q3 裁定）：`filename` 是**镜像文件路径**（旧实现只把它当包内裸文件名塞进
+    // `<program filename=...>`，且没有任何数据面）。文件不存在 → 中文错误；`numSectors == 0` →
+    // 按镜像文件事实推导（sparse 按**展开后**大小）；目标 LUN 固定 0（旧签名无 LUN 参数）。
     bool writeRaw(const QString &filename, quint64 startSector,
                   quint64 numSectors, quint64 sectorSize);
 
@@ -45,100 +71,23 @@ signals:
     void progress(int percent);
 
 private:
-    // Sahara protocol commands (from sahara_defs.py/cmd_t)
-    enum SaharaCmd : quint32 {
-        SAHARA_HELLO_REQ      = 0x01,
-        SAHARA_HELLO_RSP      = 0x02,
-        SAHARA_READ_DATA      = 0x03,
-        SAHARA_END_TRANSFER   = 0x04,
-        SAHARA_DONE_REQ       = 0x05,
-        SAHARA_DONE_RSP       = 0x06,
-        SAHARA_RESET_REQ      = 0x07,
-        SAHARA_RESET_RSP      = 0x08,
-        SAHARA_MEMORY_DEBUG   = 0x09,
-        SAHARA_MEMORY_READ    = 0x0A,
-        SAHARA_CMD_READY      = 0x0B,
-        SAHARA_SWITCH_MODE    = 0x0C,
-        SAHARA_EXECUTE_REQ    = 0x0D,
-        SAHARA_EXECUTE_RSP    = 0x0E,
-        SAHARA_EXECUTE_DATA   = 0x0F,
-        SAHARA_64BIT_MEMORY_DEBUG = 0x10,
-        SAHARA_64BIT_MEMORY_READ = 0x11,
-        SAHARA_64BIT_MEMORY_READ_DATA = 0x12,
-    };
-    enum SaharaMode : quint32 {
-        SAHARA_MODE_IMAGE_TX_PENDING  = 0x00,
-        SAHARA_MODE_IMAGE_TX_COMPLETE = 0x01,
-        SAHARA_MODE_MEMORY_DEBUG      = 0x02,
-        SAHARA_MODE_COMMAND           = 0x03,
-    };
-    enum SaharaStatus : quint32 {
-        SAHARA_STATUS_SUCCESS           = 0x00,
-        SAHARA_NAK_INVALID_CMD          = 0x01,
-        SAHARA_NAK_PROTOCOL_MISMATCH    = 0x02,
-        SAHARA_NAK_INVALID_TARGET_PROTOCOL = 0x03,
-        SAHARA_NAK_INVALID_HOST_PROTOCOL   = 0x04,
-        SAHARA_NAK_INVALID_PACKET_SIZE     = 0x05,
-        SAHARA_NAK_UNEXPECTED_IMAGE_ID     = 0x06,
-        SAHARA_NAK_INVALID_HEADER_SIZE     = 0x07,
-        SAHARA_NAK_INVALID_DATA_SIZE       = 0x08,
-    };
+    bool ensureFirehoseConfigured();     // configure 只在需要时做一次（协商结果留在会话内）
+    // getstorageinfo 单次查询；`reportedLunCount` 非空时回填设备上报的 LUN 数（0 = 没报，见 firehose.h）
+    bool queryStorageInfo(quint32 lun, edl::StorageInfo &out, quint32 *reportedLunCount, QString *error);
+    // writePartition / writeRaw 的单条目写实现；`numSectors == 0` → 按镜像事实推导，
+    // `upperBoundSectors > 0` → 目标窗口上限（超出即拒，0 = 不限）
+    bool writeImageEntry(const QString &imageFile, const QString &label, quint32 lun,
+                         quint64 startSector, quint64 numSectors, quint32 sectorSize,
+                         quint64 upperBoundSectors);
+    bool fail(const QString &msg);       // m_lastError = msg + outputMessage(msg, true)
 
-    // HELLO_REQ / HELLO_RSP payload: 12 x uint32_le (48 bytes)
-    struct SaharaHello {
-        quint32 version;
-        quint32 versionSupported;
-        quint32 cmdPacketLength;
-        quint32 mode;
-        quint32 reserved[6];
-    };
-
-    // READ_DATA payload (from device): 5 x uint32_le (20 bytes)
-    struct SaharaReadData {
-        quint32 imageId;
-        quint32 dataOffset;
-        quint32 dataLen;
-    };
-
-    // END_TRANSFER / DONE_RSP payload: 3 x uint32_le (12 bytes)
-    struct SaharaEndTransfer {
-        quint32 imageId;
-        quint32 imageTxStatus;
-    };
-
-    bool sendSaharaCmd(SaharaCmd cmd, const QByteArray &payload = {});
-    bool recvSaharaPacket(SaharaCmd &outCmd, QByteArray &outPayload, int timeoutMs = 10000);
-    bool recvHelloReq(SaharaHello &hello, int timeoutMs = 10000);
-    bool sendHelloResp(quint32 mode, quint32 version = 2);
-    bool recvReadData(SaharaReadData &rd, int timeoutMs = 10000);
-    bool recvEndTransfer(SaharaEndTransfer &et, int timeoutMs = 10000);
-    bool sendDoneReq();
-    bool recvDoneResp(SaharaEndTransfer &et, int timeoutMs = 10000);
-    bool sendSwitchMode(SaharaMode mode);
-    bool serveProgrammer(const QString &programmerPath);
-
-    // Firehose: XML over USB
-    bool sendFirehoseXml(const QString &xml, int timeoutMs = 30000);
-    QString recvFirehoseResponse(int timeoutMs = 30000);
-    bool waitFirehoseDone(int timeoutMs = 60000);
-
-    // USB helpers (libusb)
-    bool openUSB();
-    void closeUSB();
-    bool claimInterface();
-
-    libusb_context *m_ctx;
-    libusb_device_handle *m_devHandle;
-    int m_outEp;
-    int m_inEp;
-
-    bool m_connected;
-    bool m_firehoseMode;
+    // 声明顺序即初始化顺序：m_session 绑定 m_transport，故 m_transport 必须在前
+    edl::LibusbEdlTransport m_transport;
+    edl::EdlSession        m_session;
+    bool    m_connected  = false;
+    bool    m_configured = false;        // beginFirehose 是否已成功（写/读路径的前置）
     QString m_lastError;
-
-    // Found device info
-    uint16_t m_vid;
-    uint16_t m_pid;
+    QString m_lastProgressKey;           // 进度去重键（stage + detail）：write 阶段每块都回调
 };
 
 #endif // EDL_HANDLER_H

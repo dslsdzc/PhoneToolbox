@@ -80,12 +80,25 @@ FirehoseResponse parseFirehoseResponse(const QByteArray &xml);
 // 把每条 Program 报成"越界"而非"LUN 无设备几何"（见实现处注释）。
 bool parseStorageInfo(const FirehoseResponse &r, quint32 lun, StorageInfo &out, QString *error);
 
+// getstorageinfo 响应里"设备报的 LUN 数"（Task 7 集成新增：`EDLHandler::listPartitions` 据此决定
+// 逐个查几个 LUN）。键值与解析口径同 bkerler 的存储信息文本
+// （edl/edlclient/Library/firehose.py:1266-1275 的 parse_storage）：
+//   * `num_physical_partitions` —— 十进制（bkerler:1274-1275）
+//   * `bNumberLu`              —— 十进制（qdl/设备侧对同一概念的别名）
+//   * `UFS Total Active LU`    —— **十六进制**（bkerler:1271-1272 用 int(x, 16) 读，UFS 侧）
+// 0 = 响应**没报** → 调用方按"只查 LUN 0"处理（绝不猜 LUN 数）。
+// 解析结果带上限 8（防呆，见实现处注释）：设备报怪值时不得让调用方发成千上万条查询。
+quint32 parseLunCount(const FirehoseResponse &r);
+
 // ---- 会话级小工具（需要传输）----
 
 // 发一条命令并等**一个** `<response>`（设备可能先发 <log> 再发响应，也可能反过来 ——
 // reference/qdl/src/firehose.c:250-270 的注释；bkerler 循环等 `<response value`：
 // edl/edlclient/Library/firehose.py:269-281）。线上形态 = `<?xml …?><data>命令</data>`，
 // **无长度前缀**（firehose.c:399-405；firehose.py:904-922）。
+// **命令帧的 ZLP 由本函数补**（Task 7 集成修正）：包裹后载荷长度恰为 `maxPacketSize()` 整数倍时
+// 追加一次 0 字节写（qdl 的规则对**所有**写生效：reference/qdl/src/usb.c:548-553）；不补则设备侧
+// bulk 读看不到短包 → 真机卡住/超时。数据块的 ZLP 在 edl_session 的数据面，传输层一概不补。
 // 返回值：拿到响应元素（ACK 或 NAK 都算）→ true；写失败/超时/没有任何 <response> → false + 中文 *error。
 // ACK/NAK 的**语义**由调用方判定（本函数不替调用方决定成败）。
 // ⚠️ 见到 <response> 即停读：响应之后才到的 <log> 留给下一个命令的读循环去 drain
@@ -102,5 +115,11 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
 //   4. 其它失败 → false + 中文 *error（带设备返回原文）。
 // 成功时 memoryName 为实际生效的类型、maxPayloadBytes 为协商后的载荷上限。
 bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloadBytes, QString *error);
+
+// 发命令前的 drain：把 IN 端点里"响应之后还跟着的字节"读干净（0 超时轮询读，直到端点静默或达到
+// 次数上限 —— 给设备"话痨日志"留余量，同时保证不会挂死）。依据：qdl 的注释明确"不消费完，后续写
+// 会超时"（reference/qdl/src/firehose.c:249-252），而 firehoseSendCommand 见到 <response> 即停读
+// （响应之后才到的 <log> 就留在端点里）。会话层（edl_session.cpp）与 EDLHandler 共用本实现。
+void drainResidual(IEdlTransport &t);
 
 } // namespace edl

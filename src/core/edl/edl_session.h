@@ -51,6 +51,24 @@ public:
     bool run(const FlashPlan &plan, const QByteArray &programmer,
              const FlashOptions &opt, QString *error);
 
+    // 进入 Firehose 会话：configure 协商（= run() 的第 ③ 步，Phase B Task 7 拆出为公开入口）。
+    // 前置：设备已在 Firehose 且传输句柄可用（本函数不做 Sahara、不重枚举）。
+    // `memoryName` 入参 = 首选存储类型（"emmc"/"ufs"），出参 = **实际生效**的类型（NAK "Not support
+    // configure MemoryName" 时 firehoseConfigure 会换型重试一次，见 firehose.h）；
+    // `maxPayloadBytes` 出参 = 设备回报的载荷上限（**0 = 设备未回报**，此时会话按保守默认分块）。
+    // 协商结果留在会话内（m_maxPayload），供 writePlan 的数据面分块 —— 同一次会话不重复 configure。
+    // 失败语义：false + 中文 *error（**不**关句柄、**不**发 reset —— 收手由调用方决定）。
+    bool beginFirehose(QString &memoryName, quint32 &maxPayloadBytes, QString *error);
+
+    // 已在 Firehose 会话内的写入路径（Phase B Task 7 公开入口：run() 与 EDLHandler 共用）。
+    // 前置：设备已在 Firehose；configure 由 beginFirehose 完成（未协商过时按保守默认分块）。
+    // 内部：getstorageinfo（逐计划 LUN）→ validatePlan（不过则拒刷）→ 逐条目 Program/Erase/Patch
+    //       → setbootablestoragedrive（计划含 xbl/sbl1 时）。
+    // **不**发 reset、**不**关句柄、**不**做 Sahara/重枚举 —— reset 只属 run() 的成功路径
+    // （既有 UI 流程"edlConnect 后停在 Firehose"走的正是本函数，见 Task 8 的 oppo-edl 通道）。
+    // 失败语义：false + 中文 *error（带阶段名/条目名），设备留在 EDL 便于重试。
+    bool writePlan(const FlashPlan &plan, const FlashOptions &opt, QString *error);
+
     // 只读回（不写入、不复位）。
     // ⚠️ 前置条件：设备**已在 Firehose 模式**且传输句柄可用 —— 本函数没有 programmer 参数，
     //    无法自行做 Sahara 引导（那是 run() 的职责）。`device` 提供逐 LUN 几何，用于**发送前**

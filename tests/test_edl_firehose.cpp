@@ -42,6 +42,12 @@ private slots:
     void parseStorageInfoFallsBackToTextKeys();
     void parseStorageInfoFailsWithoutGeometry();
     void parseStorageInfoFailsWithoutTotalBlocks();
+
+    // —— Task 7 集成修正：命令帧 ZLP 的悬空责任 + listPartitions 的 LUN 数来源 ——
+    void addsZlpWhenCommandPayloadHitsPacketBoundary();
+    void doesNotAddZlpForShortCommand();
+    void parseLunCountReadsTextKeys();
+    void drainConsumesResidualUntilSilent();
 };
 
 void TestEdlFirehose::programXmlHasFourRequiredAttrs()
@@ -417,6 +423,100 @@ void TestEdlFirehose::parseStorageInfoFailsWithoutGeometry()
     edl::StorageInfo info; QString err;
     QVERIFY(!edl::parseStorageInfo(r, 0, info, &err));
     QVERIFY(!err.isEmpty());
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 集成修正：命令帧的 ZLP（悬空责任补齐）
+// ---------------------------------------------------------------------------
+
+// 命令载荷长度**恰为端点包长整数倍**时，设备侧的 bulk 读看不到短包 → 真机会卡住/超时。
+// qdl 的规则（reference/qdl/src/usb.c:548-553）是对**所有写**生效的；本项目把责任落在
+// "发起该笔写的上层"：数据块在 edl_session 的数据面，命令帧在 firehoseSendCommand（本用例钉住）。
+// 传输层是纯字节管道（LibusbEdlTransport::write() 不补 ZLP），故这条只能在这里发起。
+void TestEdlFirehose::addsZlpWhenCommandPayloadHitsPacketBoundary()
+{
+    edl::MockEdlTransport t;                        // maxPacket 默认 1024
+    t.reads << QByteArray("<response value=\"ACK\" />");
+
+    // 造一条**包裹后**长度恰为 1024 整数倍的命令：`<patch value="…"/>` 的 value 补到刚好整除
+    const QByteArray wrapHead("<?xml version=\"1.0\" encoding=\"UTF-8\" ?><data>");
+    const QByteArray wrapTail("</data>");
+    const QByteArray head("<patch value=\"");
+    const QByteArray tail("\"/>");
+    const int fixed = wrapHead.size() + wrapTail.size() + head.size() + tail.size();
+    const QByteArray body = head + QByteArray(1024 - (fixed % 1024), 'A') + tail;
+    QCOMPARE((wrapHead + body + wrapTail).size() % t.maxPacket, 0);   // 前提成立（不是"碰巧"）
+
+    edl::FirehoseResponse resp; QString err;
+    QVERIFY2(edl::firehoseSendCommand(t, body, resp, 1000, &err), qPrintable(err));
+    QVERIFY(resp.ack);
+
+    QCOMPARE(t.writes.size(), 2);                   // payload + 追加的 0 字节写
+    QCOMPARE(t.writes.at(0), wrapHead + body + wrapTail);
+    QVERIFY(t.writes.at(1).isEmpty());              // ZLP：一次 0 字节写（qdl usb.c:548-553）
+}
+
+// 不是整数倍 → 一笔写，不得多补 ZLP（多补会让设备把 ZLP 当成下一笔传输的开头）
+void TestEdlFirehose::doesNotAddZlpForShortCommand()
+{
+    edl::MockEdlTransport t;
+    t.reads << QByteArray("<response value=\"ACK\" />");
+
+    edl::FirehoseResponse resp; QString err;
+    QVERIFY2(edl::firehoseSendCommand(t, edl::xmlGetStorageInfo(0), resp, 1000, &err), qPrintable(err));
+    QVERIFY(resp.ack);
+    QCOMPARE(t.writes.size(), 1);
+    QVERIFY(!t.writes.at(0).isEmpty());
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 集成修正：getstorageinfo 响应里的 LUN 数（listPartitions 据此决定查几个 LUN）
+// ---------------------------------------------------------------------------
+
+// bkerler 的存储信息键值（edl/edlclient/Library/firehose.py:1266-1275）：
+//   * `num_physical_partitions` —— 十进制（UFS/eMMC 都可能有）
+//   * `UFS Total Active LU`     —— 十六进制（bkerler 用 int(x, 16) 读，UFS 侧）
+// 键值形态由本仓既有的 textKeyValue 口径解析（先 '=' 后 ':'，见 firehose.cpp）。
+// 0 = 没报（调用方按"只查 LUN 0"处理）；防呆上限 8（设备报怪值时不得让调用方发上万条查询）。
+void TestEdlFirehose::parseLunCountReadsTextKeys()
+{
+    edl::FirehoseResponse r;
+    r.ack = true;
+
+    r.errorText = QStringLiteral("num_physical_partitions = \"6\"\nSECTOR_SIZE_IN_BYTES = \"4096\"");
+    QCOMPARE(edl::parseLunCount(r), quint32(6));
+
+    r.errorText = QStringLiteral("bNumberLu: 3");
+    QCOMPARE(edl::parseLunCount(r), quint32(3));
+
+    r.errorText = QStringLiteral("UFS Total Active LU = 0x6");
+    QCOMPARE(edl::parseLunCount(r), quint32(6));            // 十六进制源（带 0x 前缀）
+
+    r.errorText = QStringLiteral("nothing useful here");
+    QCOMPARE(edl::parseLunCount(r), quint32(0));            // 没报 → 0
+
+    r.errorText = QStringLiteral("num_physical_partitions = \"4294967295\"");
+    QCOMPARE(edl::parseLunCount(r), quint32(8));            // 防呆上限
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 集成修正：drainResidual 成为会话层与 EDLHandler 的共享实现
+// ---------------------------------------------------------------------------
+
+// 端点里有残留（"响应之后才到的 <log>"）→ 一次 drain 读干净；端点静默后**立即**返回
+// （不空转：静默时只多一次轮询调用）。红线依据：qdl firehose.c:249-252（不消费完后续写会超时）。
+void TestEdlFirehose::drainConsumesResidualUntilSilent()
+{
+    edl::MockEdlTransport t;
+    t.residual << QByteArray("<log value=\"late-one\" />") << QByteArray("tail-without-tag");
+
+    edl::drainResidual(t);
+    QVERIFY(t.residual.isEmpty());                    // 全部消费（不是只取一段）
+    QVERIFY(t.reads.isEmpty());                       // drain 不得动 reads 队列（mock 的 0 超时契约）
+
+    const int callsBefore = t.calls.size();
+    edl::drainResidual(t);                            // 已静默：一次轮询即返回
+    QCOMPARE(t.calls.size() - callsBefore, 1);
 }
 
 QTEST_APPLESS_MAIN(TestEdlFirehose)

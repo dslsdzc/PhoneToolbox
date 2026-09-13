@@ -13,8 +13,9 @@
 //      MIN(max_payload_size / sector_size, left)（firehose.c:1080），但 max_payload_size < sector_size
 //      时 qdl 会算出 chunk_size=0 并死循环 —— 取 max(1, …) 兜底。
 //   3. `len % maxPacketSize() == 0` → 补一次 0 字节写（ZLP）：reference/qdl/src/usb.c:548-553。
-//      **由本数据面负责**（qdl 的 usb 层对所有写都补；这里只对数据块补，命令帧的 ZLP 留给
-//      libusb 传输层 —— Task 7 的 write() 不得对数据块再补一次，否则真机上每块多一个 ZLP）。
+//      **本数据面只负责数据块**；命令帧的 ZLP 由 firehoseSendCommand 负责（它也是"上层发起者"，
+//      Task 7 集成修正：此前那条责任实际悬空）；传输层（LibusbEdlTransport::write）是纯字节管道，
+//      一概不补 —— 若它也按包长整数倍补，数据块会被会话与传输各补一次（真机每块多一个 ZLP）。
 //   4. 一条 program 的**数据总量恒为 numSectors × sectorSize**：源头不足补零（qdl 的
 //      memset 残段：firehose.c:1089-1097），源头超出截断（qdl 只按 num_sectors 发）并告警。
 //   5. **整条 program 的数据发完只等一个 ACK**（firehose.c:1132-1137），块间不额外等待。
@@ -44,9 +45,7 @@ constexpr int kDataAckTimeoutMs   = 120000;   // program 数据发完的 ACK（q
 constexpr int kReadTimeoutMs      = 30000;    // 回读数据阶段单次读超时（qdl：firehose.c:1241）
 constexpr int kReadChunkBytes     = 4096;     // 单次 IN 传输读取上限（与 firehose.cpp:462 同款）
 constexpr int kMaxReadsPerResponse = 64;      // 读次数上限（防"永远不含 <response"时死循环）
-// drain 轮询的次数上限：每次轮询都是非阻塞的（0 超时），正常最多几次就静默；
-// 给设备"话痨日志"留足余量的同时保证**不会挂死**（上限 64×4096 字节）。
-constexpr int kMaxDrainPolls      = 64;
+// （drain 轮询的次数上限随 drainResidual 一起搬去了 firehose.cpp —— Task 7：会话与 EDLHandler 共用）
 constexpr quint64 kZeroPieceBytes = 1024 * 1024;   // 补零/填充的生成片大小（不 materialize 整段）
 
 QString actionName(PlanEntry::Action a)
@@ -85,18 +84,8 @@ QString entryFailText(const PlanEntry &e, quint64 writtenSectors, quint64 offset
         .arg(why);
 }
 
-// 写之前的 drain：把 IN 端点里"响应之后还跟着的字节"读干净。0 超时 = 非阻塞轮询
-// （真机 = libusb_bulk_transfer(timeout=0) 立即返回，见 edl_transport.h 的 read 说明）；
-// 空返回即端点静默。qdl 的做法是"见到响应后继续读到超时"（firehose.c:249-252、:274-276），
-// 差别只是它给每次读 100ms —— 我们不等（写之前没有待等的数据）。
-void drainResidual(IEdlTransport &t)
-{
-    QString ignored;
-    for (int i = 0; i < kMaxDrainPolls; ++i) {
-        if (t.read(kReadChunkBytes, 0, &ignored).isEmpty())
-            break;
-    }
-}
+// 写之前的 drain 用 firehose.h 的 edl::drainResidual（Task 7 起为共享实现：EDLHandler 的
+// getstorageinfo 也要在同一处清理，见 firehose.cpp —— 一处实现，别各写一份）。
 
 // 只等响应、不发命令：数据面 raw 数据之后的那一个 ACK（firehose.c:1132-1137）与回读操作的
 // 收尾响应都走这里。**不重复实现解析** —— 复用 Task 5 的 parseFirehoseResponse（严格 ACK/NAK）。
@@ -375,19 +364,94 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
     report(QStringLiteral("configure"), memoryName, 0);
     {
         QString cfgErr;
-        if (!firehoseConfigure(m_t, memoryName, payload, &cfgErr)) {
+        if (!beginFirehose(memoryName, payload, &cfgErr)) {
             m_t.close();
             return fail(QStringLiteral("configure 阶段失败：%1").arg(cfgErr));
         }
     }
     if (payload == 0) {
-        m_maxPayload = kDefaultMaxPayloadBytes;
         report(QStringLiteral("configure"),
                QStringLiteral("设备未回报 MaxPayloadSizeToTargetInBytesSupported，"
                               "按保守默认 %1 字节分块").arg(m_maxPayload), 0);
-    } else {
-        m_maxPayload = payload;
     }
+
+    // ④-⑦ 写入路径（getstorageinfo → validatePlan → 逐条目 → setbootablestoragedrive）委托
+    //       writePlan：与"设备已在 Firehose"的调用方（EDLHandler / oppo-edl 通道）共用同一实现，
+    //       失败语义（关句柄、不发 reset）集中在 run() 一处表达。
+    if (!writePlan(plan, opt, error)) {
+        m_t.close();     // 失败路径：只关句柄，**不发 reset**（设备留在 EDL 便于重试）
+        return false;
+    }
+
+    // ⑧ reset：**仅成功路径发一次**。best-effort（控制方裁定）：真机上设备往往"先 ACK 再重启"
+    // 或直接掉线，故超时/NAK/传输错误都不把"已经刷完"判成失败 —— qdl 在这点上会记错并返回错误码
+    // （reference/qdl/src/firehose.c:1585-1598），照抄会让每次成功刷机都以失败收场。
+    // **但"不失败"不等于"不报告"**：两种结局都落一条日志说明实际情况。
+    report(QStringLiteral("reset"), QStringLiteral("复位设备"), 100);
+    {
+        FirehoseResponse resp;
+        drainResidual(m_t);
+        QString sendErr;
+        if (!firehoseSendCommand(m_t, xmlReset(), resp, kCmdTimeoutMs, &sendErr)) {
+            report(QStringLiteral("reset"),
+                   QStringLiteral("已发送复位命令（%1：未收到 ACK，设备可能已重启）—— "
+                                  "数据已全部写入，可手动重启").arg(sendErr), 100);
+        } else if (resp.nak) {
+            report(QStringLiteral("reset"),
+                   QStringLiteral("复位命令被设备拒绝（NAK：%1）—— 数据已全部写入，可手动重启")
+                       .arg(resp.errorText.isEmpty() ? resp.raw : resp.errorText), 100);
+        } else {
+            report(QStringLiteral("reset"), QStringLiteral("复位命令已被设备确认"), 100);
+        }
+        // Firehose 的 <power value="reset"/> 只是"让设备重启"；句柄的退场由传输层负责
+        // （IEdlTransport::resetDevice）。同样 best-effort + 同样必须报告。
+        QString resetErr;
+        if (!m_t.resetDevice(&resetErr))
+            report(QStringLiteral("reset"),
+                   QStringLiteral("复位调用失败（%1）—— 设备可能已自行重启；数据已全部写入")
+                       .arg(resetErr), 100);
+    }
+    m_t.close();
+    report(QStringLiteral("done"), QStringLiteral("刷写完成"), 100);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// beginFirehose：configure 协商（run() 的第 ③ 步拆出为公开入口，Task 7）
+// ---------------------------------------------------------------------------
+
+bool EdlSession::beginFirehose(QString &memoryName, quint32 &maxPayloadBytes, QString *error)
+{
+    quint32 payload = 0;
+    if (!firehoseConfigure(m_t, memoryName, payload, error))
+        return false;                      // 错误文案由 firehoseConfigure 给出（含设备返回原文）
+    // 0 = 设备未回报支持值 → 保守默认（kDefaultMaxPayloadBytes 的出处见顶部常量注释）
+    m_maxPayload = (payload == 0) ? kDefaultMaxPayloadBytes : payload;
+    maxPayloadBytes = payload;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// writePlan：已在 Firehose 会话内的写入路径（run() 的 ④-⑦ 步；Task 7 拆出为公开入口）
+// ---------------------------------------------------------------------------
+
+bool EdlSession::writePlan(const FlashPlan &plan, const FlashOptions &opt, QString *error)
+{
+    const auto report = [this](const QString &stage, const QString &detail, int percent) {
+        if (m_progress) m_progress(SessionProgress{stage, detail, percent});
+    };
+    const auto fail = [error](const QString &msg) {
+        if (error) *error = msg;
+        return false;
+    };
+
+    // 进度计数每次进入都重置：本函数是公开入口，可能被同一会话反复调用（EDLHandler 的逐次写入）
+    m_writtenBytes = 0;
+    m_totalBytes = plan.totalBytes;
+
+    // 空计划：fail-closed（计划层已拒，这里是第二道）—— 一条设备命令都不发
+    if (plan.entries.isEmpty())
+        return fail(QStringLiteral("拒绝刷写：空计划（没有任何条目）"));
 
     // ④ getstorageinfo：只查**计划里出现过的 LUN**（去重，保持计划顺序）。qdl 口径是逐条目取
     // physical_partition_number（reference/qdl/src/program.c:259），不依赖设备的 LUN 总数 ——
@@ -465,36 +529,6 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
         break;   // 只发一次：取第一个匹配的 bootloader 分区（qdl 也只标记一个 LUN）
     }
 
-    // ⑧ reset：**仅成功路径发一次**。best-effort（控制方裁定）：真机上设备往往"先 ACK 再重启"
-    // 或直接掉线，故超时/NAK/传输错误都不把"已经刷完"判成失败 —— qdl 在这点上会记错并返回错误码
-    // （reference/qdl/src/firehose.c:1585-1598），照抄会让每次成功刷机都以失败收场。
-    // **但"不失败"不等于"不报告"**：两种结局都落一条日志说明实际情况。
-    report(QStringLiteral("reset"), QStringLiteral("复位设备"), 100);
-    {
-        FirehoseResponse resp;
-        drainResidual(m_t);
-        QString sendErr;
-        if (!firehoseSendCommand(m_t, xmlReset(), resp, kCmdTimeoutMs, &sendErr)) {
-            report(QStringLiteral("reset"),
-                   QStringLiteral("已发送复位命令（%1：未收到 ACK，设备可能已重启）—— "
-                                  "数据已全部写入，可手动重启").arg(sendErr), 100);
-        } else if (resp.nak) {
-            report(QStringLiteral("reset"),
-                   QStringLiteral("复位命令被设备拒绝（NAK：%1）—— 数据已全部写入，可手动重启")
-                       .arg(resp.errorText.isEmpty() ? resp.raw : resp.errorText), 100);
-        } else {
-            report(QStringLiteral("reset"), QStringLiteral("复位命令已被设备确认"), 100);
-        }
-        // Firehose 的 <power value="reset"/> 只是"让设备重启"；句柄的退场由传输层负责
-        // （IEdlTransport::resetDevice）。同样 best-effort + 同样必须报告。
-        QString resetErr;
-        if (!m_t.resetDevice(&resetErr))
-            report(QStringLiteral("reset"),
-                   QStringLiteral("复位调用失败（%1）—— 设备可能已自行重启；数据已全部写入")
-                       .arg(resetErr), 100);
-    }
-    m_t.close();
-    report(QStringLiteral("done"), QStringLiteral("刷写完成"), 100);
     return true;
 }
 
