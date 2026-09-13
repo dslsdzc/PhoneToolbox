@@ -104,6 +104,8 @@ public:
     //   mtk-brom:            daPath(DA 二进制路径)(分区列表待接线)
     //   huawei-usb-update:   updateApp(update.app 路径)
     //   spd:                 pacPath + fdl1Path + fdl2Path
+    //   oppo-edl:            planDir(解包产物目录) + programmerPath(可选，缺省在 planDir 内探测
+    //                        prog_*firehose*.*)
     // 失败返回 false 并填 error；插件缺失时明确提示。
     bool flashFullPackage(const QString &deviceId, DeviceDetector::DeviceMode mode,
                           const QVariantMap &params, QString *error);

@@ -105,6 +105,7 @@ private slots:
     void expandsSparseChunksIntoDataStream();
     void readsBackWithoutReset();
     void readBackRejectsRangeOutsideDevice();
+    void writePlanInExistingFirehoseSessionHasNoSaharaAndNoReset();
 };
 
 // 主路径：Erase(整 LUN) → Program(2 扇区) → Patch(DISK) → reset 收尾。
@@ -894,6 +895,62 @@ void TestEdlSession::readBackRejectsRangeOutsideDevice()
     QVERIFY(!s.readBack({req}, {si}, &err));
     QVERIFY(err.contains(QStringLiteral("越界")));
     QVERIFY(t.writes.isEmpty());                              // 越界 → 一条命令都不发
+}
+
+// beginFirehose + writePlan 的**直接**入口（Task 8 前置 2）：设备**已在 Firehose** 时用——
+// 既有的 run() 用例只间接覆盖（它前面自己走了一遍 Sahara + 重枚举，看不见"这一步有没有偷偷再做"）。
+// 断言红线：不打 Sahara、不等重枚举、不复位、不自己 open（句柄由调用方/既有连接持有）；
+// configure 只由 beginFirehose 发（writePlan 不重复协商）。
+void TestEdlSession::writePlanInExistingFirehoseSessionHasNoSaharaAndNoReset()
+{
+    QTemporaryDir dir;
+    const QByteArray image(8192, '\x5A');                  // 2 扇区
+    const edl::PlanEntry prog = makeProgram(dir.path(), image);
+
+    edl::FlashPlan plan;
+    plan.storageType = QStringLiteral("ufs");
+    plan.entries = {prog};
+    plan.totalBytes = 8192;
+
+    // 读队列只有 Firehose 侧响应：configure → getstorageinfo → program 声明 → 数据发完。
+    // **不含任何 Sahara 帧** —— 若会话偷偷打 Sahara，这里会当场读空超时。
+    edl::MockEdlTransport t;
+    t.maxPacket = 512;
+    t.reads << QByteArray(kAckXml)                          // configure
+            << QByteArray(kStorageInfoXml)                  // getstorageinfo(LUN 0)
+            << QByteArray(kAckXml)                          // program 声明
+            << QByteArray(kAckXml);                         // 数据发完
+
+    QString err;
+    edl::EdlSession s(t, [](const edl::SessionProgress &) {});
+    QString memoryName = QStringLiteral("ufs");
+    quint32 payload = 0;
+    QVERIFY2(s.beginFirehose(memoryName, payload, &err), qPrintable(err));
+    QVERIFY2(s.writePlan(plan, edl::FlashOptions{}, &err), qPrintable(err));
+
+    // ① 不打 Sahara、不重枚举、不 open（设备已在 Firehose，句柄由既有连接持有）
+    QCOMPARE(t.calls.count(QStringLiteral("open")), 0);
+    QVERIFY(!t.calls.contains(QStringLiteral("waitReenumerate")));
+    QCOMPARE(t.calls.count(QStringLiteral("close")), 0);
+    // Sahara 的痕迹：本路径每一笔写只能是 Firehose 命令帧（"<?xml"）、镜像数据或 ZLP 空写。
+    // （Sahara 阶段会裸写 programmer 字节 + 二进制帧 —— 出现任何第四种形态即视为打了 Sahara）
+    for (const QByteArray &w : t.writes)
+        QVERIFY2(w.isEmpty() || w.startsWith(QByteArray("<?xml")) || w == image,
+                 w.left(24).toHex().constData());
+    // ② 不复位：命令与调用序列里都没有 reset
+    for (const QByteArray &w : t.writes)
+        QVERIFY(!w.contains(QByteArray("<reset")));
+    QVERIFY(!t.calls.contains(QStringLiteral("reset")));
+    // ③ 数据面照常：program 命令 + 8192 字节原样 + ZLP（8192 % 512 == 0）
+    const int at = t.writes.indexOf(framed(edl::xmlProgram(prog)));
+    QVERIFY(at > 0);
+    QCOMPARE(t.writes[at + 1], image);
+    QVERIFY(t.writes[at + 2].isEmpty());
+    // ④ configure 只由 beginFirehose 发一次（writePlan 复用协商结果，不重复 configure）
+    int configureCount = 0;
+    for (const QByteArray &w : t.writes)
+        if (w.contains(QByteArray("configure"))) ++configureCount;
+    QCOMPARE(configureCount, 1);
 }
 
 QTEST_APPLESS_MAIN(TestEdlSession)

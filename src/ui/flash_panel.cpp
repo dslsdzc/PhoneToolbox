@@ -1,4 +1,5 @@
 #include "flash_panel.h"
+#include "flash_plan_dialog.h"          // Phase B Task 8：EDL 刷写计划预览
 #include "core/filename_parser.h"
 #include "core/restart_tool.h"
 #include <QVBoxLayout>
@@ -56,15 +57,20 @@ void FlashPanel::setupUI()
     m_edlSelectProgBtn = new QPushButton("选择 Programmer", this);
     m_edlConnectBtn = new QPushButton("连接 EDL", this);
     m_edlDisconnectBtn = new QPushButton("断开 EDL", this);
+    // Phase B Task 8：EDL 刷写计划（解包产物目录 / .ofp/.ops 整包 → 计划预览 → 按计划刷写）
+    m_edlPlanBtn = new QPushButton("EDL 刷写计划…", this);
+    m_edlPlanBtn->setToolTip("按 rawprogram/patch XML 计划刷写（自动 Sahara 引导，设备须停留在 9008）");
     m_edlStatusLabel = new QLabel("EDL: 未连接", this);
     m_edlSelectProgBtn->hide();
     m_edlConnectBtn->hide();
     m_edlDisconnectBtn->hide();
+    m_edlPlanBtn->hide();
     m_edlStatusLabel->hide();
 
     topLayout->addWidget(m_edlSelectProgBtn);
     topLayout->addWidget(m_edlConnectBtn);
     topLayout->addWidget(m_edlDisconnectBtn);
+    topLayout->addWidget(m_edlPlanBtn);
     topLayout->addWidget(m_edlStatusLabel);
 
     // MTK 模式控件 (默认隐藏)
@@ -197,6 +203,8 @@ void FlashPanel::setupUI()
             this, &FlashPanel::onEdlConnect);
     connect(m_edlDisconnectBtn, &QPushButton::clicked,
             this, &FlashPanel::onEdlDisconnect);
+    connect(m_edlPlanBtn, &QPushButton::clicked,
+            this, &FlashPanel::onEdlPlanFlash);
 
     // MTK 信号
     connect(m_mtkConnectBtn, &QPushButton::clicked,
@@ -255,6 +263,7 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     m_edlSelectProgBtn->hide();
     m_edlConnectBtn->hide();
     m_edlDisconnectBtn->hide();
+    m_edlPlanBtn->hide();
     m_edlStatusLabel->hide();
     m_mtkConnectBtn->hide();
     m_mtkDisconnectBtn->hide();
@@ -275,6 +284,9 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_edlSelectProgBtn->show();
         m_edlConnectBtn->show();
         m_edlDisconnectBtn->show();
+        // 刷写计划入口不需要"已连接"：通道自己走 Sahara 引导（设备须停留在 9008，
+        // 先点过「连接 EDL」反而会把设备带到 Firehose —— 提示见处理函数）
+        m_edlPlanBtn->show();
         m_edlStatusLabel->show();
         m_edlStatusLabel->setText(m_flashTool->edlIsConnected() ? "EDL: 已连接" : "EDL: 未连接");
         m_edlDisconnectBtn->setEnabled(m_flashTool->edlIsConnected());
@@ -1102,6 +1114,93 @@ void FlashPanel::onEdlDisconnect()
     m_partitionList->clear();
 }
 
+// Phase B Task 8：EDL 刷写计划入口（oppo-edl 通道）。两种来源：解包产物目录（rawprogram*/patch*/
+// settings.xml）或整包（.ofp/.ops，先解包到临时目录）。预览确认后按计划整包刷写。
+void FlashPanel::onEdlPlanFlash()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("EDL 刷写计划"));
+    box.setIcon(QMessageBox::Question);
+    box.setText(QStringLiteral("请选择计划来源："));
+    box.setInformativeText(QStringLiteral(
+        "解包产物目录：含 rawprogram*.xml / settings.xml 的目录（推荐）\n"
+        "整包：.ofp / .ops 原包（先解包到临时目录再预览）\n\n"
+        "注意：刷写会重新执行 Sahara 引导，设备须停留在 EDL 9008 状态；"
+        "若已点过「连接 EDL」（设备已在 Firehose），请重新插拔回到 9008。"));
+    QPushButton *dirBtn = box.addButton(QStringLiteral("选择目录…"), QMessageBox::AcceptRole);
+    QPushButton *pkgBtn = box.addButton(QStringLiteral("选择整包 (.ofp/.ops)…"),
+                                        QMessageBox::ActionRole);
+    box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.exec();
+
+    QString planDir;
+    QString error;
+    bool picked = false;
+    if (box.clickedButton() == dirBtn) {
+        const QString dir = QFileDialog::getExistingDirectory(
+            this, QStringLiteral("选择解包产物目录"), QString(), QFileDialog::ShowDirsOnly);
+        if (dir.isEmpty()) {
+            emit outputMessage(QStringLiteral("已取消 EDL 刷写计划（未选择目录）"), false);
+            return;
+        }
+        picked = FlashPlanDialog::buildAndShow(dir, this, &planDir, &error);
+        m_edlPlanTempDir.reset();          // 目录入口用不上上次整包的解包产物
+    } else if (box.clickedButton() == pkgBtn) {
+        const QString pkg = QFileDialog::getOpenFileName(
+            this, QStringLiteral("选择 OPPO 固件包"), QString(),
+            QStringLiteral("OPPO 固件包 (*.ofp *.ops);;所有文件 (*)"));
+        if (pkg.isEmpty()) {
+            emit outputMessage(QStringLiteral("已取消 EDL 刷写计划（未选择固件包）"), false);
+            return;
+        }
+        // 解包产物必须活过本次刷写：临时目录由面板持有（重建一次 = 丢弃上一次的产物）
+        m_edlPlanTempDir = std::make_unique<QTemporaryDir>();
+        if (!m_edlPlanTempDir->isValid()) {
+            m_edlPlanTempDir.reset();
+            emit outputMessage(QStringLiteral("无法创建解包临时目录，已取消"), true);
+            return;
+        }
+        picked = FlashPlanDialog::buildAndShowPackage(pkg, this, m_edlPlanTempDir.get(),
+                                                      &planDir, &error);
+        if (!picked)
+            m_edlPlanTempDir.reset();      // 未开刷：临时目录（含解包产物）可立即回收
+    } else {
+        return;                            // 取消
+    }
+
+    if (!picked) {
+        // 取消（error 为空）与失败（error 非空）分开落日志
+        if (error.isEmpty())
+            emit outputMessage(QStringLiteral("已取消 EDL 刷写计划"), false);
+        else
+            emit outputMessage(QStringLiteral("EDL 刷写计划不可用: %1").arg(error), true);
+        return;
+    }
+
+    emit outputMessage(QStringLiteral("EDL 刷写计划已确认，开始刷写：%1").arg(planDir), false);
+    m_progressBar->setVisible(true);
+    m_progressBar->setValue(0);
+    m_edlPlanBtn->setEnabled(false);
+
+    QVariantMap params;
+    params.insert(QStringLiteral("planDir"), planDir);
+    QString runErr;
+    const bool ok = m_flashTool->flashFullPackage(m_deviceInfo.serialNumber,
+                                                  DeviceDetector::MODE_EDL_9008, params, &runErr);
+    if (!ok)
+        emit outputMessage(QStringLiteral("刷写失败: %1").arg(runErr), true);
+    else
+        emit outputMessage(QStringLiteral("刷写完成"), false);
+
+    m_progressBar->setVisible(false);
+    m_edlPlanBtn->setEnabled(true);
+
+    // 整包解包产物常有数 GB：成功即回收（计划已写完，镜像不再需要）。失败保留，便于重试；
+    // 换来源时（选择目录/重新选包）会释放上一次的。
+    if (ok)
+        m_edlPlanTempDir.reset();
+}
+
 // ==================== MTK 模式 ====================
 
 void FlashPanel::onMtkConnect()
@@ -1239,6 +1338,19 @@ void FlashPanel::onFrpErase()
     int mode = m_deviceInfo.mode;
 
     if (deviceId.isEmpty()) return;
+
+    // Phase B Task 8 前置：EDL 模式下按分区名找 FRP 必然失败（Firehose 只回报 lun<N>）——
+    // 不再走完确认框再失败，直接给出可操作的指引（核心层 eraseFRP 仍保留同口径报错兜底）
+    if (mode == DeviceDetector::MODE_EDL_9008) {
+        emit outputMessage(QStringLiteral(
+            "EDL 模式无法按分区名定位 FRP：请改用「EDL 刷写计划…」（计划中 label=frp 的条目）"), true);
+        QMessageBox::information(this, QStringLiteral("清除 FRP"),
+            QStringLiteral("EDL 模式请改用「EDL 刷写计划…」清除 FRP：\n\n"
+                "Firehose 只能枚举 lun<N>，拿不到 GPT 分区名，无法按名字定位 frp 分区。\n"
+                "计划方式下，XML 里 label=frp 的条目自带 LUN/起始扇区/扇区数，可精确定位。\n\n"
+                "（Fastboot / ADB Root / MTK 模式的「清除 FRP」不受影响。）"));
+        return;
+    }
 
     QMessageBox msgBox(this);
     msgBox.setWindowTitle("警告: 清除 FRP");
@@ -1616,6 +1728,32 @@ void FlashPanel::onBrickRepairClicked()
             "  2. 连接 USB 数据线\n"
             "  3. 等设备被 PhoneToolbox 识别\n\n"
             "当前模式不支持。请先短接测试点进入深刷模式。");
+        return;
+    }
+
+    // EDL 的"目录批量刷写"已确定性失效（Phase B Task 7 审查发现，Q2 改动引入的 UI 级回归）：
+    // 本流程拿镜像 basename（boot/vbmeta…）去比 EDLPartition::name，而 Firehose 只枚举得出
+    // "lun<N>"（无 GPT 分区名）—— 匹配必然全部落空、每个镜像都报"EDL 未能匹配分区"。
+    // 处置（Task 8 前置，二选一）：**明确拒绝并指路刷写计划**（不静默失败）。选它而不是"改走计划
+    // 条目"的理由：本流程是"裸镜像目录 + 按名打分匹配 + 断点续传文件"的形状，目录里没有
+    // rawprogram/patch XML 或 GPT，给不出 validatePlan 需要的 LUN/起始扇区/扇区数几何 ——
+    // 改成计划驱动等于把救砖流程重写成另一个功能（超出本任务范围，且计划层已覆盖该场景）。
+    // MTK 不受影响：mtkListPartitions 给的是真实分区名。
+    // 下游仍留有 EDL 侧旧分支（连接/匹配/备份/写/断开）：它们与 MTK 共用同一流程骨架，逐个摘除会
+    // 牵连 backupCriticalPartitions / matchPartitionFiles 等只服务本流程的成员 —— 待计划方式接入
+    // 后按整块清理；本入口（唯一调用点）已在源头拒绝，不会执行到它们。
+    if (edlMode) {
+        emit outputMessage(QStringLiteral(
+            "EDL 模式已不支持「死砖修复」目录批量刷写：Firehose 只回报 lun<N>，"
+            "无法把镜像文件名映射到分区。请改用「EDL 刷写计划…」"), true);
+        QMessageBox::information(this, QStringLiteral("死砖修复"),
+            QStringLiteral("EDL 模式请改用「EDL 刷写计划…」：\n\n"
+                "  1. 先解包官方线刷包（.ofp/.ops）得到 rawprogram*.xml + 镜像目录\n"
+                "  2. 点「EDL 刷写计划…」选择该目录（或直接选整包）\n"
+                "  3. 预览条目并确认后按计划刷写\n\n"
+                "计划以 XML/GPT 的分区名与几何为准（含 LUN / 起始扇区 / 扇区数），"
+                "不再依赖文件名匹配。\n"
+                "MTK 模式的死砖修复不受影响，仍可继续使用。"));
         return;
     }
 

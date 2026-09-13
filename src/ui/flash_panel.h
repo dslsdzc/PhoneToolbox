@@ -7,7 +7,9 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QTextEdit>
+#include <QTemporaryDir>          // 整包入口（.ofp/.ops）的解包临时目录须活过刷写，按值持有
 #include <functional>
+#include <memory>
 #include "core/device_detector.h"
 #include "core/flash_tool.h"
 
@@ -48,6 +50,8 @@ private slots:
     void onEdlSelectProgrammer();
     void onEdlConnect();
     void onEdlDisconnect();
+    // EDL 刷写计划（Phase B Task 8）：目录/整包 → 计划预览 → flashFullPackage("oppo-edl")
+    void onEdlPlanFlash();
 
     // MTK 模式
     void onMtkConnect();
@@ -108,8 +112,11 @@ private:
     QPushButton *m_edlSelectProgBtn;
     QPushButton *m_edlConnectBtn;
     QPushButton *m_edlDisconnectBtn;
+    QPushButton *m_edlPlanBtn;
     QLabel *m_edlStatusLabel;
     QString m_programmerPath;
+    // 整包入口（.ofp/.ops）的解包临时目录：解包产物必须活到本次刷写结束（否则刷写读不到镜像）
+    std::unique_ptr<QTemporaryDir> m_edlPlanTempDir;
 
     // MTK 模式
     QPushButton *m_mtkConnectBtn;

@@ -1,6 +1,10 @@
 #include "flash_tool.h"
 #include "adb_embedded.h"
 #include "core/modes/spd_storage.h"
+// Phase B Task 8：oppo-edl 通道 —— 计划层（目录 → FlashPlan）+ 会话编排 + 真机传输整链
+#include "core/edl/edl_libusb_transport.h"
+#include "core/edl/edl_session.h"
+#include "core/edl/flash_plan.h"
 #include "src/plugins/plugin_manager.h"
 #include <libusb.h>
 #include <QProcess>
@@ -908,28 +912,24 @@ bool FlashTool::eraseFRP(const QString &deviceId, int deviceMode)
         return false;
     }
 
-    // 对于 EDL / MTK: 找到 frp 分区后写零
-    // 先确定分区名和大小
+    if (edlMode) {
+        // Phase B Task 8 前置（Task 7 审查交接）：Firehose 只枚举得出 **LUN**（listPartitions 的
+        // 产物是 "lun<N>"），拿不到 GPT 分区名 —— 按 "frp"/"protect_frp"/"frp_raw" 找分区在本路径上
+        // **必然不命中**（旧实现只会走到"EDL 未找到 FRP 分区"，等于静默失败）。
+        // 不猜、不静默：明确告知改走刷写计划（rawprogram 的 label=frp 条目带 LUN/起始扇区/扇区数，
+        // 计划方式能精确定位该分区）。
+        emit outputMessage(QStringLiteral(
+            "EDL 模式无法按分区名定位 FRP：Firehose 只回报 lun<N>，不含 GPT 分区名。"
+            "请改用「EDL 刷写计划…」方式清除 —— 计划中 label=frp 的条目可定位该分区"), true);
+        emit flashProgress(0);
+        return false;
+    }
+
+    // MTK: 找到 frp 分区后写零（EDL 已在上面明确拒绝，见其注释）
     QString frpName;
     quint64 frpSize = 0;
 
-    if (edlMode) {
-        // EDL: 在分区列表中查找
-        auto parts = edlListPartitions();
-        for (const auto &p : parts) {
-            QString lower = p.name.toLower();
-            if (lower == "frp" || lower == "protect_frp" || lower == "frp_raw") {
-                frpName = p.name;
-                frpSize = static_cast<quint64>(p.numSectors) * static_cast<quint64>(p.sectorSize);
-                break;
-            }
-        }
-        if (frpName.isEmpty()) {
-            emit outputMessage("EDL 未找到 FRP 分区", true);
-            emit flashProgress(0);
-            return false;
-        }
-    } else if (mtkMode) {
+    if (mtkMode) {
         auto parts = mtkListPartitions();
         for (const auto &p : parts) {
             QString lower = p.name.toLower();
@@ -977,17 +977,8 @@ bool FlashTool::eraseFRP(const QString &deviceId, int deviceMode)
     emit flashProgress(60);
 
     bool ok = false;
-    if (edlMode) {
-        // EDL: 需要先重新获取分区信息来写
-        auto parts = edlListPartitions();
-        for (const auto &p : parts) {
-            if (p.name == frpName) {
-                emit outputMessage("EDL: 写入零到 FRP 分区...", false);
-                ok = edlWritePartition(p, tmpPath);
-                break;
-            }
-        }
-    } else if (mtkMode) {
+    if (mtkMode) {
+        // EDL 分支已不存在：EDL 在入口即明确拒绝（Firehose 无分区名，见上面的注释）
         emit outputMessage("MTK: 写入零到 FRP 分区...", false);
         ok = mtkWritePartition(frpName, tmpPath);
     }
@@ -1149,6 +1140,24 @@ static int countDevicesOfVid(int vid, QString *error)
     return n;
 }
 
+// programmer 探测（oppo-edl 通道）：解包产物目录内的 prog_*firehose*.{elf,mbn,bin}。
+// 真包两种命名都覆盖（prog_ufs_firehose_*.elf / prog_firehose_*.mbn —— buildPlanFromDir 也按前者
+// 判 storageType）。大小写不敏感；返回全部候选（由调用方决定取谁并如实报告"多个候选"）。
+static QStringList findProgrammersInDir(const QString &dir)
+{
+    QDir d(dir);
+    const QStringList names = d.entryList(
+        {QStringLiteral("*.elf"), QStringLiteral("*.mbn"), QStringLiteral("*.bin")},
+        QDir::Files, QDir::Name);
+    QStringList hits;
+    for (const QString &name : names) {
+        const QString lower = name.toLower();
+        if (lower.startsWith(QLatin1String("prog")) && lower.contains(QLatin1String("firehose")))
+            hits << d.absoluteFilePath(name);
+    }
+    return hits;
+}
+
 QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
 {
     switch (mode) {
@@ -1158,6 +1167,8 @@ QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
         return QStringLiteral("huawei-usb-update");
     case DeviceDetector::MODE_SPD:
         return QStringLiteral("spd");
+    case DeviceDetector::MODE_EDL_9008:
+        return QStringLiteral("oppo-edl");
     default:
         return QString();
     }
@@ -1258,7 +1269,93 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
                 emit flashProgress(percent);
             }, error);
     }
-    // 不可达：flashChannelForMode 仅返回上述三字面量或空串（空串已在上方拒绝），
+    if (channel == QStringLiteral("oppo-edl")) {
+        // Phase B 通道（Task 8）：解包产物目录（rawprogram*/patch*/settings.xml）→ FlashPlan →
+        // Sahara 引导（programmer）→ 重枚举 → configure → getstorageinfo → validatePlan →
+        // 逐条目写 → reset。**设备须停留在 9008（Sahara）状态**：run() 会自己 open 设备并走
+        // Sahara，若用户已用「连接 EDL」把设备带到 Firehose，请改走 EdlSession::writePlan 那类
+        // 会话内入口（Task 7 的 EDLHandler 路径），本通道不适用。
+        const QString planDir = params.value(QStringLiteral("planDir")).toString();
+        if (planDir.isEmpty()) {
+            if (error) *error = QStringLiteral("缺少解包产物目录（oppo-edl 通道的 planDir）");
+            return false;
+        }
+        edl::FlashPlan plan;
+        QString planErr;
+        if (!edl::buildPlanFromDir(planDir, plan, &planErr)) {
+            // buildPlanFromDir 的 *error 已带文件名级诊断（中文），直接透传
+            if (error)
+                *error = QStringLiteral("构建刷写计划失败：%1")
+                             .arg(planErr.isEmpty() ? planDir : planErr);
+            return false;
+        }
+        for (const QString &w : plan.warnings)
+            emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
+
+        QString programmerPath = params.value(QStringLiteral("programmerPath")).toString();
+        if (programmerPath.isEmpty()) {
+            const QStringList found = findProgrammersInDir(planDir);
+            if (found.isEmpty()) {
+                if (error)
+                    *error = QStringLiteral("未在 %1 内找到 programmer（prog_*firehose*.{elf,mbn,bin}），"
+                                            "请显式提供 programmerPath").arg(planDir);
+                return false;
+            }
+            programmerPath = found.first();
+            if (found.size() > 1)
+                emit outputMessage(QStringLiteral("目录内有 %1 个 programmer 候选，使用首个：%2")
+                                       .arg(found.size())
+                                       .arg(QFileInfo(programmerPath).fileName()), false);
+        }
+        QFile progFile(programmerPath);
+        if (!progFile.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("无法读取 programmer: %1").arg(programmerPath);
+            return false;
+        }
+        const QByteArray programmer = progFile.readAll();
+        progFile.close();
+        if (programmer.isEmpty()) {
+            if (error) *error = QStringLiteral("programmer 文件为空: %1").arg(programmerPath);
+            return false;
+        }
+
+        // 多设备防护：LibusbEdlTransport::open 取首个匹配的 9008 设备（PID 表见其头文件）
+        // —— 多台高通设备同连时警告（与既有三通道同款分派层计数警告）
+        const int qcomCount = countDevicesOfVid(0x05C6, nullptr);
+        if (qcomCount > 1)
+            emit outputMessage(QStringLiteral(
+                "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
+                .arg(qcomCount), false);
+        emit outputMessage(QStringLiteral("OPPO EDL 刷写通道：%1（计划 %2 条条目，programmer %3）")
+                               .arg(deviceId)
+                               .arg(plan.entries.size())
+                               .arg(QFileInfo(programmerPath).fileName()), false);
+
+        // 会话进度 → 既有两条信号。日志只在 (stage, detail) 变化时落一条：write 阶段每块都回调
+        // （与 EDLHandler 的转发口径一致），百分比始终转发。
+        edl::LibusbEdlTransport transport;
+        QString lastProgressKey;
+        edl::EdlSession session(transport, [this, &lastProgressKey](const edl::SessionProgress &p) {
+            const QString key = p.stage + QLatin1Char('\x1f') + p.detail;
+            if (key != lastProgressKey) {
+                lastProgressKey = key;
+                if (!p.detail.isEmpty())
+                    emit outputMessage(QStringLiteral("[%1] %2").arg(p.stage, p.detail), false);
+            }
+            emit flashProgress(p.percent);
+        });
+
+        edl::FlashOptions opt;      // 默认：边写边校验（条目无 sha256 时跳过）、不做刷前全量校验
+        QString runErr;
+        if (!session.run(plan, programmer, opt, &runErr)) {
+            if (error) *error = runErr.isEmpty() ? QStringLiteral("EDL 刷写失败") : runErr;
+            return false;
+        }
+        emit flashProgress(100);
+        emit outputMessage(QStringLiteral("EDL 刷写完成（设备已复位）"), false);
+        return true;
+    }
+    // 不可达：flashChannelForMode 仅返回上述四字面量或空串（空串已在上方拒绝），
     // 保留裸 return 以满足编译器的全路径返回检查。
     return false;
 }

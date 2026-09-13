@@ -18,6 +18,9 @@ void TestPipeline::channelMapping()
              QStringLiteral("huawei-usb-update"));
     QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_SPD),
              QStringLiteral("spd"));
+    // Phase B Task 8：9008 走 oppo-edl 通道（计划目录 + programmer → EdlSession::run）
+    QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_EDL_9008),
+             QStringLiteral("oppo-edl"));
 }
 
 void TestPipeline::channelMappingUnknown()

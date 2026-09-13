@@ -297,7 +297,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_sahara.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_libusb_transport.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -399,6 +400,13 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp)
+                elseif(_test_stem STREQUAL "test_flash_plan_dialog")
+                    # Phase B Task 8：对话框（src/ui，不编入任何静态库）被测源 + 它调用的计划层
+                    # （buildPlanFromDir 的整链在 flash_plan.cpp；OFP/OPS 解包走 image_engine）。
+                    # 额外链 Qt6::Widgets 与 offscreen 平台，见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/flash_plan_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
@@ -409,6 +417,16 @@ if(ENABLE_IMAGE_TESTS)
                 endif()
                 set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
                 add_test(NAME ${_test_target} COMMAND ${_test_target})
+                # Phase B Task 8：对话框测试是唯一带 Widgets 的测试 —— QTEST_MAIN 会造 QApplication，
+                # 无 DISPLAY 的环境必须走 offscreen 平台插件（否则 ctest 当场 abort）。
+                # QT_QPA_PLATFORMTHEME 置空：桌面主题插件（如 qt6ct）在无显示环境下加载 GTK 后
+                # 直接退出（实测 exit 1，QtTest 还没跑），主题与"勾选框门控"断言无关 —— 置空
+                # 让本用例与环境无关（ENVIRONMENT 是**追加**到环境，不能只靠不设置）。
+                if(_test_stem STREQUAL "test_flash_plan_dialog")
+                    target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
+                    set_tests_properties(${_test_target} PROPERTIES
+                        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")
+                endif()
                 # BROM 协议测试需要 libusb（image_engine 不传递）。
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
