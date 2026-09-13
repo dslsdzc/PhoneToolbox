@@ -1191,6 +1191,10 @@ git commit -m "feat(edl): libusb 传输实现 + EDLHandler 退化薄封装（顺
 - Modify: `src/ui/flash_panel.cpp`（入口按钮）
 - Test: `tests/test_flash_plan_dialog.cpp`（offscreen 平台）
 
+**Task 7 交接的两点（本任务须处理）**：
+1. **FRP 清除路径**（`src/core/flash_tool.cpp:918/982-986`）按**分区名**找 `"frp"`，而 Firehose 只给得出 `lun<N>`（`EdlSession::listPartitions` 无法枚举分区名）→ 该路径在 EDL 通道下会走"未找到 FRP 分区"。**做法**：让 FRP 动作改为**从刷写计划里取条目**（计划里有 `label=frp` 就能定位），或在拿不到计划时**明确报错并提示"请用计划方式"**，不要静默失败。
+2. `beginFirehose`/`writePlan` 目前只被 `run()` 的既有用例**间接**覆盖，缺"设备已在 Firehose → 不打 Sahara、不发 reset"的直接断言 → 补一条直接用例（本任务或 Task 8 均可，但**必须有**）。
+
 **Interfaces:**
 - Consumes: Task 3 `buildPlanFromDir`、Task 6 `EdlSession`、Task 7 `LibusbEdlTransport`/`EDLHandler`
 - Produces:
