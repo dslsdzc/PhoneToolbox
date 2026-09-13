@@ -1128,6 +1128,10 @@ git commit -m "feat(edl): EdlSession 编排 + 数据面（分块/ZLP/补零/spar
 4. `<program>` 补 `physical_partition_number` + 数据面走 `EdlSession` 的写入路径（`:791-814`）。
 5. `<read>` 属性名改 `num_partition_sectors`、补 `physical_partition_number`、去掉 `filename`（`:716-725`）。
 
+**Task 6 交接的两条契约（本任务必须遵守，均已写进 `edl_transport.h` 注释）**：
+1. **数据块的 ZLP 由会话数据面负责** → `LibusbEdlTransport::write()` **不得**再对数据块补 ZLP（命令帧自身是否补由你定，但要在注释里写明）；否则真机每块多发一个 ZLP，而离线用例看不见。
+2. **重枚举后的重新 open 由 `waitReenumerate` 负责**：`close()` 幂等、close 后可再 open、`waitReenumerate` 调用前须已 `close()` 且**返回 true 时设备已重新 `open()`（调用方不再 open）**。会话已按此实现（不再二次 open），你若违反契约，真机会"打不开设备"而离线用例因 mock 恒真而全绿。
+
 - [ ] **Step 1: 写失败测试**
 
 `tests/test_edl_libusb_transport.cpp`：只测**不碰设备**的部分（例如 VID/PID 匹配表与错误文案构造）—— 把 VID/PID 表做成可测的纯函数：
