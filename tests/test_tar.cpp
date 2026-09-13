@@ -547,6 +547,7 @@ void TestTar::indexTarStreamNamesOffsetsSizes()
     QList<imgtar::TarIndexEntry> idx3;
     quint64 tarEnd3 = 0;
     QVERIFY2(imgtar::indexTarStream(p3, idx3, &tarEnd3, &err), qPrintable(err));
+    QVERIFY2(err.isEmpty(), "索引成功但 error 残留（契约：error 仅在返回 false 时有意义）");
     QCOMPARE(idx3.size(), 3);
     QCOMPARE(tarEnd3, quint64(tar.size()));
     // 而完整性检查必须报"不符"

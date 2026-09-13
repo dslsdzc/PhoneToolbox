@@ -594,6 +594,11 @@ bool indexTarStream(const QString &tarPath, QList<TarIndexEntry> &out,
     // scan == -1（有校验行但校验不符）**不**在此拒绝：本函数只要校验行的**位置**（据此算出归档区结束），
     // 「完整性是否通过」是 verifyMd5FooterStream 的职责（计划层的「校验」列）。这条职责分离是必须的 ——
     // 否则"用户故意刷改包"（本场景常见）会被索引层直接拦死。scanMd5Footer 在 -1 路径上同样已置好 tarEnd。
+    // -1 路径上 scanMd5Footer 已把"MD5 校验失败"写进 *error —— 但本函数**返回 true**，
+    // 按本仓约定（bool + error，error 仅在 false 时有意义）必须清掉，否则以
+    // error.isEmpty() 判成功的调用方会把"索引成功"误读成"失败"。
+    if (error)
+        error->clear();
     if (tarEnd)
         *tarEnd = quint64(archiveEnd);
 
