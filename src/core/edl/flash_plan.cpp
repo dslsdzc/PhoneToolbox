@@ -70,11 +70,12 @@ quint64 attrU64(QXmlStreamReader &reader, const char *name, bool *ok)
 // 三态与各调用点的处置（**逐态行为写在这里，两个调用点都不得自行分叉**）：
 //   Missing     属性**不存在**：
 //                 · start_sector（program/patch，required=true）→ 记缺失、丢弃该条目；
-//                 · start_sector（erase，required=false）→ 保持 0；
-//                 · erase 的 num_partition_sectors → 0 = **整 LUN 擦**（唯一保留该语义的形态）。
+//                 · start_sector（erase，required=false）→ 保持 0；**但仅当计数也缺失时才合法**
+//                   （双缺省 = 整 LUN 擦，唯一保留该语义的形态；单缺一个 → 丢条目，见 loadEraseTag）；
+//                 · erase 的 num_partition_sectors → 0 = 整 LUN 擦，**同上：仅当起点也缺失时才合法**。
 //   Empty       属性存在但为空串：qdl attr_as_string 遇空串返回 NULL（reference/qdl/src/util.c:101-102），
-//                等同缺失处理 —— 但对**破坏性**的 erase 计数一律 fail-closed 丢弃（见 loadEraseTag）：
-//                空串被当作"0 扇区"会静默放大成整 LUN 擦。
+//                等同缺失处理 —— 但对**破坏性**的 erase 一律 fail-closed 丢弃（见 loadEraseTag）：
+//                空串被当作"0 扇区"或"起点 0"都等于主机替用户补一个没写过的数。
 //   Decimal     纯十进制：取数值。
 //   NonDecimal  存在但按该属性的 base 解析不出来（firehose 表达式如 "NUM_DISK_SECTORS-5."、
 //                 base=10 时的 "0x800"、或 "abc"）：
@@ -171,23 +172,27 @@ private:
 //   表达式**不是错误**：不记 warning、不丢条目（Backup-GPT 头修补条目就在这一类，丢掉即漏修补；
 //   reference/qdl/src/program.c:261、src/patch.c:46、src/firehose.c:874-879）。
 //   缺失或空串 → 必需时记缺失（条目丢弃 + warning）。
-// required=false：属性可缺省（erase 标签缺省 = 整 LUN 擦，见 loadEraseTag），缺省不记错。
-void readStartSector(QXmlStreamReader &reader, PlanEntry &e, RequiredAttrs &attrs, bool required = true)
+// required=false：属性可缺省（erase 标签缺省 *并且* 计数也缺省 = 整 LUN 擦，见 loadEraseTag），缺省不记错。
+// **返回值 = 本次读到的三态**（条目已就地写好）：erase 判"用户是否声明过起点"要用它，
+// 免得把属性再读一遍、两处判据各自漂移。
+SectorAttr readStartSector(QXmlStreamReader &reader, PlanEntry &e, RequiredAttrs &attrs,
+                           bool required = true)
 {
     const SectorAttr a = readSectorAttr(reader, "start_sector");
     switch (a.kind) {
     case SectorAttrKind::Decimal:
         e.startSector = a.value;
-        return;
+        break;
     case SectorAttrKind::NonDecimal:
         e.startSectorExpr = a.raw;   // 表达式原样保留；startSector 保持 0（模型契约）
-        return;
+        break;
     case SectorAttrKind::Missing:
     case SectorAttrKind::Empty:
         if (required)
             attrs.noteMissing("start_sector");
-        return;
+        break;
     }
+    return a;
 }
 
 // start_sector 的**三态处置**（唯一实现；逐态语义见上面 readStartSector 的注释）。
@@ -254,18 +259,25 @@ void loadProgramTag(QXmlStreamReader &reader, quint32 fileLun, const QString &xm
 
 // rawprogram 的 <erase> → PlanEntry{Erase}
 // 必需：SECTOR_SIZE_IN_BYTES / physical_partition_number（reference/qdl/src/program.c:39-42）；
-// start_sector / num_partition_sectors **可缺省 = 整 LUN 擦**（<erase> 省略 start/count 即整 LUN，
+// start_sector / num_partition_sectors **双双缺省 = 整 LUN 擦**（<erase> 省略 start/count 即整 LUN，
 // reference/qdl/src/firehose.c:611-628），缺省置 0，由会话层按"整 LUN"解释。
 // 注：qdl 的 load_erase_tag 把这四项都当必需且拒绝 num_sectors=0（src/program.c:39-59）——
 // 本项目按 spec §3.4/§4 允许整 LUN 擦，故此处放宽为可缺省。
 //
-// **安全语义（Task 1 审查发现、Task 2 修复）**：num_partition_sectors 属性**存在但不可解析**
-// （"abc"、firehose 表达式）曾被静默当 0，而 0 在本模型里 ="整 LUN 擦" ⇒ 定点擦被静默放大成
-// 整盘擦。qdl 对这类输入是直接拒绝的：`load_erase_tag` 的 `if (!program->num_sectors)` →
-// ux_err("erase tag with num_sectors=0 not allowed") → -EINVAL（reference/qdl/src/program.c:54-59）。
-// 现在只有**属性确实缺失**才保留整 LUN 语义；其余（不可解析 / 表达式 / **显式 0**）一律丢弃该条目
-// + 中文 warning —— 与本文件"宁可少条目并告警，也不猜"的原则一致；显式 0 之所以也丢，正因为它与
-// "整 LUN"哨兵同值（同 program.c:54-59 的拒绝理由）。
+// **安全语义（Task 1 审查发现、Task 2 修复、终审 C-1 补强）**：0 在本模型里 ="整 LUN 擦"，
+// 于是一切"把非 0 意图压成 0"的路径都会把定点擦静默放大成整盘擦。三道判据：
+//   ① 计数属性**存在但不可解析**（"abc"、firehose 表达式）或**显式 0** → 丢弃条目 + warning
+//      （Task 2）。qdl 对这种输入直接拒绝：`if (!program->num_sectors)` →
+//      ux_err("erase tag with num_sectors=0 not allowed") → -EINVAL（src/program.c:54-59）；
+//      显式 0 之所以也丢，正因为它与"整 LUN"哨兵同值。
+//   ② **起点与计数必须同时缺省**才保留整 LUN 语义（终审 C-1）。此前只看计数的 kind：
+//      `<erase start_sector="100"/>`（给了起点、没给长度）解析零 warning 通过，而 xmlErase 的
+//      "num_sectors>0 才补两个属性"会让 start_sector **连根丢掉**，语义从"从扇区 100 起擦"
+//      变成"整 LUN 擦"——与 ① 是同一个失败模式，只是这次被放大的是起点。
+//   ③ 反向的单缺（给了计数、没给起点）同样丢弃：起点缺失时 xmlErase 会补 start_sector="0"，
+//      那是主机**替用户编**了一个从未声明过的起点；长度不明比起点不明更常见，但两者都是猜。
+// 三种丢弃共用一条原则（与本文件一致）：宁可少条目并告警，也不猜；erase 是破坏性操作，
+// 猜错的代价（数据被擦掉）不可逆。
 void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
                   QList<PlanEntry> &out, QStringList &warnings)
 {
@@ -279,17 +291,39 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
                         .arg(attrs.missing()).arg(fileLun);
         return;
     }
-    // 缺省 0 = 整 LUN；表达式同样原样保留。
-    // 注意（Task 5）：startSectorExpr 非空时不能按"numSectors==0 = 整 LUN"处理。
-    readStartSector(reader, e, attrs, /*required=*/false);
+    // 缺省保持 0（待下面判定是否合法）；表达式（NonDecimal）同样原样保留。
+    // 返回值 = 起点三态，本函数要用它判"用户是否声明过起点"（见 ②/③）。
+    const SectorAttr start = readStartSector(reader, e, attrs, /*required=*/false);
 
     // 三态判定统一走 readSectorAttr（与 start_sector 同源），处置按注释里的策略逐态分发：
-    // 只有**属性缺失**才是整 LUN 擦；Empty/NonDecimal/显式 0 一律丢弃（fail-closed）
+    // 只有**起点与计数双双缺失**才是整 LUN 擦；Empty/NonDecimal/显式 0 一律丢弃（fail-closed）
     const SectorAttr count = readSectorAttr(reader, "num_partition_sectors", /*base=*/0);
+    // "声明过起点" = 十进制或表达式；Empty 按缺失处理（与 qdl attr_as_string 遇空串返回 NULL 一致，
+    // reference/qdl/src/util.c:101-102）。表达式非空 ⇒ 不能按"numSectors==0 = 整 LUN"解释（Task 5）。
+    const bool startGiven = start.kind == SectorAttrKind::Decimal
+                            || start.kind == SectorAttrKind::NonDecimal;
+    const QString shownStart = e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
+                                                           : e.startSectorExpr;
     if (count.kind == SectorAttrKind::Decimal && count.value > 0) {
+        if (!startGiven) {
+            // ③ 给了长度、没给起点：xmlErase 会补 start_sector="0"，等于主机编一个起点
+            warnings << QStringLiteral("rawprogram erase 条目被跳过：给了 num_partition_sectors=%1 "
+                                       "但缺 start_sector（lun=%2）—— 起点不明，补 0 等于主机"
+                                       "擅自指定擦除起点（整 LUN 擦请两个属性都省略）")
+                            .arg(count.value).arg(e.lun);
+            return;
+        }
         e.numSectors = count.value;
     } else if (count.kind == SectorAttrKind::Missing) {
-        e.numSectors = 0;   // 属性缺失 = 整 LUN 擦（唯一保留该语义的形态）
+        if (startGiven) {
+            // ② 给了起点、没给长度：xmlErase 见 num_sectors==0 会把 start_sector 一起省略
+            warnings << QStringLiteral("rawprogram erase 条目被跳过：给了 start_sector=%1 "
+                                       "但缺 num_partition_sectors（lun=%2）—— 擦除长度不明，"
+                                       "按 0 处理会连起点一起省略、放大成整 LUN 擦")
+                            .arg(shownStart).arg(e.lun);
+            return;
+        }
+        e.numSectors = 0;   // 双缺省 = 整 LUN 擦（唯一保留该语义的形态）
     } else {
         const bool isZero = count.kind == SectorAttrKind::Decimal;   // 走到这里 Decimal 只剩 0
         const QString shown = isZero ? QString::number(count.value) : count.raw;
@@ -299,8 +333,7 @@ void loadEraseTag(QXmlStreamReader &reader, quint32 fileLun,
                              isZero ? QStringLiteral("不是有效的定点擦范围（整 LUN 擦请省略该属性）")
                                     : QStringLiteral("不可解析"))
                         .arg(e.lun)
-                        .arg(e.startSectorExpr.isEmpty() ? QString::number(e.startSector)
-                                                         : e.startSectorExpr);
+                        .arg(shownStart);
         return;
     }
     warnLunMismatch(QStringLiteral("erase"), e, fileLun, warnings);

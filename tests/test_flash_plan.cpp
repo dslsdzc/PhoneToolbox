@@ -50,6 +50,7 @@ private slots:
     void keepsExpressionStartSector();
     void keepsExpressionStartSectorInProgram();
     void eraseWithUnparseableCountIsDropped();
+    void eraseWithOnlyOneOfStartOrCountIsDropped();
     void finalizePlanSortsAndSums();
     void validateRejectsAndWarns();
     void validateAcceptsPlanAtCapacityAndAdjacent();
@@ -273,6 +274,54 @@ void TestFlashPlan::eraseWithUnparseableCountIsDropped()
     QCOMPARE(warn.size(), 3);                      // 三条被丢弃，每条都有 warning
     for (const QString &w : warn)
         QVERIFY(w.contains(QStringLiteral("num_partition_sectors")));
+}
+
+// ---- 终审 C-1：erase 只给 start / 只给 count 的单缺形态 ----
+//
+// Task 2 的判据只看**计数**的 kind（`count.kind == Missing` 就放行 = 整 LUN），没看起点是否给过：
+// `<erase SECTOR_SIZE_IN_BYTES="4096" physical_partition_number="0" start_sector="100"/>`
+// 解析**零 warning 通过**、numSectors=0，而下发时 xmlErase 的判据是"num_sectors>0 才补两个属性"
+// （firehose.cpp 的 xmlErase）→ start_sector 连根丢掉，语义从"从扇区 100 起擦"变成"整 LUN 擦"。
+// 与 Task 2 修的"不可解析计数被当 0"是同一个失败模式，只是这次被放大的是起点。
+//
+// 用例覆盖四种形态（① ② 是本次修复的判据，③ ④ 是必须保持不变的合法形态）：
+//   ① 给 start 没给 count  → 不产条目 + warning（否则放大成整 LUN 擦）
+//   ② 给 count 没给 start  → 不产条目 + warning（否则 xmlErase 补一个用户没写过的 start_sector=0）
+//   ③ start/count 双缺省    → 仍产条目且 numSectors==0（合法的整 LUN 擦，语义唯一）
+//   ④ start/count 都给      → 正常产条目（不能被新判据误伤）
+void TestFlashPlan::eraseWithOnlyOneOfStartOrCountIsDropped()
+{
+    QTemporaryDir dir;
+    // 四条都写 physical_partition_number="0" 且文件序号 = 0：避免 lun 不一致告警混进来
+    // （warnLunMismatch；否则断言 warn 条数会被那两条无关告警污染），四条靠属性本身区分。
+    const QString xml = writeFile(dir.path(), "rawprogram0.xml",
+        "<data>\n"
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "         start_sector=\"100\" />\n"                                              // ① 只有起点
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "         num_partition_sectors=\"100\" />\n"                                     // ② 只有长度
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" />\n"      // ③ 双缺省
+        "  <erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"\n"
+        "         start_sector=\"4096\" num_partition_sectors=\"100\" />\n"                // ④ 双给
+        "</data>\n");
+    QList<edl::PlanEntry> out; QStringList warn; QString err;
+    QVERIFY2(edl::parseRawprogramXml(xml, 0, out, warn, &err), qPrintable(err));
+
+    QCOMPARE(out.size(), 2);                       // ① ② 被丢弃，只留 ③ ④
+    QCOMPARE(warn.size(), 2);
+    // ① 的 warning 必须点出缺的是 num_partition_sectors（否则用户不知道该补哪个属性）
+    QVERIFY(warn[0].contains(QStringLiteral("num_partition_sectors")));
+    QVERIFY(warn[0].contains(QStringLiteral("start_sector=100")));   // 印出用户实际写的起点
+    // ② 的 warning 必须点出缺的是 start_sector
+    QVERIFY(warn[1].contains(QStringLiteral("start_sector")));
+    QVERIFY(warn[1].contains(QStringLiteral("num_partition_sectors=100")));
+
+    QCOMPARE(out[0].action, edl::PlanEntry::Action::Erase);
+    QCOMPARE(out[0].startSector, quint64(0));      // ③ 双缺省仍是**合法**的整 LUN 擦
+    QCOMPARE(out[0].numSectors, quint64(0));
+
+    QCOMPARE(out[1].startSector, quint64(4096));   // ④ 双给不被误伤
+    QCOMPARE(out[1].numSectors, quint64(100));
 }
 
 // ---- Task 2：排序/统计 + validatePlan + sparse 扇区换算 ----
