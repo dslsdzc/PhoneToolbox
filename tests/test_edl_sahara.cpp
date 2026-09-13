@@ -134,13 +134,13 @@ void TestEdlSahara::handlesHelloSplitAcrossReads()
 }
 
 // 既有缺陷回归（edl_handler.cpp:302-312 把 READ_DATA_64 的 offset 截成 quint32）：
-// 偏移 4 GiB+4 截断后折回 4 —— 截断实现会"成功"回吐 prog[4..8)，正确实现必须判越界。
+// 偏移 4 GiB 截断后折回 0 —— 截断实现会"成功"回吐 prog[0..4)="0123"，正确实现必须判越界。
 // 正因为折回值落在有效区间内，两条路径才可区分（无需 4 GiB 缓冲）。
 void TestEdlSahara::doesNotTruncate64BitOffset()
 {
     edl::MockEdlTransport t;
     const QByteArray prog("0123456789ABCDEF");
-    const quint64 hugeOffset = 0x100000004ull;   // 4 GiB + 4 = 4294967300
+    const quint64 hugeOffset = 0x1'0000'0000ull;   // 4 GiB = 4294967296（lead 指定值）
     t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})
             << saharaReadData64Frame(0, hugeOffset, 4)
             << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
@@ -149,7 +149,7 @@ void TestEdlSahara::doesNotTruncate64BitOffset()
     QString err;
     QVERIFY(!edl::saharaLoadProgrammer(t, prog, &err));
     QVERIFY2(err.contains(QStringLiteral("越界")), qPrintable(err));
-    QVERIFY2(err.contains(QStringLiteral("4294967300")), qPrintable(err));   // 偏移按 64 位完整打印
+    QVERIFY2(err.contains(QStringLiteral("4294967296")), qPrintable(err));   // 偏移按 64 位完整打印
     QCOMPARE(t.writes.size(), 1);                // 只有 HELLO_RSP：越界请求一个字节都不回吐
     QCOMPARE(int(t.writes.at(0).at(0)), 0x02);
 }

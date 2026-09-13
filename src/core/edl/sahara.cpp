@@ -5,6 +5,8 @@
 // END_OF_IMAGE → DONE 序列），差异只有三点（Task 4 brief Step 3）：
 //   1. 走 IEdlTransport（不内联 libusb）；
 //   2. SAHARA_READ_DATA_64 用 quint64 偏移（修既有 edl_handler.cpp:302-312 的 32 位截断缺陷）；
+//      注意 DONE 对的方向是 **host 主动**（发 DONE_REQ、收 DONE_RSP，与其余四条"设备主动"相反），
+//      细节见下方 sendDoneAndWait() 注释；
 //   3. 失败文案中文且带阶段名。
 // 协议参照：edl/edlclient/Library/sahara.py:105-135（HELLO_RSP 布局）、:650-747（服务循环）、
 // :453-459（DONE_REQ/DONE_RSP）；Qualcomm Sahara 协议。
@@ -169,9 +171,15 @@ bool serveProgrammerChunk(IEdlTransport &t, const QByteArray &programmer,
     return true;
 }
 
-// DONE 序列：host 发 DONE_REQ（cmd=0x05、总长 8、无载荷）→ device 回 DONE_RSP（0x06）。
-// 参照 edl_handler.cpp:338-364（sendDoneReq/recvDoneResp）、bkerler sahara.py:453-459
-// （pack("<II", DONE_REQ, 0x8) 后要求 DONE_RSP）。
+// DONE 序列：**host 主动** —— host 先发 DONE_REQ（cmd=0x05、总长 8、无载荷），设备再回 DONE_RSP（0x06）。
+// ⚠️ 方向与 HELLO_REQ / READ_DATA / READ_DATA_64 / END_OF_IMAGE **相反**（那四条都是设备主动发）：
+//    把 DONE_REQ 误当成"设备发来的完成信号"就会少发或多发一帧，是这条链上最易记反的一处。
+// 两源一致：
+//   - 既有可工作实现 src/core/modes/edl_handler.cpp:566-584：sendDoneReq() 之后 recvDoneResp()
+//     明确要求收到 DONE_RSP(0x06)（`sendDoneReq`/`recvDoneResp` 本体见 :338-364）；
+//   - edl/edlclient/Library/sahara.py:453-459（cmd_done）：host 写 `pack("<II", DONE_REQ, 0x8)`
+//     后要求 `cmd == SAHARA_DONE_RSP`。
+// 本条由 lead 复核确认（brief 修订提交 313a7c5）。
 bool sendDoneAndWait(IEdlTransport &t, PacketReader &reader, QString *error)
 {
     if (!writeFrame(t, SAHARA_DONE_REQ, QByteArray(),
