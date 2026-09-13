@@ -27,6 +27,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 
+#include <limits>          // std::numeric_limits（writeEntry 的溢出判定：扇区数 × 扇区大小）
+
 #include "firehose.h"
 #include "image_engine/sparse_image.h"
 #include "sahara.h"

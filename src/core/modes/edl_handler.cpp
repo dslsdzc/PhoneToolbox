@@ -142,6 +142,7 @@ bool EDLHandler::connectSahara(const QString &programmerPath)
 void EDLHandler::disconnect()
 {
     if (m_connected && m_transport.isOpen()) {
+        edl::drainResidual(m_transport);      // 发 reset 前清 IN 端点残留（与 queryStorageInfo 同口径）
         edl::FirehoseResponse resp;
         QString ignored;
         edl::firehoseSendCommand(m_transport, edl::xmlReset(), resp,
@@ -342,12 +343,6 @@ bool EDLHandler::writeImageEntry(const QString &imageFile, const QString &label,
         return fail(QStringLiteral("镜像 %1 需要 %2 扇区，超过目标区间上限 %3 扇区")
                         .arg(imageFile).arg(numSectors).arg(upperBoundSectors));
     }
-    if (numSectors > derivedSectors) {
-        // 明码标价：会话的数据面会把不足的部分**补零**写到设备（qdl 同款：firehose.c:1089-1097）
-        emit outputMessage(QStringLiteral("注意：声明 %1 扇区大于镜像实际 %2 扇区 —— "
-                                          "余量将按数据面规则补零写入").arg(numSectors).arg(derivedSectors),
-                           false);
-    }
     if (numSectors > (std::numeric_limits<quint64>::max)() / quint64(sectorSize))
         return fail(QStringLiteral("扇区数 × 扇区大小 溢出 u64（%1）").arg(imageFile));
     e.numSectors = numSectors;
@@ -365,6 +360,17 @@ bool EDLHandler::writeImageEntry(const QString &imageFile, const QString &label,
     edl::finalizePlan(plan);
     for (const QString &w : warnings)
         emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
+
+    // 补零告警必须**在归一化之后**判：sparse 条目会按文件头改写 numSectors（flash_plan.cpp 的
+    // normalizeProgramImage），若在归一化前按调用方声明值告警，改写后那句话就不成立了（Task 7 审查
+    // Minor）。单条目计划（plan.entries[0] 即 e）—— 只有归一化后仍大于镜像事实才明码标价：
+    // 会话的数据面会把不足的部分**补零**写到设备（qdl 同款：firehose.c:1089-1097）。
+    if (plan.entries.size() == 1 && plan.entries.first().numSectors > derivedSectors) {
+        emit outputMessage(QStringLiteral("注意：声明 %1 扇区大于镜像实际 %2 扇区 —— "
+                                          "余量将按数据面规则补零写入")
+                               .arg(plan.entries.first().numSectors).arg(derivedSectors),
+                           false);
+    }
 
     emit outputMessage(QStringLiteral("写入分区: %1（LUN %2，起始扇区 %3，%4 扇区 × %5 字节%6）")
                            .arg(label).arg(lun).arg(startSector).arg(numSectors).arg(sectorSize)

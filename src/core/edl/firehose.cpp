@@ -487,12 +487,6 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
     // 数据块在 edl_session 的数据面（edl_session.cpp 不变量 3），命令帧在这里。
     // 传输层是纯字节管道，不补（edl_libusb_transport.h 顶部）。
     // 离线保护：tests/test_edl_firehose.cpp 的 addsZlpWhenCommandPayloadHitsPacketBoundary。
-    // 命令帧的 ZLP：载荷长度恰为端点包长整数倍时，必须补一次 0 字节写 —— 否则设备侧的 bulk 读
-    // 看不到"短包"，会一直等下一批数据（真机上表现为卡住/超时）。qdl 的规则对**所有**写生效
-    // （reference/qdl/src/usb.c:548-553）；本项目的责任划分是"**发起该笔写的上层**补"：
-    // 数据块在 edl_session 的数据面（edl_session.cpp 不变量 3），命令帧在这里。
-    // 传输层是纯字节管道，不补（edl_libusb_transport.h 顶部）。
-    // 离线保护：tests/test_edl_firehose.cpp 的 addsZlpWhenCommandPayloadHitsPacketBoundary。
     const int maxPacket = t.maxPacketSize();
     if (maxPacket > 0 && !payload.isEmpty() && payload.size() % maxPacket == 0) {
         QString zlpErr;
