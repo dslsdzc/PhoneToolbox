@@ -29,6 +29,11 @@ private slots:
     void img2simgStreamEmptyInput();
     void systemImg2simgInterop();
     void systemSimg2imgInterop();
+    // Task 6：sparseWalk（会话数据面的 sparse 展开依据）
+    void sparseWalkYieldsRawFillAndDontCare();
+    void sparseWalkMatchesSimg2img();
+    void sparseWalkAbortsOnCallbackFalse();
+    void sparseWalkRejectsTruncatedAndNonSparse();
 };
 
 static QByteArray buildSparseHeader(quint32 totalBlks, quint32 totalChunks)
@@ -63,6 +68,24 @@ static QByteArray buildRawChunk(const QByteArray &payload)
     put32(8, static_cast<quint32>(12 + payload.size()));
     c.append(payload);
     return c;
+}
+
+// chunk 头（12 字节）：type u16@0 + chunk_sz u32@4 + total_sz u32@8（AOSP 布局，同 parseSparseHeader）
+static QByteArray buildChunkHeader(quint16 type, quint32 blocks, quint32 totalSz)
+{
+    QByteArray c(12, '\0');
+    auto put16 = [&](int off, quint16 v) { c[off] = char(v); c[off + 1] = char(v >> 8); };
+    auto put32 = [&](int off, quint32 v) {
+        c[off] = char(v); c[off + 1] = char(v >> 8); c[off + 2] = char(v >> 16); c[off + 3] = char(v >> 24);
+    };
+    put16(0, type); put32(4, blocks); put32(8, totalSz);
+    return c;
+}
+
+// FILL chunk：total_sz = 12 + 4，载荷为 4 字节 pattern（按 pattern[i % 4] 重复填充）
+static QByteArray buildFillChunk(quint32 blocks, const QByteArray &pattern4)
+{
+    return buildChunkHeader(0xCAC2, blocks, 16) + pattern4;
 }
 
 void TestSparse::detectSparse()
@@ -468,6 +491,130 @@ void TestSparse::systemSimg2imgInterop()
     p.start(QStringLiteral("/usr/bin/simg2img"), { sparsePath, outPath });
     QVERIFY(p.waitForFinished(60000) && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0);
     QCOMPARE(readFile(outPath), raw);
+}
+
+// ---- Task 6：sparseWalk（会话数据面按块展开 sparse 的依据；不落盘、内存 O(块)）----
+
+// 按块产出结构化数据：RAW 带 data、FILL 只带 fillValue（调用方流式生成，避免 materialize）、
+// DONT_CARE 不产出数据但偏移照常推进（reference/qdl/src/program.c:139-170）。
+void TestSparse::sparseWalkYieldsRawFillAndDontCare()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.sparse");
+
+    // 1 块 RAW（内容非全同）+ 2 块 FILL(44 33 22 11) + 1 块 DONT_CARE = 4 块
+    QByteArray raw(4096, Qt::Uninitialized);
+    for (int i = 0; i < raw.size(); ++i) raw[i] = char(i & 0xFF);
+    QByteArray sparse = buildSparseHeader(4, 3) + buildRawChunk(raw);
+    sparse += buildFillChunk(2, QByteArray("\x44\x33\x22\x11", 4));
+    sparse += buildChunkHeader(0xCAC3, 1, 12);
+    QVERIFY(writeFile(inPath, sparse));
+
+    QList<imgsparse::SparseChunk> got;
+    QString err;
+    QVERIFY2(imgsparse::sparseWalk(inPath, [&got](const imgsparse::SparseChunk &c) {
+                 got.append(c);
+                 return true;
+             }, &err), qPrintable(err));
+
+    QCOMPARE(got.size(), 3);
+    // ① RAW：data = 块内原始字节，偏移从 0 起
+    QVERIFY(got[0].raw);
+    QVERIFY(!got[0].fill);
+    QVERIFY(!got[0].dontCare);
+    QCOMPARE(got[0].rawOffsetBytes, quint64(0));
+    QCOMPARE(got[0].rawBytes, quint64(4096));
+    QCOMPARE(got[0].data, raw);
+    // ② FILL：data 为空（会话按 fillValue 生成），fillValue = 小端读回的 u32，覆盖 2 块
+    QVERIFY(got[1].fill);
+    QVERIFY(!got[1].raw);
+    QVERIFY(!got[1].dontCare);
+    QCOMPARE(got[1].rawOffsetBytes, quint64(4096));
+    QCOMPARE(got[1].rawBytes, quint64(8192));
+    QCOMPARE(got[1].fillValue, quint32(0x11223344));
+    QVERIFY(got[1].data.isEmpty());
+    // ③ DONT_CARE：不产出数据，偏移照常推进
+    QVERIFY(got[2].dontCare);
+    QVERIFY(!got[2].raw);
+    QVERIFY(!got[2].fill);
+    QCOMPARE(got[2].rawOffsetBytes, quint64(4096 + 8192));
+    QCOMPARE(got[2].rawBytes, quint64(4096));
+    QVERIFY(got[2].data.isEmpty());
+}
+
+// 把 sparseWalk 的产出按调用方语义拼回去，必须与既有 simg2img **逐字节一致** —— 这条把
+// "块遍历与 simg2imgStream 同源、不重写解析"变成可执行断言。
+void TestSparse::sparseWalkMatchesSimg2img()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.sparse");
+    QByteArray raw(4096, Qt::Uninitialized);
+    for (int i = 0; i < raw.size(); ++i) raw[i] = char((i * 7) & 0xFF);
+    QByteArray sparse = buildSparseHeader(4, 3) + buildRawChunk(raw);
+    sparse += buildFillChunk(2, QByteArray("\x11\x22\x33\x44", 4));
+    sparse += buildChunkHeader(0xCAC3, 1, 12);
+    QVERIFY(writeFile(inPath, sparse));
+
+    QByteArray rebuilt;
+    QString err;
+    QVERIFY2(imgsparse::sparseWalk(inPath, [&rebuilt](const imgsparse::SparseChunk &c) {
+        if (c.raw) {
+            rebuilt += c.data;
+        } else if (c.fill) {
+            // 4 字节 pattern 逐字节重复（小端 u32 → 原字节序），与 simg2img 的 pat[j % 4] 同款
+            QByteArray pat(4, '\0');
+            for (int j = 0; j < 4; ++j) pat[j] = char((c.fillValue >> (8 * j)) & 0xFF);
+            for (quint64 off = 0; off < c.rawBytes; off += 4) rebuilt += pat;
+        } else {
+            rebuilt += QByteArray(static_cast<int>(c.rawBytes), '\0');   // DONT_CARE → 零填充
+        }
+        return true;
+    }, &err), qPrintable(err));
+    QCOMPARE(rebuilt, imgsparse::simg2img(sparse));
+}
+
+// 回调返回 false = 调用方要求中止（会话在 NAK/写失败时提前收手）→ 返回 false 且 error 说明原因。
+void TestSparse::sparseWalkAbortsOnCallbackFalse()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.sparse");
+    QByteArray sparse = buildSparseHeader(2, 1) + buildRawChunk(QByteArray(8192, '\xAB'));
+    QVERIFY(writeFile(inPath, sparse));
+
+    int calls = 0;
+    QString err;
+    QVERIFY(!imgsparse::sparseWalk(inPath, [&calls](const imgsparse::SparseChunk &) {
+        ++calls;
+        return false;
+    }, &err));
+    QCOMPARE(calls, 1);
+    QVERIFY(err.contains(QStringLiteral("中止")));
+}
+
+void TestSparse::sparseWalkRejectsTruncatedAndNonSparse()
+{
+    QTemporaryDir dir;
+    const QString inPath = dir.filePath("in.sparse");
+    QString err;
+
+    // 非 sparse（magic 不符）
+    QVERIFY(writeFile(inPath, QByteArray(4096, '\xAA')));
+    QVERIFY(!imgsparse::sparseWalk(inPath, [](const imgsparse::SparseChunk &) { return true; }, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 头声明 2 块 RAW，实际只给 1 块的数据 → 截断
+    QByteArray truncated = buildSparseHeader(2, 1) + buildChunkHeader(0xCAC1, 2, 12 + 8192)
+                           + QByteArray(4096, '\xAB');
+    QVERIFY(writeFile(inPath, truncated));
+    err.clear();
+    QVERIFY(!imgsparse::sparseWalk(inPath, [](const imgsparse::SparseChunk &) { return true; }, &err));
+    QVERIFY(!err.isEmpty());
+
+    // 文件不存在
+    err.clear();
+    QVERIFY(!imgsparse::sparseWalk(dir.filePath("nope.sparse"),
+                                   [](const imgsparse::SparseChunk &) { return true; }, &err));
+    QVERIFY(!err.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestSparse)

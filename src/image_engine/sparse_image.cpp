@@ -13,6 +13,8 @@ constexpr quint16 kChunkRaw = 0xCAC1, kChunkFill = 0xCAC2, kChunkDontCare = 0xCA
 constexpr int kSparseHeaderSize = 28, kChunkHeaderSize = 12;
 // blk_sz / blockSize 防护上限（AOSP 实际恒为 4096；防止恶意头触发 GB 级分配）
 constexpr qint64 kMaxBlockSize = 64 * 1024 * 1024;
+// sparseWalk 单次回调产出的上限：大块切多片，避免 GB 级镜像一次性进内存
+constexpr qint64 kWalkPieceBytes = 8 * 1024 * 1024;
 
 // AOSP sparse_format.h 头布局：magic(u32@0) major(u16@4) minor(u16@6)
 // file_hdr_sz(u16@8) chunk_hdr_sz(u16@10) blk_sz(u32@12)
@@ -84,6 +86,39 @@ qint64 sparseTotalSize(const SparseHeader &h, QString *error)
     return static_cast<qint64>(total);
 }
 
+// 一个已解析并校验过的 chunk 头。**simg2imgChunks 与 sparseWalkChunks 共用同一套解析**
+// （块遍历同源：头字段读取、越界判定、dataSz 计算都只在这里一份），差别只在"产出到哪"。
+struct ChunkInfo {
+    quint16 type = 0;
+    quint32 blocks = 0;       // chunk_sz（块数）
+    qint64  totalSz = 0;      // 整块长度（含 chunk 头）
+    qint64  chunkBytes = 0;   // blocks × blk_sz（该块覆盖的 raw 字节数）
+    qint64  dataSz = 0;       // totalSz - chunkHdrSz（RAW/FILL 的载荷长度）
+    qint64  dataPos = 0;      // 载荷起始偏移
+};
+
+// 读并校验 pos 处的 chunk 头；失败置 error 并返回 false（校验口径与原实现逐条一致）。
+bool readChunkInfo(QIODevice *in, const SparseHeader &h, qint64 pos, qint64 inSize,
+                   qint64 written, qint64 totalSize, ChunkInfo &out, QString *error)
+{
+    if (pos + h.chunkHdrSz > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（chunk 头越界）")); return false; }
+    QByteArray chBuf(h.chunkHdrSz, Qt::Uninitialized);
+    if (!in->seek(pos) || !readExact(in, chBuf.data(), h.chunkHdrSz)) {
+        setErr(error, QStringLiteral("sparse 文件被截断（chunk 头不完整）"));
+        return false;
+    }
+    out.type = qFromLittleEndian<quint16>(chBuf.constData());
+    out.blocks = qFromLittleEndian<quint32>(chBuf.constData() + 4);
+    const quint32 totalSz = qFromLittleEndian<quint32>(chBuf.constData() + 8);
+    out.chunkBytes = static_cast<qint64>(out.blocks) * h.blkSz;
+    if (written + out.chunkBytes > totalSize) { setErr(error, QStringLiteral("chunk 超出镜像声明大小")); return false; }
+    if (totalSz < h.chunkHdrSz) { setErr(error, QStringLiteral("非法 chunk total_sz")); return false; }
+    out.totalSz = totalSz;
+    out.dataSz = totalSz - h.chunkHdrSz;
+    out.dataPos = pos + h.chunkHdrSz;
+    return true;
+}
+
 // 核心：按 chunk 流式读入写盘（内存 O(chunk)）。输出设备须已预置为 totalBlks*blkSz 大小
 // （DONTCARE 块只前移写位置，空洞读回为 0）。进度 = 已消费的 sparse 输入字节。
 bool simg2imgChunks(QIODevice *in, QIODevice *out, const SparseHeader &h,
@@ -97,29 +132,17 @@ bool simg2imgChunks(QIODevice *in, QIODevice *out, const SparseHeader &h,
     qint64 written = 0;
     QByteArray dataBuf(1024 * 1024, Qt::Uninitialized); // RAW 数据复用读缓冲
     QByteArray fillBuf;                                 // FILL 块复用缓冲
-    QByteArray chBuf(h.chunkHdrSz, Qt::Uninitialized);  // chunk 头缓冲
     char pat[4];
     if (progress) progress(0);
     for (quint32 i = 0; i < h.totalChunks; ++i) {
-        if (pos + h.chunkHdrSz > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（chunk 头越界）")); return false; }
-        if (!in->seek(pos) || !readExact(in, chBuf.data(), h.chunkHdrSz)) {
-            setErr(error, QStringLiteral("sparse 文件被截断（chunk 头不完整）"));
-            return false;
-        }
-        const quint16 type = qFromLittleEndian<quint16>(chBuf.constData());
-        const quint32 chunkSz = qFromLittleEndian<quint32>(chBuf.constData() + 4);
-        const quint32 totalSz = qFromLittleEndian<quint32>(chBuf.constData() + 8);
-        const qint64 chunkBytes = static_cast<qint64>(chunkSz) * h.blkSz;
-        if (written + chunkBytes > totalSize) { setErr(error, QStringLiteral("chunk 超出镜像声明大小")); return false; }
-        if (totalSz < h.chunkHdrSz) { setErr(error, QStringLiteral("非法 chunk total_sz")); return false; }
-        const qint64 dataSz = totalSz - h.chunkHdrSz;
-        const qint64 dataPos = pos + h.chunkHdrSz;
-        switch (type) {
+        ChunkInfo ci;
+        if (!readChunkInfo(in, h, pos, inSize, written, totalSize, ci, error)) return false;
+        switch (ci.type) {
         case kChunkRaw: {
-            if (dataSz != chunkBytes) { setErr(error, QStringLiteral("RAW chunk 数据长度与块数不匹配")); return false; }
-            if (dataPos + dataSz > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（RAW 数据越界）")); return false; }
-            if (!in->seek(dataPos)) { setErr(error, QStringLiteral("读取 sparse 失败")); return false; }
-            qint64 remaining = dataSz;
+            if (ci.dataSz != ci.chunkBytes) { setErr(error, QStringLiteral("RAW chunk 数据长度与块数不匹配")); return false; }
+            if (ci.dataPos + ci.dataSz > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（RAW 数据越界）")); return false; }
+            if (!in->seek(ci.dataPos)) { setErr(error, QStringLiteral("读取 sparse 失败")); return false; }
+            qint64 remaining = ci.dataSz;
             while (remaining > 0) {
                 const qint64 n = in->read(dataBuf.data(), qMin(remaining, static_cast<qint64>(dataBuf.size())));
                 if (n <= 0) { setErr(error, QStringLiteral("sparse 文件被截断（RAW 数据不足）")); return false; }
@@ -129,9 +152,9 @@ bool simg2imgChunks(QIODevice *in, QIODevice *out, const SparseHeader &h,
             break;
         }
         case kChunkFill: {
-            if (dataSz != 4) { setErr(error, QStringLiteral("FILL chunk 数据长度必须为 4")); return false; }
-            if (dataPos + 4 > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（FILL 数据越界）")); return false; }
-            if (!in->seek(dataPos) || !readExact(in, pat, 4)) {
+            if (ci.dataSz != 4) { setErr(error, QStringLiteral("FILL chunk 数据长度必须为 4")); return false; }
+            if (ci.dataPos + 4 > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（FILL 数据越界）")); return false; }
+            if (!in->seek(ci.dataPos) || !readExact(in, pat, 4)) {
                 setErr(error, QStringLiteral("sparse 文件被截断（FILL 数据不足）"));
                 return false;
             }
@@ -139,23 +162,23 @@ bool simg2imgChunks(QIODevice *in, QIODevice *out, const SparseHeader &h,
             fillBuf.resize(static_cast<int>(h.blkSz));
             for (int j = 0; j < fillBuf.size(); ++j)
                 fillBuf[j] = pat[j % 4];
-            for (quint32 b = 0; b < chunkSz; ++b)
+            for (quint32 b = 0; b < ci.blocks; ++b)
                 if (!writeAll(out, fillBuf.constData(), fillBuf.size())) { setErr(error, QStringLiteral("写输出失败")); return false; }
             break;
         }
         case kChunkDontCare:
             // 输出设备已预置为 totalSize，直接前移写位置（空洞读回为 0，与旧接口零填充逐字节一致）
-            if (!out->seek(out->pos() + chunkBytes)) { setErr(error, QStringLiteral("DONTCARE 块写位置移动失败")); return false; }
+            if (!out->seek(out->pos() + ci.chunkBytes)) { setErr(error, QStringLiteral("DONTCARE 块写位置移动失败")); return false; }
             break;
         case kChunkCrc32:
             setErr(error, QStringLiteral("sparse 含 CRC32 chunk，不支持"));
             return false;
         default:
-            setErr(error, QStringLiteral("不支持的 chunk 类型 0x%1").arg(type, 4, 16, QLatin1Char('0')));
+            setErr(error, QStringLiteral("不支持的 chunk 类型 0x%1").arg(ci.type, 4, 16, QLatin1Char('0')));
             return false;
         }
-        written += chunkBytes;
-        pos += totalSz;
+        written += ci.chunkBytes;
+        pos += ci.totalSz;
         if (progress) progress(static_cast<quint64>(qMin(pos, inSize)));
     }
     if (written != totalSize) { setErr(error, QStringLiteral("chunk 总量与头声明不一致")); return false; }
@@ -307,6 +330,93 @@ bool img2simgIo(QIODevice *in, QIODevice *out, quint32 blockSize,
     if (progress) progress(static_cast<quint64>(fileSize));
     return true;
 }
+
+// Task 6：按块产出（不落盘）。与 simg2imgChunks **同一套块遍历**（共用一个 readChunkInfo 解析 +
+// 越界判定），只把"写输出设备"换成回调。大段按 kWalkPieceBytes 切片，避免 GB 级镜像一次性
+// materialize（FILL 尤其如此：qdl 是按 max_payload 边生成边发的，reference/qdl/src/firehose.c:1055-1066）。
+bool sparseWalkChunks(QIODevice *in, const SparseHeader &h,
+                      const std::function<bool(const SparseChunk &)> &cb, QString *error)
+{
+    const qint64 totalSize = sparseTotalSize(h, error);
+    if (totalSize < 0) return false;
+    const qint64 inSize = in->size();
+    if (inSize < 0) { setErr(error, QStringLiteral("输入设备大小未知")); return false; }
+
+    qint64 pos = h.fileHdrSz;
+    qint64 written = 0;                                  // raw 镜像内的推进字节（= 下一片的 rawOffsetBytes）
+    QByteArray dataBuf(1024 * 1024, Qt::Uninitialized);  // RAW 数据读缓冲
+
+    // 一片一段地喂给回调；rawOffsetBytes/rawBytes 按片推进
+    auto emitPiece = [&](bool isRaw, bool isFill, qint64 bytes, quint32 fillValue,
+                         const QByteArray &data) -> bool {
+        SparseChunk c;
+        c.rawOffsetBytes = static_cast<quint64>(written);
+        c.rawBytes = static_cast<quint64>(bytes);
+        c.raw = isRaw;
+        c.fill = isFill;
+        c.dontCare = (!isRaw && !isFill);
+        c.fillValue = fillValue;
+        c.data = data;
+        if (!cb(c)) {
+            setErr(error, QStringLiteral("sparseWalk 被调用方中止（偏移 %1 处的 %2 字节未全部产出）")
+                              .arg(c.rawOffsetBytes).arg(c.rawBytes));
+            return false;
+        }
+        written += bytes;
+        return true;
+    };
+
+    for (quint32 i = 0; i < h.totalChunks; ++i) {
+        ChunkInfo ci;
+        if (!readChunkInfo(in, h, pos, inSize, written, totalSize, ci, error)) return false;
+        switch (ci.type) {
+        case kChunkRaw: {
+            if (ci.dataSz != ci.chunkBytes) { setErr(error, QStringLiteral("RAW chunk 数据长度与块数不匹配")); return false; }
+            if (ci.dataPos + ci.dataSz > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（RAW 数据越界）")); return false; }
+            if (!in->seek(ci.dataPos)) { setErr(error, QStringLiteral("读取 sparse 失败")); return false; }
+            qint64 remaining = ci.dataSz;
+            while (remaining > 0) {
+                const qint64 n = in->read(dataBuf.data(), qMin(remaining, static_cast<qint64>(dataBuf.size())));
+                if (n <= 0) { setErr(error, QStringLiteral("sparse 文件被截断（RAW 数据不足）")); return false; }
+                if (!emitPiece(true, false, n, 0, QByteArray(dataBuf.constData(), n)))
+                    return false;
+                remaining -= n;
+            }
+            break;
+        }
+        case kChunkFill: {
+            if (ci.dataSz != 4) { setErr(error, QStringLiteral("FILL chunk 数据长度必须为 4")); return false; }
+            if (ci.dataPos + 4 > inSize) { setErr(error, QStringLiteral("sparse 文件被截断（FILL 数据越界）")); return false; }
+            char pat[4];
+            if (!in->seek(ci.dataPos) || !readExact(in, pat, 4)) {
+                setErr(error, QStringLiteral("sparse 文件被截断（FILL 数据不足）"));
+                return false;
+            }
+            const quint32 fillValue = qFromLittleEndian<quint32>(pat);   // 原样小端读回，写回即还原字节序
+            qint64 remaining = ci.chunkBytes;
+            while (remaining > 0) {
+                const qint64 n = qMin(remaining, kWalkPieceBytes);
+                if (!emitPiece(false, true, n, fillValue, QByteArray())) return false;
+                remaining -= n;
+            }
+            break;
+        }
+        case kChunkDontCare:
+            // 不产出数据（调用方按 rawBytes 推进偏移）；无数据可分片，故一次性产出
+            if (!emitPiece(false, false, ci.chunkBytes, 0, QByteArray())) return false;
+            break;
+        case kChunkCrc32:
+            setErr(error, QStringLiteral("sparse 含 CRC32 chunk，不支持"));
+            return false;
+        default:
+            setErr(error, QStringLiteral("不支持的 chunk 类型 0x%1").arg(ci.type, 4, 16, QLatin1Char('0')));
+            return false;
+        }
+        pos += ci.totalSz;
+    }
+    if (written != totalSize) { setErr(error, QStringLiteral("chunk 总量与头声明不一致")); return false; }
+    return true;
+}
 } // namespace
 
 bool isSparse(const QByteArray &header)
@@ -389,6 +499,24 @@ bool simg2imgStream(const QString &inPath, const QString &outPath,
     out.close();
     if (!ok) QFile::remove(outPath);
     return ok;
+}
+
+bool sparseWalk(const QString &inPath, const std::function<bool(const SparseChunk &)> &cb,
+                QString *error)
+{
+    if (!cb) {
+        setErr(error, QStringLiteral("sparseWalk 未提供回调"));
+        return false;
+    }
+    QFile in(inPath);
+    if (!in.open(QIODevice::ReadOnly)) {
+        setErr(error, QStringLiteral("无法打开输入文件 %1: %2").arg(inPath, in.errorString()));
+        return false;
+    }
+    SparseHeader h;
+    if (!parseSparseHeader(&in, h, error)) return false;
+    if (sparseTotalSize(h, error) < 0) return false;
+    return sparseWalkChunks(&in, h, cb, error);
 }
 
 bool img2simgStream(const QString &inPath, const QString &outPath, quint32 blockSize,

@@ -295,7 +295,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_worker.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_sahara.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_firehose.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -369,6 +370,17 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
+                elseif(_test_stem STREQUAL "test_edl_session")
+                    # Phase B Task 6：会话编排（Sahara → 重枚举 → configure → getstorageinfo →
+                    # validatePlan → 逐条目数据面 → reset）整链编入；sparse 展开走
+                    # image_engine/sparse_image.cpp 的 sparseWalk（该源已在 image_engine 静态库内，
+                    # 这里再显式编入本目标，使"数据面依赖 sparse 解析"在构建图上可见）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/sparse_image.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
