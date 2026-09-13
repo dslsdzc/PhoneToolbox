@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -204,8 +205,10 @@ bool FlashPlanDialog::buildAndShow(const QString &dir, QWidget *parent,
 
     FlashPlanDialog dlg(plan, parent);
     dlg.setPlanDir(dir);
-    if (dlg.exec() != QDialog::Accepted || !dlg.confirmed())
-        return false;        // 取消：*error 保持调用方原值（调用方按空 error 识别"用户取消"）
+    if (dlg.exec() != QDialog::Accepted || !dlg.confirmed()) {
+        if (error) error->clear();   // 显式清空：调用方以"*error 为空 = 用户取消"判定（不赖调用方初值）
+        return false;
+    }
 
     if (outDir) *outDir = dir;
     return true;
@@ -239,7 +242,9 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
     const auto cb = [&progress](const QString &name, int percent) {
         progress.setLabelText(QStringLiteral("解包中：%1").arg(name));
         progress.setValue(percent);
-        QCoreApplication::processEvents();      // 同步引擎 + 模态进度条：手动泵事件
+        // 同步引擎 + 模态进度条：手动泵事件；**排除用户输入**（只重绘）—— 解包没有取消钩子，
+        // 让点击进来只会制造"看着像能取消"的假象（与面板侧刷写期间的泵法同一口径）
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     };
 
     QString extractErr;
@@ -270,8 +275,10 @@ bool FlashPlanDialog::buildAndShowPackage(const QString &packagePath, QWidget *p
     dlg.setPlanDir(tempDir->path());
     if (!extractErr.isEmpty())
         dlg.addWarnings({QStringLiteral("解包告警：%1").arg(extractErr)});
-    if (dlg.exec() != QDialog::Accepted || !dlg.confirmed())
+    if (dlg.exec() != QDialog::Accepted || !dlg.confirmed()) {
+        if (error) error->clear();   // 与 buildAndShow 同口径：*error 为空 = 用户取消
         return false;
+    }
 
     if (outDir) *outDir = tempDir->path();
     return true;

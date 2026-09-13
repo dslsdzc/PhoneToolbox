@@ -113,6 +113,19 @@ public:
     // 纯函数（单测）：设备模式 → 协议通道名；非协议模式返回空串
     static QString flashChannelForMode(DeviceDetector::DeviceMode mode);
 
+    // 纯函数（单测）：该模式的「刷入」是否由**整包协议通道**接管（即不进分区刷写）。
+    // = 通道非空 且 **不是 oppo-edl**：9008 的分区列表是真实可选条目（lun<N>），「刷入」必须保持
+    // "写所选分区"的语义（与「读取」一致）；整包按计划刷写走专用入口「EDL 刷写计划…」。
+    // 抽成函数是为了让这条边界有回归守卫（Task 8 审查 Important：EDL 单选分区刷写曾被通道截胡成死路）。
+    static bool isPackageChannelMode(DeviceDetector::DeviceMode mode);
+
+    // 纯函数（单测）：oppo-edl 通道的 programmer 解析 —— 显式路径优先；否则在 planDir 内探测
+    // prog_*firehose*.{elf,mbn,bin}（大小写不敏感，取字典序首个）。
+    // 返回空串 = 没找到（*error 填中文）；*messages 为需要落日志的提示（多个候选时非空），
+    // 由调用方逐条 emit outputMessage。**不碰设备/USB**（探测逻辑可离线钉住）。
+    static QString resolveProgrammer(const QString &planDir, const QString &explicitPath,
+                                     QStringList *messages, QString *error);
+
 signals:
     void outputMessage(const QString &msg, bool isError);
     void flashProgress(int percent);

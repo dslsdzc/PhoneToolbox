@@ -16,6 +16,7 @@
 #include <QFrame>
 #include <QCheckBox>
 #include <QApplication>
+#include <QEventLoop>                   // processEvents 的标志（ExcludeUserInputEvents，刷写期间只重绘）
 #include <QThread>
 #include <QRegularExpression>
 #include <QMap>
@@ -636,9 +637,17 @@ void FlashPanel::onFlashClicked()
     // F5: 协议通道整包刷写（MTK BROM / 华为 USB Update / 展锐）——
     // 优先于分区刷写；通道按所选设备模式分派，ADB 条目不会进入此分支
     // （flashChannelForMode 对非协议模式返回空串）。
-    const QString channel = FlashTool::flashChannelForMode(
-        static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode));
-    if (!channel.isEmpty()) {
+    //
+    // Phase B Task 8：`oppo-edl`（9008）**不在这里截胡** —— EDL 的分区列表是真实可选条目（lun<N>），
+    // 「刷入」必须保持"写所选分区"的语义（与 onDumpClicked 的「读取」一致，见 :920-941；
+    // 两条路径行为一致是硬要求）。
+    // 若在此截胡：本段没有 oppo-edl 的参数分支 → params 空 → 通道报"缺少 planDir"直接 return，
+    // 下面对 EDL 的分区写分支将**永久不可达**（Task 8 审查 Important）。
+    // 整包按计划刷写走专用入口「EDL 刷写计划…」（onEdlPlanFlash），与本按钮互不干扰。
+    const DeviceDetector::DeviceMode deviceMode =
+        static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode);
+    const QString channel = FlashTool::flashChannelForMode(deviceMode);
+    if (FlashTool::isPackageChannelMode(deviceMode)) {
         const QString deviceId = m_deviceInfo.serialNumber;
         QVariantMap params;
         if (channel == QStringLiteral("huawei-usb-update")) {
@@ -1162,18 +1171,28 @@ void FlashPanel::onEdlPlanFlash()
         }
         picked = FlashPlanDialog::buildAndShowPackage(pkg, this, m_edlPlanTempDir.get(),
                                                       &planDir, &error);
-        if (!picked)
-            m_edlPlanTempDir.reset();      // 未开刷：临时目录（含解包产物）可立即回收
     } else {
         return;                            // 取消
     }
 
+    // 解包产物常有数 GB：清理策略一处说清 ——
+    //   * 用户取消（error 为空）→ 立即回收；
+    //   * **构建/解包失败（error 非空）→ 保留并把路径告诉用户**（Task 8 审查 Minor：此时 reset 等于
+    //     让用户为同一个包再解一遍；保留后可直接改包/重选，或手动清理）；
+    //   * 刷写成功 → 回收；刷写失败 → 保留（便于就地重试）；
+    //   * 下一次选包会整体替换（旧目录随 unique_ptr 析构删除）。
     if (!picked) {
-        // 取消（error 为空）与失败（error 非空）分开落日志
-        if (error.isEmpty())
+        if (error.isEmpty()) {
             emit outputMessage(QStringLiteral("已取消 EDL 刷写计划"), false);
-        else
+            if (m_edlPlanTempDir)
+                m_edlPlanTempDir.reset();
+        } else {
             emit outputMessage(QStringLiteral("EDL 刷写计划不可用: %1").arg(error), true);
+            if (m_edlPlanTempDir)
+                emit outputMessage(QStringLiteral("解包产物保留在：%1（改包后可重选该目录，"
+                                                  "避免重新解包；也可手动删除）")
+                                       .arg(m_edlPlanTempDir->path()), false);
+        }
         return;
     }
 
@@ -1182,11 +1201,23 @@ void FlashPanel::onEdlPlanFlash()
     m_progressBar->setValue(0);
     m_edlPlanBtn->setEnabled(false);
 
+    // 刷写是同步一整趟（Sahara → 逐条目写 → reset），不泵事件则进度条与日志**全程不重绘**
+    // （死砖循环是手动 processEvents，见 onBrickRepairClicked 的执行段）。这里用
+    // **ExcludeUserInputEvents**：只放行重绘/定时器，鼠标键盘事件一律不进队列 ——
+    // 从根上排除"刷写途中用户再点按钮造成重入"，比逐个禁用按钮更可靠（且连接是本段专有，
+    // 退出即断开，不影响其它路径的既有行为）。
+    const QMetaObject::Connection pump = connect(
+        m_flashTool, &FlashTool::flashProgress, this, [](int) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        });
+
     QVariantMap params;
     params.insert(QStringLiteral("planDir"), planDir);
     QString runErr;
     const bool ok = m_flashTool->flashFullPackage(m_deviceInfo.serialNumber,
                                                   DeviceDetector::MODE_EDL_9008, params, &runErr);
+    disconnect(pump);
+
     if (!ok)
         emit outputMessage(QStringLiteral("刷写失败: %1").arg(runErr), true);
     else
@@ -1195,10 +1226,8 @@ void FlashPanel::onEdlPlanFlash()
     m_progressBar->setVisible(false);
     m_edlPlanBtn->setEnabled(true);
 
-    // 整包解包产物常有数 GB：成功即回收（计划已写完，镜像不再需要）。失败保留，便于重试；
-    // 换来源时（选择目录/重新选包）会释放上一次的。
     if (ok)
-        m_edlPlanTempDir.reset();
+        m_edlPlanTempDir.reset();          // 成功即回收（镜像已写完，不再需要）
 }
 
 // ==================== MTK 模式 ====================

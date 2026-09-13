@@ -41,7 +41,8 @@ public:
 
     // 目录入口（解包产物目录：rawprogram*.xml / settings.xml）：
     //   buildPlanFromDir → 预览 → 用户确认后 *outDir = dir 并返回 true。
-    // 返回 false 时：*error 非空 = 构建计划失败（中文文案）；*error 为空 = 用户取消。
+    // 返回 false 时：*error 非空 = 构建计划失败（中文文案）；*error 为空 = 用户取消
+    // （取消路径**显式 error->clear()**，不依赖调用方传进来的初值）。
     static bool buildAndShow(const QString &dir, QWidget *parent, QString *outDir, QString *error);
 
     // 整包入口（.ofp/.ops）：Phase A 的 extractOFP/extractOPS 解包到 **tempDir**（由调用方持有：

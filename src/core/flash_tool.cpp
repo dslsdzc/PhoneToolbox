@@ -1142,7 +1142,7 @@ static int countDevicesOfVid(int vid, QString *error)
 
 // programmer 探测（oppo-edl 通道）：解包产物目录内的 prog_*firehose*.{elf,mbn,bin}。
 // 真包两种命名都覆盖（prog_ufs_firehose_*.elf / prog_firehose_*.mbn —— buildPlanFromDir 也按前者
-// 判 storageType）。大小写不敏感；返回全部候选（由调用方决定取谁并如实报告"多个候选"）。
+// 判 storageType）。大小写不敏感；按文件名排序（QDir::Name）保证"取首个"可复现。
 static QStringList findProgrammersInDir(const QString &dir)
 {
     QDir d(dir);
@@ -1156,6 +1156,33 @@ static QStringList findProgrammersInDir(const QString &dir)
             hits << d.absoluteFilePath(name);
     }
     return hits;
+}
+
+QString FlashTool::resolveProgrammer(const QString &planDir, const QString &explicitPath,
+                                     QStringList *messages, QString *error)
+{
+    if (!explicitPath.isEmpty())
+        return explicitPath;        // 显式指定即信任；打不开/为空由调用方在读取时报错
+
+    const QStringList found = findProgrammersInDir(planDir);
+    if (found.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("未在 %1 内找到 programmer（prog_*firehose*.{elf,mbn,bin}）。"
+                                    "请在「EDL 刷写计划…」入口重新选择包含 programmer 的目录，"
+                                    "或显式提供 programmerPath").arg(planDir);
+        return QString();
+    }
+    if (found.size() > 1 && messages)
+        *messages << QStringLiteral("目录内有 %1 个 programmer 候选，使用首个：%2")
+                         .arg(found.size()).arg(QFileInfo(found.first()).fileName());
+    return found.first();
+}
+
+bool FlashTool::isPackageChannelMode(DeviceDetector::DeviceMode mode)
+{
+    // oppo-edl（9008）**不在**此列：EDL 的分区列表是真实条目，分区刷写/读取都按 lun<N> 工作。
+    // 见 flash_tool.h 的注释与 tests/test_pipeline.cpp 的 edlKeepsPartitionFlashPath。
+    return !flashChannelForMode(mode).isEmpty() && mode != DeviceDetector::MODE_EDL_9008;
 }
 
 QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
@@ -1277,7 +1304,10 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         // 会话内入口（Task 7 的 EDLHandler 路径），本通道不适用。
         const QString planDir = params.value(QStringLiteral("planDir")).toString();
         if (planDir.isEmpty()) {
-            if (error) *error = QStringLiteral("缺少解包产物目录（oppo-edl 通道的 planDir）");
+            // 文案指向 UI 入口：只有「EDL 刷写计划…」会带 planDir 进来，用户需要知道去哪（Task 8 审查）
+            if (error)
+                *error = QStringLiteral("缺少解包产物目录（oppo-edl 通道的 planDir）—— "
+                                        "整包刷写请用界面的「EDL 刷写计划…」入口");
             return false;
         }
         edl::FlashPlan plan;
@@ -1292,20 +1322,17 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         for (const QString &w : plan.warnings)
             emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
 
-        QString programmerPath = params.value(QStringLiteral("programmerPath")).toString();
+        QStringList progNotes;
+        QString progErr;
+        const QString programmerPath = resolveProgrammer(
+            planDir, params.value(QStringLiteral("programmerPath")).toString(), &progNotes, &progErr);
+        for (const QString &note : progNotes)
+            emit outputMessage(note, false);
         if (programmerPath.isEmpty()) {
-            const QStringList found = findProgrammersInDir(planDir);
-            if (found.isEmpty()) {
-                if (error)
-                    *error = QStringLiteral("未在 %1 内找到 programmer（prog_*firehose*.{elf,mbn,bin}），"
-                                            "请显式提供 programmerPath").arg(planDir);
-                return false;
-            }
-            programmerPath = found.first();
-            if (found.size() > 1)
-                emit outputMessage(QStringLiteral("目录内有 %1 个 programmer 候选，使用首个：%2")
-                                       .arg(found.size())
-                                       .arg(QFileInfo(programmerPath).fileName()), false);
+            if (error)
+                *error = progErr.isEmpty()
+                    ? QStringLiteral("无法确定 programmer（oppo-edl 通道）") : progErr;
+            return false;
         }
         QFile progFile(programmerPath);
         if (!progFile.open(QIODevice::ReadOnly)) {
