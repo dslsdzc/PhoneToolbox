@@ -660,16 +660,21 @@ void TestEdlSahara::servesProgrammerInRequestedSlices()
             << saharaFrame(edl::SAHARA_READ_DATA, {0, 4, 8, 0})          // off=4 len=8
             << saharaFrame(edl::SAHARA_READ_DATA_64, {0, 12, 0, 0, 4, 0})// 64 位：off=12 len=4
             << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
-            << saharaFrame(edl::SAHARA_DONE_REQ, {});
+            << saharaFrame(edl::SAHARA_DONE_RSP, {});   // ← DONE 这对是 **host 主动**：host 发 DONE_REQ，
+                                                        //   设备回 DONE_RSP（bkerler sahara.py:453-459 +
+                                                        //   edl_handler.cpp:566-584 两源一致；与 HELLO_REQ/
+                                                        //   READ_DATA/END_OF_IMAGE 的"设备主动"方向相反，最易记反）
 
     QString err;
     QVERIFY2(edl::saharaLoadProgrammer(t, prog, &err), qPrintable(err));
-    QCOMPARE(t.writes.size(), 5);                                  // HELLO_RSP + 3 段数据 + DONE_RSP
+    QCOMPARE(t.writes.size(), 5);                                  // HELLO_RSP + 3 段数据 + DONE_REQ
     QCOMPARE(t.writes[1], QByteArray("0123"));                     // 第一段切片
     QCOMPARE(t.writes[2], QByteArray("456789AB"));                 // 第二段切片
     QCOMPARE(t.writes[3], QByteArray("CDEF"));                     // 64 位偏移段（未截断）
     const QByteArray helloRsp = t.writes[0];
     QCOMPARE(int(helloRsp.at(0)), 0x02);                           // cmd = HELLO_RSP
+    QCOMPARE(int(t.writes[4].at(0)), 0x05);                        // 最后一帧 = DONE_REQ（host 主动）
+    QCOMPARE(int(t.writes[4].at(4)), 8);                           // 长度字段 = 8（无 payload）
 }
 
 void TestEdlSahara::failsWhenDeviceNeverRequests()
@@ -680,6 +685,8 @@ void TestEdlSahara::failsWhenDeviceNeverRequests()
     QVERIFY(!err.isEmpty());                                        // 中文文案，含"未收到"
 }
 ```
+
+**另需补一条用例（控制器要求）**：`SAHARA_READ_DATA_64` 的**偏移 > 4GiB**（如 `offset = 0x1_0000_0000`）—— brief 自带那条只覆盖小偏移，**杀不掉截断缺陷**；断言切出的字节等于该 64 位偏移处的内容（夹具侧把 programmer 造得足够大或用"偏移越界即报错"的语义明确表达，由你选并说明）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
