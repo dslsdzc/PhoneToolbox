@@ -20,6 +20,15 @@ struct PlanEntry {
     quint64 numSectors = 0;     // Program/Erase：sparse 展开后的 raw 扇区数
     quint32 sectorSize = 4096;  // 逐条目 SECTOR_SIZE_IN_BYTES
     bool    sparse = false;
+    // 该条目**将下发的字节量**。同一个字段在两层里由不同步骤回填，读它必须两条口径都吃：
+    //   * 计划层（buildPlanFromDir 路径）：只有 sparse 条目由 normalizePlan 回填"去 sparse 后的
+    //     字节数"（flash_plan.cpp 的 normalizeProgramImage）；非 sparse 条目**恒为 0**，
+    //     由 finalizePlan 按 numSectors × sectorSize 兜底（进度分母同款）。
+    //   * EDLHandler 单条目路径（edl_handler.cpp 的 writeImageEntry）：直接填 numSectors × sectorSize
+    //     （= 实际推送量，含数据面补零）。
+    // 因而**不许**把它当"文件大小"或"非零即可信"用；UI 的"大小"列就是
+    // `rawBytes != 0 ? rawBytes : numSectors × sectorSize`（flash_plan_dialog.cpp 的 entryBytes），
+    // 与上面两条口径一致。
     quint64 rawBytes = 0;
     QString sha256;             // 可选（rawprogram 无此属性；OPS 元数据有）
     quint64 byteOffset = 0;     // Patch 专用

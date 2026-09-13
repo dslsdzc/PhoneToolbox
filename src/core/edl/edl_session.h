@@ -20,9 +20,11 @@ struct FlashOptions {
     bool verifyAfterWrite = true;      // 边写边算 sha256，写完比对（不符 → 错误，不回滚）
     bool fullVerifyBeforeWrite = false;// 刷前完整校验（GB 级慢，默认关）
     // Sahara→Firehose 重枚举的**总预算**（传给 IEdlTransport::waitReenumerate）。
-    // 默认 45000 = 既有实现的 3s 初等 + 15 次重试（src/core/modes/edl_handler.cpp:589-614 的
-    // `msleep(3000)` + `retries=15`）。轮询间隔由传输实现决定；做成显式旋钮是为了让"预算"可配置、
-    // 可测，而不是散落的魔数。
+    // 默认 45000 沿用既有实现的量级：重写前的 edl_handler.cpp（提交 515cc57 的
+    // `connectSahara()` 段）是 `msleep(3000)` 初等 + `retries=15` 次重试、每次再 `msleep(2000)`
+    // ⇒ 上限 33000 ms，45000 是在其之上取整留的余量（**不是**精确等值）。改这个数之前先用真机
+    // 复核：预算偏短会让重枚举慢的机型直接失败在 Firehose 门口。轮询间隔由传输实现决定；
+    // 做成显式旋钮是为了让"预算"可配置、可测，而不是散落的魔数。
     int reenumerateTimeoutMs = 45000;
 };
 
@@ -64,9 +66,15 @@ public:
     // 前置：设备已在 Firehose；configure 由 beginFirehose 完成（未协商过时按保守默认分块）。
     // 内部：getstorageinfo（逐计划 LUN）→ validatePlan（不过则拒刷）→ 逐条目 Program/Erase/Patch
     //       → setbootablestoragedrive（计划含 xbl/sbl1 时）。
-    // **不**发 reset、**不**关句柄、**不**做 Sahara/重枚举 —— reset 只属 run() 的成功路径
+    // **不**发 reset、**不**做 Sahara/重枚举 —— reset 只属 run() 的成功路径
     // （既有 UI 流程"edlConnect 后停在 Firehose"走的正是本函数，见 Task 8 的 oppo-edl 通道）。
-    // 失败语义：false + 中文 *error（带阶段名/条目名），设备留在 EDL 便于重试。
+    // 句柄：成功路径保持占用（调用方接着用）；**每条走到设备侧的失败路径都会 close()**
+    // （edl_session.cpp 的 writePlan：getstorageinfo ×3 / validatePlan / 条目写入 / setbootable ×2
+    // 各处 return 前都 close；唯一例外是"空计划"——它在任何设备命令之前就拒了，不碰句柄）。
+    // 之所以这么选：走到这里的失败多半意味着设备已掉线或状态可疑，留着旧句柄只会把错误推迟到
+    // 下一次调用才爆；代价是**调用方必须同步自己的连接记账**（EDLHandler 就把 m_connected /
+    // m_configured 置 false），需要继续操作时自行重连。
+    // 失败语义：false + 中文 *error（带阶段名/条目名），设备留在 EDL 便于重试（句柄需重开）。
     bool writePlan(const FlashPlan &plan, const FlashOptions &opt, QString *error);
 
     // 只读回（不写入、不复位）。

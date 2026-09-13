@@ -1,10 +1,10 @@
 // src/core/edl/sahara.cpp
 //
 // Sahara 协议（纯协议层，走 IEdlTransport）——语义来源：既有**已工作**实现
-// src/core/modes/edl_handler.cpp:131-446（HELLO 应答 / 按设备请求分片回吐 programmer /
+// src/core/modes/edl_handler.cpp（重写前 515cc57）:131-446（HELLO 应答 / 按设备请求分片回吐 programmer /
 // END_OF_IMAGE → DONE 序列），差异只有三点（Task 4 brief Step 3）：
 //   1. 走 IEdlTransport（不内联 libusb）；
-//   2. SAHARA_READ_DATA_64 用 quint64 偏移（修既有 edl_handler.cpp:302-312 的 32 位截断缺陷）；
+//   2. SAHARA_READ_DATA_64 用 quint64 偏移（修既有 edl_handler.cpp（重写前 515cc57）:302-312 的 32 位截断缺陷）；
 //      注意 DONE 对的方向是 **host 主动**（发 DONE_REQ、收 DONE_RSP，与其余四条"设备主动"相反），
 //      细节见下方 sendDoneAndWait() 注释；
 //   3. 失败文案中文且带阶段名。
@@ -15,7 +15,7 @@
 namespace edl {
 namespace {
 
-// 服务循环单次读超时（照 edl_handler.cpp:23 TIMEOUT_MS）
+// 服务循环单次读超时（照 edl_handler.cpp（重写前 515cc57）:23 TIMEOUT_MS）
 const int kDataTimeoutMs = 10000;
 // 单次 IN 传输的读取上限：设备→主机的 Sahara 帧很小（HELLO_REQ 0x30、END_OF_IMAGE 0x10），
 // 4 KiB 足够一次收下；半帧/多帧由 PacketReader 自行合并拆分。
@@ -62,7 +62,7 @@ void appendLe32(QByteArray &buf, quint32 v)
 }
 
 // 帧：cmd(4B LE) + 总长(4B LE) + 载荷（总长含 8 字节头）——与 tests/edl_test_helpers.h 的
-// saharaFrame() 及 edl_handler.cpp:134-157 sendSaharaCmd 同布局。
+// saharaFrame() 及 edl_handler.cpp（重写前 515cc57）:134-157 sendSaharaCmd 同布局。
 QByteArray buildFrame(quint32 cmd, const QByteArray &payload)
 {
     QByteArray frame;
@@ -73,7 +73,7 @@ QByteArray buildFrame(quint32 cmd, const QByteArray &payload)
     return frame;
 }
 
-// 读帧器：与 edl_handler.cpp:159-199 同构（先收 8 字节帧头，再按 len-8 收载荷），
+// 读帧器：与 edl_handler.cpp（重写前 515cc57）:159-199 同构（先收 8 字节帧头，再按 len-8 收载荷），
 // 额外维护跨读缓冲——真机 bulk IN 一次可能只给半帧、或一次给多帧，按 totalLen 切分后
 // 余量留给下一帧。测试的 MockEdlTransport 每次 read() 给整帧，走同一路径。
 class PacketReader
@@ -134,7 +134,7 @@ bool writeFrame(IEdlTransport &t, quint32 cmd, const QByteArray &payload,
 
 // HELLO_RSP：cmd=0x02、总长 0x30、载荷 10×u32 =
 // {version, version_supported, cmd_packet_length, mode, reserved[0..5]}
-// （edl_handler.cpp:236-254 sendHelloResp；bkerler sahara.py:105-109；
+// （edl_handler.cpp（重写前 515cc57）:236-254 sendHelloResp；bkerler sahara.py:105-109；
 //  mode 取 SAHARA_MODE_IMAGE_TX_PENDING=0，见 sahara_defs.py:78-82）
 bool sendHelloResponse(IEdlTransport &t, quint32 version, QString *error)
 {
@@ -151,7 +151,7 @@ bool sendHelloResponse(IEdlTransport &t, quint32 version, QString *error)
 }
 
 // 按设备请求回吐 programmer 切片。越界 → 中文错误（既有实现只查了 offset+len > size 的
-// 32 位形式，edl_handler.cpp:427-433；这里用 quint64 且写成防溢出的减法形式）。
+// 32 位形式，edl_handler.cpp（重写前 515cc57）:427-433；这里用 quint64 且写成防溢出的减法形式）。
 bool serveProgrammerChunk(IEdlTransport &t, const QByteArray &programmer,
                           quint32 imageId, quint64 offset, quint64 len, QString *error)
 {
@@ -175,7 +175,7 @@ bool serveProgrammerChunk(IEdlTransport &t, const QByteArray &programmer,
 // ⚠️ 方向与 HELLO_REQ / READ_DATA / READ_DATA_64 / END_OF_IMAGE **相反**（那四条都是设备主动发）：
 //    把 DONE_REQ 误当成"设备发来的完成信号"就会少发或多发一帧，是这条链上最易记反的一处。
 // 两源一致：
-//   - 既有可工作实现 src/core/modes/edl_handler.cpp:566-584：sendDoneReq() 之后 recvDoneResp()
+//   - 既有可工作实现 src/core/modes/edl_handler.cpp（重写前 515cc57）:566-584：sendDoneReq() 之后 recvDoneResp()
 //     明确要求收到 DONE_RSP(0x06)（`sendDoneReq`/`recvDoneResp` 本体见 :338-364）；
 //   - edl/edlclient/Library/sahara.py:453-459（cmd_done）：host 写 `pack("<II", DONE_REQ, 0x8)`
 //     后要求 `cmd == SAHARA_DONE_RSP`。
@@ -231,7 +231,7 @@ bool saharaLoadProgrammer(IEdlTransport &t, const QByteArray &programmer,
                     .arg(payload.size()).arg(kMinHelloPayload));
     }
 
-    // HELLO_RSP 的 version 字段回设备上报的版本（既有 edl_handler.cpp:549 与
+    // HELLO_RSP 的 version 字段回设备上报的版本（既有 edl_handler.cpp（重写前 515cc57）:549 与
     // bkerler sahara.py:656 传的都是设备版本）；设备报 0（异常/空字段）时退回主机 v2。
     const quint32 deviceVersion = readLe32(payload, 0);
     const quint32 version = deviceVersion >= 1 ? deviceVersion : kHostVersion;
@@ -262,7 +262,7 @@ bool saharaLoadProgrammer(IEdlTransport &t, const QByteArray &programmer,
                             .arg(payload.size()));
             }
             // 64 位：image_id(u64) offset(u64) length(u64) —— 不得截断成 32 位
-            // （既有 edl_handler.cpp:302-312 的缺陷，Task 4 修复点）
+            // （既有 edl_handler.cpp（重写前 515cc57）:302-312 的缺陷，Task 4 修复点）
             const quint32 imageId = quint32(readLe64(payload, 0));
             const quint64 offset = readLe64(payload, 8);
             const quint64 len = readLe64(payload, 16);
@@ -270,7 +270,7 @@ bool saharaLoadProgrammer(IEdlTransport &t, const QByteArray &programmer,
                 return false;
         } else if (cmd == SAHARA_END_OF_IMAGE) {
             // 参数 {image_id(u32), image_tx_status(u32)}；非 SUCCESS 即失败
-            // （edl_handler.cpp:394-408、bkerler sahara.py:719-740）
+            // （edl_handler.cpp（重写前 515cc57）:394-408、bkerler sahara.py:719-740）
             const quint32 status = payload.size() >= 8 ? readLe32(payload, 4) : kStatusSuccess;
             if (status != kStatusSuccess) {
                 return fail(error, QStringLiteral("Sahara 阶段 programmer 传输失败: status=0x%1")
@@ -280,10 +280,10 @@ bool saharaLoadProgrammer(IEdlTransport &t, const QByteArray &programmer,
         } else if (cmd == SAHARA_DONE_RSP || cmd == SAHARA_CMD_READY) {
             // 设备直接宣告完成（多阶段/XML 配置流程）：参照 bkerler sahara.py:741
             // （CMD_READY/DONE_RSP → "All images from XML uploaded."）与
-            // edl_handler.cpp:409-415（同样按成功退出）。此时设备不需要我们的 DONE_REQ。
+            // edl_handler.cpp（重写前 515cc57）:409-415（同样按成功退出）。此时设备不需要我们的 DONE_REQ。
             return true;
         } else if (cmd == SAHARA_HELLO_REQ) {
-            // 中途重握手：既有实现按错误处理（edl_handler.cpp:287-290 "Unexpected HELLO_REQ
+            // 中途重握手：既有实现按错误处理（edl_handler.cpp（重写前 515cc57）:287-290 "Unexpected HELLO_REQ
             // during data transfer"）。bkerler 只在多阶段 XML 流程里重发 HELLO_RSP
             // （sahara.py:670-672，is_xml_config 分支）——本项目的单 programmer 流程不做，
             // fail-closed 报错（宁可停也不装看不见）。

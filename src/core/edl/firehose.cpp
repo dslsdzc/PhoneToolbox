@@ -277,7 +277,7 @@ QByteArray xmlErase(const PlanEntry &e)
 QByteArray xmlRead(quint32 lun, quint64 startSector, quint64 numSectors, quint32 sectorSize)
 {
     // reference/qdl/src/firehose.c:1197-1207（属性名是 num_partition_sectors —— 既有
-    // edl_handler.cpp:716-725 的 num_sectors 是缺陷，协议速查 §6.5）。
+    // edl_handler.cpp（重写前 515cc57）:716-725 的 num_sectors 是缺陷，协议速查 §6.5）。
     QList<QPair<QString, QString>> attrs;
     attrs << qMakePair(QStringLiteral("SECTOR_SIZE_IN_BYTES"), QString::number(sectorSize))
           << qMakePair(QStringLiteral("num_partition_sectors"), QString::number(numSectors))
@@ -333,7 +333,7 @@ FirehoseResponse parseFirehoseResponse(const QByteArray &xml)
 
         if (name == QLatin1String("response")) {
             // **严格相等**判定：contains 会被"log 文本里出现 ACK"骗过
-            // （反面参照 src/core/modes/edl_handler.cpp:494-510；两参照都是属性值相等判定：
+            // （反面参照 src/core/modes/edl_handler.cpp（重写前 515cc57）:494-510；两参照都是属性值相等判定：
             //  reference/qdl/src/firehose.c:1869-1872 的 xmlStrcmp、bkerler getstatus
             //  edl/edlclient/Library/firehose.py:235-239）。
             const QString v = rd.attributes().value(QLatin1String("value")).toString();
@@ -532,7 +532,9 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
 {
     bool switchedStorage = false;   // 换存储类型最多一次（firehose.py:936-940）
     bool negotiated = false;        // 载荷协商最多重发一次（qdl：恰好两次发送，firehose.c:534-548）
-    quint32 payload = maxPayloadBytes;
+    // 入参初值同样钳制：函数出口的 maxPayloadBytes 保证 ≤ kMaxNegotiatedPayloadBytes（依据见头文件）
+    const auto clampPayload = [](quint32 v) { return qMin(v, kMaxNegotiatedPayloadBytes); };
+    quint32 payload = clampPayload(maxPayloadBytes);
 
     for (;;) {
         FirehoseResponse resp;
@@ -561,7 +563,7 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
                 if (!other.isEmpty()) {
                     memoryName = other;
                     switchedStorage = true;
-                    payload = maxPayloadBytes;      // 新类型从调用方给的初始值重来
+                    payload = clampPayload(maxPayloadBytes);   // 新类型从调用方给的初始值重来
                     continue;
                 }
             }
@@ -577,8 +579,11 @@ bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloa
         // **最多两次发送**：negotiated 落地后即使设备再报新值也只采纳、不再发（与 qdl 一致 ——
         // 它第二次 send 后直接 `qdl->max_payload_size = size` 收尾，:544-548）；
         // 否则"每轮回报不同值"会让 10s 预算的循环无限重发，等于挂死。
+        // 采纳前**钳到 kMaxNegotiatedPayloadBytes**：这个数一路变成数据面的单块字节数，未钳制的
+        // 4 GiB 值会让 QByteArray 先尝试 ~4 GiB 分配、再以负 int 进 libusb（依据见 firehose.h）。
         const quint32 supported =
-            responseAttrU32(resp.raw, QStringLiteral("MaxPayloadSizeToTargetInBytesSupported"));
+            qMin(responseAttrU32(resp.raw, QStringLiteral("MaxPayloadSizeToTargetInBytesSupported")),
+                 kMaxNegotiatedPayloadBytes);
         if (supported > 0 && supported != payload) {
             if (negotiated) {
                 payload = supported;    // 已重发过一次：采纳设备最新值，就此定案

@@ -10,7 +10,7 @@ namespace edl {
 //
 // 数值与既有实现一致（src/core/modes/edl_handler.h:47-68 的 SaharaCmd，来源
 // edl/edlclient/Library/sahara_defs.py:20-39 cmd_t）。本枚举是其子集 + CMD_READY：
-// CMD_READY 见下方服务循环说明（既有 edl_handler.cpp:409-415、bkerler sahara.py:741）。
+// CMD_READY 见下方服务循环说明（既有 edl_handler.cpp（重写前 515cc57）:409-415、bkerler sahara.py:741）。
 enum SaharaCmd : quint32 {
     SAHARA_HELLO_REQ      = 0x01, SAHARA_HELLO_RSP   = 0x02,
     SAHARA_READ_DATA      = 0x03, SAHARA_END_OF_IMAGE = 0x04,
@@ -27,7 +27,7 @@ enum SaharaCmd : quint32 {
 //
 // 帧布局：cmd(4B LE) + 总长(4B LE) + N×4B LE 参数；READ_DATA 参数 = {image_id(u32), offset(u32), length(u32)}，
 // READ_DATA_64 参数 = {image_id(u64), offset(u64), length(u64)}（均为小端）。
-// 参照：既有解析器 src/core/modes/edl_handler.cpp:201-254；edl/edlclient/Library/sahara.py:453-459（DONE）。
+// 参照：既有解析器 src/core/modes/edl_handler.cpp（重写前 515cc57）:201-254；edl/edlclient/Library/sahara.py:453-459（DONE）。
 bool saharaLoadProgrammer(IEdlTransport &t, const QByteArray &programmer,
                           QString *error, int helloTimeoutMs = 30000);
 } // namespace edl

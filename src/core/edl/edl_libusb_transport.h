@@ -5,7 +5,7 @@
 //
 // 设备阶段（`EdlUsbStage`）是**本类唯一的模式状态**：Sahara（programmer 载入前）与 Firehose
 // （programmer 载入后、设备重枚举回来）的 **PID 表、接口号、端点号都不同**。这三张表搬自既有
-// 实现（src/core/modes/edl_handler.cpp:9-21 的 PID/端点常量 + :111-129 的 claimInterface），
+// 实现（src/core/modes/edl_handler.cpp（重写前 515cc57）:9-21 的 PID/端点常量 + :111-129 的 claimInterface），
 // 做成静态纯函数以便离线钉住 —— 重构中改错它们，真机上只表现为"设备没反应"。
 //
 // 本类**不补 ZLP**（一条规则一处责任，控制方裁定）：write() 是纯字节管道，无法区分"命令帧"与
@@ -38,7 +38,7 @@ public:
 
     // 构造、析构与 close() **不触碰 USB 栈**（未打开时是纯内存对象）—— 离线用例可直接构造与断言。
 
-    // ---- 纯函数：设备身份与端点表（离线可测；常量搬自 edl_handler.cpp:9-21,111-129）----
+    // ---- 纯函数：设备身份与端点表（离线可测；常量搬自 edl_handler.cpp（重写前 515cc57）:9-21,111-129）----
     // 9008 家族身份：VID 0x05C6 + PID {0x9008(Sahara), 0x900E(两阶段), 0x9025(Firehose)}
     static bool isEdlId(quint16 vid, quint16 pid);
     // 分阶段 PID 表（**不对称**：Sahara 不认 0x9025，Firehose 不认 0x9008；0x900E 两阶段都认
@@ -73,8 +73,11 @@ public:
     bool waitReenumerate(int timeoutMs, QString *error) override;
     int  maxPacketSize() const override;       // 未打开 → 0（包长未知；会话据此不发 ZLP）
 
-    static constexpr int kReenumPollIntervalMs = 3000;  // 既有 3s 轮询（edl_handler.cpp:589-614）
-    static constexpr int kWriteTimeoutMs       = 10000; // 既有 TIMEOUT_MS（edl_handler.cpp:23）
+    // 轮询间隔 3s：既有实现（重写前的 edl_handler.cpp，提交 515cc57 的 `connectSahara()` 段）是"初等
+    // msleep(3000) + 15 次重试、每次 msleep(2000)"；这里把初等值统一成每次轮询的间隔，重试次数不再
+    // 固定，而是由 waitReenumerate 的总预算（默认 45000 ms）决定。
+    static constexpr int kReenumPollIntervalMs = 3000;
+    static constexpr int kWriteTimeoutMs       = 10000; // 既有 TIMEOUT_MS（edl_handler.cpp（重写前 515cc57）:23）
     static constexpr int kFallbackMaxPacket    = 512;   // 描述符未给出包长时的兜底（USB 2.0 bulk）
 
 private:

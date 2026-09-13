@@ -27,6 +27,17 @@ namespace edl {
 //   * `waitReenumerate` 按 edl_transport.h 的生命周期契约建模：成功时记录一次 `open`
 //     （"返回 true ⇒ 设备已重新 open()，会话不再 open"），失败时不记；预算存进 lastReenumTimeoutMs。
 // 既有用例（Task 4/5）不设 residual、不读 calls，行为与本文件历史版本逐字节一致。
+//
+// ---- 两条**结构性盲区**（本 mock 表达不了，别以为用例过了就覆盖了）----
+//   ① drain 只吃 `residual`、**从不消费 `reads`**（`read(timeoutMs==0)` 见下）：真机上"drain 把一条
+//      已经到达的响应吃掉"这类缺陷（设备抢发/响应早到）在离线用例里**不可表达** —— 想覆盖它得让
+//      drain 也从 reads 里取字节，那会同时改掉既有用例的语义。当前会话顺序是"先 drain 再发命令"，
+//      故今天没有这条风险；但"会话在命令之后 drain"这种改法，用例不会拦住。
+//   ② 正超时（`timeoutMs != 0`）的 `read` **不记录 `maxBytes` / `timeoutMs`**：所以"会话问错块长、
+//      用错超时"（例如本该 4096 却要 64 KiB、本该 30s 却传 0）在离线断言里看不见。
+//      `timeoutMs == 0` 那一类**能**看见（mock 对 0 走另一条分支并记 "drain"）—— Task 7 抓到
+//      `timeout=0` 缺陷靠的正是这一点。要补盲区②，加一个 `lastReadMaxBytes/lastReadTimeoutMs`
+//      记录即可，但那会把"每个 read 都要记账"变成所有既有用例的隐含约定，故留作已知缺口。
 class MockEdlTransport : public IEdlTransport
 {
 public:

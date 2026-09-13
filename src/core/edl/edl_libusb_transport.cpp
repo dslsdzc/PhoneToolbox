@@ -3,11 +3,12 @@
 // 真机传输实现（Phase B Task 7）。本文件与 src/core/modes/edl_handler.cpp 是全仓仅有的两处
 // libusb 依赖；协议模块只见 IEdlTransport（见头文件顶部与本文件末尾的对照说明）。
 //
-// 搬来的既有逻辑（src/core/modes/edl_handler.cpp，改动点写在每处）：
+// 搬来的既有逻辑（src/core/modes/edl_handler.cpp，**重写前**版本 = 提交 515cc57；改动点写在每处）：
 //   * 设备身份表（:9-21 的 EDL_SAHARA_VID/PID + EDL_900E + EDL_FIREHOSE_PID）
 //   * 接口/端点常量（:16-21 的 EDP_OUT/EDP_IN/FH_OUT/FH_IN + :111-129 claimInterface 的 iface 0/1）
 //   * open/枚举/打开/认领/超时（:45-129）
-//   * 重枚举轮询（:589-614 的 3s×15，参数化为"总预算 + 3s 间隔"）
+//   * 重枚举轮询（:589-614：初等 msleep(3000) + 15 次重试、每次 msleep(2000) ⇒ 上限 33s，
+//     本项目参数化为"总预算 + 3s 间隔"）
 // 改动（有意为之，逐条已由离线用例或注释钉住）：
 //   1. 端点与 OUT 包长改为从**活动配置描述符**取（qdl 同款：reference/qdl/src/usb.c:190-210），
 //      取不到才退回阶段常量 —— 既有实现把端点号写死，且拿不到 wMaxPacketSize（ZLP 判据缺失）。
@@ -20,10 +21,12 @@
 #include <QThread>
 #include <libusb.h>
 
+#include <limits>       // std::numeric_limits（write 的 int 长度上限判定）
+
 namespace edl {
 namespace {
 
-// 设备身份（搬自 edl_handler.cpp:10-13）
+// 设备身份（搬自 edl_handler.cpp（重写前 515cc57）:10-13）
 constexpr quint16 kQcVid       = 0x05c6;
 constexpr quint16 kPidSahara   = 0x9008;   // Sahara（9008 主形态）
 constexpr quint16 kPidBothStages = 0x900e; // 两阶段都出现（部分机型不换 PID）
@@ -175,7 +178,7 @@ bool LibusbEdlTransport::claimAndDiscoverEndpoints(QString *error)
 {
     const int iface = interfaceNumber(m_stage);
 
-    // 既有顺序（edl_handler.cpp:111-129）：claim → 失败则 detach 内核驱动 → 再 claim
+    // 既有顺序（edl_handler.cpp（重写前 515cc57）:111-129）：claim → 失败则 detach 内核驱动 → 再 claim
     int ret = libusb_claim_interface(m_dev, iface);
     if (ret != LIBUSB_SUCCESS) {
         const int det = libusb_detach_kernel_driver(m_dev, iface);
@@ -264,10 +267,19 @@ bool LibusbEdlTransport::write(const QByteArray &data, QString *error)
         return true;
     }
 
+    // 单块长度必须塞得进 libusb 的 `int length`。今天 QByteArray 自己就以 int 计长（上限 INT_MAX），
+    // 所以这条**目前不可达**；留着是因为上游的单块尺寸来自设备协商值（firehoseConfigure 已钳制，
+    // 见 kMaxNegotiatedPayloadBytes），一旦将来数据面改成 64 位缓冲，这里必须**拒绝**而不是窄化。
+    if (data.size() > std::numeric_limits<int>::max()) {
+        setErr(error, QStringLiteral("写入失败：单块 %1 字节超过 libusb 的 int 长度上限")
+                          .arg(data.size()));
+        return false;
+    }
+
     int transferred = 0;
     const int ret = libusb_bulk_transfer(m_dev, m_outEp,
                                          reinterpret_cast<unsigned char *>(const_cast<char *>(data.constData())),
-                                         data.size(), &transferred, kWriteTimeoutMs);
+                                         static_cast<int>(data.size()), &transferred, kWriteTimeoutMs);
     if (ret != LIBUSB_SUCCESS) {
         setErr(error, QStringLiteral("写入 OUT 端点失败：%1")
                           .arg(QString::fromLatin1(libusb_error_name(ret))));
@@ -346,7 +358,8 @@ bool LibusbEdlTransport::waitReenumerate(int timeoutMs, QString *error)
     clock.start();
     QString lastErr = noDeviceError(m_stage);
 
-    // 3s 间隔轮询（既有经验值：edl_handler.cpp:593 的 msleep(3000) 初等 + :610 的 2s 重试），
+    // 3s 间隔轮询（既有实现：初等 msleep(3000) + 每次重试 msleep(2000) —— 重写前的
+    // edl_handler.cpp，提交 515cc57 的 `connectSahara()` 段），
     // 预算耗尽即收手（默认 45s = FlashOptions::reenumerateTimeoutMs）。
     // **首试前也等一个间隔**：此刻设备正在掉线/重枚举（Sahara DONE 后立刻枚举必然落空），
     // 而 0x900E 这类"不换 PID"的机型尤其危险 —— 它能被立刻开出来，但模式切换尚未完成，

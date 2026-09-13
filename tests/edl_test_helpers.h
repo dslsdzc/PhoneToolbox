@@ -5,7 +5,7 @@
 #include "core/edl/sahara.h"
 
 // Sahara 帧：cmd(4B LE) + 总长(4B LE) + N×4B LE 参数（与 src/core/edl/sahara.cpp 的帧布局一致；
-// 既有解析器见 src/core/modes/edl_handler.cpp:201-254）
+// 既有解析器见 src/core/modes/edl_handler.cpp（重写前 515cc57）:201-254）
 //
 // 本文件是**共享**夹具：Task 4（test_edl_sahara.cpp）与 Task 6（test_edl_session.cpp）都用它，
 // 不得在测试文件内各写一份。
@@ -24,7 +24,7 @@ inline QByteArray saharaFrame(quint32 cmd, const QList<quint32> &words)
 // 64 位 READ_DATA 帧：参数 = image_id(u64) + offset(u64) + length(u64) = 6 个 u32 字（低位在前）。
 // ⚠️ 别手写这串字：写 {0,12,0,0,4,0} 会编码成 image_id=0xC00000000 / offset=**0** / length=4
 //    （本计划早期版本就是这么错的，实测回吐 "0123" 而非期望切片）—— 用本函数。
-// 参照解析器：src/core/modes/edl_handler.cpp:302-312（既有 64 位分支，会把 offset 截成 32 位）、
+// 参照解析器：src/core/modes/edl_handler.cpp（重写前 515cc57）:302-312（既有 64 位分支，会把 offset 截成 32 位）、
 // edl/edlclient/Library/sahara.py:678-700。
 inline QByteArray saharaReadData64Frame(quint64 imageId, quint64 offset, quint64 length)
 {

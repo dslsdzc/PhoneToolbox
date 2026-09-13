@@ -29,10 +29,10 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] MTK DA 连接 / 分区读写 / 全分区备份
 [√] MTK Bootloader 解锁 / 回锁
 [√] Fastboot 解锁 / 回锁 (多策略适配各品牌)
-[√] FRP 清除: Fastboot / ADB Root / EDL / MTK 四模式
+[√] FRP 清除: Fastboot / ADB Root / MTK 三模式 (EDL 明确不支持按分区名清除, 指路「EDL 刷写计划」)
 [√] Fastboot 内存转储
 [√] 运行刷机脚本 (flash-all.sh/bat)
-[√] 分区列表获取: Fastboot / ADB / EDL Firehose / MTK 四通道
+[√] 分区列表获取: Fastboot / ADB / MTK 三通道 (EDL Firehose 只能列 lun<N> 卷, 分区名用「EDL 刷写计划」)
 [√] 死砖修复: 固件自动校验 → 分区文件权重匹配 → 稀疏镜像检测
 [√] 死砖修复: 镜像大小校验 → 按优先级排序写入 → 失败重试 → 进度保存/恢复
 

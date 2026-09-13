@@ -614,11 +614,13 @@ PlanCheck validatePlan(const FlashPlan &plan, const QList<StorageInfo> &device)
             chk.warnings << QStringLiteral("条目 %1 的 sectorSize %2 与设备 blockSize %3 不一致（以条目值为准）")
                                 .arg(entryName(e)).arg(e.sectorSize).arg(it->blockSize);
         }
-        // 规则 6：有 sha256 即记 warning。此处**不读整个文件**——"边写边算"是默认路径，
-        // "刷前完整校验"是 Task 8 的可选开关。（纯告警、无修正、与几何无关，故不进 normalizePlan。）
+        // 规则 6：有 sha256 即记 warning。此处**不读整个文件**——"边写边算"是默认路径
+        // （FlashOptions::verifyAfterWrite）；"刷前完整校验"（FlashOptions::fullVerifyBeforeWrite）
+        // 默认关、且当前**没有 UI 入口**，所以下面的用户可见文案不许诺它。
+        // （纯告警、无修正、与几何无关，故不进 normalizePlan。）
         if (!e.sha256.isEmpty()) {
-            chk.warnings << QStringLiteral("条目 %1 携带 sha256（%2…）：默认边写边校验，"
-                                           "刷前完整校验为可选开关（Task 8）")
+            chk.warnings << QStringLiteral("条目 %1 携带 sha256（%2…）：写入过程中计算并比对，"
+                                           "不另做刷前完整校验")
                                 .arg(entryName(e), e.sha256.left(12));
         }
         // 规则 7：表达式条目主机侧无法求值（参照也不解释，reference/qdl/src/firehose.c:874-879），

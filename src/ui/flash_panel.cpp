@@ -279,6 +279,10 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     m_lockBtn->setEnabled(false);
     m_frpBtn->setEnabled(false);
     m_brickRepairBtn->setEnabled(false);
+    // 提示也一并复位：下面 EDL 分支会给这两个按钮挂"为什么不可用"的提示，
+    // 不复位就会跟着按钮状态漂到别的模式（Fastboot/MTK 下它们是可用的）
+    m_frpBtn->setToolTip(QString());
+    m_brickRepairBtn->setToolTip(QString());
 
     if (info.mode == DeviceDetector::MODE_EDL_9008) {
         // EDL 模式: 显示连接控件
@@ -292,13 +296,26 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_edlStatusLabel->setText(m_flashTool->edlIsConnected() ? "EDL: 已连接" : "EDL: 未连接");
         m_edlDisconnectBtn->setEnabled(m_flashTool->edlIsConnected());
 
-        // 已连接 EDL Firehose 后显示分区操作
+        // 已连接 EDL Firehose 后显示分区操作。「清除 FRP」「死砖修复」在 EDL 下点不出任何结果：
+        // 两者都要"分区名 → 分区"，而 Firehose 只回报 lun<N>（各自的处理函数会弹指路框，
+        // 见 onClearFrpClicked / onBrickRepairClicked 的 EDL 早退）—— 与其让用户先点一次再被拒，
+        // 不如在这里就置灰并说明原因（tooltip 指明替代入口）。读回（m_dumpBtn）不受影响。
         if (m_flashTool->edlIsConnected()) {
             m_dumpBtn->setEnabled(true);
-            m_frpBtn->setEnabled(true);
-            m_brickRepairBtn->setEnabled(true);
+            m_frpBtn->setToolTip(QStringLiteral(
+                "EDL 模式不支持：Firehose 只能枚举 lun<N>，拿不到 GPT 分区名。"
+                "请改用「EDL 刷写计划…」（计划里 label=frp 的条目）"));
+            m_brickRepairBtn->setToolTip(QStringLiteral(
+                "EDL 模式不支持：Firehose 只能枚举 lun<N>，无法把镜像文件名映射到分区。"
+                "请改用「EDL 刷写计划…」"));
             if (!m_currentFile.isEmpty() && m_currentFile.toLower().endsWith(".img"))
                 m_flashBtn->setEnabled(m_partitionList->currentItem() != nullptr);
+        } else {
+            // 未连接时也让"为什么现在点不了"可见（连上后如上面所述仍然点不了，原因不同）
+            m_frpBtn->setToolTip(QStringLiteral("需先「连接 EDL」；连接后 EDL 模式仍不支持按分区名清除 FRP，"
+                                               "请改用「EDL 刷写计划…」"));
+            m_brickRepairBtn->setToolTip(QStringLiteral("需先「连接 EDL」；连接后 EDL 模式仍不支持目录批量刷写，"
+                                                       "请改用「EDL 刷写计划…」"));
         }
         return; // EDL 不走后面的逻辑
     }

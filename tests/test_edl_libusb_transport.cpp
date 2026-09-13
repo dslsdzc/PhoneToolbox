@@ -4,7 +4,7 @@
 //
 // 诚实边界（写在用例头上，免得读者误以为真机行为已被验证）：真机的端点/时序/重枚举/ZLP
 // **无法离线验证**。本文件只钉三件不碰 USB 栈的事：
-//   ① VID/PID 匹配表（哪个 PID 属哪个阶段）——搬自 src/core/modes/edl_handler.cpp:10-21 的既有经验值；
+//   ① VID/PID 匹配表（哪个 PID 属哪个阶段）——搬自 src/core/modes/edl_handler.cpp（重写前 515cc57）:10-21 的既有经验值；
 //   ② 每阶段的接口号/端点号（同一处搬来）——重构中最容易被悄悄改错、真机上表现为"设备没反应"；
 //   ③ 中文错误文案 + **未打开句柄**时 7 个方法的行为（构造/close/read/write 不得触碰 USB 栈，
 //      故无需真机、也无需 mock）。
@@ -59,7 +59,7 @@ void TestEdlLibusbTransport::matchesPidPerStage()
     QVERIFY(!T::matchesStage(edl::EdlUsbStage::Firehose, 0x18D1, 0x9025));
 }
 
-// 每阶段的接口号/端点号是**搬来的经验值**（src/core/modes/edl_handler.cpp:16-21 的
+// 每阶段的接口号/端点号是**搬来的经验值**（src/core/modes/edl_handler.cpp（重写前 515cc57）:16-21 的
 // EDP_OUT/EDP_IN/FH_OUT/FH_IN + claimInterface 的 iface 0/1）。真机正确性离线无法验证，
 // 但"不得在重构里悄悄改掉"是可离线钉住的 —— 改错只会表现为真机没反应。
 void TestEdlLibusbTransport::pinsStageInterfaceAndEndpoints()

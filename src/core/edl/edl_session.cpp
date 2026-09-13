@@ -348,7 +348,7 @@ bool EdlSession::run(const FlashPlan &plan, const QByteArray &programmer,
 
     // ② 等重枚举：设备消失又回来。契约（edl_transport.h 顶部）：调用前须已 close()（上一行就是），
     //    返回 true 时设备**已重新 open()** —— 故这里不再 open 一次（重复打开会拿到第二个句柄）。
-    //    预算来自 FlashOptions::reenumerateTimeoutMs（默认 45000 = edl_handler.cpp:589-614 的 3s×15）；
+    //    预算来自 FlashOptions::reenumerateTimeoutMs（默认 45000 ms，依据见 edl_session.h 该字段注释）；
     //    失败 → 中止 + 带阶段名的中文错误 + **不发 reset**（spec §4 错误矩阵）。
     report(QStringLiteral("reenumerate"), QStringLiteral("等待设备进入 Firehose"), 0);
     {

@@ -45,7 +45,7 @@ void TestEdlSahara::servesProgrammerInRequestedSlices()
             << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
             << saharaFrame(edl::SAHARA_DONE_RSP, {});   // ← DONE 这对是 **host 主动**：host 发 DONE_REQ，
                                                         //   设备回 DONE_RSP（bkerler sahara.py:453-459 +
-                                                        //   edl_handler.cpp:566-584 两源一致；与 HELLO_REQ/
+                                                        //   edl_handler.cpp（重写前 515cc57）:566-584 两源一致；与 HELLO_REQ/
                                                         //   READ_DATA/END_OF_IMAGE 的"设备主动"方向相反，最易记反）
 
     QString err;
@@ -106,7 +106,7 @@ void TestEdlSahara::failsWhenDeviceGoesSilentAfterHello()
     QCOMPARE(t.writes.size(), 1);                                   // 只有 HELLO_RSP
 }
 
-// END_OF_IMAGE 带非 SUCCESS 状态 → 失败（edl_handler.cpp:394-408 同判定）
+// END_OF_IMAGE 带非 SUCCESS 状态 → 失败（edl_handler.cpp（重写前 515cc57）:394-408 同判定）
 void TestEdlSahara::failsOnEndOfImageErrorStatus()
 {
     edl::MockEdlTransport t;
@@ -133,7 +133,7 @@ void TestEdlSahara::handlesHelloSplitAcrossReads()
     QCOMPARE(le32(t.writes.at(0), 0), quint32(edl::SAHARA_HELLO_RSP));
 }
 
-// 既有缺陷回归（edl_handler.cpp:302-312 把 READ_DATA_64 的 offset 截成 quint32）：
+// 既有缺陷回归（edl_handler.cpp（重写前 515cc57）:302-312 把 READ_DATA_64 的 offset 截成 quint32）：
 // 偏移 4 GiB 截断后折回 0 —— 截断实现会"成功"回吐 prog[0..4)="0123"，正确实现必须判越界。
 // 正因为折回值落在有效区间内，两条路径才可区分（无需 4 GiB 缓冲）。
 void TestEdlSahara::doesNotTruncate64BitOffset()

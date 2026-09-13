@@ -9,7 +9,8 @@
 //
 // 属性集与判定口径的权威出处：docs/superpowers/specs/oppo-flash-protocol-facts.md §1-§3；
 // 每条处标注 reference/qdl/src/firehose.c 或 edl/edlclient/Library/firehose.py 的行号。
-// 反面参照（**不得照抄**）：src/core/modes/edl_handler.cpp —— 它的 ACK 判定用 contains、
+// 反面参照（**不得照抄**）：src/core/modes/edl_handler.cpp（**重写前**版本，提交 515cc57）
+// —— 它的 ACK 判定用 contains、
 // 命令帧带 4 字节长度前缀、program 缺 physical_partition_number、read 用错属性名
 // （协议速查 §6 列的 5 处既有缺陷）。
 #pragma once
@@ -45,7 +46,7 @@ QByteArray xmlErase(const PlanEntry &e);
 
 // `<read SECTOR_SIZE_IN_BYTES num_partition_sectors physical_partition_number start_sector/>`
 // （reference/qdl/src/firehose.c:1197-1207；注意属性名是 num_partition_sectors，
-// 既有 edl_handler.cpp:716-725 的 num_sectors 是错的）。
+// 既有 edl_handler.cpp（重写前 515cc57）:716-725 的 num_sectors 是错的）。
 QByteArray xmlRead(quint32 lun, quint64 startSector, quint64 numSectors, quint32 sectorSize);
 
 // `<getstorageinfo physical_partition_number="N"/>`（reference/qdl/src/firehose.c:1907-1908；
@@ -113,8 +114,20 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
 //   3. NAK 且文案含 "Only nop and sig tag can be" → 设备要求 EDL 鉴权：**直接失败、不重试**
 //      （firehose.py:941-956 走小米鉴权分支，本项目明确不做 —— spec §8）；
 //   4. 其它失败 → false + 中文 *error（带设备返回原文）。
-// 成功时 memoryName 为实际生效的类型、maxPayloadBytes 为协商后的载荷上限。
+// 成功时 memoryName 为实际生效的类型、maxPayloadBytes 为协商后的载荷上限（**已被
+// kMaxNegotiatedPayloadBytes 钳制**：设备报超出上限的值时按上限采纳）。
 bool firehoseConfigure(IEdlTransport &t, QString &memoryName, quint32 &maxPayloadBytes, QString *error);
+
+// 协商载荷上限的**上界（8 MiB）**：入参加初值、设备回报的 MaxPayloadSizeToTargetInBytesSupported
+// 一律先钳到它再采用（firehose.cpp 的 firehoseConfigure）。依据：
+//   * 硬约束在下游 —— 这个值最终变成数据面的单块字节数（edl_session.cpp 的 `chunkBytes`），而单块
+//     要过 `LibusbEdlTransport::write` 交给 libusb 的 **int length**，QByteArray 自身也以 int 计长；
+//     设备报的是 quint32（最大 ~4 GiB），不钳制就会先尝试 ~4 GiB 分配、再以负 int 进 libusb。
+//   * 量级参照：qdl 与 bkerler 的默认/兜底载荷都是 1048576（1 MiB）（reference/qdl/src/usb.c:580、
+//     auto.c:162；edl/edlclient/Library/firehose.py:913,1007）；两参照对设备回报值都**不钳制**
+//     （firehose.c:534-548），故本上限是防御性加固、不是偏离参照。取 8× 参照默认值：给真机协商出
+//     更大值的余量，同时把最坏情况的单块分配钉在 8 MiB（远低于任何整型/分配危险区）。
+constexpr quint32 kMaxNegotiatedPayloadBytes = 8 * 1024 * 1024;
 
 // 发命令前的 drain：把 IN 端点里"响应之后还跟着的字节"读干净（0 超时轮询读，直到端点静默或达到
 // 次数上限 —— 给设备"话痨日志"留余量，同时保证不会挂死）。依据：qdl 的注释明确"不消费完，后续写

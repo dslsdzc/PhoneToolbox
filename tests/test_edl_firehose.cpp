@@ -19,6 +19,7 @@ private slots:
     void responseAckAndNakAreStrict();
     void configureNegotiatesMaxPayload();
     void configureStopsAfterOneNegotiationRound();
+    void configureClampsAbsurdMaxPayload();
 
     // —— 以下为本任务补充的用例（brief 的 5 条之外的边界）——
     void programXmlMatchesReferenceExactly();
@@ -129,6 +130,33 @@ void TestEdlFirehose::configureStopsAfterOneNegotiationRound()
 // ---------------------------------------------------------------------------
 // 补充用例
 // ---------------------------------------------------------------------------
+
+// 终审 M-2：设备回报的 MaxPayloadSizeToTargetInBytesSupported 采纳前必须钳到
+// kMaxNegotiatedPayloadBytes。该值一路变成数据面的单块字节数（edl_session.cpp 的 chunkBytes）→
+// LibusbEdlTransport::write 交给 libusb 的 **int length**：设备报 ~4 GiB 时不钳制会先尝试超大分配、
+// 再以负 int 进 libusb（离线用例永远看不见，mock 的分块都是小值）。
+// 断言三件事：① 出参被钳；② **重发的 configure 命令里也是钳制值**（设备会按命令里的值安排缓冲，
+// 命令与出参不一致就等于说谎）；③ 入参初值同样被钳（函数出口的不变量对任何调用方都成立）。
+void TestEdlFirehose::configureClampsAbsurdMaxPayload()
+{
+    edl::MockEdlTransport t;
+    t.reads << QByteArray("<response value=\"ACK\" MaxPayloadSizeToTargetInBytesSupported=\"4294967280\" />")
+            << QByteArray("<response value=\"ACK\" />");
+    QString name = QStringLiteral("ufs"); quint32 maxPayload = 0; QString err;
+    QVERIFY2(edl::firehoseConfigure(t, name, maxPayload, &err), qPrintable(err));
+    QCOMPARE(maxPayload, edl::kMaxNegotiatedPayloadBytes);                  // ①
+    QCOMPARE(t.writes.size(), 2);
+    QVERIFY(t.writes[1].contains(QByteArray("MaxPayloadSizeToTargetInBytes=\"8388608\"")));  // ②
+    QVERIFY(!t.writes[1].contains("4294967280"));                           // 未钳制的值一个字节都不许出
+
+    // 入参初值（调用方给的）同样钳制：设备未回报时出口值就是它
+    edl::MockEdlTransport t2;
+    t2.reads << QByteArray("<response value=\"ACK\" />");
+    QString name2 = QStringLiteral("ufs"); quint32 maxPayload2 = 0xFFFFFFFFu; QString err2;
+    QVERIFY2(edl::firehoseConfigure(t2, name2, maxPayload2, &err2), qPrintable(err2));
+    QCOMPARE(maxPayload2, edl::kMaxNegotiatedPayloadBytes);                 // ③
+    QVERIFY(t2.writes[0].contains(QByteArray("MaxPayloadSizeToTargetInBytes=\"8388608\"")));
+}
 
 // 属性顺序与集合逐字节对齐 qdl：SECTOR_SIZE_IN_BYTES → num_partition_sectors →
 // physical_partition_number → start_sector → filename（reference/qdl/src/firehose.c:1021-1030）。
@@ -254,7 +282,7 @@ void TestEdlFirehose::logOnlyResponseIsNeitherAckNorNak()
 }
 
 // 其余命令的形态：read / getstorageinfo / setbootablestoragedrive / reset。
-// read 的属性名参照 reference/qdl/src/firehose.c:1197-1207（既有 edl_handler.cpp:716-725
+// read 的属性名参照 reference/qdl/src/firehose.c:1197-1207（既有 edl_handler.cpp（重写前 515cc57）:716-725
 // 的 num_sectors 是错名，故这里显式断言"没有 num_sectors="）；
 // reset 参照 :1590-1592 的 <power value="reset" DelayInSeconds="10"/>。
 void TestEdlFirehose::miscCommandsHaveReferenceShapes()

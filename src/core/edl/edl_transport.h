@@ -16,7 +16,9 @@ namespace edl {
 //     显式表达，才能在 mock 里按时序断言——忘掉 close 恰恰是真机上重枚举永远等不到的最常见原因）。
 //   * `waitReenumerate`：**调用前须已 `close()`；返回 true 时设备已重新 `open()`**（即重枚举后的
 //     重新打开由传输实现完成，调用方**不要**再 open 一次）。`timeoutMs` 是**总预算**，轮询间隔
-//     由传输自定（既有经验值 3s：src/core/modes/edl_handler.cpp:589-614 的 3s + 15 次重试）。
+//     由传输自定：既有实现是"初等 3s + 15 次重试、每次间隔 2s"、上限 33s（重写前的
+//     src/core/modes/edl_handler.cpp，提交 515cc57 的 `connectSahara()` 段），libusb 传输把初等值
+//     统一成 3s 间隔（见 edl_libusb_transport.h 的 kReenumPollIntervalMs），重试次数改由预算决定。
 //   * `read(maxBytes, timeoutMs=0)` = **非阻塞轮询**（drain 语义）：立即返回端点里已有的字节，
 //     没有则空返回且**不置 error**。会话据此在每笔写之前清空 IN 端点残留
 //     （reference/qdl/src/firehose.c:249-252：不消费完，后续写会超时）。
