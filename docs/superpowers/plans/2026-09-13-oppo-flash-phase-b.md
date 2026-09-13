@@ -631,6 +631,17 @@ inline QByteArray saharaFrame(quint32 cmd, const QList<quint32> &words)
     for (int i = 0; i < words.size(); ++i) put32(8 + i * 4, words.at(i));
     return f;
 }
+
+// 64 位 READ_DATA 帧：参数 = image_id(u64) + offset(u64) + length(u64) = 6 个 u32 字（低位在前）。
+// ⚠️ 别手写这串字：写 {0,12,0,0,4,0} 会编码成 image_id=0xC00000000 / offset=**0** / length=4
+//    （本计划早期版本就是这么错的，实测回吐 "0123" 而非期望切片）—— 用本函数。
+inline QByteArray saharaReadData64Frame(quint64 imageId, quint64 offset, quint64 length)
+{
+    QList<quint32> words;
+    const quint64 vals[3] = {imageId, offset, length};
+    for (quint64 v : vals) { words << quint32(v & 0xFFFFFFFFu) << quint32(v >> 32); }
+    return saharaFrame(quint32(edl::SAHARA_READ_DATA_64), words);
+}
 ```
 
 `tests/test_edl_sahara.cpp`：用一个"假设备"驱动 —— 预置 reads 队列（HELLO_REQ 帧、两段 READ_DATA、END_OF_IMAGE），断言 writes 里的应答与数据切片。
@@ -658,7 +669,7 @@ void TestEdlSahara::servesProgrammerInRequestedSlices()
     t.reads << saharaFrame(edl::SAHARA_HELLO_REQ, {2, 1, 0, 0})          // mode=2, ver=2
             << saharaFrame(edl::SAHARA_READ_DATA, {0, 0, 4, 0})          // image=0 off=0 len=4
             << saharaFrame(edl::SAHARA_READ_DATA, {0, 4, 8, 0})          // off=4 len=8
-            << saharaFrame(edl::SAHARA_READ_DATA_64, {0, 12, 0, 0, 4, 0})// 64 位：off=12 len=4
+            << saharaReadData64Frame(0, 12, 4)               // 64 位：off=12 len=4（用共享夹具，别手写字串）
             << saharaFrame(edl::SAHARA_END_OF_IMAGE, {0, 0})
             << saharaFrame(edl::SAHARA_DONE_RSP, {});   // ← DONE 这对是 **host 主动**：host 发 DONE_REQ，
                                                         //   设备回 DONE_RSP（bkerler sahara.py:453-459 +
