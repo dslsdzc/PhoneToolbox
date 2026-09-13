@@ -972,6 +972,10 @@ bool sparseWalk(const QString &inPath, const std::function<bool(const SparseChun
 }
 ```
 
+**Task 5 审查的两条交接项（本任务必做，均已由审查员独立核实）**：
+1. **drain 警告**：`firehoseSendCommand` 见 `<response>` 即停读，**残留字节留在 IN 端点**；qdl 的注释明确"不消费完，后续写会超时"（`reference/qdl/src/firehose.c:249-252`）。本任务**在每次写之前**（或每条命令之后）必须 drain 掉残留，否则下一笔写可能超时 —— 把这条写进代码注释，并加一条用例（预置"响应后还跟着一段字节"的读队列 → 断言下一命令仍成功）。
+2. **`maxPayloadBytes == 0` 的语义**：设备未回 `MaxPayloadSizeToTargetInBytesSupported` 时 `firehoseConfigure` 会原样回传（**可能是 0**）。**不得把 0 当"无上限"**（否则数据面会试图一次发完整个镜像）—— 取一个保守默认并在注释里写明依据，且日志里说明用了默认值。
+
 **getstorageinfo 的枚举口径（Task 5 实现者提出，控制方裁定）**：只查**计划里出现过的 LUN**（对 `plan.entries` 的 `lun` 去重后逐个查），**不**依赖设备的 LUN 总数 —— 这是 qdl 的口径（`reference/qdl/src/program.c:259` 逐条目取 `physical_partition_number`，不枚举 LUN）。`getstorageinfo` 响应里的 `num_physical_partitions`/`bNumberLu` 仅作日志信息，**不**用于决定查几个 LUN；`StorageInfo` 里没有 LUN 数字段是刻意的（Task 5 已在注释说明），不要为此扩结构体。
 
 **Mock 扩展（Task 4 实现者提醒，本任务必做）**：`tests/mock_edl_transport.h` 目前只记录 writes，**不记录 `close`/`resetDevice`/`waitReenumerate` 的调用**（也不记录顺序）。本任务要断言"失败路径不发 reset""成功路径 reset 在最后"，因此先把 mock 扩成**记录调用序列**（如 `QStringList calls;` 追加 `"open"/"close"/"reset"/"waitReenumerate"`，并在 write 时追加 `"write"`），再据此断言。这是 §6 测试策略里"中止语义"的前置条件。
