@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSet>
+#include <QByteArrayView>
 #include <QCryptographicHash>
 #include <limits>
 #include <new>
@@ -205,7 +206,8 @@ int scanMd5Footer(QFile &f, qint64 fileSize, qint64 &tarEnd, QString *error)
                 setErr(error, QStringLiteral("文件被截断"));
                 return -2;
             }
-            h.addData(buf.constData(), int(want));
+            // QByteArrayView 重载（非弃用）；与旧的 addData(const char*, qsizetype) 逐字节等价
+            h.addData(QByteArrayView(buf.constData(), want));
             remain -= want;
         }
         if (h.result().toHex() == hashHex)
@@ -541,7 +543,7 @@ bool appendMd5FooterStream(const QString &tarPath, QString *error)
         return false;
     qint64 got = 0;
     while ((got = f.read(buf.data(), buf.size())) > 0)
-        hash.addData(buf.constData(), int(got));
+        hash.addData(QByteArrayView(buf.constData(), got));   // QByteArrayView 重载（非弃用）
     if (got < 0) {
         setErr(error, QStringLiteral("读取文件失败: %1").arg(tarPath));
         return false;
