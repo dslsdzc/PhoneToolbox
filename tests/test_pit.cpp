@@ -39,18 +39,6 @@ private slots:
 
 using namespace odintest;
 
-static QList<PitSpec> bootSbootNv()
-{
-    QList<PitSpec> es;
-    PitSpec boot; boot.name = QByteArray("BOOT");  boot.identifier = 80; boot.flashFilename = QByteArray("spl.img");
-    boot.blockCount = 1024; es << boot;
-    PitSpec sboot; sboot.name = QByteArray("SBOOT"); sboot.identifier = 1; sboot.flashFilename = QByteArray("sboot.bin");
-    sboot.blockCount = 4096; es << sboot;
-    PitSpec nv; nv.name = QByteArray("wfixnv2"); nv.identifier = 4; nv.flashFilename = QByteArray("nvitem.bin");
-    nv.blockCount = 2048; es << nv;
-    return es;
-}
-
 void TestPit::parsesHeaderAndEntries()
 {
     const QByteArray raw = buildPit(bootSbootNv());

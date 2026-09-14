@@ -44,22 +44,7 @@ private slots:
 
 using namespace odintest;
 
-// 合成 PIT 夹具：BOOT/spl.img、SBOOT/sboot.bin、wfixnv2/nvitem.bin。
-// 注：test_pit.cpp 内有一份同内容的**文件内** static（Task 3 落地时未提到 helpers 头）。
-// 本任务的分工约束（不改任务书外文件）下不合并 —— 两份都是纯数据、无逻辑，风险为零；
-// 合并进 odin_test_helpers.h 作为后续整理项记录在 Task 4 报告里。
-static QList<PitSpec> bootSbootNv()
-{
-    QList<PitSpec> es;
-    PitSpec boot; boot.name = QByteArray("BOOT");  boot.identifier = 80; boot.flashFilename = QByteArray("spl.img");
-    boot.blockCount = 1024; es << boot;
-    PitSpec sboot; sboot.name = QByteArray("SBOOT"); sboot.identifier = 1; sboot.flashFilename = QByteArray("sboot.bin");
-    sboot.blockCount = 4096; es << sboot;
-    PitSpec nv; nv.name = QByteArray("wfixnv2"); nv.identifier = 4; nv.flashFilename = QByteArray("nvitem.bin");
-    nv.blockCount = 2048; es << nv;
-    return es;
-}
-
+// 夹具 bootSbootNv()（BOOT/spl.img、SBOOT/sboot.bin、wfixnv2/nvitem.bin）由 odin_test_helpers.h 提供。
 // 造一个含若干条目的 .tar.md5（磁盘上），返回路径与条目名→(偏移,大小)
 static QString writeTarMd5(const QString &dir, const QString &name,
                            const QList<imgtar::TarEntry> &entries, bool withFooter = true)

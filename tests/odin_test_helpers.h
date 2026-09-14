@@ -6,7 +6,8 @@
 #include "core/odin/pit.h"
 
 // 合成 PIT 夹具（共享：test_pit / test_samsung_plan / test_odin_session 都用它，勿各写一份）。
-// 字段默认值取真样本 J1POP3G.pit 的 BOOT 条目形态（dt=2 MMC / attr=0x5 / upd=1）。
+// 字段默认值：deviceType=2（MMC ⇒ 512 B/扇区）、updateAttributes=1、attributes=0x5。
+// 与真样本的逐字段对照见下方 bootSbootNv()（**并非**全部照抄真值 —— 别把默认值当真值断言）。
 namespace odintest {
 
 inline void putU32(QByteArray &d, int off, quint32 v)
@@ -91,6 +92,24 @@ inline QByteArray buildPit(const QList<PitSpec> &entries,
         }
     }
     return d + trailing;
+}
+
+// 三条夹具 = 真样本 reference/samsung-samples/sm-j110h/J1POP3G.pit 的
+// BOOT / SBOOT / wfixnv2 条目（分区名、identifier、blockCount、flashFilename、deviceType 照抄真值）。
+// **未照抄**的字段保持 PitSpec 默认值，与真值的出入（2026-09-14 逐字节复核）：
+//   * attributes：真 BOOT=0x2、真 SBOOT/wfixnv2=0x5；夹具三条一律取默认 0x5
+//   * blockSizeOrOffset：真 SBOOT=8192、真 wfixnv2=18432；夹具取默认 0（真 BOOT=0，一致）
+// 计划层（samsung_plan）不读这两个字段，夹具无需区分；将来若有消费者依赖它们，须先扩 PitSpec。
+inline QList<PitSpec> bootSbootNv()
+{
+    QList<PitSpec> es;
+    PitSpec boot; boot.name = QByteArray("BOOT");  boot.identifier = 80; boot.flashFilename = QByteArray("spl.img");
+    boot.blockCount = 1024; es << boot;
+    PitSpec sboot; sboot.name = QByteArray("SBOOT"); sboot.identifier = 1; sboot.flashFilename = QByteArray("sboot.bin");
+    sboot.blockCount = 4096; es << sboot;
+    PitSpec nv; nv.name = QByteArray("wfixnv2"); nv.identifier = 4; nv.flashFilename = QByteArray("nvitem.bin");
+    nv.blockCount = 2048; es << nv;
+    return es;
 }
 
 } // namespace odintest
