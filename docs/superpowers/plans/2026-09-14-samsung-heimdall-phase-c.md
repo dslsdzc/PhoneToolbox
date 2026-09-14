@@ -50,6 +50,7 @@
 
 **工程约定（沿用既有惯例，违反会被审查打回）**
 - 命名空间 `odin`（与 `edl` 平级）；纯函数签名一律 `bool f(...) + QString *error`。
+- 遍历 Qt 容器防 detach 用 **`std::as_const`**（`#include <utility>`）—— **不要用 `qAsConst`**：Qt 6.6 起弃用（实测每处 1 条 `-Wdeprecated-declarations`），且本仓既有风格是 `std::as_const`（`src/ui/fs_browser_dialog.cpp:252`、`src/ui/image_tool_panel.cpp:794`）。
 - **传输层是纯字节管道**：不补 ZLP、不做协议判断 —— 每条规则只在一个地方负责（Phase B 教训：命令帧 ZLP 曾两处注释互相推诿）。
 - 新增 `src/core/odin/*.{h,cpp}` 由 `GLOB_RECURSE src/core/*.cpp` **自动**编入主程序（CMakeLists.txt:107-112）→ 主程序侧**不需要**改 CMake。
 - 单测：每个测试源独立可执行；新测试要**显式**加进 `CMakeLists.txt` 的 `IMAGE_TEST_SOURCES`，并在 `foreach` 里按 `_test_stem` 追加 `_test_extra_sources`（放被测源；`src/core` 不在任何静态库内）。
@@ -820,7 +821,7 @@ void TestPit::realSamplesParseWithKnownFacts()
     pits.sort();
     QVERIFY2(pits.size() >= 9, qPrintable(QStringLiteral("真 PIT 少于 9 个：%1").arg(pits.size())));
 
-    for (const QString &p : qAsConst(pits)) {
+    for (const QString &p : std::as_const(pits)) {
         odin::PitTable t;
         QString err;
         QVERIFY2(odin::parsePitFile(p, t, &err), qPrintable(QFileInfo(p).fileName() + ": " + err));
@@ -829,13 +830,13 @@ void TestPit::realSamplesParseWithKnownFacts()
         // 尾部签名块：10/10 样本都非空（256..1024B）—— 要求 filesize == 28+count*132 的解析器会全灭
         QVERIFY2(t.trailingBytes > 0, qPrintable(QFileInfo(p).fileName()));
         // 每个分区名都清洗过（无 CR/LF/NUL）
-        for (const odin::PitEntry &e : qAsConst(t.entries)) {
+        for (const odin::PitEntry &e : std::as_const(t.entries)) {
             QVERIFY(!e.partitionName.contains(QLatin1Char('\r')));
             QVERIFY(!e.partitionName.contains(QLatin1Char('\n')));
         }
         // 至少一个条目声明了文件名
         bool anyName = false;
-        for (const odin::PitEntry &e : qAsConst(t.entries))
+        for (const odin::PitEntry &e : std::as_const(t.entries))
             anyName = anyName || e.hasImageName();
         QVERIFY(anyName);
     }
@@ -868,7 +869,7 @@ void TestPit::realSamplesParseWithKnownFacts()
              qPrintable(err));
     QCOMPARE(q7.entries.size(), 136);
     QCOMPARE(q7.luCount, quint16(4));
-    for (const odin::PitEntry &e : qAsConst(q7.entries))
+    for (const odin::PitEntry &e : std::as_const(q7.entries))
         QCOMPARE(e.deviceType, quint32(8));
 
     // CR/LF 清洗的真证据：j1xlte 样本的 USERDATA.fotaFilename 在**文件里**是 "remained\r\n"
@@ -1320,7 +1321,7 @@ void TestSamsungPlan::matchesByPitFilename()
     QCOMPARE(f.read(3000), QByteArray(3000, 'A'));
     // 缺镜像 → 有告警且指明了条目与文件名
     bool warned = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         warned = warned || (w.contains(QStringLiteral("wfixnv2")) && w.contains(QStringLiteral("nvitem.bin")));
     QVERIFY(warned);
 }
@@ -1341,10 +1342,10 @@ void TestSamsungPlan::skipsEntriesWithoutImageName()
     QVERIFY(odin::buildSamsungPlan({tar}, pit, plan, &err), qPrintable(err));
     QCOMPARE(plan.entries.size(), 1);
     // 未声明的条目**不得**产生"缺镜像"告警（只有一条汇总）
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         QVERIFY2(!w.contains(QStringLiteral("SBOOT")), qPrintable(w));
     bool summary = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         summary = summary || w.contains(QStringLiteral("未声明镜像文件名"));
     QVERIFY(summary);
 }
@@ -1368,7 +1369,7 @@ void TestSamsungPlan::fallsBackToUniquePitEntry()
     QCOMPARE(plan.entries[0].imageFile, QStringLiteral("J1POP3G.pit"));
     QCOMPARE(plan.entries[0].matchRule, QStringLiteral(".pit 唯一性回退"));
     bool warned = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         warned = warned || w.contains(QStringLiteral("唯一"));
     QVERIFY(warned);
 
@@ -1395,7 +1396,7 @@ void TestSamsungPlan::warnsBothMismatchDirections()
     odin::SamsungPlan plan;
     QVERIFY(odin::buildSamsungPlan({tar}, pit, plan, &err), qPrintable(err));
     bool missingInPkg = false, missingInPit = false;
-    for (const QString &w : qAsConst(plan.warnings)) {
+    for (const QString &w : std::as_const(plan.warnings)) {
         if (w.contains(QStringLiteral("不在所选包内"))) missingInPkg = true;
         if (w.contains(QStringLiteral("extra.bin"))) missingInPit = true;
     }
@@ -1417,7 +1418,7 @@ void TestSamsungPlan::warnsWhenImageLargerThanPartition()
     odin::SamsungPlan plan;
     QVERIFY(odin::buildSamsungPlan({tar}, pit, plan, &err), qPrintable(err));
     bool warned = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         warned = warned || w.contains(QStringLiteral("放不下"));
     QVERIFY(warned);
 }
@@ -1435,7 +1436,7 @@ void TestSamsungPlan::summarisesSmallImages()
     odin::SamsungPlan plan;
     QVERIFY(odin::buildSamsungPlan({tar}, pit, plan, &err), qPrintable(err));
     int perEntry = 0, summary = 0;
-    for (const QString &w : qAsConst(plan.warnings)) {
+    for (const QString &w : std::as_const(plan.warnings)) {
         if (w.contains(QStringLiteral("放不下"))) ++perEntry;
         if (w.contains(QStringLiteral("小于分区"))) ++summary;
     }
@@ -1459,7 +1460,7 @@ void TestSamsungPlan::reportsMd5FooterState()
     QVERIFY(!plan.files[0].md5HasFooter);
     QVERIFY(!plan.files[0].verifyOk);
     bool warned = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         warned = warned || w.contains(QStringLiteral("校验"));
     QVERIFY(warned);
 
@@ -1480,7 +1481,7 @@ void TestSamsungPlan::reportsMd5FooterState()
     QVERIFY(plan2.files[0].md5HasFooter);
     QVERIFY(!plan2.files[0].verifyOk);
     bool warned2 = false;
-    for (const QString &w : qAsConst(plan2.warnings))
+    for (const QString &w : std::as_const(plan2.warnings))
         warned2 = warned2 || w.contains(QStringLiteral("MD5"));
     QVERIFY(warned2);
 }
@@ -1563,7 +1564,7 @@ void TestSamsungPlan::realPackagesBuildPlan()
                                      + 8388608 + 2097152 + 181868));
     // 三个包都带校验行且校验通过（含 MODEM 的 "␣*" 变体 —— Task 1 的修复在此被真实包验证）
     QCOMPARE(plan.files.size(), 3);
-    for (const odin::SamsungPlanFile &f : qAsConst(plan.files)) {
+    for (const odin::SamsungPlanFile &f : std::as_const(plan.files)) {
         QVERIFY2(f.md5HasFooter, qPrintable(QFileInfo(f.path).fileName()));
         QVERIFY2(f.verifyOk, qPrintable(QFileInfo(f.path).fileName()));
     }
@@ -1579,7 +1580,7 @@ void TestSamsungPlan::realPackagesBuildPlan()
     expect[QStringLiteral("MODEM")]    = QStringLiteral("SPRDCP.img");
     expect[QStringLiteral("WDSP")]     = QStringLiteral("SPRDDSP.img");
     expect[QStringLiteral("wfixnv2")]  = QStringLiteral("nvitem.bin");
-    for (const odin::SamsungPlanEntry &e : qAsConst(plan.entries)) {
+    for (const odin::SamsungPlanEntry &e : std::as_const(plan.entries)) {
         QVERIFY2(expect.contains(e.partition), qPrintable(e.partition));
         QCOMPARE(e.imageFile, expect.value(e.partition));
         QVERIFY(e.sourceOffset > 0);
@@ -1587,21 +1588,21 @@ void TestSamsungPlan::realPackagesBuildPlan()
     }
     // BOOT2/spl2.img 不在任何包内 → 必须有一条"不在所选包内"的告警
     bool boot2Warned = false;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         boot2Warned = boot2Warned || w.contains(QStringLiteral("spl2.img"));
     QVERIFY(boot2Warned);
     // CSC 包内的 J1POP3G.pit 自身也被当作镜像（PIT 条目的 flashFilename 是 J1POP3G_LTN_OPEN.pit）
     bool pitMatched = false;
-    for (const odin::SamsungPlanEntry &e : qAsConst(plan.entries))
+    for (const odin::SamsungPlanEntry &e : std::as_const(plan.entries))
         pitMatched = pitMatched || e.matchRule == QStringLiteral(".pit 唯一性回退");
     QVERIFY(pitMatched);
     // 分区大小核对：真数据里只有 MODEM(SPRDCP.img) 恰好等于分区大小，其余都小于 → 只应有一条汇总告警
     int summary = 0;
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         summary += w.contains(QStringLiteral("小于分区")) ? 1 : 0;
     QCOMPARE(summary, 1);
     // 镜像 > 分区：真数据里一条都不该有
-    for (const QString &w : qAsConst(plan.warnings))
+    for (const QString &w : std::as_const(plan.warnings))
         QVERIFY2(!w.contains(QStringLiteral("放不下")), qPrintable(w));
 }
 
@@ -1664,7 +1665,7 @@ bool loadPitFromPackage(const QStringList &tarMd5Files, PitTable &out,
             setErr(error, QStringLiteral("无法索引固件包 %1：%2").arg(QFileInfo(path).fileName(), ierr));
             return false;
         }
-        for (const imgtar::TarIndexEntry &e : qAsConst(idx))
+        for (const imgtar::TarIndexEntry &e : std::as_const(idx))
             if (!e.isDir && endsWithPit(e.name))
                 hits.append({path, e.name, e.offset, e.size});
     }
@@ -1674,7 +1675,7 @@ bool loadPitFromPackage(const QStringList &tarMd5Files, PitTable &out,
     }
     if (hits.size() > 1) {
         QStringList names;
-        for (const Hit &h : qAsConst(hits))
+        for (const Hit &h : std::as_const(hits))
             names << QStringLiteral("%1（%2）").arg(h.entryName, QFileInfo(h.path).fileName());
         setErr(error, QStringLiteral("所选包内有 %1 个 .pit，无法确定用哪个：%2")
                           .arg(hits.size()).arg(names.join(QStringLiteral("、"))));
@@ -1743,12 +1744,12 @@ bool buildSamsungPlan(const QStringList &tarMd5Files, const PitTable &pit,
             setErr(error, QStringLiteral("无法索引固件包 %1：%2").arg(base, ierr));
             return false;
         }
-        for (const imgtar::TarIndexEntry &e : qAsConst(idx)) {
+        for (const imgtar::TarIndexEntry &e : std::as_const(idx)) {
             if (e.isDir)
                 continue;
             f.entryNames << e.name;
             bool dup = false;
-            for (const IndexedImage &im : qAsConst(images))
+            for (const IndexedImage &im : std::as_const(images))
                 dup = dup || im.name.compare(e.name, Qt::CaseInsensitive) == 0;
             if (dup) {
                 plan.warnings << QStringLiteral("包内条目重名，已忽略后者：%1（%2）").arg(e.name, base);
@@ -2490,7 +2491,7 @@ void TestOdinSession::stopsOnPartIndexMismatchWithoutEndSession()
     QVERIFY(!s.run(fx.plan, opt, &err));
     QVERIFY(err.contains(QStringLiteral("BOOT")));
     QVERIFY(err.contains(QStringLiteral("分片")));
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameEndSession(false));      // 失败路径**不发**结束会话
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
 }
@@ -2507,7 +2508,7 @@ void TestOdinSession::refusesWhenDevicePitLacksPartition()
     QString err;
     QVERIFY(!s.run(fx.plan, OdinOptions{}, &err));
     QVERIFY(err.contains(QStringLiteral("BOOT")));
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());         // 拒刷：**一条数据都不发**
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
 }
@@ -2527,11 +2528,11 @@ void TestOdinSession::fallsBackToPackagePitWhenDumpFails()
     QString err;
     QVERIFY2(s.run(fx.plan, OdinOptions{}, &err), qPrintable(err));   // 成功（回退包内 PIT）
     bool warned = false;
-    for (const QString &d : qAsConst(details))
+    for (const QString &d : std::as_const(details))
         warned = warned || d.contains(QStringLiteral("设备 PIT"));
     QVERIFY(warned);
     bool flashed = false;
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         flashed = flashed || w == frameRequestFlash();
     QVERIFY(flashed);
 }
@@ -2562,7 +2563,7 @@ void TestOdinSession::refusesZeroSizedImage()
     QString err;
     QVERIFY(!s.run(fx.plan, opt, &err));
     QVERIFY(!err.isEmpty());
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());
 }
 
@@ -2581,13 +2582,13 @@ void TestOdinSession::negotiatesOnlyForVersion2()
     QString err;
     QVERIFY2(s.run(fx.plan, opt, &err), qPrintable(err));
     bool negotiated = false;
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         negotiated = negotiated || w == frameFilePartSize(1048576) || w == frameFilePartSize(131072);
     QVERIFY(!negotiated);
     // 片大小 = 128 KiB（profileForVersion(1)），序列声明值同款
     QCOMPARE(t.writes[2], frameDeviceTypeQuery());  // 索引 1 = 起会话，索引 2 直接是机型查询
     bool seq = false;
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         seq = seq || w == frameRequestSequence(131072);
     QVERIFY(seq);
 }
@@ -2610,7 +2611,7 @@ void TestOdinSession::reportsProgressToHundred()
     QVERIFY(!seen.isEmpty());
     QCOMPARE(seen.last().percent, 100);
     QStringList stages;
-    for (const OdinProgress &p : qAsConst(seen))
+    for (const OdinProgress &p : std::as_const(seen))
         if (!stages.contains(p.stage))
             stages << p.stage;
     QVERIFY(stages.contains(QStringLiteral("handshake")));
@@ -2619,7 +2620,7 @@ void TestOdinSession::reportsProgressToHundred()
     QVERIFY(stages.contains(QStringLiteral("done")));
     // 进度单调不减
     int prev = -1;
-    for (const OdinProgress &p : qAsConst(seen)) {
+    for (const OdinProgress &p : std::as_const(seen)) {
         QVERIFY(p.percent >= prev);
         prev = p.percent;
     }
@@ -2640,7 +2641,7 @@ void TestOdinSession::failsWhenImageFileMissing()
     QVERIFY(!s.run(fx.plan, opt, &err));
     QVERIFY(err.contains(QStringLiteral("BOOT")));
     // 打开镜像失败必须在**发任何 0x66 命令之前**（不把设备带进半途状态）
-    for (const QByteArray &w : qAsConst(t.writes))
+    for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
 }
@@ -2807,7 +2808,7 @@ bool OdinSession::run(const SamsungPlan &plan, const OdinOptions &opt, QString *
         ok = false;
 
     if (ok) {
-        for (const ResolvedEntry &r : qAsConst(todo)) {
+        for (const ResolvedEntry &r : std::as_const(todo)) {
             if (!writeEntry(r, error)) { ok = false; break; }
         }
     }
@@ -3542,7 +3543,7 @@ void TestPipeline::samsungOdinChannel()
         for (const QString &w : plan.warnings)
             emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
         // 包完整性：构建阶段已校验并记进 warnings；这里把结论再点一次（不阻断 —— 改包刷写在场景里常见）
-        for (const odin::SamsungPlanFile &f : qAsConst(plan.files))
+        for (const odin::SamsungPlanFile &f : std::as_const(plan.files))
             if (!f.verifyOk)
                 emit outputMessage(QStringLiteral("[校验] %1 未通过 MD5 校验（%2）")
                                        .arg(QFileInfo(f.path).fileName(),
