@@ -1,5 +1,6 @@
 #include "flash_panel.h"
 #include "flash_plan_dialog.h"          // Phase B Task 8：EDL 刷写计划预览
+#include "samsung_plan_dialog.h"        // Phase C Task 9：三星 Odin 刷写计划预览
 #include "core/filename_parser.h"
 #include "core/restart_tool.h"
 #include <QVBoxLayout>
@@ -256,6 +257,8 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         modeStr = "华为 USB Update"; break;
     case DeviceDetector::MODE_SPD:
         modeStr = "展锐"; break;
+    case DeviceDetector::MODE_SAMSUNG_ODIN:
+        modeStr = "三星 (Odin)"; break;
     default:
         modeStr = "未知"; break;
     }
@@ -345,17 +348,19 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         return; // MTK 不走后面的逻辑
     }
 
-    // F5: 协议通道模式（MTK BROM / 华为 USB Update / 展锐）——整包刷写通道。
+    // F5: 协议通道模式（MTK BROM / 华为 USB Update / 展锐 / 三星 Odin）——整包刷写通道。
     // 分区列表不适用：MTK BROM 分区镜像选择待接线（F1 runBromFlash 分区结构），
-    // 华为/展锐为整包通道；跳过 onRefreshPartitions，避免对协议设备(如
-    // usb-1-2)发 ADB 查询。「刷入」按所选设备模式走协议通道文件参数对话框。
+    // 华为/展锐为整包通道，三星侧分区来自包内 PIT（刷写入口里弹预览）；
+    // 跳过 onRefreshPartitions，避免对协议设备(如 usb-1-2)发 ADB 查询。
+    // 「刷入」按所选设备模式走协议通道文件参数对话框。
     if (m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM ||
         m_deviceInfo.mode == DeviceDetector::MODE_HUAWEI_USB_UPDATE ||
-        m_deviceInfo.mode == DeviceDetector::MODE_SPD) {
+        m_deviceInfo.mode == DeviceDetector::MODE_SPD ||
+        m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_ODIN) {
         m_partitionList->clear();
         m_partitions.clear();
         m_flashBtn->setEnabled(true);
-        m_flashBtn->setToolTip(QStringLiteral("协议通道整包刷写（按模式选择 update.app / pac+FDL / DA 文件）"));
+        m_flashBtn->setToolTip(QStringLiteral("协议通道整包刷写（按模式选择 update.app / pac+FDL / DA / 三星 tar.md5）"));
         return;
     }
 
@@ -696,6 +701,34 @@ void FlashPanel::onFlashClicked()
             // runBromFlash 分区结构适配，未适配前标注"分区选择待接线"。
             emit outputMessage(QStringLiteral(
                 "MTK BROM 通道：分区镜像选择待接线，本次仅执行 DA 协议握手"), false);
+        } else if (channel == QStringLiteral("samsung-odin")) {
+            // Phase C：选包 → 计划预览（含两类不匹配告警 + 未验证勾选）→ 确认后把**文件列表**
+            // 交给通道（通道内自行解析 PIT 并重建计划 —— 与 oppo-edl 通道传 planDir 同款口径）
+            const QStringList tars = QFileDialog::getOpenFileNames(
+                this, QStringLiteral("选择三星固件包（BL/AP/CP/CSC 的 .tar.md5，可多选）"), QString(),
+                QStringLiteral("三星固件包 (*.tar.md5 *.tar);;所有文件 (*)"));
+            if (tars.isEmpty()) return;
+            QString pitPath;
+            const QMessageBox::StandardButton wantPit = QMessageBox::question(
+                this, QStringLiteral("PIT"),
+                QStringLiteral("是否显式指定 PIT 文件？\n\n"
+                               "选「否」用包内 .pit（推荐，通常来自 CSC 包）；\n"
+                               "包内没有 .pit 时必须选「是」并指定文件。"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (wantPit == QMessageBox::Yes) {
+                pitPath = QFileDialog::getOpenFileName(this, QStringLiteral("选择 PIT 文件"), QString(),
+                                                       QStringLiteral("PIT (*.pit);;所有文件 (*)"));
+                if (pitPath.isEmpty()) return;
+            }
+            QString planErr;
+            if (!SamsungPlanDialog::buildAndShow(tars, pitPath, this, &planErr)) {
+                if (!planErr.isEmpty())
+                    emit outputMessage(QStringLiteral("三星刷写计划构建失败：%1").arg(planErr), true);
+                return;                     // *error 空 = 用户取消（静默返回，与 EDL 计划入口同口径）
+            }
+            params.insert(QStringLiteral("tarMd5Files"), tars);
+            if (!pitPath.isEmpty())
+                params.insert(QStringLiteral("pitPath"), pitPath);
         }
 
         // 已知显示伪影（F5-1）：VID 通配检测（华为 0x12D1 / 展锐 0x1782）

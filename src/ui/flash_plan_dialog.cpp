@@ -1,21 +1,14 @@
 #include "flash_plan_dialog.h"
 
-#include <QCheckBox>
 #include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
-#include <QHBoxLayout>
-#include <QHeaderView>
-#include <QLabel>
-#include <QListWidget>
 #include <QProgressDialog>
-#include <QPushButton>
-#include <QStandardItemModel>
-#include <QTableView>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 
 #include "oppo_extract_worker.h"
+#include "plan_preview_widget.h"
 
 namespace {
 
@@ -47,30 +40,18 @@ QString entryStart(const edl::PlanEntry &e)
     return QString::number(e.startSector);
 }
 
-QString humanBytes(quint64 bytes)
-{
-    if (bytes >= 1024ull * 1024 * 1024)
-        return QStringLiteral("%1 GiB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 2);
-    if (bytes >= 1024ull * 1024)
-        return QStringLiteral("%1 MiB").arg(bytes / (1024.0 * 1024), 0, 'f', 1);
-    if (bytes >= 1024ull)
-        return QStringLiteral("%1 KiB").arg(bytes / 1024.0, 0, 'f', 0);
-    return QStringLiteral("%1 B").arg(bytes);
-}
-
 QString entryBytes(const edl::PlanEntry &e)
 {
     const quint64 bytes = e.rawBytes != 0
         ? e.rawBytes
         : e.numSectors * quint64(e.sectorSize ? e.sectorSize : 1);
-    return bytes == 0 ? QStringLiteral("-") : humanBytes(bytes);
+    return bytes == 0 ? QStringLiteral("-") : planBytesText(bytes);
 }
 
 } // namespace
 
 FlashPlanDialog::FlashPlanDialog(const edl::FlashPlan &plan, QWidget *parent)
     : QDialog(parent)
-    , m_warnings(plan.warnings)
 {
     buildUi(plan);
 }
@@ -83,26 +64,22 @@ void FlashPlanDialog::buildUi(const edl::FlashPlan &plan)
     QVBoxLayout *layout = new QVBoxLayout(this);
 
     // 顶部摘要：来源 / 存储类型 / 条目数 / 总字节
-    m_summaryLabel = new QLabel(this);
-    m_summaryLabel->setTextFormat(Qt::RichText);
-    m_summaryLabel->setText(QStringLiteral(
+    const QString summary = QStringLiteral(
         "<b>来源：</b>%1　<b>存储类型：</b>%2　<b>条目数：</b>%3　<b>总字节：</b>%4")
         .arg(plan.source.isEmpty() ? QStringLiteral("（未标注）") : plan.source,
              plan.storageType.isEmpty() ? QStringLiteral("（未标注）") : plan.storageType)
         .arg(plan.entries.size())
-        .arg(humanBytes(plan.totalBytes)));
-    m_summaryLabel->setWordWrap(true);
-    layout->addWidget(m_summaryLabel);
+        .arg(planBytesText(plan.totalBytes));
 
     // 条目表：分区 / LUN / 起始扇区 / 扇区数 / 大小 / 文件 / 校验
-    m_model = new QStandardItemModel(plan.entries.size(), 7, this);
-    m_model->setHorizontalHeaderLabels({
+    const QStringList headers = {
         QStringLiteral("分区"), QStringLiteral("LUN"), QStringLiteral("起始扇区"),
         QStringLiteral("扇区数"), QStringLiteral("大小"), QStringLiteral("文件"),
-        QStringLiteral("校验")});
-    for (int row = 0; row < plan.entries.size(); ++row) {
-        const edl::PlanEntry &e = plan.entries.at(row);
-        const QStringList cells = {
+        QStringLiteral("校验")};
+    QList<QStringList> rows;
+    QStringList tips;                    // 表里只显文件名，完整路径走 tooltip
+    for (const edl::PlanEntry &e : plan.entries) {
+        rows.append(QStringList{
             entryName(e),
             QString::number(e.lun),
             entryStart(e),
@@ -113,74 +90,27 @@ void FlashPlanDialog::buildUi(const edl::FlashPlan &plan)
                 : QFileInfo(e.imageFile).fileName(),
             e.sha256.isEmpty() ? QStringLiteral("-")
                                : QStringLiteral("%1…").arg(e.sha256.left(12)),
-        };
-        for (int col = 0; col < cells.size(); ++col) {
-            QStandardItem *item = new QStandardItem(cells.at(col));
-            item->setEditable(false);
-            if (!e.imageFile.isEmpty() && e.imageFile != QLatin1String("DISK"))
-                item->setToolTip(e.imageFile);        // 表里只显文件名，完整路径走 tooltip
-            m_model->setItem(row, col, item);
-        }
+        });
+        tips.append(!e.imageFile.isEmpty() && e.imageFile != QLatin1String("DISK")
+                        ? e.imageFile
+                        : QString());
     }
 
-    m_table = new QTableView(this);
-    m_table->setObjectName(QStringLiteral("planTable"));
-    m_table->setModel(m_model);
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->verticalHeader()->setVisible(false);
-    m_table->resizeColumnsToContents();
-    layout->addWidget(m_table, 1);
+    m_preview = new PlanPreviewWidget(headers, rows, summary, plan.warnings,
+                                      QStringLiteral("我知晓此路径真机未验证"), this);
+    m_preview->setColumnTooltips(5, tips);
+    layout->addWidget(m_preview);
 
-    // 告警列表（计划层 warnings + 解包告警）
-    m_warningsTitle = new QLabel(QStringLiteral("告警"), this);
-    layout->addWidget(m_warningsTitle);
-    m_warningsList = new QListWidget(this);
-    m_warningsList->setObjectName(QStringLiteral("warningsList"));
-    m_warningsList->setMaximumHeight(110);
-    layout->addWidget(m_warningsList);
-    refreshWarnings();
-
-    // 真机未验证告知：勾选前「开始刷写」保持禁用（默认停手，不是默认开刷）
-    m_ackCheck = new QCheckBox(QStringLiteral("我知晓此路径真机未验证"), this);
-    m_ackCheck->setObjectName(QStringLiteral("ackCheck"));
-    layout->addWidget(m_ackCheck);
-
-    QHBoxLayout *buttonLayout = new QHBoxLayout();
-    m_startButton = new QPushButton(QStringLiteral("开始刷写"), this);
-    m_startButton->setObjectName(QStringLiteral("startButton"));
-    m_startButton->setEnabled(false);
-    QPushButton *cancelButton = new QPushButton(QStringLiteral("取消"), this);
-    buttonLayout->addStretch();
-    buttonLayout->addWidget(m_startButton);
-    buttonLayout->addWidget(cancelButton);
-    layout->addLayout(buttonLayout);
-
-    connect(m_ackCheck, &QCheckBox::toggled,
-            m_startButton, &QPushButton::setEnabled);
-    connect(m_startButton, &QPushButton::clicked, this, [this]() {
+    connect(m_preview, &PlanPreviewWidget::startRequested, this, [this]() {
         emit startRequested(m_planDir);
         accept();
     });
-    connect(cancelButton, &QPushButton::clicked, this, &FlashPlanDialog::reject);
-}
-
-void FlashPlanDialog::refreshWarnings()
-{
-    m_warningsList->clear();
-    m_warningsList->addItems(m_warnings);
-    const bool any = !m_warnings.isEmpty();
-    m_warningsTitle->setVisible(any);
-    m_warningsList->setVisible(any);
+    connect(m_preview, &PlanPreviewWidget::cancelRequested, this, &FlashPlanDialog::reject);
 }
 
 void FlashPlanDialog::addWarnings(const QStringList &warnings)
 {
-    if (warnings.isEmpty())
-        return;
-    m_warnings.append(warnings);
-    refreshWarnings();
+    m_preview->addWarnings(warnings);
 }
 
 void FlashPlanDialog::accept()

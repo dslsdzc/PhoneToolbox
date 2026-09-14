@@ -16,12 +16,7 @@
 
 #include "core/edl/flash_plan.h"
 
-class QCheckBox;
-class QLabel;
-class QListWidget;
-class QPushButton;
-class QStandardItemModel;
-class QTableView;
+class PlanPreviewWidget;
 class QTemporaryDir;
 
 class FlashPlanDialog : public QDialog
@@ -69,17 +64,11 @@ signals:
 
 private:
     void buildUi(const edl::FlashPlan &plan);
-    void refreshWarnings();
 
-    QLabel *m_summaryLabel = nullptr;
-    QTableView *m_table = nullptr;
-    QStandardItemModel *m_model = nullptr;
-    QLabel *m_warningsTitle = nullptr;
-    QListWidget *m_warningsList = nullptr;
-    QCheckBox *m_ackCheck = nullptr;
-    QPushButton *m_startButton = nullptr;
+    // 预览骨架（摘要 + 告警 + 条目表 + 未验证勾选 + 开始/取消按钮）——
+    // Phase C Task 9 从本类抽出，与三星对话框共用；planDir 语义仍由本类持有。
+    PlanPreviewWidget *m_preview = nullptr;
 
-    QStringList m_warnings;      // 计划告警 + 解包告警（预览用，不去重）
     QString m_planDir;
     bool m_confirmed = false;
 };

@@ -303,7 +303,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -426,8 +427,11 @@ if(ENABLE_IMAGE_TESTS)
                     # PB-B6：对话框的整包入口把解包搬到 OppoExtractWorker（同样属 src/ui，
                     # 不编入任何静态库）—— 用例直接驱动该 worker 验证"工作线程 + 真实进度 +
                     # 条目边界取消"，故一并编入本目标。
+                    # Phase C Task 9：预览骨架抽成 PlanPreviewWidget（src/ui，同样不编入
+                    # 任何静态库）—— 对话框改用该控件，本目标随之补编。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/flash_plan_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/plan_preview_widget.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/oppo_extract_worker.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp)
                 elseif(_test_stem STREQUAL "test_pit")
@@ -468,6 +472,15 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
+                elseif(_test_stem STREQUAL "test_samsung_plan_dialog")
+                    # Phase C Task 9：三星计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
+                    # + 计划层/PIT/tar 索引。Qt6::Widgets 与 offscreen 见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/samsung_plan_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/plan_preview_widget.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -486,12 +499,13 @@ if(ENABLE_IMAGE_TESTS)
                 endif()
                 set_target_properties(${_test_target} PROPERTIES AUTOMOC ON)
                 add_test(NAME ${_test_target} COMMAND ${_test_target})
-                # Phase B Task 8：对话框测试是唯一带 Widgets 的测试 —— QTEST_MAIN 会造 QApplication，
-                # 无 DISPLAY 的环境必须走 offscreen 平台插件（否则 ctest 当场 abort）。
+                # Phase B Task 8：对话框测试是仅有的两个带 Widgets 的测试 —— QTEST_MAIN 会造
+                # QApplication，无 DISPLAY 的环境必须走 offscreen 平台插件（否则 ctest 当场 abort）。
                 # QT_QPA_PLATFORMTHEME 置空：桌面主题插件（如 qt6ct）在无显示环境下加载 GTK 后
                 # 直接退出（实测 exit 1，QtTest 还没跑），主题与"勾选框门控"断言无关 —— 置空
                 # 让本用例与环境无关（ENVIRONMENT 是**追加**到环境，不能只靠不设置）。
-                if(_test_stem STREQUAL "test_flash_plan_dialog")
+                # Phase C Task 9：三星计划对话框共用同一套 Widgets + offscreen 配置。
+                if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
                     set_tests_properties(${_test_target} PROPERTIES
                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")
