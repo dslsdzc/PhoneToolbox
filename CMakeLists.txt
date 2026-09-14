@@ -302,7 +302,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -448,6 +449,17 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
+                elseif(_test_stem STREQUAL "test_odin_libusb_transport")
+                    # Phase C Task 7：真机传输（odin 侧唯一的 libusb 依赖点）+ 它消费的整链编入本
+                    # 目标 —— 使"会话只经 IOdinTransport 碰设备"在构建图上可见；libusb 按名补链，
+                    # 见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_libusb_transport.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -481,7 +493,8 @@ if(ENABLE_IMAGE_TESTS)
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
                 if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
                    OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline"
-                   OR _test_stem STREQUAL "test_edl_libusb_transport")
+                   OR _test_stem STREQUAL "test_edl_libusb_transport"
+                   OR _test_stem STREQUAL "test_odin_libusb_transport")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
                 endif()
