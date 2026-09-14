@@ -572,25 +572,31 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
         // 只对三星 VID 深挖描述符：每 2s 一轮的枚举里，其余厂商不必多读一次配置描述符。
         if (desc.idVendor == 0x04E8) {
             QList<quint8> classes;
-            bool bulkIn = false, bulkOut = false;
+            bool hasBulkInOut = false;          // 与 odin_libusb_transport.cpp 的 inspectDevice 同规则：
+                                                // **同一接口内** bulk in/out 齐备才算（否则检测认领而 open() 拒，
+                                                // 用户会看到"列表里有、一刷就说未找到设备"）
             libusb_config_descriptor *cfg = nullptr;
             if (libusb_get_active_config_descriptor(list[i], &cfg) == LIBUSB_SUCCESS && cfg) {
                 for (int ic = 0; ic < int(cfg->bNumInterfaces); ++ic) {
                     for (int a = 0; a < int(cfg->interface[ic].num_altsetting); ++a) {
                         const libusb_interface_descriptor *alt = &cfg->interface[ic].altsetting[a];
                         classes << quint8(alt->bInterfaceClass);
+                        bool epIn = false, epOut = false;
                         for (int e = 0; e < int(alt->bNumEndpoints); ++e) {
                             const libusb_endpoint_descriptor *ep = &alt->endpoint[e];
                             if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
                                 continue;
-                            if (ep->bEndpointAddress & LIBUSB_ENDPOINT_IN) bulkIn = true; else bulkOut = true;
+                            if (ep->bEndpointAddress & LIBUSB_ENDPOINT_IN) epIn = true;
+                            else                                                epOut = true;
                         }
+                        if (epIn && epOut)
+                            hasBulkInOut = true;
                     }
                 }
                 libusb_free_config_descriptor(cfg);
             }
             if (odin::LibusbOdinTransport::isOdinDevice(desc.idVendor, desc.idProduct,
-                                                        classes, bulkIn && bulkOut)) {
+                                                        classes, hasBulkInOut)) {
                 const QString devId = QStringLiteral("usb-%1-%2")
                                           .arg(libusb_get_bus_number(list[i]))
                                           .arg(libusb_get_device_address(list[i]));
