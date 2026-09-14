@@ -29,6 +29,7 @@ private slots:
     void failsWhenImageFileMissing();
     void pitDumpStreamInterruptionDoesNotFallBack();
     void flashesMultiSequenceImage();
+    void transportFailuresAbortAndClose();
 };
 
 using namespace odin;
@@ -436,6 +437,67 @@ void TestOdinSession::flashesMultiSequenceImage()
         prev = p.percent;
     }
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
+}
+
+// 审查 Minor 4 附带：mock 的 `failWriteAt`/`openResult` 此前在全部用例里**从未使用** ——
+// 实现里约 9 处 `if (!m_t.write(...))` 失败分支与 open 失败分支零覆盖。一条用例、三个场景。
+void TestOdinSession::transportFailuresAbortAndClose()
+{
+    {   // 场景 A：**会话建立阶段**写失败（0x64/0x00 起会话那一笔）
+        Fixture fx;
+        const QByteArray image(3000, '\x5A');
+        QVERIFY(makeFixture(fx, image));
+        MockOdinTransport t;
+        queueSessionSetup(t);
+        t.failWriteAt = 1;                         // 0 = "ODIN" 握手，1 = 起会话帧
+        OdinSession s(t);
+        QString err;
+        QVERIFY(!s.run(fx.plan, OdinOptions{}, &err));
+        QVERIFY2(err.contains(QStringLiteral("起会话失败")), qPrintable(err));       // 错误带阶段名
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));     // 传输层原文被带出
+        QCOMPARE(t.writes.size(), 1);              // 失败的那笔不进 writes，故只剩握手
+        QVERIFY(!t.writes.contains(frameEndSession(false)));                // 失败路径不发 0x67
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));                  // 失败也关句柄
+    }
+    {   // 场景 B：**数据面**写失败（第 1 片数据）
+        Fixture fx;
+        const QByteArray image(3000, '\x5A');
+        QVERIFY(makeFixture(fx, image));
+        MockOdinTransport t;
+        queueSessionSetup(t);
+        OdinOptions opt;
+        opt.dumpDevicePit = false;
+        t.reads << ackFrame(0x66, 0) << ackFrame(0x66, 0);   // 申请刷写 / 申请序列 的应答
+        // 前 7 笔：ODIN / 起会话 / 片大小 / 机型 / 总字节 / 申请刷写 / 申请序列 → 第 8 笔（下标 7）= 第 1 片
+        t.failWriteAt = 7;
+        OdinSession s(t);
+        QString err;
+        QVERIFY(!s.run(fx.plan, opt, &err));
+        QVERIFY2(err.contains(QStringLiteral("写入分片失败")), qPrintable(err));     // 命中**写失败**分支
+        QVERIFY2(err.contains(QStringLiteral("BOOT")), qPrintable(err));            // 错误带分区名
+        QVERIFY2(err.contains(QStringLiteral("已写 0 字节")), qPrintable(err));      // 与已写字节
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));     // 传输层原文被带出
+        QVERIFY(!t.writes.contains(frameEndSession(false)));
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));
+    }
+    {   // 场景 C（记账用）：**open 失败** → 立即返回；此时尚未拿到句柄，故不 close
+        MockOdinTransport t;
+        t.openResult = false;
+        SamsungPlan plan;                          // 非空计划才会走到 open（空计划在 open 前早退）
+        SamsungPlanEntry e;
+        e.partition = QStringLiteral("BOOT");
+        e.imageFile = QStringLiteral("spl.img");
+        e.sizeBytes = 1;
+        e.fileIndex = 0;
+        plan.files.append(SamsungPlanFile{});
+        plan.entries.append(e);
+        OdinSession s(t);
+        QString err;
+        QVERIFY(!s.run(plan, OdinOptions{}, &err));
+        QVERIFY2(err.contains(QStringLiteral("打开设备失败")), qPrintable(err));
+        QCOMPARE(t.calls, QStringList{QStringLiteral("open")});   // 不 close：open 未成功，无句柄可关
+        QVERIFY(t.writes.isEmpty());
+    }
 }
 
 QTEST_APPLESS_MAIN(TestOdinSession)

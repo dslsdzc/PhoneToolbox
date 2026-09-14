@@ -205,7 +205,9 @@ bool OdinSession::beginSession(QString *error)
 
 void OdinSession::queryDeviceType()
 {
-    // best-effort（odin4 odin_protocol.cpp:433-452 的调用点：握手后、起会话前）。
+    // best-effort（请求本身见 odin4 odin_protocol.cpp:433-452）。**调用点与 odin4 不同**：
+    // odin4 在 odin4.cpp:172 于「握手后、**起会话前**」调用，本期按 spec §5 的流程在
+    // `beginSession()` **之后**、上报总字节之前调用 —— 同一请求号、不同时机（审查 Minor 7）。
     // ⚠️ D13：同一个 0x64/0x01 在 Thor 是"重置刷写计数"（刷完才发），在 odin4 里既当机型查询
     // 又当重置 —— 本期只做**一次查询**，刷完**不**发重置。语义冲突留给持机人裁定。
     QString err;
@@ -302,8 +304,19 @@ OdinSession::DumpOutcome OdinSession::dumpDevicePit(PitTable &out, QString *erro
         data.append(chunk);
     }
     // ③ 末片之后设备会再发一次空包（Heimdall 末片带 kEmptyTransferAfter；odin4:654-657 紧随一次 IN 空读）
-    //    —— best-effort，拿不到不算错
-    m_t.read(1, m_opt.controlTimeoutMs, nullptr);
+    //    —— best-effort，拿不到不算错。但**要落日志**（审查 Minor 5）：设备不发空包时这一读会白等到
+    //    超时（10s）且此前没有任何输出；"有没有尾空包""收到的是不是空包"是判断参照口径是否
+    //    与真机一致的现场证据（本期无真机，未验证）。**不改变控制流**。
+    QString eerr;
+    const QByteArray emptyPkt = m_t.read(1, m_opt.controlTimeoutMs, &eerr);
+    report(QStringLiteral("info"),
+           !eerr.isEmpty()
+               ? QStringLiteral("设备 PIT 尾空包：超时未收到（%1；真机未验证）").arg(eerr)
+               : (emptyPkt.isEmpty()
+                      ? QStringLiteral("设备 PIT 尾空包：已收到")
+                      : QStringLiteral("设备 PIT 尾空包：收到 %1 字节**非空**包（流可能未对齐）")
+                            .arg(emptyPkt.size())),
+           percentFor(m_writtenBytes));
     // ④ 结束：0x65/0x03 → 应答
     if (!m_t.write(framePitEndRequest(), &werr)) {
         setErr(error, QStringLiteral("结束读取设备 PIT 失败：%1").arg(werr));
