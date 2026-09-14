@@ -300,7 +300,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -429,6 +430,12 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
+                elseif(_test_stem STREQUAL "test_odin_protocol")
+                    # Phase C：协议帧纯函数层（src/core/odin 已 GLOB 编入主程序，不属任何静态库）；
+                    # 它消费 PitEntry（pit.h），故一并编入 pit.cpp。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
