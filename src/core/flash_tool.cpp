@@ -19,7 +19,6 @@
 #include <QCoreApplication>
 #include <QThread>
 #include <QPair>
-#include <utility>   // std::as_const（项目约定：不得用 qAsConst）
 
 #ifdef Q_OS_WIN
 static const char *kPlatformScript = "flash-all.bat";
@@ -1428,13 +1427,8 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         }
         for (const QString &w : plan.warnings)
             emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
-        // 包完整性：构建阶段已校验并记进 warnings；这里把结论再点一次（不阻断 —— 改包刷写在场景里常见）
-        for (const odin::SamsungPlanFile &f : std::as_const(plan.files))
-            if (!f.verifyOk)
-                emit outputMessage(QStringLiteral("[校验] %1 未通过 MD5 校验（%2）")
-                                       .arg(QFileInfo(f.path).fileName(),
-                                            f.md5HasFooter ? QStringLiteral("校验行不符")
-                                                           : QStringLiteral("无校验行")), false);
+        // 包完整性结论由计划层 warnings 承担（上面那行，[计划] 前缀已含"校验失败/无校验行"两种文案）——
+        // 此处不再重复输出，避免同一坏包出两行。
 
         // 多设备防护（同既有四通道）：LibusbOdinTransport::open 取首个匹配设备
         const int samsungCount = countDevicesOfVid(0x04E8, nullptr);

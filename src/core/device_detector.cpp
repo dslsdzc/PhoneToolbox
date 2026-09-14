@@ -572,9 +572,10 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
         // 只对三星 VID 深挖描述符：每 2s 一轮的枚举里，其余厂商不必多读一次配置描述符。
         if (desc.idVendor == 0x04E8) {
             QList<quint8> classes;
-            bool hasBulkInOut = false;          // 与 odin_libusb_transport.cpp 的 inspectDevice 同规则：
-                                                // **同一接口内** bulk in/out 齐备才算（否则检测认领而 open() 拒，
-                                                // 用户会看到"列表里有、一刷就说未找到设备"）
+            // 与 odin_libusb_transport.cpp 的 inspectDevice 同规则（**CDC 路径**上）：
+            // 同一接口内 bulk in/out 齐备才算。注意老 PID 兜底（0x6601/0x685D/0x68C3）**不看描述符**、
+            // 由纯函数直接命中 —— 那条路径上"检测认领 ⊆ open() 可接受"不成立（需真机才能暴露，实际机型极少）。
+            bool hasBulkInOut = false;
             libusb_config_descriptor *cfg = nullptr;
             if (libusb_get_active_config_descriptor(list[i], &cfg) == LIBUSB_SUCCESS && cfg) {
                 for (int ic = 0; ic < int(cfg->bNumInterfaces); ++ic) {
@@ -605,10 +606,14 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
                 info.mode = MODE_SAMSUNG_ODIN;
                 info.model = getModeDisplayName(MODE_SAMSUNG_ODIN);
                 newDevices[devId] = info;
+                // emit 模式与兄弟分支一致：新设备 → deviceConnected；同 ID 模式变化 → deviceModeChanged
                 if (!m_currentDevices.contains(devId)) {
+                    qDebug() << "Odin device connected:" << devId;
                     emit deviceConnected(info);
                 } else if (m_currentDevices[devId].mode != MODE_SAMSUNG_ODIN) {
                     emit deviceModeChanged(devId, MODE_SAMSUNG_ODIN);
+                    qDebug() << "Odin device mode changed:" << devId
+                             << "to" << getModeDisplayName(MODE_SAMSUNG_ODIN);
                 }
                 continue;                       // 已认领，不再走下面的 PID 表
             }
