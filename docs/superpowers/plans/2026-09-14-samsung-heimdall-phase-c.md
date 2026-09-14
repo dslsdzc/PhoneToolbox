@@ -3372,8 +3372,10 @@ QTEST_APPLESS_MAIN(TestOdinLibusbTransport)
 - **接口号与端点不写死**：Odin 设备的接口号/端点在描述符里（Thor/odin4 都是遍历取），不照搬 Heimdall 的固定值。
 - `write()`：空数组 = ZLP（超时 100 ms，`odin4-llucs odin_protocol.cpp:294-302`）；非空走 bulk，**短写必须报错**（数据面继续发下一片会错位）。
 - `read()`：`timeoutMs <= 0` → `effectiveTimeoutMs` 换算后短读，`LIBUSB_ERROR_TIMEOUT` 且请求为轮询时**空返回且不置 error**。
-- `reset()`：只做句柄退场（**不**调 `libusb_reset_device`，理由同 Phase B：设备此刻正在重启）。
-- `maxPacketSize()`：未打开 → 0。
+- ⚠️ **接口已收窄（Task 6 落地时按审查收窄，以落盘的 `src/core/odin/odin_transport.h` 为准）**：
+  `IOdinTransport` **只有 `open` / `close` / `write` / `read` 四个方法** —— 原计划的 `reset()` 与 `maxPacketSize()` 已删除
+  （会话从不调用它们：设备重启走协议命令 `0x67/0x01`，不经 USB 复位；ZLP 由会话的显式空写表达，不靠包长判定）。
+  **不要**再实现这两个方法（会编译不过）。
 
 - [ ] **Step 4: 跑测试，确认通过**：`./build/image_engine_tests_test_odin_libusb_transport && ctest --test-dir build --output-on-failure` → 全绿，44/44。
 
