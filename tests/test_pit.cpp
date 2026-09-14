@@ -5,6 +5,11 @@
 #ifndef ODIN_SAMPLES_DIR
 #define ODIN_SAMPLES_DIR ""
 #endif
+// 1 = 真样本缺失/不足时 FAIL 而非 SKIP（CMake 侧 ODIN_SAMPLES_REQUIRED=ON 时传入；
+// 默认 0 保持离线友好 —— 本地无 reference/ 时的 SKIP 语义不变）。
+#ifndef ODIN_SAMPLES_REQUIRED
+#define ODIN_SAMPLES_REQUIRED 0
+#endif
 
 #include <QtTest>
 #include <utility>
@@ -95,6 +100,9 @@ void TestPit::passthroughAttributesAndDeviceTypeUntouched()
     es[0].updateAttributes = 5;                            // 真数据里出现 5（Heimdall 的 fota=1/secure=2 解释不了）
     es[0].deviceType = 8;                                  // UFS（Heimdall 枚举只到 3）
     es[0].blockSizeOrOffset = 0xDEADBEEFu;
+    es[0].binaryType = 1;      // CP（决定结束序列包的目的地：modem）
+    es[0].fileOffset = 7;
+    es[0].fileSize = 9;
     odin::PitTable t;
     QString err;
     QVERIFY2(odin::parsePit(buildPit(es), t, &err), qPrintable(err));
@@ -102,6 +110,9 @@ void TestPit::passthroughAttributesAndDeviceTypeUntouched()
     QCOMPARE(t.entries[0].updateAttributes, quint32(5));
     QCOMPARE(t.entries[0].deviceType, quint32(8));
     QCOMPARE(t.entries[0].blockSizeOrOffset, 0xDEADBEEFu);
+    QCOMPARE(t.entries[0].binaryType, quint32(1));
+    QCOMPARE(t.entries[0].fileOffset, quint32(7));
+    QCOMPARE(t.entries[0].fileSize, quint32(9));
 }
 
 void TestPit::partitionBytesByDeviceType()
@@ -189,6 +200,13 @@ void TestPit::rejectsBadInput()
     QVERIFY(!odin::parsePit(buildPit({}), t, &err));
     QVERIFY(!err.isEmpty());
 
+    // count 是攻击者可控值：必须用 64 位算所需长度（0xFFFFFFFF*132 ≈ 566 GB）
+    QByteArray huge = buildPit(bootSbootNv());
+    odintest::putU32(huge, 4, 0xFFFFFFFFu);
+    err.clear();
+    QVERIFY(!odin::parsePit(huge, t, &err));
+    QVERIFY(!err.isEmpty());
+
     // 文件不存在
     err.clear();
     QVERIFY(!odin::parsePitFile(QStringLiteral("/nonexistent/x.pit"), t, &err));
@@ -201,8 +219,14 @@ void TestPit::realSamplesParseWithKnownFacts()
 {
     const QString root = QString::fromLatin1(ODIN_SAMPLES_DIR);
     QDir dir(root);
-    if (root.isEmpty() || !dir.exists())
+    if (root.isEmpty() || !dir.exists()) {
+#if ODIN_SAMPLES_REQUIRED
+        QFAIL("真样本目录不存在，但本次构建要求真样本（ODIN_SAMPLES_REQUIRED=ON）—— "
+              "本用例是 PIT 解析最强的离线证据，不允许静默跳过");
+#else
         QSKIP("真样本目录不存在（reference/ 为 gitignored；见 spec §2）");
+#endif
+    }
 
     QStringList pits;
     QDirIterator it(root, {QStringLiteral("*.pit")}, QDir::Files, QDirIterator::Subdirectories);

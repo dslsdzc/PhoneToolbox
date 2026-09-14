@@ -307,6 +307,12 @@ if(ENABLE_IMAGE_TESTS)
             # 首轮循环走 if(_test_count EQUAL 0) 分支，不会经 get_filename_component
             # 赋值 _test_stem —— 循环前显式置空，避免读未初始化变量/残留值。
             set(_test_stem "")
+            # 三星真样本目录（reference/ 为 gitignored）：只把**路径**编进用例，内容不进仓库。
+            # PT_ODIN_SAMPLES_DIR 是 CACHE 变量 —— 便于做"指向不存在目录"的负控制实验。
+            set(PT_ODIN_SAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/reference/samsung-samples"
+                CACHE PATH "三星真样本目录（gitignored）")
+            # ON = 真样本缺失/不足时让用例 FAIL 而非 SKIP（本仓 CI/验证跑这个；默认 OFF 保持离线友好）
+            option(ODIN_SAMPLES_REQUIRED "Fail (instead of skip) when Samsung samples are missing" OFF)
             foreach(_test_src IN LISTS IMAGE_TEST_SOURCES)
                 if(_test_count EQUAL 0)
                     set(_test_target image_engine_tests)
@@ -421,7 +427,10 @@ if(ENABLE_IMAGE_TESTS)
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
                     # 真样本在 reference/（gitignored）：只把**路径**编进来，用例内 QSKIP 兜底
                     target_compile_definitions(${_test_target} PRIVATE
-                        ODIN_SAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/reference/samsung-samples")
+                        ODIN_SAMPLES_DIR="${PT_ODIN_SAMPLES_DIR}")
+                    if(ODIN_SAMPLES_REQUIRED)
+                        target_compile_definitions(${_test_target} PRIVATE ODIN_SAMPLES_REQUIRED=1)
+                    endif()
                 endif()
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
                 # ImageWorker 测试额外链 root_patcher（image_worker.cpp 的 doPatch 调
