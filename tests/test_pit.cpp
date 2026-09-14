@@ -7,6 +7,8 @@
 #endif
 
 #include <QtTest>
+#include <utility>
+
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -209,7 +211,7 @@ void TestPit::realSamplesParseWithKnownFacts()
     pits.sort();
     QVERIFY2(pits.size() >= 9, qPrintable(QStringLiteral("真 PIT 少于 9 个：%1").arg(pits.size())));
 
-    for (const QString &p : qAsConst(pits)) {
+    for (const QString &p : std::as_const(pits)) {
         odin::PitTable t;
         QString err;
         QVERIFY2(odin::parsePitFile(p, t, &err), qPrintable(QFileInfo(p).fileName() + ": " + err));
@@ -218,13 +220,13 @@ void TestPit::realSamplesParseWithKnownFacts()
         // 尾部签名块：10/10 样本都非空（256..1024B）—— 要求 filesize == 28+count*132 的解析器会全灭
         QVERIFY2(t.trailingBytes > 0, qPrintable(QFileInfo(p).fileName()));
         // 每个分区名都清洗过（无 CR/LF/NUL）
-        for (const odin::PitEntry &e : qAsConst(t.entries)) {
+        for (const odin::PitEntry &e : std::as_const(t.entries)) {
             QVERIFY(!e.partitionName.contains(QLatin1Char('\r')));
             QVERIFY(!e.partitionName.contains(QLatin1Char('\n')));
         }
         // 至少一个条目声明了文件名
         bool anyName = false;
-        for (const odin::PitEntry &e : qAsConst(t.entries))
+        for (const odin::PitEntry &e : std::as_const(t.entries))
             anyName = anyName || e.hasImageName();
         QVERIFY(anyName);
     }
@@ -257,7 +259,7 @@ void TestPit::realSamplesParseWithKnownFacts()
              qPrintable(err));
     QCOMPARE(q7.entries.size(), 136);
     QCOMPARE(q7.luCount, quint16(4));
-    for (const odin::PitEntry &e : qAsConst(q7.entries))
+    for (const odin::PitEntry &e : std::as_const(q7.entries))
         QCOMPARE(e.deviceType, quint32(8));
 
     // CR/LF 清洗的真证据：j1xlte 样本的 USERDATA.fotaFilename 在**文件里**是 "remained\r\n"
