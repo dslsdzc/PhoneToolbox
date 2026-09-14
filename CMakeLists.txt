@@ -301,7 +301,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -436,6 +437,17 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp)
+                elseif(_test_stem STREQUAL "test_odin_session")
+                    # Phase C：会话编排（走 IOdinTransport，mock = tests/mock_odin_transport.h）编入
+                    # 它的整链 —— 会话消费 samsung_plan（计划层）与 odin_protocol（帧/判定），
+                    # 计划层又消费 tar_image（indexTarStream）；四条源在此显式列出，使"会话只经
+                    # 传输缝碰设备"在构建图上可见（本目标不含任何 libusb 源）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
