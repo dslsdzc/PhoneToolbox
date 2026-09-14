@@ -54,7 +54,8 @@
 - **传输层是纯字节管道**：不补 ZLP、不做协议判断 —— 每条规则只在一个地方负责（Phase B 教训：命令帧 ZLP 曾两处注释互相推诿）。
 - 新增 `src/core/odin/*.{h,cpp}` 由 `GLOB_RECURSE src/core/*.cpp` **自动**编入主程序（CMakeLists.txt:107-112）→ 主程序侧**不需要**改 CMake。
 - 单测：每个测试源独立可执行；新测试要**显式**加进 `CMakeLists.txt` 的 `IMAGE_TEST_SOURCES`，并在 `foreach` 里按 `_test_stem` 追加 `_test_extra_sources`（放被测源；`src/core` 不在任何静态库内）。
-- 真样本路径经**编译期宏** `ODIN_SAMPLES_DIR` 传入（`target_compile_definitions`），用例内 `QSKIP` 兜底 —— **绝不**把 `reference/` 内容提交，也不让用例硬编码相对路径。
+- 真样本路径经**编译期宏** `ODIN_SAMPLES_DIR` 传入（其值来自 **CACHE 变量** `PT_ODIN_SAMPLES_DIR`，便于做"指向不存在目录"的负控制），用例内 **`QSKIP` 兜底**（默认）—— **绝不**把 `reference/` 内容提交，也不让用例硬编码相对路径。
+  ⚠️ **`QSKIP` 不改变退出码 → ctest 照样报绿**：真样本"最强的离线证据"会在缺 `reference/` 的机器（新克隆/CI）上**静默蒸发**。故加开关 **`ODIN_SAMPLES_REQUIRED=ON`** → 缺失/不足时 `QFAIL` 而非 `QSKIP`；**本计划的验证跑一律带 `-DODIN_SAMPLES_REQUIRED=ON`**，且看输出里 `0 skipped`（不要只看 ctest 绿灯）。Task 4 的 `test_samsung_plan` 用同一套机制。
 - 提交：**只 `git add` 具体文件路径**。仓库有 4 个遗留 tracked 文件在 `build/` 下，`git add -A` / `-u` / `commit -a` 一律禁止。
 - 测试输出必须干净；全量 `ctest` 不得回归（当前基线 **39/39**）。
 
@@ -1232,6 +1233,9 @@ git commit -m "feat(odin): PIT 解析（28B 头 + 132B 条目 + 尾部签名容�
 #ifndef ODIN_SAMPLES_DIR
 #define ODIN_SAMPLES_DIR ""
 #endif
+#ifndef ODIN_SAMPLES_REQUIRED
+#define ODIN_SAMPLES_REQUIRED 0
+#endif
 
 #include <QtTest>
 #include <QCryptographicHash>
@@ -1541,8 +1545,13 @@ void TestSamsungPlan::realPackagesBuildPlan()
 {
     const QString root = QString::fromLatin1(ODIN_SAMPLES_DIR);
     const QString dir = root + QStringLiteral("/sm-j110h");
-    if (root.isEmpty() || !QDir(dir).exists())
+    if (root.isEmpty() || !QDir(dir).exists()) {
+#if ODIN_SAMPLES_REQUIRED
+        QFAIL("真样本目录不存在，但本次构建要求真样本（ODIN_SAMPLES_REQUIRED=ON）");
+#else
         QSKIP("真样本目录不存在（reference/ 为 gitignored）");
+#endif
+    }
     const QString bl = dir + QStringLiteral("/BL_J110HXXU0AQJ1_CL1240844_QB15258762_REV02_user_low_ship.tar.md5");
     const QString csc = dir + QStringLiteral("/CSC_ODD_J110HODD0AQF2_CL1214683_QB14017971_REV02_user_low_ship.tar.md5");
     const QString modem = dir + QStringLiteral("/MODEM_J110HDDU0AQF1_CL2068124_QB6737246_REV00.tar.md5");
