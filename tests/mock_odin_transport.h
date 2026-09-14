@@ -13,20 +13,19 @@ namespace odin {
 // （失败路径不发 0x67、close 一定在最后、轮询用的是 timeout 0）。
 // 对照先例：tests/mock_edl_transport.h（同一套建模思路）。
 //
-// ⚠️ **轮询（timeoutMs == 0）不动 `reads` 队列** —— 与 MockEdlTransport 的 drain 语义一致
-//    （见该文件 "read(timeoutMs == 0) = 非阻塞轮询 …只吐 residual，**不动** reads 队列"）。
-//    任务书 Step 2 的脚本（"LOKE" 之后紧跟起会话应答）与任务书 Step 3 的 handshake
-//    （握手后 `read(64, 0)` 清端点）组合起来，若轮询也出队，就会把 beginAck 吃掉、
-//    整串读错位 —— 那是**任务书自身材料的一处内部矛盾**（脚本/实现/断言三者不能同时成立）。
-//    取"轮询不出队"是唯一能同时满足三者且与真机一致的解：真机上握手刚完设备还没发东西，
-//    非阻塞轮询本就该空返回；且轮询吃掉一条**已到达**的响应恰是 MockEdlTransport 头注释
-//    记下的结构性盲区①（"设备抢发/响应早到"），不该由 mock 主动注入到每条用例里。
-//    本 mock 因此**不建模**"端点已有残留字节"（odin 会话不做握手后 drain 之外的清端点，
-//    PIT 末片后的空包由脚本里的空元素表达，见 queuePitDump）——已知缺口，与 EDL 同款。
+// ⚠️ **轮询（timeoutMs == 0）只消费 `residual`、永不消费 `reads`** —— 与 Phase B 已过审的
+//    tests/mock_edl_transport.h 逐字同款语义（"drain 只吃 residual、**从不消费 reads**"）。
+//    依据：会话在握手后做的 `read(64, 0)` 是**清端点** —— 真实设备此刻并没有"应答"要交给我们。
+//    若把清端点建模成"从应答脚本里出队"，Step 2 的读脚本（"LOKE" 之后紧跟起会话应答）与
+//    Step 3 的 handshake 就**互相矛盾**（脚本 / 实现 / 断言三者不能同时成立：清端点会吃掉
+//    beginAck，整串读错位）。要模拟"端点里已有残留字节"就往 `residual` 里放（本任务的用例
+//    目前都不需要，保持为空）。**已知缺口**（与 EDL mock 的结构性盲区①同款）：本 mock 因此
+//    表达不了真机上"设备抢发/响应早到、被清端点吃掉"这类缺陷。
 class MockOdinTransport : public IOdinTransport
 {
 public:
-    QList<QByteArray> reads;       // 每次正超时 read() 出队一个；空队列 → 返回空 + error
+    QList<QByteArray> reads;       // 正超时 read 的脚本化响应（FIFO）；空队列 → 返回空 + error
+    QList<QByteArray> residual;    // IN 端点里的残留字节：**只有轮询（timeoutMs==0）才消费它**
     QList<QByteArray> writes;      // 每次 write() 追加（**含空写 = ZLP**）
     QStringList calls;             // "open"/"close"/"write"/"read"/"poll"/"reset"
     QList<int> readTimeouts;       // 每次 read 的 timeoutMs（钉住「轮询 = 0」）
@@ -49,13 +48,15 @@ public:
 
     QByteArray read(int maxBytes, int timeoutMs, QString *error) override {
         readTimeouts.append(timeoutMs);
-        calls << (timeoutMs == 0 ? QStringLiteral("poll") : QStringLiteral("read"));
-        if (timeoutMs == 0)
-            return {};                                  // 轮询：端点静默，空返回**且不置 error**（见类注释）
-        if (reads.isEmpty()) {
-            if (error) *error = QStringLiteral("读超时（mock 队列空）");
-            return {};
+        if (timeoutMs == 0) {                           // 轮询（清端点）：只吃 residual，见类注释
+            calls << QStringLiteral("poll");
+            if (residual.isEmpty()) return {};          // 端点静默：空返回且**不置 error**
+            QByteArray head = residual.takeFirst();
+            if (head.size() > maxBytes) { residual.prepend(head.mid(maxBytes)); head.truncate(maxBytes); }
+            return head;
         }
+        calls << QStringLiteral("read");
+        if (reads.isEmpty()) { if (error) *error = QStringLiteral("读超时（mock 队列空）"); return {}; }
         QByteArray head = reads.takeFirst();
         if (head.size() > maxBytes) {                   // 超出请求长度的部分留待下次（真实 USB 语义）
             reads.prepend(head.mid(maxBytes));
