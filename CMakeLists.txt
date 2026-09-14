@@ -299,7 +299,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_libusb_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_edl_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_plan_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pit.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -422,6 +423,12 @@ if(ENABLE_IMAGE_TESTS)
                     # Phase C：PIT 解析纯模块（src/core/odin 已 GLOB 编入主程序，不属任何静态库）
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp)
+                elseif(_test_stem STREQUAL "test_samsung_plan")
+                    # Phase C：计划层（PIT 匹配）—— 同属 src/core/odin，直接编入本目标
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
