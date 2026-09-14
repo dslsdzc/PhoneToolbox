@@ -54,12 +54,25 @@ private:
         quint64 offset = 0; quint64 size = 0; PitEntry pit;
     };
 
+    // 设备 PIT 读取的三种结局（审查修复：**中途**失败不得回退包内 PIT）。
+    // 分界线 = 第一笔 `framePitPartRequest` 是否已经写出：设备只在该请求之后才进入数据流，
+    // 而一旦进入，主机就无法知道它是否已经把余下的片发进 IN 端点 —— 此时改道包内 PIT 继续刷写，
+    // 会把设备留在"以为还在传 PIT"的半开会话里（比直接失败更糟：用户重试时对不上状态）。
+    enum class DumpOutcome {
+        Ok,                 // 读全 + 解析成功
+        RejectedNoStream,   // **可回退**：设备未进入数据阶段（请求失败/被拒、回报大小不合理），
+                            //   或数据流已按 size 对齐消费完而只剩内容问题（长度不符/解析失败）
+                            //   —— 这两种情况端点里都没有"设备还在发"的字节。
+        StreamInterrupted   // **不可回退**：已进入数据阶段后中断（分片请求写失败/分片读空/
+                            //   结束请求或结束应答失败）→ run() 直接失败，错误文案写明需重试。
+    };
+
     bool handshake(QString *error);
     bool beginSession(QString *error);
     bool readAck(quint32 expectedId, bool allowProgressCodes, const QString &context, QString *error);
     void queryDeviceType();
     bool setTotalBytes(quint64 total, QString *error);
-    bool dumpDevicePit(PitTable &out, QString *error);
+    DumpOutcome dumpDevicePit(PitTable &out, QString *error);
     bool resolveEntries(const SamsungPlan &plan, const PitTable *devicePit,
                         QList<ResolvedEntry> &out, QString *error);
     bool writeEntry(const ResolvedEntry &r, QString *error);

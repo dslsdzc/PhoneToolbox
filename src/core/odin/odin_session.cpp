@@ -77,12 +77,20 @@ bool OdinSession::run(const SamsungPlan &plan, const OdinOptions &opt, QString *
     bool haveDevicePit = false;
     if (ok && m_opt.dumpDevicePit) {
         QString derr;
-        if (dumpDevicePit(devicePit, &derr))
+        const DumpOutcome outcome = dumpDevicePit(devicePit, &derr);
+        if (outcome == DumpOutcome::Ok) {
             haveDevicePit = true;
-        else
+        } else if (outcome == DumpOutcome::StreamInterrupted) {
+            // **不回退**：设备可能仍在把余下的 PIT 片发进 IN 端点。改道包内 PIT 继续刷写，
+            // 会让设备停在半开会话里（后续命令与残留数据交错）—— 直接失败，让用户重试整次会话。
+            setErr(error, QStringLiteral("设备 PIT 读取在数据阶段中断：%1 —— 设备可能停在半开会话，"
+                                         "请重试（未下发任何分区数据）").arg(derr));
+            ok = false;
+        } else {
             report(QStringLiteral("pit"),
                    QStringLiteral("读取设备 PIT 失败，改用包内 PIT：%1").arg(derr),
                    percentFor(m_writtenBytes));
+        }
     }
 
     QList<ResolvedEntry> todo;
@@ -242,12 +250,12 @@ bool OdinSession::setTotalBytes(quint64 total, QString *error)
     return readAck(kControlSession, false, QStringLiteral("上报总字节"), error);
 }
 
-bool OdinSession::dumpDevicePit(PitTable &out, QString *error)
+OdinSession::DumpOutcome OdinSession::dumpDevicePit(PitTable &out, QString *error)
 {
     QString werr;
     if (!m_t.write(framePitDumpRequest(), &werr)) {
         setErr(error, QStringLiteral("请求读取设备 PIT 失败：%1").arg(werr));
-        return false;
+        return DumpOutcome::RejectedNoStream;   // 命令没发出去 → 设备未开始发流
     }
     // ① 请求应答：id 回显 0x65 + u32 文件大小（Heimdall PitFileResponse；odin4:626-637）
     QString rerr;
@@ -256,39 +264,40 @@ bool OdinSession::dumpDevicePit(PitTable &out, QString *error)
         setErr(error, QStringLiteral("读取设备 PIT 失败：未收到大小应答（%1 字节）%2")
                           .arg(rsp.size())
                           .arg(rerr.isEmpty() ? QString() : QStringLiteral("；") + rerr));
-        return false;
+        return DumpOutcome::RejectedNoStream;   // 大小应答是数据流的前置 → 设备尚未发流
     }
     Ack ack;
     if (!parseAck(rsp, ack, error)) {
         prefixErr(error, QStringLiteral("读取设备 PIT 失败"));
-        return false;
+        return DumpOutcome::RejectedNoStream;
     }
     const AckVerdict v = judgeAck(ack, kControlPitFile, false);
     if (!v.ok) {
         setErr(error, QStringLiteral("读取设备 PIT 失败：%1").arg(v.reason));
-        return false;
+        return DumpOutcome::RejectedNoStream;   // 请求阶段被拒（如 BOOTLOADER_FAIL）
     }
     const quint32 size = ack.code;
     if (size == 0 || size > kMaxPitBytes) {
         setErr(error, QStringLiteral("设备回报的 PIT 大小不合理（%1 字节）").arg(size));
-        return false;
+        return DumpOutcome::RejectedNoStream;   // 同上：还没请求过任何一片
     }
     // ② 逐片取：0x65/0x02 + 片序号 → 应答是**裸的 ≤500 字节数据**（无 8 字节头）
     //    （Heimdall 的 ReceiveFilePartPacket 是 500 字节变长包；odin4:643-652 同样把应答当原始数据）
+    //    ⚠️ 从这里起进入**数据阶段**：任何失败都返回 StreamInterrupted（不可回退，见 DumpOutcome）。
     QByteArray data;
     data.reserve(int(size));
     const quint32 parts = (size + kPitPartSize - 1) / kPitPartSize;
     for (quint32 i = 0; i < parts; ++i) {
         if (!m_t.write(framePitPartRequest(i), &werr)) {
             setErr(error, QStringLiteral("读取设备 PIT 第 %1 片失败：%2").arg(i).arg(werr));
-            return false;
+            return DumpOutcome::StreamInterrupted;
         }
         const QByteArray chunk = m_t.read(kPitPartSize, m_opt.controlTimeoutMs, &rerr);
         if (chunk.isEmpty()) {
             setErr(error, QStringLiteral("读取设备 PIT 第 %1/%2 片失败：%3")
                               .arg(i + 1).arg(parts)
                               .arg(rerr.isEmpty() ? QStringLiteral("设备未回数据") : rerr));
-            return false;
+            return DumpOutcome::StreamInterrupted;
         }
         data.append(chunk);
     }
@@ -298,18 +307,23 @@ bool OdinSession::dumpDevicePit(PitTable &out, QString *error)
     // ④ 结束：0x65/0x03 → 应答
     if (!m_t.write(framePitEndRequest(), &werr)) {
         setErr(error, QStringLiteral("结束读取设备 PIT 失败：%1").arg(werr));
-        return false;
+        return DumpOutcome::StreamInterrupted;
     }
     if (!readAck(kControlPitFile, false, QStringLiteral("结束读取设备 PIT"), error))
-        return false;
+        return DumpOutcome::StreamInterrupted;
 
+    // 至此：每一片都请求过且都有应答、结束请求也已确认 —— 流已按 size 对齐消费完，
+    // 端点里不可能还有"设备正在发"的字节。以下是**内容**问题（长度不符/解析失败），
+    // 改道包内 PIT 是安全的 → 归入可回退。
     data.truncate(int(size));                  // 末片可能多读（设备按 500 发，我们只要 size 字节）
     if (quint32(data.size()) != size) {
         setErr(error, QStringLiteral("设备 PIT 数据不完整（期望 %1 字节，收到 %2）")
                           .arg(size).arg(data.size()));
-        return false;
+        return DumpOutcome::RejectedNoStream;
     }
-    return parsePit(data, out, error);
+    if (!parsePit(data, out, error))
+        return DumpOutcome::RejectedNoStream;
+    return DumpOutcome::Ok;
 }
 
 bool OdinSession::resolveEntries(const SamsungPlan &plan, const PitTable *devicePit,

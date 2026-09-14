@@ -27,6 +27,8 @@ private slots:
     void negotiatesOnlyForVersion2();
     void reportsProgressToHundred();
     void failsWhenImageFileMissing();
+    void pitDumpStreamInterruptionDoesNotFallBack();
+    void flashesMultiSequenceImage();
 };
 
 using namespace odin;
@@ -222,6 +224,7 @@ void TestOdinSession::refusesWhenDevicePitLacksPartition()
     QVERIFY(err.contains(QStringLiteral("BOOT")));
     for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());         // 拒刷：**一条数据都不发**
+    QVERIFY(!t.writes.contains(frameEndSession(false)));   // 失败路径不发结束会话（红线；审查 Minor 3）
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
 }
 
@@ -277,6 +280,7 @@ void TestOdinSession::refusesZeroSizedImage()
     QVERIFY(!err.isEmpty());
     for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());
+    QVERIFY(!t.writes.contains(frameEndSession(false)));   // 失败路径不发结束会话（红线；审查 Minor 3）
 }
 
 void TestOdinSession::negotiatesOnlyForVersion2()
@@ -355,6 +359,82 @@ void TestOdinSession::failsWhenImageFileMissing()
     // 打开镜像失败必须在**发任何 0x66 命令之前**（不把设备带进半途状态）
     for (const QByteArray &w : std::as_const(t.writes))
         QVERIFY(w != frameRequestFlash());
+    QVERIFY(!t.writes.contains(frameEndSession(false)));   // 失败路径不发结束会话（红线；审查 Minor 3）
+    QCOMPARE(t.calls.last(), QStringLiteral("close"));
+}
+
+// 审查修复②：设备 PIT 读取**在数据阶段中断**（请求已发出、设备不再回片）时**不得**回退包内 PIT
+// —— 设备可能仍在把余下的片发进 IN 端点，改道继续刷写会把设备留在半开会话。
+// 对照组是同文件里的 fallsBackToPackagePitWhenDumpFails（**请求阶段**被拒 → 回退成功，保持原样）。
+void TestOdinSession::pitDumpStreamInterruptionDoesNotFallBack()
+{
+    Fixture fx;
+    const QByteArray image(3000, '\x5A');
+    QVERIFY(makeFixture(fx, image));
+    MockOdinTransport t;
+    queueSessionSetup(t);
+    t.reads << ackFrame(0x65, 1184);               // ① 大小应答正常
+    t.reads << QByteArray();                       // ② 数据阶段：设备对第 0 片**什么都没回**
+    OdinSession s(t);
+    QString err;
+    QVERIFY(!s.run(fx.plan, OdinOptions{}, &err));                 // 不可回退 → run 直接失败
+    QVERIFY2(err.contains(QStringLiteral("数据阶段")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("重试")), qPrintable(err));
+    QVERIFY(!t.writes.contains(frameRequestFlash()));              // 未下发任何分区数据
+    QVERIFY(!t.writes.contains(frameEndSession(false)));           // 也不发结束会话
+    QVERIFY(!t.writes.contains(framePitEndRequest()));             // 中断即止，不补结束 PIT 请求
+    QCOMPARE(t.calls.last(), QStringLiteral("close"));
+}
+
+// 审查修复④：**多序列**分支（v2 profile = 1 MiB × 30 片 = 30 MiB/序列）—— 真机固件几乎必走。
+// 31 MiB 镜像 = 序列1（30 片）+ 序列2（1 片）；断言两条序列声明值、两次结束序列的
+// realSize/isLast、分片总数与**拼接结果逐字节等于镜像**（既证明无零填充、也证明无重复/丢字节）。
+void TestOdinSession::flashesMultiSequenceImage()
+{
+    Fixture fx;
+    const int mib = 1024 * 1024;
+    const QByteArray image(31 * mib, '\x5A');      // 31 MiB
+    QVERIFY(makeFixture(fx, image));
+    MockOdinTransport t;
+    queueSessionSetup(t);                          // version 2 → 1 MiB / 30 片
+    OdinOptions opt;
+    opt.dumpDevicePit = false;
+    t.reads << ackFrame(0x66, 0);                  // 申请文件传输
+    t.reads << ackFrame(0x66, 0);                  // 申请序列 1
+    for (int i = 0; i < 30; ++i)
+        t.reads << ackFrame(0x00, quint32(i));     // 序列 1 的 30 片
+    t.reads << ackFrame(0x66, 0);                  // 序列 1 的结束序列应答
+    t.reads << ackFrame(0x66, 0);                  // 申请序列 2
+    t.reads << ackFrame(0x00, 0);                  // 序列 2 的唯一一片（片序号从 0 重新计）
+    t.reads << ackFrame(0x66, 0);                  // 序列 2 的结束序列应答
+    queueEndSession(t);
+
+    QList<OdinProgress> seen;
+    OdinSession s(t, [&seen](const OdinProgress &p) { seen << p; });
+    QString err;
+    QVERIFY2(s.run(fx.plan, opt, &err), qPrintable(err));
+
+    const quint32 seq1 = quint32(30 * mib);
+    QCOMPARE(int(t.writes.count(frameRequestSequence(seq1))), 1);   // 30 MiB 序列声明一次
+    QCOMPARE(int(t.writes.count(frameRequestSequence(quint32(mib)))), 1);  // 1 MiB 序列声明一次
+    // 两次结束序列：realSize 分别是 30 MiB / 1 MiB，isLast 分别是 false / true
+    QCOMPARE(int(t.writes.count(frameEndSequence(fx.plan.entries[0].pit, seq1, false))), 1);
+    QCOMPARE(int(t.writes.count(frameEndSequence(fx.plan.entries[0].pit, quint32(mib), true))), 1);
+
+    QByteArray joined;
+    int parts = 0;
+    for (const QByteArray &w : std::as_const(t.writes)) {
+        if (w.size() == mib) { joined.append(w); ++parts; }   // 数据片恒为整片 1 MiB
+    }
+    QCOMPARE(parts, 31);
+    QCOMPARE(joined.size(), image.size());
+    QCOMPARE(joined, image);                       // 无额外零填充、无重复、无丢字节
+    QCOMPARE(seen.last().percent, 100);
+    int prev = -1;
+    for (const OdinProgress &p : std::as_const(seen)) {
+        QVERIFY(p.percent >= prev);                // 进度单调不减
+        prev = p.percent;
+    }
     QCOMPARE(t.calls.last(), QStringLiteral("close"));
 }
 

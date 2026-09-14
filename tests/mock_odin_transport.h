@@ -27,11 +27,10 @@ public:
     QList<QByteArray> reads;       // 正超时 read 的脚本化响应（FIFO）；空队列 → 返回空 + error
     QList<QByteArray> residual;    // IN 端点里的残留字节：**只有轮询（timeoutMs==0）才消费它**
     QList<QByteArray> writes;      // 每次 write() 追加（**含空写 = ZLP**）
-    QStringList calls;             // "open"/"close"/"write"/"read"/"poll"/"reset"
+    QStringList calls;             // "open"/"close"/"write"/"read"（正超时）/ "poll"（timeoutMs==0）
     QList<int> readTimeouts;       // 每次 read 的 timeoutMs（钉住「轮询 = 0」）
     int  failWriteAt = -1;         // 第 N 次 write 失败（0 基），-1 = 不失败
     bool openResult = true;
-    int  maxPacket = 512;
 
     bool open(QString *error) override { Q_UNUSED(error) calls << QStringLiteral("open"); return openResult; }
     void close() override { calls << QStringLiteral("close"); }
@@ -64,9 +63,6 @@ public:
         }
         return head;
     }
-
-    bool reset(QString *error) override { Q_UNUSED(error) calls << QStringLiteral("reset"); return true; }
-    int maxPacketSize() const override { return maxPacket; }
 };
 
 } // namespace odin
