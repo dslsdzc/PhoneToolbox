@@ -205,6 +205,10 @@ void TestPit::rejectsBadInput()
     odintest::putU32(huge, 4, 0xFFFFFFFFu);
     err.clear();
     QVERIFY(!odin::parsePit(huge, t, &err));
+    // 判别力所在：64 位真实需求 = 0xFFFFFFFF*132 + 28 = 566935682968；32 位回绕只得 4294967192，
+    // 而 4294967192 仍大于夹具大小（1448）→ 单靠"被拒"断言拦不住 32 位重构（本用例加断言前实测：
+    // 把 need 改成 32 位算术，11/11 照样全绿）。故这里**有意**与错误文案的字节数耦合。
+    QVERIFY2(err.contains(QStringLiteral("566935682968")), qPrintable(err));
     QVERIFY(!err.isEmpty());
 
     // 文件不存在
