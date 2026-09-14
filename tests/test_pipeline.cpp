@@ -11,6 +11,7 @@ class TestPipeline : public QObject {
 private slots:
     void channelMapping();
     void channelMappingUnknown();
+    void samsungOdinChannel();
     void edlKeepsPartitionFlashPath();
     void edlChannelRejectsMissingPlanDir();
     void resolveProgrammerPicksFirstCandidate();
@@ -34,6 +35,20 @@ void TestPipeline::channelMappingUnknown()
     QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_ADB), QString());
     QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_FASTBOOT), QString());
     QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_UNKNOWN), QString());
+}
+
+// Phase C：三星 Odin 通道 —— 通道名 + 是否整包通道（不含 EDL 的"分区刷写"例外）
+void TestPipeline::samsungOdinChannel()
+{
+    QCOMPARE(FlashTool::flashChannelForMode(DeviceDetector::MODE_SAMSUNG_ODIN),
+             QStringLiteral("samsung-odin"));
+    QVERIFY(FlashTool::isPackageChannelMode(DeviceDetector::MODE_SAMSUNG_ODIN));
+    // 缺 tarMd5Files 时必须**明确报错**（不能让通道分支静默 return 掉）
+    FlashTool tool;
+    QString err;
+    QVERIFY(!tool.flashFullPackage(QStringLiteral("usb-1-2"), DeviceDetector::MODE_SAMSUNG_ODIN,
+                                  QVariantMap(), &err));
+    QVERIFY(err.contains(QStringLiteral("tarMd5Files")));
 }
 
 // Task 8 审查 Important 的回归守卫：EDL（9008）的「刷入」**不得**被整包协议通道接管 ——

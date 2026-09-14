@@ -1,6 +1,7 @@
 #include "device_detector.h"
 #include "adb_embedded.h"
 #include "modes/edl_9008.h"
+#include "core/odin/odin_libusb_transport.h"
 #include "resource_monitor.h"
 #include <libusb.h>
 #include <QProcess>
@@ -565,6 +566,48 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
         libusb_device_descriptor desc;
         if (libusb_get_device_descriptor(list[i], &desc) != LIBUSB_SUCCESS)
             continue;
+
+        // 三星 Odin（Phase C）：判据是**纯函数**（odin_libusb_transport.h 的 isOdinDevice）——
+        // VID 0x04E8 + 接口类 0x0A(CDC_DATA) + 批量 in/out（Thor/odin4 现行做法），老 PID 兜底。
+        // 只对三星 VID 深挖描述符：每 2s 一轮的枚举里，其余厂商不必多读一次配置描述符。
+        if (desc.idVendor == 0x04E8) {
+            QList<quint8> classes;
+            bool bulkIn = false, bulkOut = false;
+            libusb_config_descriptor *cfg = nullptr;
+            if (libusb_get_active_config_descriptor(list[i], &cfg) == LIBUSB_SUCCESS && cfg) {
+                for (int ic = 0; ic < int(cfg->bNumInterfaces); ++ic) {
+                    for (int a = 0; a < int(cfg->interface[ic].num_altsetting); ++a) {
+                        const libusb_interface_descriptor *alt = &cfg->interface[ic].altsetting[a];
+                        classes << quint8(alt->bInterfaceClass);
+                        for (int e = 0; e < int(alt->bNumEndpoints); ++e) {
+                            const libusb_endpoint_descriptor *ep = &alt->endpoint[e];
+                            if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
+                                continue;
+                            if (ep->bEndpointAddress & LIBUSB_ENDPOINT_IN) bulkIn = true; else bulkOut = true;
+                        }
+                    }
+                }
+                libusb_free_config_descriptor(cfg);
+            }
+            if (odin::LibusbOdinTransport::isOdinDevice(desc.idVendor, desc.idProduct,
+                                                        classes, bulkIn && bulkOut)) {
+                const QString devId = QStringLiteral("usb-%1-%2")
+                                          .arg(libusb_get_bus_number(list[i]))
+                                          .arg(libusb_get_device_address(list[i]));
+                DeviceInfo info;
+                info.serialNumber = devId;
+                info.mode = MODE_SAMSUNG_ODIN;
+                info.model = getModeDisplayName(MODE_SAMSUNG_ODIN);
+                newDevices[devId] = info;
+                if (!m_currentDevices.contains(devId)) {
+                    emit deviceConnected(info);
+                } else if (m_currentDevices[devId].mode != MODE_SAMSUNG_ODIN) {
+                    emit deviceModeChanged(devId, MODE_SAMSUNG_ODIN);
+                }
+                continue;                       // 已认领，不再走下面的 PID 表
+            }
+        }
+
         for (const ProtoId &id : ids) {
             if (desc.idVendor != id.vid)
                 continue;
@@ -702,6 +745,8 @@ QString DeviceDetector::getModeDisplayName(DeviceMode mode) const
         return QStringLiteral("华为 USB Update");
     case MODE_SPD:
         return QStringLiteral("展锐");
+    case MODE_SAMSUNG_ODIN:
+        return QStringLiteral("三星 (Odin)");
     default: return "未知";
     }
 }

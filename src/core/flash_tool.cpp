@@ -5,6 +5,10 @@
 #include "core/edl/edl_libusb_transport.h"
 #include "core/edl/edl_session.h"
 #include "core/edl/flash_plan.h"
+// Phase C Task 8：samsung-odin 通道 —— PIT（包内/显式）→ 计划 → OdinSession + 真机传输
+#include "core/odin/odin_libusb_transport.h"
+#include "core/odin/odin_session.h"
+#include "core/odin/samsung_plan.h"
 #include "src/plugins/plugin_manager.h"
 #include <libusb.h>
 #include <QProcess>
@@ -15,6 +19,7 @@
 #include <QCoreApplication>
 #include <QThread>
 #include <QPair>
+#include <utility>   // std::as_const（项目约定：不得用 qAsConst）
 
 #ifdef Q_OS_WIN
 static const char *kPlatformScript = "flash-all.bat";
@@ -1196,6 +1201,8 @@ QString FlashTool::flashChannelForMode(DeviceDetector::DeviceMode mode)
         return QStringLiteral("spd");
     case DeviceDetector::MODE_EDL_9008:
         return QStringLiteral("oppo-edl");
+    case DeviceDetector::MODE_SAMSUNG_ODIN:
+        return QStringLiteral("samsung-odin");
     default:
         return QString();
     }
@@ -1382,7 +1389,84 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         emit outputMessage(QStringLiteral("EDL 刷写完成（设备已复位）"), false);
         return true;
     }
-    // 不可达：flashChannelForMode 仅返回上述四字面量或空串（空串已在上方拒绝），
+    if (channel == QStringLiteral("samsung-odin")) {
+        // Phase C 通道：BL/AP/CP/CSC 的 .tar.md5 → PIT（包内优先）→ OdinSession（握手 → 读设备 PIT
+        // → 对账 → 逐分区写入 → 结束会话/重启）。**设备须处于 Odin 下载模式**（长按音量下+Home+电源）。
+        const QStringList tars = params.value(QStringLiteral("tarMd5Files")).toStringList();
+        if (tars.isEmpty()) {
+            if (error)
+                *error = QStringLiteral("缺少固件包列表（samsung-odin 通道的 tarMd5Files）—— "
+                                        "整包刷写请用界面「刷入」（选中三星 Odin 设备后会自动弹选包对话框）");
+            return false;
+        }
+        const QString pitPath = params.value(QStringLiteral("pitPath")).toString();
+
+        odin::PitTable pit;
+        QString pitSource;
+        if (!pitPath.isEmpty()) {
+            QString pitErr;
+            if (!odin::parsePitFile(pitPath, pit, &pitErr)) {
+                if (error) *error = QStringLiteral("读取 PIT 失败：%1").arg(pitErr);
+                return false;
+            }
+            pitSource = QStringLiteral("用户指定 PIT：%1").arg(QFileInfo(pitPath).fileName());
+        } else {
+            QString pitDesc;
+            QString pitErr;
+            if (!odin::loadPitFromPackage(tars, pit, &pitDesc, &pitErr)) {
+                if (error) *error = pitErr;
+                return false;
+            }
+            pitSource = pitDesc;
+        }
+
+        odin::SamsungPlan plan;
+        QString planErr;
+        if (!odin::buildSamsungPlan(tars, pit, plan, &planErr, pitSource)) {
+            if (error) *error = QStringLiteral("构建刷写计划失败：%1").arg(planErr);
+            return false;
+        }
+        for (const QString &w : plan.warnings)
+            emit outputMessage(QStringLiteral("[计划] %1").arg(w), false);
+        // 包完整性：构建阶段已校验并记进 warnings；这里把结论再点一次（不阻断 —— 改包刷写在场景里常见）
+        for (const odin::SamsungPlanFile &f : std::as_const(plan.files))
+            if (!f.verifyOk)
+                emit outputMessage(QStringLiteral("[校验] %1 未通过 MD5 校验（%2）")
+                                       .arg(QFileInfo(f.path).fileName(),
+                                            f.md5HasFooter ? QStringLiteral("校验行不符")
+                                                           : QStringLiteral("无校验行")), false);
+
+        // 多设备防护（同既有四通道）：LibusbOdinTransport::open 取首个匹配设备
+        const int samsungCount = countDevicesOfVid(0x04E8, nullptr);
+        if (samsungCount > 1)
+            emit outputMessage(QStringLiteral(
+                "检测到 %1 台三星 USB 设备，将刷写首个进入 Odin 模式的设备（完整设备选择器为后续任务）")
+                .arg(samsungCount), false);
+        emit outputMessage(QStringLiteral("三星 Odin 刷写通道：%1（%2，%3 条条目）")
+                               .arg(deviceId, plan.pitSource).arg(plan.entries.size()), false);
+
+        odin::LibusbOdinTransport transport;
+        QString lastProgressKey;
+        odin::OdinSession session(transport, [this, &lastProgressKey](const odin::OdinProgress &p) {
+            const QString key = p.stage + QLatin1Char('\x1f') + p.detail;
+            if (key != lastProgressKey) {
+                lastProgressKey = key;
+                if (!p.detail.isEmpty())
+                    emit outputMessage(QStringLiteral("[%1] %2").arg(p.stage, p.detail), false);
+            }
+            emit flashProgress(p.percent);
+        });
+        odin::OdinOptions opt;
+        QString runErr;
+        if (!session.run(plan, opt, &runErr)) {
+            if (error) *error = runErr.isEmpty() ? QStringLiteral("三星 Odin 刷写失败") : runErr;
+            return false;
+        }
+        emit flashProgress(100);
+        emit outputMessage(QStringLiteral("三星 Odin 刷写完成"), false);
+        return true;
+    }
+    // 不可达：flashChannelForMode 仅返回上述五字面量或空串（空串已在上方拒绝），
     // 保留裸 return 以满足编译器的全路径返回检查。
     return false;
 }

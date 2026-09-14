@@ -374,7 +374,15 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_session.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/firehose.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/flash_plan.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/sahara.cpp
+                        # Phase C Task 8：flash_tool.cpp 新增 samsung-odin 通道（odin 计划层 +
+                        # 会话 + 真机传输整链）——不补这些源会在链接期炸（undef）。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_libusb_transport.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 elseif(_test_stem STREQUAL "test_flash_plan")
                     # Phase B Task 1：计划层（模型 + rawprogram/patch XML 解析）为纯函数模块，
                     # 位于 src/core/edl（已 GLOB 编入主程序，不属任何静态库）——按范例如入本目标。

@@ -106,6 +106,8 @@ public:
     //   spd:                 pacPath + fdl1Path + fdl2Path
     //   oppo-edl:            planDir(解包产物目录) + programmerPath(可选，缺省在 planDir 内探测
     //                        prog_*firehose*.*)
+    //   samsung-odin:        tarMd5Files(QStringList，BL/AP/CP/CSC 的 .tar.md5) + pitPath(可选；
+    //                        缺省用包内 .pit —— 找不到包内 .pit 且未显式指定 → 明确报错)
     // 失败返回 false 并填 error；插件缺失时明确提示。
     bool flashFullPackage(const QString &deviceId, DeviceDetector::DeviceMode mode,
                           const QVariantMap &params, QString *error);

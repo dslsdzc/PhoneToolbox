@@ -25,7 +25,8 @@ public:
         MODE_RECOVERY = 6,
         MODE_MTK_BROM = 7,          // MTK BROM 直刷（F1）
         MODE_HUAWEI_USB_UPDATE = 8, // 华为 Kirin USB Update（F2 插件）
-        MODE_SPD = 9                // 展锐 ResearchDownload（F4）
+        MODE_SPD = 9,               // 展锐 ResearchDownload（F4）
+        MODE_SAMSUNG_ODIN = 10      // 三星 Odin 下载模式（Phase C）
     };
 
     explicit DeviceDetector(QObject *parent = nullptr);
