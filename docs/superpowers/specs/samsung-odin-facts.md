@@ -587,7 +587,7 @@ sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
 | 项 | 值 | 复核命令 |
 |---|---|---|
 | 测试 | **45/45 通过** | `ctest --test-dir build` |
-| 构建警告 | **1 条（既有代码；Phase C 新增/改动文件 0 条）** | 全新构建目录 `cmake -B <新目录> -G Ninja -DODIN_SAMPLES_REQUIRED=ON && cmake --build <新目录>` → 366/366 成功、1 条 warning |
+| 构建警告 | **0 条**（`ae557ec` 清掉 `tar_image.cpp` 两条、`aa4df9f` 清掉 `payload_image.cpp` 一条；三条**均为既有代码**、非 Phase C 引入） | 全新构建目录 `cmake -B <新目录> -G Ninja && cmake --build <新目录>` → **366/366 成功、0 warning**（2026-09-15 控制器实测）。⚠️ **复核必须用全新目录**：`cmake --build build` 在无事可做时只输出 "no work to do"、**不重放**警告 |
 | 真样本硬断言 | `test_pit` 11 passed / **0 skipped**；`test_samsung_plan` 13 passed / **0 skipped** | 两个可执行文件直接运行（构建带 `-DODIN_SAMPLES_REQUIRED=ON`） |
 | 真 PIT 样本 | **10** 个（spec §3.1 的 9 个 + `sm-j110h/J1POP3G.pit`）；`test_pit` 的硬断言门槛是 **≥9**，本机实解析 10 个 | `find reference/samsung-samples -name '*.pit' \| wc -l` |
 | 真 `.tar.md5` | **3** 个（BL / CSC / MODEM，均属 SM-J110H） | `find reference/samsung-samples -name '*.tar.md5' \| wc -l` |

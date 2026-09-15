@@ -301,7 +301,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     设备侧读 PIT (dump) 无真机可验; repartition 不做; attributes/updateAttributes 不做语义解释;
     deviceType 不裁枚举 (8=UFS 透传); 写超时无独立参数 (控制帧与 1MiB 数据片共用 10s);
     真包只覆盖一台老机型 (SM-J110H 展锐方案) 的 BL/CSC/MODEM, AP 包 (966MB) 未纳入;
-    GUI 只到启动冒烟。**12 条逐条清单见 docs/superpowers/specs/samsung-odin-facts.md §7**
+    GUI 只到启动冒烟。**14 条逐条清单见 docs/superpowers/specs/samsung-odin-facts.md §7**
 
 
 规划中 (计划 F 剩余 + 后续)
