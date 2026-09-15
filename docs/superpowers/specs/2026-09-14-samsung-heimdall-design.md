@@ -99,7 +99,7 @@ bool serializePit(const PitTable &t, QByteArray &out, QString *error); // 仅在
 | 事实 | 设计 | 测试 |
 |---|---|---|
 | 尾部签名、长度不定 | **不要求** `28+count×132 == fileSize`；剩余字节收进 `trailing`，只记长度 | **10 个真 PIT 必须全部解析成功**（硬断言） |
-| `lu_count` ≠ 0 | 不当 padding；与条目数的关系**只记不拒**（三方说法不一） | 真样本上断言读到非 0 |
+| `lu_count` 名不副实（实测有 0 也有 4） | 不当 padding；与条目数的关系**只记不拒**（三方说法不一） | 真样本上**如实记录**（`J1POP3G.pit`=0 / `SM-Q7MQ`=4）—— **不得**断言"恒非 0"（第 10 个真样本推翻了这个假设） |
 | `attributes` 三解读 | **不做位域解释**；只透传原值，UI 显十六进制 | 断言原值透传 |
 | 字符串含 CR/LF | 统一清洗（截 NUL + 去 CR/LF + 去首尾空白） | 合成用例覆盖含 `\r\n` 的名字 |
 
@@ -147,7 +147,7 @@ bool buildSamsungPlan(const QStringList &tarMd5Files, const PitTable &pit, Samsu
 
 | 层 | 内容 | 强度 |
 |---|---|---|
-| **真样本** | PIT 解析对 **10 个真 PIT 硬断言**（分区数/名字/offset/size 自洽、`trailing` 非空、`lu_count` 非 0） | 本计划最强的离线证据 |
+| **真样本** | PIT 解析对 **10 个真 PIT 硬断言**（分区数/名字/offset/size 自洽、`trailing` 非空、`lu_count` 如实记录） | 本计划最强的离线证据 |
 | **真包** | `buildSamsungPlan` 对 **3 个真 tar.md5**（BL/CSC/MODEM）验证：拆包 + 镜像↔分区匹配 + MD5 校验（含 `␣*` 变体） | 真实包实例 |
 | **对拍** | 协议帧常量与 Heimdall/odin4/Thor 逐字段对拍（带出处）；PIT 字段语义与 samloader-rs 对照 | 三方一致才敢用 |
 | **mock** | `IOdinTransport` 脚本化响应 + 写字节全记录 → 断言完整会话的字节序列（分块/结束帧/MD5） | 与 Phase B 同款 |
