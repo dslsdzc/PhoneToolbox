@@ -286,6 +286,22 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] Sahara/Firehose 协议栈 (可注入传输 + 严格 ACK; 无真机 mock 验证, 真机待验)
 [√] 刷写计划预览对话框 (逐条目表格 + 未验证勾选门控)
 [√] 诚实边界: 真机 USB 时序/ZLP/programmer 兼容性/真实 NAK/刷完能否开机 均未验证
+[√] 变更 (Phase C 连带): 预览表格抽出通用控件 PlanPreviewWidget (三星复用) 后, 本对话框的 tooltip
+    由"逐行 7 列都带完整镜像路径"收窄为**仅「文件」列**——表格内容不变, 用户可见变化
+
+--- 三星 Odin 刷写 (Phase C 自研) ---
+[√] PIT 解析 (28B 头 + 132B 条目 + 尾部签名容忍 + 字符串清洗; 10 个真 PIT 硬断言)
+[√] 刷写计划层 (tar.md5 流式索引 + 以 PIT 条目文件名为准的匹配 + .pit 唯一性回退 + 双向不匹配告警)
+[√] Odin 协议层 (1024B 控制包 / 会话协商 / 总字节 u64 / 逐分区数据面 / ACK 与负码文案; 三方对照逐条带出处)
+[√] 刷写会话 (握手 → 起会话 → 读设备 PIT → **以设备 PIT 为准**对账 → 逐分区写入 → 结束/重启)
+[√] 真机传输 (VID 0x04E8 + CDC_DATA 类匹配 + 老 PID 兜底; timeout=0 轮询换算)
+[√] 设备检测条目「三星 (Odin)」+ FlashTool 第 5 通道 samsung-odin + 计划预览对话框 (未验证勾选门控)
+[√] 前置修复: 三星 .tar.md5 校验行接受 "␣*" 分隔符 (真 MODEM 包此前静默跳过 MD5 校验)
+[√] 诚实边界: 真机全链未验证 (USB 时序 / 类匹配实际枚举 / 真实 ACK / 能否接受未签名镜像);
+    设备侧读 PIT (dump) 无真机可验; repartition 不做; attributes/updateAttributes 不做语义解释;
+    deviceType 不裁枚举 (8=UFS 透传); 写超时无独立参数 (控制帧与 1MiB 数据片共用 10s);
+    真包只覆盖一台老机型 (SM-J110H 展锐方案) 的 BL/CSC/MODEM, AP 包 (966MB) 未纳入;
+    GUI 只到启动冒烟。**12 条逐条清单见 docs/superpowers/specs/samsung-odin-facts.md §7**
 
 
 规划中 (计划 F 剩余 + 后续)
@@ -293,5 +309,5 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] OPPO/一加/realme EDL 刷写链 (Phase B 代码就绪: 计划层/协议层/会话/通道/UI, mock 验证; **真机验证待持机人**)
 [√] OPPO 固件解包引擎 (Phase A 已交付: OFP QC/MTK + OPS, 离线验证)
 [ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
-[ ] 三星 Heimdall 集成 (Odin 协议开源实现)
+[√] 三星 Heimdall 集成 (Odin 协议开源实现) —— Phase C 代码就绪: PIT 解析/计划层/协议/会话/通道/UI, mock 验证; **真机验证待持机人**
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)

@@ -474,3 +474,116 @@ sed -n '181,188p' reference/samloader-rs/pit/src/lib.rs
 sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
 ```
 
+---
+
+## 7. 本期裁定与实现落点（Phase C 实施后回填）
+
+### 7.1 三方冲突裁定表与未采纳清单
+
+**三方冲突裁定表**：见实施计划 `docs/superpowers/plans/2026-09-14-samsung-heimdall-phase-c.md`
+的「Global Constraints」（D1-D15，逐条给出三方取值、本期采用值与依据）。
+
+**未采纳清单**（按 D 表「本期采用」列逐条核对；不含三方一致的 D1/D9/D12，D13 单列于下）：
+
+- **未采纳 Heimdall 的取值（7 条）**：D3（起会话 payload 取 `0x7FFFFFFF`，非全零）、D4（按 version
+  分支协商，非「非零即协商」）、D5（总字节宽度 u64，非 u32）、D6（控制包后不发空传输）、D7（结束
+  序列前只发 before、**不发** after）、D11（ACK 用 id 回显 + `0xFFFFFFFF` / `code<0` 判定，非仅比
+  8 字节类型）、D15（`lu_count` 读出而非当 padding）。
+- **未采纳 odin4 的取值（4 条）**：D2（握手读 4 字节，非「读 ≤512 再取前 4」—— 但**借用了它的
+  非阻塞 drain 防御**）、D8（结束序列后不读；odin4 读一次且仅告警）、D10（modem 的 `isLast` 在
+  帧偏移 24，非 28）、D14（`realSize` 不做 512 对齐）。
+- **未采纳 Thor 的取值（3 条）**：D7（Thor 不发 before，本期发）、D11 的「应答首字节 `0xFF`
+  即失败」扩展判定（较本期采用的 odin4 口径更宽，D 表注释并列）、D13（Thor 刷完发
+  ResetFlashCount，本期不发）。
+
+**未裁定、留给持机人**：D13（`0x64/0x01` 在 Thor 是 ResetFlashCount、在 odin4 里既当机型查询
+又是 ResetFlashCount —— 本期只做一次 best-effort 机型查询、刷完**不发**重置）。
+
+**一处被真样本推翻的设计预期（交叉引用，供终审注意）**：设计 spec
+`docs/superpowers/specs/2026-09-14-samsung-heimdall-design.md` §6 的真样本一行把 **`lu_count` 非 0**
+列为断言之一，但第 10 个样本 `sm-j110h/J1POP3G.pit` 实测 `lu_count = 0`（第 9 个 SM8750 样本是 4）
+—— 该预期**不成立**。交付的代码/用例按 D15 落地（**读出但只记不拒**，
+`tests/test_pit.cpp` 对 J1POP3G 断言的是 `luCount == 0`）；**设计 spec 该行的措辞未改**（不在本任务
+可改文件范围内），此处如实记录。
+
+### 7.2 实现落点（便于持机人继续）
+
+| 事实 | 落点 |
+|---|---|
+| PIT 解析 | `src/core/odin/pit.cpp` |
+| 计划层（含 .pit 唯一性回退） | `src/core/odin/samsung_plan.cpp` |
+| 协议帧/ACK 判定 | `src/core/odin/odin_protocol.cpp` |
+| 会话编排（读设备 PIT + 对账） | `src/core/odin/odin_session.cpp` |
+| 真机传输（类匹配/端点/超时换算） | `src/core/odin/odin_libusb_transport.cpp` |
+| 传输接口（4 方法，纯字节管道） | `src/core/odin/odin_transport.h` |
+| 设备检测 / 通道 / UI | `src/core/device_detector.cpp`、`src/core/flash_tool.cpp`、`src/ui/samsung_plan_dialog.cpp` |
+| 通用预览控件（EDL/三星共用） | `src/ui/plan_preview_widget.cpp` |
+| 校验行 "␣*" 变体修复 | `src/image_engine/tar_image.cpp`（`scanMd5Footer` / `verifyMd5Footer`） |
+| 真样本硬断言 | `tests/test_pit.cpp`、`tests/test_samsung_plan.cpp`（经 `ODIN_SAMPLES_DIR` + `ODIN_SAMPLES_REQUIRED=ON`） |
+
+### 7.3 真包实证的告警口径（与 spec §4 的差异，已在实现里落地）
+
+「分区大小与镜像大小**不符** → warning」按字面执行会在真包上产生 9 条无意义告警
+（SM-J110H 的 10 条匹配里 9 条镜像小于分区、属正常）→ 收窄为：
+**镜像 > 分区 → 逐条 warning（放不下）**；镜像 < 分区 → 一条汇总 warning；
+分区未声明大小（blockCount=0）→ 逐条 warning。
+
+### 7.4 真机待验清单（12 条 —— **不是缺陷清单，是"没有真机就验不了"的清单**）
+
+以下由本阶段的独立审查逐条确认，凡在文档/功能清单里出现的"已交付"表述均**不覆盖**这些项：
+
+1. **真机全链未验证**：USB 时序、CDC_DATA 类匹配的实际枚举顺序、候选 altsetting 的选择、
+   `claim` + `detach_kernel_driver` 的成功率、ZLP 的真机反应、1 ms 轮询的实际效果、
+   bootloader 是否接受未签名镜像 —— 一律未验证。
+2. **设备侧读 PIT（dump）无真机可验**：只到"代码就绪 + mock"（`tests/test_odin_session.cpp`
+   用 1184 字节设备 PIT → 3 片 × 500 B 拼接覆盖，含逐片请求与尾空包）。
+3. **写超时无独立参数**：`IOdinTransport::write` 没有超时形参 → 控制帧与 1 MiB 数据片共用
+   `kWriteTimeoutMs = 10000`（`src/core/odin/odin_libusb_transport.h:90`）；参照 odin4 的数据面
+   是 30 s / 120 s 两档（`reference/odin4-llucs/src/usb/odin_protocol.cpp:400,404`，对应
+   128 KiB / 1 MiB 两档）。1 MiB 正常 < 1 s，只有"慢而仍在推进"的极端场景会误判；
+   **持机人若遇失败只需改这一个常量**。
+4. **端点 altsetting**：端点取自某个 altsetting，但 claim 之后未调用
+   `libusb_set_interface_alt_setting` —— 若批量端点只出现在非 0 altsetting，真机会失败。
+   该形态**继承自已发布的 EDL 实现**（`src/core/edl/edl_libusb_transport.cpp` 同款，
+   全仓无 `libusb_set_interface_alt_setting` 调用），非本阶段引入。
+5. **三处已知的流对齐薄弱点**：(a) 大小应答迟到仍会毒化"回退包内 PIT"路径；
+   (b) 设备多发字节时 `read` 后 `truncate` 再判 Ok（`src/core/odin/odin_session.cpp:331`）；
+   (c) 设备 PIT 尾空包用 `read(1)` 探测（`src/core/odin/odin_session.cpp:311`）—— 存在
+   "窃取下一笔应答首字节"的可能，已加日志可观察（不改变控制流）。
+6. **短写报错分支离线不可达**：`transferred != data.size()`（`src/core/odin/odin_libusb_transport.cpp:281`）
+   —— 无真机造不出这个状态，分支本身未被执行过。
+7. **`0x64/0x01` 语义冲突未裁定**（D13，见 7.1）。
+8. **检测判据与传输判据是两处实现**（判据同为"同一接口内 bulk in/out 齐备"）：当前两处等价且
+   有交叉引用注释；但**老 PID 兜底路径**上"检测认领 ⊆ `open()` 可接受"**不成立** ——
+   纯函数命中老 PID 即返 true、**不看描述符**（`src/core/odin/odin_libusb_transport.cpp:103`）。
+9. **多设备计数偏宽**：`samsung-odin` 通道的多设备警告数的是全部 VID `0x04E8` 设备
+   （`src/core/flash_tool.cpp:1440`）—— 含正常开机/充电中的三星手机，**比既有各通道更易误报**。
+10. **能力边界**：**repartition 不做**（含 PIT 回写 `0x65/0x00` 上传路径）；**`attributes` /
+    `updateAttributes` 不做语义解释**（三方解读不一致，只透传原值）；**`deviceType` 不裁枚举**
+    （`0..3` 老枚举与 `8`(UFS) 一律按数值透传）。
+11. **真包只覆盖一台老机型**：SM-J110H（展锐 SPRD8735 方案）的 BL / CSC / MODEM 三个 `.tar.md5`
+    （`reference/samsung-samples/sm-j110h/`）；**AP 包（966 MB）未纳入**；其它机型与 UFS 机型待验。
+12. **GUI 只到启动冒烟**：`QT_QPA_PLATFORMTHEME= QT_QPA_PLATFORM=offscreen` 下运行至超时被杀
+    （exit=124，无崩溃）；**无交互验证**（拖放、勾选门控、进度显示均未人工走过）。
+
+### 7.5 本阶段离线证据快照（2026-09-15 复核）
+
+| 项 | 值 | 复核命令 |
+|---|---|---|
+| 测试 | **45/45 通过** | `ctest --test-dir build` |
+| 构建警告 | **1 条（既有代码；Phase C 新增/改动文件 0 条）** | 全新构建目录 `cmake -B <新目录> -G Ninja -DODIN_SAMPLES_REQUIRED=ON && cmake --build <新目录>` → 366/366 成功、1 条 warning |
+| 真样本硬断言 | `test_pit` 11 passed / **0 skipped**；`test_samsung_plan` 13 passed / **0 skipped** | 两个可执行文件直接运行（构建带 `-DODIN_SAMPLES_REQUIRED=ON`） |
+| 真 PIT 样本 | **10** 个（spec §3.1 的 9 个 + `sm-j110h/J1POP3G.pit`）；`test_pit` 的硬断言门槛是 **≥9**，本机实解析 10 个 | `find reference/samsung-samples -name '*.pit' \| wc -l` |
+| 真 `.tar.md5` | **3** 个（BL / CSC / MODEM，均属 SM-J110H） | `find reference/samsung-samples -name '*.tar.md5' \| wc -l` |
+| GUI | 启动冒烟通过（offscreen，exit=124 = 超时被杀） | 见 7.4 第 12 条 |
+
+> **关于"0 警告"的复核口径**：那一条 warning 是 `src/image_engine/payload_image.cpp:432` 的
+> `QCryptographicHash::addData(const char*, qsizetype)` 弃用告警（`-Wdeprecated-declarations`，
+> 来自提交 `b49de2a`，**非 Phase C 引入**，Phase C 新增/改动文件零告警）。⚠️ 对已建成的 `build/`
+> 直接 `cmake --build build` 会显示 `ninja: no work to do` —— **不重编译就不会重放任何告警**，
+> 很容易被误读成"全量构建 0 警告"；**复核告警必须用全新构建目录**。
+>
+> 数字口径：以上 45 / 10 / 3 及构建结论均为**本机当前实测**，与 `功能清单.txt`、`README.md` 中的表述一致；
+> 真样本位于 gitignored 的 `reference/`，**不进提交**（仓库克隆后这些数字中的真样本项会退化为 `QSKIP`，
+> 故验证跑必须带 `-DODIN_SAMPLES_REQUIRED=ON` 并核对输出 `0 skipped`）。
+

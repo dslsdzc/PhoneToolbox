@@ -44,6 +44,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 - **Fastbootd** — Android 10+ 用户空间 Fastboot
 - **EDL (9008)** — Qualcomm 紧急下载模式
 - **MTK DA** — MediaTek Download Agent 模式
+- **三星 Odin** — Odin 下载模式（VID 0x04E8 + CDC_DATA 接口类）→ 按 PIT 刷写 BL/AP/CP/CSC 的 .tar.md5（Phase C 代码就绪，真机未验证）
 
 ## 快速开始
 
@@ -101,7 +102,7 @@ PhoneToolbox/
 │   ├── main.cpp                # 入口
 │   ├── core/                   # 核心模块
 │   │   ├── adb_embedded.cpp    # ADB 自动检测/下载/缓存
-│   │   ├── device_detector.cpp # 设备检测（ADB/Fastboot/EDL/MTK）
+│   │   ├── device_detector.cpp # 设备检测（ADB/Fastboot/EDL/MTK/Odin）
 │   │   ├── flash_tool.cpp      # 刷机核心逻辑
 │   │   ├── engineer_mode.cpp   # 维修诊断: 工程模式入口映射（12 品牌）
 │   │   ├── modes/              # EDL/MTK 通讯协议实现
@@ -112,6 +113,13 @@ PhoneToolbox/
 │   │   │   ├── sahara.cpp               # Sahara 协议（programmer 上传）
 │   │   │   ├── firehose.cpp             # Firehose 协议（configure/program/patch）
 │   │   │   └── flash_plan.cpp           # 刷写计划构建（rawprogram/patch + GPT 回填）
+│   │   ├── odin/               # 三星 Odin 刷写链（自研, Phase C；真机未验证）
+│   │   │   ├── odin_transport.h          # 可注入传输接口（4 方法, 纯字节管道）
+│   │   │   ├── odin_libusb_transport.cpp # 真机传输（CDC_DATA 类匹配 + 老 PID 兜底 + 轮询换算）
+│   │   │   ├── pit.cpp                   # PIT 解析（28B 头 + 132B 条目 + 尾部签名容忍）
+│   │   │   ├── samsung_plan.cpp          # 刷写计划（tar.md5 流式索引 + 文件名优先匹配）
+│   │   │   ├── odin_protocol.cpp         # 协议帧（1024B 控制包 / 版本化分片 / ACK 判定）
+│   │   │   └── odin_session.cpp          # 会话编排（读设备 PIT + 对账 + 逐分区写入）
 │   │   └── ...
 │   ├── image_engine/           # 镜像格式引擎（纯库, 全自研）
 │   │   ├── payload_image.cpp   # payload.bin（手写 protobuf + 增量 diff）
@@ -140,7 +148,9 @@ PhoneToolbox/
 │   │   ├── tool_panel.cpp      # 左侧工具面板
 │   │   ├── image_tool_panel.cpp# 镜像工具面板（第 5 工具）
 │   │   ├── fs_browser_dialog.cpp # 文件系统浏览
-│   │   ├── flash_plan_dialog.cpp # 刷写计划预览（逐条目表格 + 未验证勾选门控）
+│   │   ├── flash_plan_dialog.cpp # 刷写计划预览（EDL；逐条目表格 + 未验证勾选门控）
+│   │   ├── plan_preview_widget.cpp # 通用刷写计划预览控件（EDL/三星共用）
+│   │   ├── samsung_plan_dialog.cpp # 三星刷写计划预览（PIT 来源/校验结论/未验证勾选门控）
 │   │   └── ...
 │   └── vuln_db/                # 漏洞数据库框架
 │       ├── vuln_entry.cpp      # 漏洞条目数据结构及 JSON 序列化
@@ -148,7 +158,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 38 个测试目标）
+├── tests/                      # 单元测试（Qt Test, 45 个测试目标）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
