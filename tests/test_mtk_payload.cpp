@@ -74,6 +74,12 @@ private slots:
     void waitDa1ReadyAcceptsOnlyC0();
     void sendEmiLegacyZeroVersionFollowsUpstreamSequence();
     void sendEmiLegacyZeroAVersionReadsInfoBeforeLength();
+    void sendEmiLegacyTierAReadsLengthThenAckThenLendram();
+    void sendEmiLegacyTierASkipsLendramFor8127();
+    void sendEmiLegacyTierCRewritesEmiHeader();
+    void sendEmiLegacyUnknownVersionSendsEmiAsIs();
+    void sendEmiLegacyTierDTruncatesAndWritesDramLength();
+    void sendEmiLegacyFailsOnNack();
     void sendEmiLegacyFailsWhenDramInitRejected();
     void exchangeDa1StorageInfoDetectsEmmc();
     void exchangeDa1StorageInfoDetectsNand();
@@ -306,6 +312,165 @@ void TestMtkPayload::sendEmiLegacyZeroAVersionReadsInfoBeforeLength()
     QCOMPARE(m->writeFrames.at(2), QByteArray("\x5A", 1));                // ACK 在 info+length 之后
     QCOMPARE(m->writeFrames.at(3), emi.bytes);                            // 本档**不写** dramlength
     QCOMPARE(m->writeFrames.size(), 6);
+}
+
+// emiver = 0x10 档（A 档 [0xF,0x10,0x11,0x14,0x15]）：读 4B dramlength → 写 ACK →
+//   **紧接着写 >I lendram（= len(emi)，未截断）** → 写 EMI 本体（与 0 档同样「先 ACK 再写长度」，
+//   但写的是 lendram 而不是 dramlength）
+void TestMtkPayload::sendEmiLegacyTierAReadsLengthThenAckThenLendram()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray(16, '\x33');
+    emi.ver = 0x10;
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    // 故意让 dramlength(0x20) ≠ len(emi)(16)：本档写的是 **lendram**，写错成 dramlength 必须被这组断言抓住
+    m->reads << QByteArray("\x5A", 1)                        // 版本被接受
+             << QByteArray("\x00\x00\x00\x20", 4)            // dramlength = 32（**不**决定发送长度）
+             << QByteArray("\x00\x2A", 2)                    // checksum
+             << QByteArray("\x00\x00\x00\x00", 4)            // M_EXT_RAM_RET = 0
+             << QByteArray("\x02", 1) << QByteArray("\x00", 1)
+             << QByteArray("\x00\x00\x00\x00\x80\x00\x00\x00", 8);
+    QString err;
+    QVERIFY2(mtkbrom::sendEmiLegacy(s, emi, 0x6765, &err), qPrintable(err));
+
+    QCOMPARE(m->writeFrames.at(0), QByteArray("\xE8", 1));
+    QCOMPARE(m->writeFrames.at(1), QByteArray("\x00\x00\x00\x10", 4));    // emiver 原样
+    QCOMPARE(m->writeFrames.at(2), QByteArray("\x5A", 1));                // ACK 在 dramlength 之后
+    QCOMPARE(m->writeFrames.at(3), QByteArray("\x00\x00\x00\x10", 4));    // **lendram = len(emi) = 16**
+    QCOMPARE(m->writeFrames.at(4), emi.bytes);                            // EMI 本体（本档不截断）
+    QCOMPARE(m->writeFrames.at(5), QByteArray("\x5A", 1));
+    QCOMPARE(m->writeFrames.at(6), QByteArray("\x80\x00\x00\x01", 4));
+    QCOMPARE(m->writeFrames.size(), 7);
+}
+
+// A 档 + hwCode 0x8127：上游 **不写** lendram（dalegacy_lib.py:350）—— 少一帧，其余逐字节相同
+void TestMtkPayload::sendEmiLegacyTierASkipsLendramFor8127()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray(16, '\x33');
+    emi.ver = 0x0F;
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\x5A", 1)
+             << QByteArray("\x00\x00\x00\x20", 4)      // 同上：与 len(emi) 不同，防"lendram 其实写了"
+             << QByteArray("\x00\x2A", 2)
+             << QByteArray("\x00\x00\x00\x00", 4)
+             << QByteArray("\x02", 1) << QByteArray("\x00", 1)
+             << QByteArray("\x00\x00\x00\x00\x80\x00\x00\x00", 8);
+    QString err;
+    QVERIFY2(mtkbrom::sendEmiLegacy(s, emi, /*hwCode=*/0x8127, &err), qPrintable(err));
+
+    QCOMPARE(m->writeFrames.at(0), QByteArray("\xE8", 1));
+    QCOMPARE(m->writeFrames.at(1), QByteArray("\x00\x00\x00\x0F", 4));
+    QCOMPARE(m->writeFrames.at(2), QByteArray("\x5A", 1));
+    QCOMPARE(m->writeFrames.at(3), emi.bytes);        // **EMI 紧跟 ACK**（lendram 被跳过）
+    QCOMPARE(m->writeFrames.size(), 6);               // 与 A 档通用路径相比少正好 1 帧
+}
+
+// emiver = 0x0D 档（C 档 [0x0C,0x0D]）：读 4B dramlength → 写 ACK → **改写 EMI 本体**为
+//   >I 0x100 + emi[4:dramlength] → 写完后再收 5×4B（Raw/CJ，仅 0x0D）
+void TestMtkPayload::sendEmiLegacyTierCRewritesEmiHeader()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray::fromHex("000102030405060708090A0B0C0D0E0F");   // 16B 可辨识
+    emi.ver = 0x0D;
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\x5A", 1)
+             << QByteArray("\x00\x00\x00\x08", 4)            // dramlength = 8（截掉后 8 字节）
+             << QByteArray("\x00\x2A", 2)                    // checksum
+             << QByteArray("\x00\x00\x00\x00", 4)            // M_EXT_RAM_RET = 0
+             << QByteArray("\x02", 1) << QByteArray("\x00", 1)
+             << QByteArray("\x00\x00\x00\x00\x80\x00\x00\x00", 8)
+             << QByteArray("\x00\x00\x00\x03", 4) << QByteArray("\x1C\x00\x40\x04", 4)
+             << QByteArray("\xAA\x08\x00\x33", 4) << QByteArray("\x00\x00\x00\x13", 4)
+             << QByteArray("\x00\x00\x00\x10", 4);           // 5×4B（仅 0x0D）
+    QString err;
+    QVERIFY2(mtkbrom::sendEmiLegacy(s, emi, 0x6765, &err), qPrintable(err));
+
+    QCOMPARE(m->writeFrames.at(0), QByteArray("\xE8", 1));
+    QCOMPARE(m->writeFrames.at(1), QByteArray("\x00\x00\x00\x0D", 4));
+    QCOMPARE(m->writeFrames.at(2), QByteArray("\x5A", 1));           // ACK 在 dramlength 之后
+    // 改写本体：>I 0x100 + emi[4:8]，本档**不单独写 dramlength**
+    QCOMPARE(m->writeFrames.at(3), QByteArray::fromHex("00000100" "04050607"));
+    QCOMPARE(m->writeFrames.at(4), QByteArray("\x5A", 1));
+    QCOMPARE(m->writeFrames.at(5), QByteArray("\x80\x00\x00\x01", 4));
+    QCOMPARE(m->writeFrames.size(), 6);
+    QVERIFY(m->reads.isEmpty());                                     // 5×4B 确实读走了
+}
+
+// 未知 emiver：上游只 warning，**不读不写** —— EMI 原样发出（不得跳过整个 DRAM 初始化）
+void TestMtkPayload::sendEmiLegacyUnknownVersionSendsEmiAsIs()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray(8, '\x77');
+    emi.ver = 0x63;
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\x5A", 1)                        // 第 1 次读：版本 ACK
+             << QByteArray("\x00\x2A", 2)                    // 第 2 次读直接是 checksum（中间无 dramlength）
+             << QByteArray("\x00\x00\x00\x00", 4)
+             << QByteArray("\x02", 1) << QByteArray("\x00", 1)
+             << QByteArray("\x00\x00\x00\x00\x80\x00\x00\x00", 8);
+    QString err;
+    QVERIFY2(mtkbrom::sendEmiLegacy(s, emi, 0x6765, &err), qPrintable(err));
+
+    QCOMPARE(m->writeFrames.at(0), QByteArray("\xE8", 1));
+    QCOMPARE(m->writeFrames.at(1), QByteArray("\x00\x00\x00\x63", 4));
+    QCOMPARE(m->writeFrames.at(2), emi.bytes);               // 原样（无 ACK/长度帧夹在中间）
+    QCOMPARE(m->writeFrames.size(), 5);
+}
+
+// 设备回 NACK → 明确失败（上游此处 sys.exit；本实现 fail-closed 返回 false）
+void TestMtkPayload::sendEmiLegacyFailsOnNack()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray(4, '\x11');
+    emi.ver = 0;
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\xA5", 1);                       // NACK：preloader 不匹配
+    QString err;
+    QVERIFY(!mtkbrom::sendEmiLegacy(s, emi, 0x6765, &err));
+    QVERIFY2(err.contains(QStringLiteral("NACK")), qPrintable(err));
+    QCOMPARE(m->writeFrames.size(), 2);                      // 只发了 0xE8 + 版本，EMI 一字节没发
+}
+
+// emiver = 0 档 + dramlength(8) ≠ len(emi)(16)：**截断**（发前 8B）+ 写的是 >I dramlength（不是 lendram）。
+// （brief 原文的 0 档用例里 dramlength == len(emi) == 16，两个值相等 → 写错成 lendram 也照样通过；
+//   这里用一个不等的情形把该分支的判别力补上）
+void TestMtkPayload::sendEmiLegacyTierDTruncatesAndWritesDramLength()
+{
+    mtkbrom::EmiData emi;
+    emi.bytes = QByteArray::fromHex("000102030405060708090A0B0C0D0E0F");
+    emi.ver = 0;
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\x5A", 1)
+             << QByteArray("\x00\x00\x00\x08", 4)            // dramlength = 8 < len(emi) = 16
+             << QByteArray("\x00\x2A", 2)
+             << QByteArray("\x00\x00\x00\x00", 4)
+             << QByteArray("\x02", 1) << QByteArray("\x00", 1)
+             << QByteArray("\x00\x00\x00\x00\x80\x00\x00\x00", 8);
+    QString err;
+    QVERIFY2(mtkbrom::sendEmiLegacy(s, emi, 0x6765, &err), qPrintable(err));
+
+    QCOMPARE(m->writeFrames.at(3), QByteArray("\x00\x00\x00\x08", 4));    // >I dramlength（8，不是 16）
+    QCOMPARE(m->writeFrames.at(4), emi.bytes.left(8));                    // **截断到 8B**
+    QVERIFY(m->writeFrames.at(4) != emi.bytes);                           // 反向锚点：确实截了
+    QCOMPARE(m->writeFrames.size(), 7);
 }
 
 // M_EXT_RAM_RET != 0 → 明确失败（DRAM 初始化没成）
