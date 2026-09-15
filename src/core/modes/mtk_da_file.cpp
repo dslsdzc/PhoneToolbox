@@ -172,12 +172,14 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
 bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
                    QStringList *warnings, DaSelection &out, QString *error)
 {
+    // 失败时 out 回到默认值（fail-closed：不残留上一次的成功结果，也不留"entry 有值、字节为空"的半份选择）。
+    // ⚠️ isXmlForced **只在成功路径末尾**赋值 —— 在早退之前赋值会让 V6 文件失败时留下 isXmlForced=true
+    //    （复审 F2：与"失败时不返回半份选择"的契约矛盾）。
     out = DaSelection{};
-    out.isXmlForced = f.isV6;
 
     if (dacode == 0) {   // 设备报 hw_code=0 = 判不出芯片；且 0 会与占位条目（hw_code==0）相撞
         setErr(error, QStringLiteral("无法判定芯片（dacode == 0）—— 拒绝选择：上游在装载阶段就把 "
-                                     "hw_code==0 的占位条目剔除（daconfig.py:200），占位条目不得被选中"));
+                                     "hw_code==0 的占位条目剔除（daconfig.py:189/200），占位条目不得被选中"));
         return false;
     }
     QList<int> candidates;
@@ -214,10 +216,7 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
     // 取**文件顺序上首个满足者**（上游 daconfig.py:207-218 的 first-match：`if self.da_loader is None`）
     // —— **不是**"取最大版本"（Task 2 审查 Important-1 已核上游）。并列只记告警（P2：5 元组才是唯一键）。
     const int best = candidates.first();
-    if (candidates.size() > 1 && warnings)
-        *warnings << QStringLiteral("hw_code=0x%1 有 %2 个条目满足版本过滤，取**文件顺序首个**（条目[%3]）——"
-                                    "上游同语义；唯一键是 5 元组（含 pagesize），本层不做 pagesize 匹配")
-                         .arg(dacode, 4, 16, QLatin1Char('0')).arg(candidates.size()).arg(best);
+    const bool multiple = candidates.size() > 1;   // 告警留到**选择成功后**再记（见下，F4①）
 
     // 硬编码 region[1]=DA1 / region[2]=DA2（三代共同；不得改用 entryRegionIndex —— P5）
     const DaRegion da1 = f.entries.at(best).regions.at(1);
@@ -236,6 +235,13 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
     out.da1Bytes = f.raw.mid(int(da1.fileOffset), int(da1.len));
     // da2 **保留尾部签名**（LEGACY 语义）：长度取 m_len，绝不裁 sigLen
     out.da2Bytes = f.raw.mid(int(da2.fileOffset), int(da2.len));
+    out.isXmlForced = f.isV6;   // **成功路径**才赋值（早退路径不得泄漏 —— F2）
+    // 多条满足：只在选择成功后才告警（失败路径留"已选中条目[x]"会误导排障 —— F4①）
+    if (multiple && warnings)
+        *warnings << QStringLiteral("hw_code=0x%1 有 %2 个条目满足版本过滤，取**文件顺序首个**（条目[%3]）——"
+                                    "上游同语义；两条目仅 pagesize 不同时唯一键才是 5 元组（含 pagesize），"
+                                    "本层不做 pagesize 匹配")
+                         .arg(dacode, 4, 16, QLatin1Char('0')).arg(candidates.size()).arg(best);
     return true;
 }
 

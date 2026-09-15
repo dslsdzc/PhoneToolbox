@@ -298,9 +298,10 @@ void TestMtkDaFile::skipsCandidatesWithEmptyDaRegions()
 void TestMtkDaFile::rejectsZeroDacode()
 {
     // P7：hw_code == 0 是占位条目，**不得**被选中。dacode 由芯片表给出（默认 = 设备 hw_code），
-    // 取不到时是 0 —— 若放行就会与占位条目相撞。上游在装载阶段就剔除它们（daconfig.py:200
+    // 取不到时是 0 —— 若放行就会与占位条目相撞。上游在装载阶段就剔除它们（daconfig.py:189/200
     // `if da.hw_code != 0:`）→ 本层对 dacode == 0 明确拒绝。
-    if (!mtktest::sampleFileAvailable(QStringLiteral("MTK_AllInOne_DA_iot.bin"))) {
+    if (!mtktest::sampleFileAvailable(QStringLiteral("MTK_AllInOne_DA_iot.bin"))
+        || !mtktest::sampleFileAvailable(QStringLiteral("MTK_DA_V6.bin"))) {
 #if MTK_SAMPLES_REQUIRED
         QFAIL("真样本缺失，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
 #else
@@ -319,34 +320,84 @@ void TestMtkDaFile::rejectsZeroDacode()
         hasPlaceholder = hasPlaceholder || e.hwCode == 0;
     QVERIFY2(hasPlaceholder, "iot 文件里应有 hw_code == 0 的占位条目");
 
+    // F1：fresh 的 `DaSelection{}` 默认就是 entryIndex == -1 —— 直接断言 -1 是**恒真断言**，判别力为零。
+    // 先用一次**成功**选择把 sel 填满（且预置值与默认值可区分），失败路径才有东西可残留/可污染。
     QStringList warn;
     mtkbrom::DaSelection sel;
+    QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6226, 0, 0, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 2);
+    QVERIFY2(sel.da1.startAddr != 0, "预置的成功结果必须与默认值（全 0）可区分");
+    warn.clear();
+    err.clear();
     QVERIFY(!mtkbrom::selectDaEntry(iot, 0, 0, 0, &warn, sel, &err));
     QVERIFY2(err.contains(QStringLiteral("dacode == 0")), qPrintable(err));
-    QCOMPARE(sel.entryIndex, -1);      // 失败时 out 保持默认（不返回半份选择）
+    // 失败即重置为默认（fail-closed）：不残留上一次的成功结果，也不留"entry 有值、字节为空"的半份选择
+    QCOMPARE(sel.entryIndex, -1);
+    QCOMPARE(sel.da1.startAddr, quint32(0));
+    QVERIFY(sel.da1Bytes.isEmpty());
+
+    // F2：**V6 文件** + dacode == 0 —— 失败路径不得写 out。isXmlForced 曾在本层早退**之前**赋值，
+    // 于是 V6 文件下返回 false 却留下 isXmlForced == true（与 .h 的"失败时不返回半份选择"矛盾）。
+    // 现有用例用的是 V5 形态的 iot（isV6 == false），测不出这个泄漏。
+    QFile f6(dir + QStringLiteral("/MTK_DA_V6.bin"));
+    QVERIFY(f6.open(QIODevice::ReadOnly));
+    mtkbrom::DaFile v6;
+    err.clear();
+    QVERIFY2(mtkbrom::parseDaFile(f6.readAll(), v6, &err), qPrintable(err));
+    QVERIFY(v6.isV6);                   // 前提：确实拿到 V6 文件，否则本段测不到该泄漏
+    warn.clear();
+    err.clear();
+    QVERIFY(!mtkbrom::selectDaEntry(v6, 0, 0, 0, &warn, sel, &err));
+    QVERIFY2(err.contains(QStringLiteral("dacode == 0")), qPrintable(err));
+    QVERIFY2(!sel.isXmlForced, "失败路径不得留下 isXmlForced（V6 文件的早退泄漏）");
+    QCOMPARE(sel.entryIndex, -1);
 }
 
 void TestMtkDaFile::rejectsOversizedRegionSlice()
 {
     // >2GiB 的 region 在 int 截断下会静默给出空切片（"上传 0 字节后静默成功"家族）。
     // 真文件造不出来（真实样本 1–4 MiB）→ 手工构造 DaFile 直接喂选择层是正当手段。
-    mtkbrom::DaFile f;
-    f.raw = QByteArray(64, '\0');
-    mtkbrom::DaEntry e;
-    e.hwCode = 0x6765;
-    e.regionCount = 3;
-    mtkbrom::DaRegion r0, r1, r2;
-    r2.len = 16;                       // region[2] 非空（否则先被"空 region"规则跳过，测不到 >2GiB 守卫）
-    r1.len = 0xFFFFFFFF;               // > INT_MAX（region[1] = DA1）
-    e.regions << r0 << r1 << r2;
-    f.entries << e;
+    auto makeEntry = [](quint32 da1Len) {
+        mtkbrom::DaEntry e;
+        e.hwCode = 0x6765;
+        e.regionCount = 3;
+        mtkbrom::DaRegion r0, r1, r2;
+        r0.len = 16;
+        r1.len = da1Len;               // region[1] = DA1
+        r2.len = 16;                   // region[2] 非空（否则先被"空 region"规则跳过，测不到 >2GiB 守卫）
+        e.regions << r0 << r1 << r2;
+        return e;
+    };
+    mtkbrom::DaFile ok;
+    ok.raw = QByteArray(64, '\0');
+    ok.entries << makeEntry(16);
 
+    // F1：fresh 的 `DaSelection{}` 默认 entryIndex == -1 —— 直接断言 -1 是恒真断言。
+    // 先用一次成功选择把 sel 填满，失败路径才有东西可残留/可污染。
     QStringList warn;
     mtkbrom::DaSelection sel;
     QString err;
-    QVERIFY(!mtkbrom::selectDaEntry(f, 0x6765, 0, 0, &warn, sel, &err));
+    QVERIFY2(mtkbrom::selectDaEntry(ok, 0x6765, 0, 0, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 0);
+    QCOMPARE(sel.da1Bytes.size(), 16);
+    warn.clear();
+    err.clear();
+
+    mtkbrom::DaFile big;
+    big.raw = QByteArray(64, '\0');
+    big.entries << makeEntry(0xFFFFFFFF);   // 第一条 > INT_MAX（first-match 会先命中的就是它）
+    big.entries << makeEntry(16);           // 第二条：顺带造出"多条满足"的告警条件（F4①）
+
+    QVERIFY(!mtkbrom::selectDaEntry(big, 0x6765, 0, 0, &warn, sel, &err));
     QVERIFY2(err.contains(QStringLiteral("int 范围")), qPrintable(err));
+    // 失败即重置为默认：不残留上一次成功的结果，也不留半份选择
     QCOMPARE(sel.entryIndex, -1);
+    QVERIFY(sel.da1Bytes.isEmpty());
+    // F4①：选择**失败**时不得留下"已选中条目[x]"（多条满足）这类告警 —— 无实害但会误导排障
+    bool misleading = false;
+    for (const QString &w : std::as_const(warn))
+        misleading = misleading || w.contains(QStringLiteral("满足版本过滤"));
+    QVERIFY2(!misleading, qPrintable(warn.join(QStringLiteral(" | "))));
 }
 
 void TestMtkDaFile::reportsNoCandidateWithAvailableCodes()
@@ -556,6 +607,18 @@ void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()
     QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6270, 0, 0x0100, &warn, sel, &err), qPrintable(err));
     QCOMPARE(sel.entryIndex, 27);                    // 条目[17] 的 sw 0x8000 > 设备 0x0100 → 被滤掉
     QCOMPARE(sel.entry.swVersion, quint16(0x0100));
+
+    // hwVersion 维的真样本判别点（F3）：设备 hw=0x8000 → 条目[17]（0x8000 ≤ 设备）；
+    // 设备 hw=0x0100 → 三条都不满足（[17]/[18] 的 0x8000 与 [27] 的 0xCA00 都 > 0x0100）→ **无候选**。
+    warn.clear();
+    err.clear();
+    QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6270, 0x8000, 0, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 17);
+    QCOMPARE(sel.entry.hwVersion, quint16(0x8000));
+    warn.clear();
+    err.clear();
+    QVERIFY(!mtkbrom::selectDaEntry(iot, 0x6270, 0x0100, 0, &warn, sel, &err));
+    QVERIFY2(err.contains(QStringLiteral("0x6270")), qPrintable(err));   // 无候选的 error 仍列出可用 hw_code
 
     // mt6590: hw_code=0x6575 两条目（[1] hw 0xCA00/sw 0xE100、[2] hw 0xCB00/sw 0xE201）
     // → 设备版本旁路时 **first-match = 文件顺序首个**（条目[1]，不是版本更大的条目[2]）。

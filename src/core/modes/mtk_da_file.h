@@ -40,7 +40,8 @@
 // P12 的协议端序属协议层，本文件只按 LE 读文件字段。
 //
 // 选择层规则出处（mtkclient v2.1.4-20-g71b0175，GPL-3.0，**只读引用不复制代码**）：
-//   Library/DA/daconfig.py:200            装载阶段剔除 hw_code==0 占位条目（本层对 dacode==0 拒绝）
+//   Library/DA/daconfig.py:189/200        装载阶段剔除 hw_code==0 占位条目（首见/追加两个分支；
+//                                         本层对 dacode==0 拒绝）
 //   Library/DA/daconfig.py:207-218        按 hw_code 找候选 + hw/sw 版本过滤（`or … == 0` 即设备值 0 旁路），
 //                                         取**文件顺序首个满足者**（first-match，非"取最大版本"）
 //   Library/DA/legacy/dalegacy_lib.py:563-571  region[1]=DA1 / region[2]=DA2 硬编码
@@ -111,7 +112,9 @@ struct DaSelection {
 //   4. 取**文件顺序上首个满足者**（上游 first-match，`if self.da_loader is None` 即不再覆盖）；
 //      多条满足 → warnings 记明（P2 的 5 元组才是唯一键，本层不做 pagesize 匹配）。
 //   5. 无候选 → false + 中文 error，并列出该文件里出现过的 hw_code（诊断）。
-// 成功返回 true 并填充 out；warnings/error 可空。out 在入口处被重置，失败时不返回半份选择。
+// 成功返回 true 并填充 out；warnings/error 可空。
+// 失败返回 false 时 out 为**默认值**（入口处即重置；isXmlForced 也只在成功路径赋值）——
+// 不残留上一次的成功结果，也不留"entry 有值、字节为空"的半份选择（fail-closed）。
 bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
                    QStringList *warnings, DaSelection &out, QString *error);
 
