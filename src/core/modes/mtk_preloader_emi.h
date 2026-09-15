@@ -17,7 +17,7 @@
 //     的整块分支（daconfig.py:137-139）属 XFlash，D1 不实现（D2 再说）。
 //
 // 契约：失败 → false + 中文 error（无 MTK_BLOADER_INFO_v / 无 MTK_BIN / 切片为空 /
-// MMM 分支字段越界 —— 详见 .cpp 的偏差说明）；**调用方不得因此中止刷写** ——
+// **版本字节非数字** / MMM 分支字段越界 —— 详见 .cpp 的偏差说明）；**调用方不得因此中止刷写** ——
 // mtkclient 同姿态：EMI 缺失只告警（"No preloader given. Operation may fail due to missing
 // dram setup."，xflash_lib.py:1143-1144）。
 // out 在入口即重置（fail-closed）；`branch` 是**诊断字段**，失败路径也可能已填入命中路径，
@@ -32,8 +32,9 @@ namespace mtkbrom {
 // 从 preloader 提取出的 EMI。
 struct EmiData {
     QByteArray bytes;    // 待发送的 EMI 本体（**LEGACY 切片**：MTK_BIN+0xC 起）
-    quint32 ver = 0;     // 版本号 = "MTK_BLOADER_INFO_v" 之后 2 个 ASCII 字节（如 "38" → 38）；
-                         // 非数字 → 0（上游此时整体失败，见 .cpp 的偏差说明）
+    quint32 ver = 0;     // 版本号 = "MTK_BLOADER_INFO_v" 之后 2 个 ASCII 字节（如 "38" → 38；
+                         // 真样本是 "35" → 35）。**读不懂即整体失败**，绝不返回"ver=0 的成功"：
+                         // 0 在上游是**合法档位**（tier-0），不得与"非数字"混用（见 .cpp）。
     QString branch;      // 诊断：命中的路径（"MMM" / "偏移0"）
 };
 

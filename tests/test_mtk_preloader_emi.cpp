@@ -21,6 +21,7 @@ private slots:
     void rejectsMalformedMmmBranch();
     void failsWithoutMarkerOrMtkBin();
     void parsesVersionFromTwoAsciiBytes();
+    void rejectsNonNumericVersion();
     // 真样本（reference/mtk-samples/，缺失时 SKIP；验证跑带 -DMTK_SAMPLES_REQUIRED=ON）
     void realPreloaderExtracts();
 };
@@ -202,18 +203,19 @@ void TestMtkPreloaderEmi::failsWithoutMarkerOrMtkBin()
 
 void TestMtkPreloaderEmi::parsesVersionFromTwoAsciiBytes()
 {
-    // 版本 = 标记后**2 个 ASCII 字节**（上游 DC:138/143 的 int(...rstrip(b"\x00"))）。
-    // 末例为非数字：上游 int() 抛异常 → 整个提取失败（emi=None）；本实现按 brief 判据继续
-    // （ver=0）且提取仍成功 —— 发送端（D2）需自行决定 ver==0 是否可发。
+    // 接受路径：版本 = 标记后**2 个 ASCII 字节**（上游 DC:138/143 的 int(...rstrip(b"\x00"))），
+    // 去 NUL 后**全是数字**才算读得懂。末两例是"合法的 0"：上游 int("0")/int("00") 都是 0，
+    // 而 emiver==0 在上游是**合法档位**（tier-0）—— 不得把合法 0 一起拒掉。
     struct Case {
         const char *verBytes;
         quint32 expect;
     };
     const Case cases[] = {
         { "38", 38 },      // 上游 Tools/preloader_to_dram.py 的样例
-        { "35", 35 },      // 真样本 preloader.bin 的实测字节
+        { "35", 35 },      // 真样本 preloader.bin 的实测字节（**整体**两位，不是末位 5）
         { "5\0", 5 },      // 单字符 + NUL（上游 rstrip 去尾部 NUL）
-        { "\0\0", 0 },     // 非数字 → ver = 0
+        { "0\0", 0 },      // 合法档位 tier-0（单字符 "0"）
+        { "00", 0 },       // 合法档位 tier-0（两位全数字："00" → 0）
     };
     for (const Case &c : cases) {
         QByteArray pre = buildPreloader(16);
@@ -222,8 +224,34 @@ void TestMtkPreloaderEmi::parsesVersionFromTwoAsciiBytes()
         QString err;
         QVERIFY2(mtkbrom::extractEmiLegacy(pre, emi, &err), qPrintable(err));
         QCOMPARE(emi.ver, c.expect);
-        // 版本解析失败不影响切片（切片判据与版本号无关）
+        // 版本号的取值不影响切片
         QCOMPARE(emi.bytes, pre.mid(0x4C, 16));
+    }
+}
+
+void TestMtkPreloaderEmi::rejectsNonNumericVersion()
+{
+    // 非数字版本 → **整体提取失败**（不是"ver=0 的成功"）：上游 int() 抛异常时是
+    // `except Exception: self.emiver = 0; self.emi = None`（DC:157-160）→ 后面
+    // `if self.daconfig.emi is not None:` 整段跳过、**根本不发 DRAM 配置**。
+    // 而 ver==0 在上游是**合法档位**（tier-0）—— 把"读不懂"混进"合法的 0"会让伪造版本
+    // 驱动协议分档，属本仓"静默错误值"家族。
+    const char *bad[] = {
+        "XX",     // 双字母
+        "\0X",    // 前导 NUL + 字母（去 NUL 后为 "X"）
+        "3X",     // 数字 + 字母（不得"前缀能转就收"）
+        "\0\0",   // 全 NUL（去 NUL 后为空）
+        " X",     // 空格 + 字母（toInt() 会 trim，故判据必须是"**全**数字"）
+    };
+    for (const char *verBytes : bad) {
+        QByteArray pre = buildPreloader(16);
+        pre.replace(18, 2, QByteArray(verBytes, 2));
+        mtkbrom::EmiData emi;
+        QString err;
+        QVERIFY2(!mtkbrom::extractEmiLegacy(pre, emi, &err), qPrintable(QByteArray(verBytes, 2).toHex()));
+        QVERIFY2(err.contains(QStringLiteral("数字")), qPrintable(err));
+        QVERIFY(emi.bytes.isEmpty());     // 失败即无 EMI（与上游 emi=None 净效果一致）
+        QVERIFY(emi.ver == 0);
     }
 }
 
