@@ -140,9 +140,20 @@ bool OdinSession::readAck(quint32 expectedId, bool allowProgressCodes,
     QString rerr;
     const QByteArray rsp = m_t.read(kAckSize, m_opt.controlTimeoutMs, &rerr);
     if (rsp.size() < kAckSize) {
-        setErr(error, QStringLiteral("%1：未收到完整应答（%2 字节）%3")
+        // 终审 I-1④：空返回有两种成因，**传输层可区分** ——
+        //   * 超时/传输错误 → 传输层**置 error**（rerr 非空；真机 odin_libusb_transport.cpp:222-227）；
+        //   * 读到 **0 长度包（ZLP）** → 空返回且**不置 error**（真机同文件 :229-235；mock 对队列里的
+        //     空 QByteArray 同款）。后者说明设备**抢发**了一个空包而我们没消费掉它（典型场景：上一笔
+        //     结束序列后设备回的空包 —— D8 本期不读），残留落在 IN 端点队头。
+        // 只补文案、**不动控制流**：诊断指向真因，免得持机人往线材/硬件方向查。
+        const QString hint = (rsp.isEmpty() && rerr.isEmpty())
+            ? QStringLiteral("（读到 0 长度包：疑似上一笔结束序列后设备发的空包未被消费 —— "
+                             "见 docs/superpowers/specs/samsung-odin-facts.md §7.4 第 13 条）")
+            : QString();
+        setErr(error, QStringLiteral("%1：未收到完整应答（%2 字节）%3%4")
                           .arg(context).arg(rsp.size())
-                          .arg(rerr.isEmpty() ? QString() : QStringLiteral("；传输层报：") + rerr));
+                          .arg(rerr.isEmpty() ? QString() : QStringLiteral("；传输层报：") + rerr)
+                          .arg(hint));
         return false;
     }
     Ack ack;
@@ -379,6 +390,20 @@ bool OdinSession::resolveEntries(const SamsungPlan &plan, const PitTable *device
                            .arg(e.pit.binaryType).arg(de->binaryType),
                        percentFor(m_writtenBytes));
             }
+            // 终审 I-2：**落点以设备 PIT 为准**（r.pit 即将被它覆盖），所以"装不装得下"必须用
+            // **设备**的分区字节数重核一次 —— 计划层那次核对（samsung_plan.cpp 规则 7）用的是
+            // 包内/用户 PIT 的 partitionBytes()：设备分区更小、而 identifier/deviceType/binaryType
+            // 三字段恰好一致时，计划层一条告警都不会发，会话却按 r.size 原样下发 → 可能越界写相邻分区。
+            // partitionBytes()：deviceType==8(UFS) → 4096 B/扇区，其余 512 B。
+            // ==0 = 设备未声明大小（真样本确有，如 J1POP3G 的 USERDATA）→ **跳过**，与规则 7 同口径。
+            const quint64 partBytes = de->partitionBytes();
+            if (partBytes != 0 && r.size > partBytes) {
+                setErr(error, QStringLiteral("分区 %1 拒绝刷写：镜像 %2 字节 > 设备 PIT 声明的分区 %3 字节"
+                                             "（以设备 PIT 为准；未下发任何数据）。"
+                                             "请核对固件包与机型是否配套")
+                                  .arg(e.partition).arg(r.size).arg(partBytes));
+                return false;
+            }
             r.pit = *de;
         }
         out.append(r);
@@ -485,13 +510,21 @@ bool OdinSession::writeEntry(const ResolvedEntry &r, QString *error)
         }
 
         // D7：结束序列命令**前**发一次空写（Heimdall kEmptyTransferBeforeAndAfter + odin4
-        // send_empty_transfer；Thor 不发 → 2:1 取"发"）。命令后**不**发（after 仅 Heimdall，D6/D8）。
+        // send_empty_transfer；Thor 不发 → 2:1 取"发"）。命令后**不**发（after 仅 Heimdall）。
         if (!m_t.write(QByteArray(), &werr))
             // 空写失败按容忍处理：odin4 只落 verbose 日志（odin_protocol.cpp:296-301）
             report(QStringLiteral("info"),
                    QStringLiteral("结束序列前的空写失败（忽略）：%1").arg(werr),
                    percentFor(m_writtenBytes + sent));
 
+        // 终审 I-1③：D6 / D7 / D8 是三件不同的事，此前注释把"after 空写"与 D8 混写成一条 ——
+        //   D6 = **控制包后的空写**     → 本实现**不发**（仅 Heimdall 每包后发；2:1 不采纳）
+        //   D7 = **结束序列命令前的空写** → 上一段**发了**；同属 D7 的"命令后空写" → **不发**
+        //   D8 = **结束序列命令后的空读** → 本实现**不读**（Heimdall 读且仅告警；2:1 不采纳）
+        // D6/D7 管"主机写不写"，D8 管"主机读不读"。
+        // 代价：设备若在这条命令后回发一个空包，没人消费它 → 残留留在 IN 端点队头；
+        // 该风险不在本处兜底，而由 readAck 的 0 长度包诊断（终审 I-1④）暴露 +
+        // docs/superpowers/specs/samsung-odin-facts.md §7.4 第 13 条记账（改不改裁定见该条）。
         if (!m_t.write(frameEndSequence(r.pit, quint32(realSize), isLast), &werr)) {
             setErr(error, QStringLiteral("结束序列失败（分区 %1，序列 %2）：%3")
                               .arg(r.partition).arg(si).arg(werr));

@@ -528,7 +528,7 @@ sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
 **镜像 > 分区 → 逐条 warning（放不下）**；镜像 < 分区 → 一条汇总 warning；
 分区未声明大小（blockCount=0）→ 逐条 warning。
 
-### 7.4 真机待验清单（12 条 —— **不是缺陷清单，是"没有真机就验不了"的清单**）
+### 7.4 真机待验清单（14 条 —— **不是缺陷清单，是"没有真机就验不了"的清单**）
 
 以下由本阶段的独立审查逐条确认，凡在文档/功能清单里出现的"已交付"表述均**不覆盖**这些项：
 
@@ -565,6 +565,22 @@ sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
     （`reference/samsung-samples/sm-j110h/`）；**AP 包（966 MB）未纳入**；其它机型与 UFS 机型待验。
 12. **GUI 只到启动冒烟**：`QT_QPA_PLATFORMTHEME= QT_QPA_PLATFORM=offscreen` 下运行至超时被杀
     （exit=124，无崩溃）；**无交互验证**（拖放、勾选门控、进度显示均未人工走过）。
+13. **结束序列后的空包残留（三方参照矛盾，本期按 D8 不读）**：结束序列命令后设备若仍发一个空包而
+    未被消费，残留会落在 IN 端点队头 → **下一个分区**的 `readAck` 读到 0 字节 → 会话中止
+    （此时**前一个分区已写完**）。症状像硬件问题（"第二个分区就卡住"）；多分区固件（BL/AP/CP/CSC）
+    在**第 2 个分区边界**即触发。三方参照互相矛盾：odin4 主动 drain
+    （`reference/odin4-llucs/src/usb/odin_protocol.cpp:523,527`）、Thor 不考虑
+    （`reference/thor/TheAirBlow.Thor.Library/Protocols/Odin.cs:399-402`）、Heimdall 读但仅告警
+    → **本期按 D8 不读**。会话层已把这条路径做成**可诊断**：读到 0 长度包时，`readAck` 的错误文案
+    会直接指向本条（`src/core/odin/odin_session.cpp`，"读到 0 长度包：…见 §7.4 第 13 条"），
+    与"真超时"（传输层置 error）在文案上分得开。
+    **是否改为容忍式 drain 需改裁定**（交持机人；不是可以顺手改的 bug）。
+14. **`noDeviceError()` 覆盖面偏宽（诊断误导）**：设备身份命中（VID `0x04E8` + CDC_DATA 类）但
+    **没有可用的批量接口**（`src/core/odin/odin_libusb_transport.cpp:175-176` 的 `insp.iface < 0`），
+    或 `libusb_open` 失败（**udev 权限 / 被别的进程占用**，同文件 :182-184）—— 两者都继续找下一个
+    候选，最终归到同一个 `noDeviceError()` ＝"未找到三星 Odin 下载模式设备…"（:188-189）。
+    持机人看到"未找到设备"第一眼会往"没插好 / 线材 / 驱动"方向查，而真因可能是权限或占用。
+    **归类口径待改**（例如把"认得出但打不开"与"根本没认出来"分开报）。
 
 ### 7.5 本阶段离线证据快照（2026-09-15 复核）
 
@@ -583,7 +599,10 @@ sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
 > 直接 `cmake --build build` 会显示 `ninja: no work to do` —— **不重编译就不会重放任何告警**，
 > 很容易被误读成"全量构建 0 警告"；**复核告警必须用全新构建目录**。
 >
-> 数字口径：以上 45 / 10 / 3 及构建结论均为**本机当前实测**，与 `功能清单.txt`、`README.md` 中的表述一致；
+> 数字口径：**45 = ctest 目标数**（`tests/` 目录内为 **44** 个 `test_*.cpp` 源文件，另 1 个是插件测试
+> 目标 `test_hisi_update`，见 `plugins/huawei_flash/CMakeLists.txt:25` —— 两个数字不是一回事，别互相套）；
+> 10 / 3 及构建结论均为**本机当前实测**，与 `功能清单.txt`、`README.md` 中的表述一致
+> （README 的目录树写"44 个测试源文件"、测试小节写"45 个测试目标"）；
 > 真样本位于 gitignored 的 `reference/`，**不进提交**（仓库克隆后这些数字中的真样本项会退化为 `QSKIP`，
 > 故验证跑必须带 `-DODIN_SAMPLES_REQUIRED=ON` 并核对输出 `0 skipped`）。
 

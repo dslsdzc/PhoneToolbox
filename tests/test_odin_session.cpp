@@ -30,6 +30,8 @@ private slots:
     void pitDumpStreamInterruptionDoesNotFallBack();
     void flashesMultiSequenceImage();
     void transportFailuresAbortAndClose();
+    void refusesWhenDevicePartitionSmallerThanImage();
+    void reportsZeroLengthPacketDiagnostic();
 };
 
 using namespace odin;
@@ -132,14 +134,16 @@ static void queueEndSession(MockOdinTransport &t)
 }
 
 // 设备侧 PIT（单条 BOOT → spl.img，与夹具计划同源）
+// blockCount 可覆盖：终审 I-2 的用例要造"设备分区比镜像小"（deviceType=2 → 512 B/扇区）。
 static QByteArray devicePitBytes(const QByteArray &partition = QByteArray("BOOT"),
-                                 const QByteArray &flashName = QByteArray("spl.img"))
+                                 const QByteArray &flashName = QByteArray("spl.img"),
+                                 quint32 blockCount = 1024)
 {
     PitSpec s;
     s.name = partition;
     s.deviceType = 2;
     s.identifier = 80;
-    s.blockCount = 1024;
+    s.blockCount = blockCount;
     s.flashFilename = flashName;
     return buildPit({s});                          // 默认带 1024 字节尾部 → 3 个 500 字节分片
 }
@@ -497,6 +501,68 @@ void TestOdinSession::transportFailuresAbortAndClose()
         QVERIFY2(err.contains(QStringLiteral("打开设备失败")), qPrintable(err));
         QCOMPARE(t.calls, QStringList{QStringLiteral("open")});   // 不 close：open 未成功，无句柄可关
         QVERIFY(t.writes.isEmpty());
+    }
+}
+
+// 终审 I-2：**落点以设备 PIT 为准**，故"装不装得下"必须用**设备**的分区字节数重核 ——
+// 计划层核对用的是包内/用户 PIT；设备分区更小但三字段一致时它一条告警都不发，会话却按
+// 包内尺寸下发 → 可能越界写相邻分区。本用例：包内 PIT 声明 1024 扇区（512 KiB，装得下 3000 B），
+// 设备 PIT 只声明 4 扇区（2048 B）→ 必须**拒刷**。
+void TestOdinSession::refusesWhenDevicePartitionSmallerThanImage()
+{
+    Fixture fx;
+    const QByteArray image(3000, '\x5A');
+    QVERIFY(makeFixture(fx, image));               // 包内 PIT：blockCount=1024 → 512 KiB
+    MockOdinTransport t;
+    queueSessionSetup(t);
+    queuePitDump(t, devicePitBytes(QByteArray("BOOT"), QByteArray("spl.img"), 4));  // 设备：4×512 = 2048 B
+    OdinSession s(t);
+    QString err;
+    QVERIFY(!s.run(fx.plan, OdinOptions{}, &err));
+    QVERIFY2(err.contains(QStringLiteral("BOOT")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("3000")), qPrintable(err));    // 镜像字节数
+    QVERIFY2(err.contains(QStringLiteral("2048")), qPrintable(err));    // **设备**分区字节数（非包内的 524288）
+    QVERIFY(!t.writes.contains(frameRequestFlash()));                   // 拒刷：一条数据都不发
+    QVERIFY(!t.writes.contains(frameEndSession(false)));
+    QCOMPARE(t.calls.last(), QStringLiteral("close"));
+}
+
+// 终审 I-1④：readAck 的"空返回"要区分**读到 0 长度包**与**超时** —— 前者传输层不置 error。
+// 本用例两个场景各钉一半：ZLP → 文案指向第 13 条且**不**带"传输层报"；超时 → 带"传输层报"。
+void TestOdinSession::reportsZeroLengthPacketDiagnostic()
+{
+    {   // 场景 A：设备回了一个 0 长度包（mock 队列里的空 QByteArray：空返回且不置 error）
+        Fixture fx;
+        const QByteArray image(3000, '\x5A');
+        QVERIFY(makeFixture(fx, image));
+        MockOdinTransport t;
+        queueSessionSetup(t);
+        OdinOptions opt;
+        opt.dumpDevicePit = false;
+        t.reads << QByteArray();                   // ← 申请文件传输的应答：ZLP
+        OdinSession s(t);
+        QString err;
+        QVERIFY(!s.run(fx.plan, opt, &err));
+        QVERIFY2(err.contains(QStringLiteral("0 长度包")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("第 13 条")), qPrintable(err));
+        QVERIFY2(!err.contains(QStringLiteral("传输层报")), qPrintable(err));   // 不是超时口径
+        QVERIFY(!t.writes.contains(frameEndSession(false)));
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));
+    }
+    {   // 场景 B（对照）：读队列空 = 超时 → 仍是"传输层报"口径，**不**出现 0 长度包文案
+        Fixture fx;
+        const QByteArray image(3000, '\x5A');
+        QVERIFY(makeFixture(fx, image));
+        MockOdinTransport t;
+        queueSessionSetup(t);
+        OdinOptions opt;
+        opt.dumpDevicePit = false;
+        OdinSession s(t);                          // 脚本至此为止 → 下一笔应答读超时
+        QString err;
+        QVERIFY(!s.run(fx.plan, opt, &err));
+        QVERIFY2(err.contains(QStringLiteral("传输层报")), qPrintable(err));
+        QVERIFY2(!err.contains(QStringLiteral("0 长度包")), qPrintable(err));
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));
     }
 }
 
