@@ -258,6 +258,8 @@ if(ENABLE_ROOT_PATCHER_TESTS)
 endif()
 
 # ---- image_engine 单元测试 ----
+# ON = MTK 真样本缺失/不足时让用例 FAIL 而非 SKIP（CI/验证跑用；默认 OFF 保持离线友好）
+option(MTK_SAMPLES_REQUIRED "Fail (instead of skip) when MTK samples are missing" OFF)
 option(ENABLE_IMAGE_TESTS "Build image_engine unit tests" ON)
 if(ENABLE_IMAGE_TESTS)
     find_package(Qt6 QUIET COMPONENTS Test)
@@ -304,7 +306,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_protocol.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_da_file.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -481,6 +484,9 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_da_file")
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -489,6 +495,17 @@ if(ENABLE_IMAGE_TESTS)
                         ODIN_SAMPLES_DIR="${PT_ODIN_SAMPLES_DIR}")
                     if(ODIN_SAMPLES_REQUIRED)
                         target_compile_definitions(${_test_target} PRIVATE ODIN_SAMPLES_REQUIRED=1)
+                    endif()
+                endif()
+                # MTK 真样本（reference/mtk-samples/，gitignored）：只把**路径**编进用例。
+                # MTK_SAMPLES_REQUIRED=ON 时缺失即 FAIL（QSKIP 不改退出码，ctest 绿灯会骗人）。
+                set(MTK_SAMPLES_DIR_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/reference/mtk-samples")
+                if(_test_stem STREQUAL "test_mtk_da_file" OR _test_stem STREQUAL "test_mtk_preloader_emi"
+                   OR _test_stem STREQUAL "test_mtk_flash_plan")
+                    target_compile_definitions(${_test_target} PRIVATE
+                        MTK_SAMPLES_DIR="${MTK_SAMPLES_DIR_DEFAULT}")
+                    if(MTK_SAMPLES_REQUIRED)
+                        target_compile_definitions(${_test_target} PRIVATE MTK_SAMPLES_REQUIRED=1)
                     endif()
                 endif()
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
