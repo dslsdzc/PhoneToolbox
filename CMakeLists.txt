@@ -349,13 +349,17 @@ if(ENABLE_IMAGE_TESTS)
                     # 不补 mtk_da_file.cpp 会在链接期炸（undef）。
                     # D1-T9：bromBringUpDa 走 extractEmiLegacy + PreloaderResult → 补 EMI 提取与
                     # preloader 解析两个模块（后者只依赖 Qt Core、下载器是注入点 —— 用例不联网）。
+                    # D1-T9 审查 I1：bromFlashOnSession 落进 mtk_payload.cpp，它还要 芯片表（代际
+                    # 判定）与计划层（设备分区表 → 计划）—— 两个都是纯 Qt Core 模块。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp

@@ -1,4 +1,7 @@
 #include <QtTest>
+#include <QFile>
+#include <QPair>
+#include <QTemporaryDir>
 #include <memory>
 #include <utility>
 
@@ -106,6 +109,108 @@ QList<QByteArray> da1UploadReads(const mtkbrom::DaSelection &sel)   // SEND_DA/J
             QByteArray("\xD5", 1), be32(sel.da1.startAddr), QByteArray("\x00\x00", 2)};
 }
 
+// ---- D1-T9 审查 I1：bromFlashOnSession（整会话 + 四道安全门）的夹具 ----
+
+// 用例用的芯片：0x6752 = 表内 LEGACY / 非 IoT / **dacode == hw_code** / 无 stage2 hwcode 追加 /
+// 默认 bmt（不在 mtk_payload.cpp bmtSettings 的特例表里）—— 夹具因此最短且无特例分支。
+constexpr quint16 kFlashHwCode = 0x6752;
+
+// 会话前置读序列：get_target_config(2) + get_hw_code(2) + get_hw_sw_ver(2) + bromver(1) + blver(1)
+// answerHwSwVer=false → 0xFC 那一笔插**空包**：MockUsbChannel::read 对空包返回 false 且**不消耗**
+// 后续队列（不是"读到超时"，是"设备没答"）—— 正好用来测 0xFC 降级而不打乱后续读序列。
+QList<QByteArray> prologueReads(quint16 hwCode, bool answerHwSwVer = true)
+{
+    return {QByteArray("\xD8", 1), QByteArray(6, '\0'),
+            QByteArray("\xFD", 1), be32(quint32(hwCode) << 16),      // hw_code 高 16 位 / hwver = 0
+            QByteArray("\xFC", 1), (answerHwSwVer ? QByteArray(8, '\0') : QByteArray()),
+            QByteArray("\x05", 1), QByteArray("\x01", 1)};
+}
+
+// 0x60 型 PMT 条目（read_pmt 判据 partdata[0x48] == 0xFF；name@0、size@0x40、offset@0x50，小端）
+QByteArray pmtEntry60(const QByteArray &name, quint64 size, quint64 offset)
+{
+    QByteArray pd(0x60, '\0');
+    pd[0x48] = char(0xFF);
+    pd.replace(0, name.size(), name);
+    for (int i = 0; i < 8; ++i) {
+        pd[0x40 + i] = char((size >> (8 * i)) & 0xFF);
+        pd[0x50 + i] = char((offset >> (8 * i)) & 0xFF);
+    }
+    return pd;
+}
+
+// 整会话读序列（走到底的成功路径：无 preloader、errorcode == 0、单分区写 + FINISH）。
+// ⚠️ PMT **读两次**：计划层一次 + flashPartition 内部再读一次（T6 既有语义：每个分区重读设备表）。
+// answerFinish=false → 省掉 FINISH 的两个 ACK（测"收尾失败只告警、仍返回 true"）。
+QList<QByteArray> fullSessionReads(const mtkbrom::DaSelection &sel, const QByteArray &pmt,
+                                   bool answerHwSwVer = true, bool answerFinish = true)
+{
+    QList<QByteArray> r = prologueReads(sel.entry.hwCode, answerHwSwVer);
+    r << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
+      << stage2Reads(0) << bootToReads() << flashInfoReads();
+    r << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（计划）
+      << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（flashPartition 内）
+      << QByteArray("\x5A", 1) << QByteArray(1, char(0x69));              // 写命令 ACK + 块 CONT
+    if (answerFinish)
+        r << QByteArray("\x5A", 1) << QByteArray("\x5A", 1);
+    return r;
+}
+
+// 与 makeSelection 同规格的 **DA 原始字节**（bromFlashOnSession 自己解析 req.daFile）
+QByteArray daBytesForHw(quint16 hwCode, bool v6 = false)
+{
+    mtktest::EntrySpec e;
+    e.hwCode = hwCode;
+    mtktest::RegionSpec r0; r0.startAddr = 0x200000;   r0.len = 16;
+    mtktest::RegionSpec r1; r1.startAddr = 0x2007000;  r1.len = 32;
+    mtktest::RegionSpec r2; r2.startAddr = 0x80000000; r2.len = 48; r2.sigLen = 0x10;
+    e.regions << r0 << r1 << r2;
+    return mtktest::buildDa({e}, v6);
+}
+
+// 日志/进度收集（bromFlashOnSession 的两个注入点）
+struct SessionCapture {
+    QStringList lines;
+    QList<bool> errors;
+    QList<QPair<quint64, quint64>> progress;
+
+    mtkbrom::BromLogFn logFn()
+    {
+        return [this](const QString &m, bool isError) { lines << m; errors << isError; };
+    }
+    mtkbrom::BromProgressFn progressFn()
+    {
+        return [this](quint64 written, quint64 total) { progress << qMakePair(written, total); };
+    }
+    QString joined() const { return lines.join(QLatin1Char('\n')); }
+    bool hasLineContaining(const QString &needle) const
+    {
+        for (const QString &l : std::as_const(lines))
+            if (l.contains(needle))
+                return true;
+        return false;
+    }
+    bool hasErrorLineContaining(const QString &needle) const
+    {
+        for (int i = 0; i < lines.size(); ++i)
+            if (errors.at(i) && lines.at(i).contains(needle))
+                return true;
+        return false;
+    }
+};
+
+// 建一个临时镜像文件（QTemporaryDir 生命周期由调用方持有）
+QString writeTempImage(QTemporaryDir &dir, const QString &fileName, const QByteArray &bytes)
+{
+    const QString path = dir.filePath(fileName);
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return QString();
+    f.write(bytes);
+    f.close();
+    return path;
+}
+
 } // namespace
 
 class TestMtkPayload : public QObject {
@@ -148,6 +253,15 @@ private slots:
     void bringUpSkipsEmiWhenNotNeeded();
     void bringUpAbortsWhenDramConfigNeededWithoutPreloader();
     void bringUpAbortsBeforeDa2WhenSyncIsWrong();
+    // ---- D1-T9 审查 I1: 刷写主体（bromFlashOnSession）的四道安全门 + 收尾 ----
+    void bromFlashOnSessionWritesPlanAndFinishes();
+    void bromFlashOnSessionRejectsEmptyPlanBeforeAnyWrite();
+    void bromFlashOnSessionRejectsUnknownHwCode();
+    void bromFlashOnSessionRejectsNonLegacyDamode();
+    void bromFlashOnSessionRejectsIotChip();
+    void bromFlashOnSessionRejectsV6DaFile();
+    void bromFlashOnSessionContinuesWhenHwSwVerUnavailable();
+    void bromFlashOnSessionWarnsButSucceedsWhenFinishFails();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -920,10 +1034,12 @@ void TestMtkPayload::bringUpOrdersEmiAfterStorageInfoAndBeforeDa2()
              qPrintable(err));
 
     // 关键帧的**相对顺序**（帧号比"存在性"更能抓顺序错位）
-    int idxDa1Payload = -1, idxEmi = -1, idxBootHeader = -1, idxStorageAck = -1;
+    int idxDa1Payload = -1, idxEmi = -1, idxBootHeader = -1, idxStorageAck = -1, idxStage2 = -1;
     for (int i = 0; i < m->writeFrames.size(); ++i) {
         if (m->writeFrames.at(i) == sel.da1Bytes) idxDa1Payload = i;
         if (m->writeFrames.at(i) == QByteArray("\xE8", 1)) idxEmi = i;
+        // m_nand_acccon（stage2 的第 5 个字段）= 全流唯一的 0x7007FFFF
+        if (m->writeFrames.at(i) == QByteArray("\x70\x07\xFF\xFF", 4)) idxStage2 = i;
         if (idxDa1Payload >= 0 && idxBootHeader < 0 && m->writeFrames.at(i) == be32(sel.da2.startAddr))
             idxBootHeader = i;                       // 0x80000000 只可能是 boot_to 的地址字段
         if (idxStorageAck < 0 && idxDa1Payload >= 0 && i > idxDa1Payload
@@ -935,7 +1051,9 @@ void TestMtkPayload::bringUpOrdersEmiAfterStorageInfoAndBeforeDa2()
     QVERIFY2(idxDa1Payload >= 0, "必须发过 DA1 载荷");
     QVERIFY2(idxStorageAck >= 0, "必须发过存储信息交换的 ACK");
     QVERIFY2(idxEmi >= 0, "errorcode == 0xBC3 时必须发过 ENABLE_DRAM(0xE8)");
-    QVERIFY2(idxStorageAck > idxDa1Payload, "存储信息交换必须在 DA1 之后");
+    // 存储交换的边界由**后一段的帧**来钉（T9 审查 M2：原写法 `idxStorageAck > idxDa1Payload`
+    // 因扫描条件自带 `i > idxDa1Payload` 而恒真）——stage2 的 m_nand_acccon 必须在它之后。
+    QVERIFY2(idxStage2 > idxStorageAck, "stage2 配置（m_nand_acccon）必须在存储信息交换之后");
     QVERIFY2(idxEmi > idxStorageAck, "EMI(0xE8) 必须在存储信息交换之后");
     QVERIFY2(idxBootHeader > idxEmi, "boot_to 必须在 EMI 之后（顺序错 = 真机必挂）");
     QVERIFY2(log.join('\n').contains(QStringLiteral("emmc")), qPrintable(log.join('\n')));
@@ -1005,6 +1123,207 @@ void TestMtkPayload::bringUpAbortsBeforeDa2WhenSyncIsWrong()
     QVERIFY2(err.contains(QStringLiteral("0xC0")), qPrintable(err));
     for (const QByteArray &f : std::as_const(m->writeFrames))
         QVERIFY2(f != be32(sel.da2.startAddr), "DA1 未就绪时不得进入 boot_to(DA2)");
+}
+
+// ---- D1-T9 审查 I1: 刷写主体（bromFlashOnSession）----
+//
+// 这 8 条把 runBromFlash 里"写之前必须先验证"的部分搬进了可离线测的层：
+//   ① 空计划早拒 ② 代际拒绝 ×4（表外/非 LEGACY/IoT/v6 DA）③ 0xFC 降级继续 ④ FINISH 只告警
+// 夹具见本文件匿名命名空间的 prologueReads / fullSessionReads / pmtEntry60 / daBytesForHw。
+
+// 基线：整条流程走到底**成功**（无 preloader / errorcode == 0 / 单分区写 + FINISH 收尾）
+void TestMtkPayload::bromFlashOnSessionWritesPlanAndFinishes()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << fullSessionReads(sel, pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000));
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.daLabel = QStringLiteral("合成 DA");
+    req.imagePaths << imgPath;
+
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err),
+             qPrintable(err));
+    QVERIFY2(cap.joined().contains(QStringLiteral("FINISH（0xD9）收尾完成")), qPrintable(cap.joined()));
+    QCOMPARE(cap.progress.size(), 1);                     // 进度分母/分子 = 计划总量/已写
+    QCOMPARE(cap.progress.at(0).first, quint64(2));
+    QCOMPARE(cap.progress.at(0).second, quint64(2));
+    QVERIFY2(m->writes.contains(image), "镜像字节必须真的写出去");
+    QVERIFY2(m->writes.contains(QByteArray(1, char(0x62))), "必须发过 EMMC 写命令(0x62)");
+    QVERIFY2(m->writes.contains(QByteArray(1, char(0xD9))), "必须发过 FINISH(0xD9)");
+}
+
+// **空计划早拒**：设备分区表与所选镜像**全不匹配** → 写任何字节之前返回 false。
+// 这条是"不许在未知分区表上写"的守卫 —— 删掉实现里的早拒时它必须红（见报告 I1 复现证据）。
+void TestMtkPayload::bromFlashOnSessionRejectsEmptyPlanBeforeAnyWrite()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    // 镜像叫 boot.img，设备表里只有 system → 匹配不上 → 零条目计划
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << fullSessionReads(sel, pmtEntry60(QByteArray("system", 6), 0x20000, 0x2000));
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.daLabel = QStringLiteral("合成 DA");
+    req.imagePaths << imgPath;
+
+    SessionCapture cap;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    QVERIFY2(err.contains(QStringLiteral("没有任何可写入")), qPrintable(err));
+    QVERIFY2(cap.progress.isEmpty(), "失败时不得报进度");
+    // **写之前**：不得出现 EMMC 写命令 / FINISH，镜像字节一个都不许发
+    QVERIFY2(!m->writes.contains(QByteArray(1, char(0x62))), "计划为空时不得发写命令");
+    QVERIFY2(!m->writes.contains(QByteArray(1, char(0xD9))), "计划为空时不得发 FINISH");
+    QVERIFY2(!m->writes.contains(image), "计划为空时镜像字节一个都不许发");
+}
+
+// 代际拒绝 ①：芯片表未收录（0x0001 不在表内）→ 明确报错（**不得**默认按 LEGACY 硬刷）
+void TestMtkPayload::bromFlashOnSessionRejectsUnknownHwCode()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << prologueReads(0x0001);
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    SessionCapture cap;
+    QString err;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    QVERIFY2(err.contains(QStringLiteral("芯片表未收录")), qPrintable(err));
+}
+
+// 代际拒绝 ②：表内但**不是 LEGACY 代**（0x0766 = XFLASH）→ 明确报错（D2/D3 另做）
+void TestMtkPayload::bromFlashOnSessionRejectsNonLegacyDamode()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << prologueReads(0x0766);
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    SessionCapture cap;
+    QString err;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    QVERIFY2(err.contains(QStringLiteral("XFLASH")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("LEGACY")), qPrintable(err));
+}
+
+// 代际拒绝 ③：**IoT 芯片**（0x6226 = LEGACY + iot）→ 明确报错（上游 IoT 走另一套 region 映射）
+void TestMtkPayload::bromFlashOnSessionRejectsIotChip()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << prologueReads(0x6226);
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    SessionCapture cap;
+    QString err;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    QVERIFY2(err.contains(QStringLiteral("IoT")), qPrintable(err));
+}
+
+// 代际拒绝 ④：**DA 文件是 v6**（XML 代；即使芯片是 LEGACY 也不能按 LEGACY 流程刷）
+void TestMtkPayload::bromFlashOnSessionRejectsV6DaFile()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << prologueReads(kFlashHwCode);          // 芯片这四道门都过，才轮到 DA 文件
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode, /*v6=*/true);
+    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    SessionCapture cap;
+    QString err;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    QVERIFY2(err.contains(QStringLiteral("v6")), qPrintable(err));
+}
+
+// **0xFC 降级**：设备不答 0xFC → 告警 + 按 0/0 继续（上游口径：不清零继续 → 版本过滤维旁路），
+// 整条流程仍能走到底成功。
+void TestMtkPayload::bromFlashOnSessionContinuesWhenHwSwVerUnavailable()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), QByteArray("\xAB\xCD", 2));
+    QVERIFY(!imgPath.isEmpty());
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << fullSessionReads(sel, pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000),
+                                 /*answerHwSwVer=*/false);
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.imagePaths << imgPath;
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err),
+             qPrintable(err));                        // **不中止**
+    QVERIFY2(cap.hasErrorLineContaining(QStringLiteral("0xFC")), "0xFC 失败必须落**告警**（isError=true）");
+    QVERIFY2(cap.joined().contains(QStringLiteral("旁路")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("DA 条目")), "降级后必须继续做条目选择（0/0 旁路版本维）");
+    QVERIFY2(cap.joined().contains(QStringLiteral("FINISH（0xD9）收尾完成")), qPrintable(cap.joined()));
+}
+
+// **FINISH 只告警**：写成功后 FINISH 无 ACK → 仍返回 true（数据已落盘），但必须有 error 级日志
+void TestMtkPayload::bromFlashOnSessionWarnsButSucceedsWhenFinishFails()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << fullSessionReads(sel, pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000),
+                                 /*answerHwSwVer=*/true, /*answerFinish=*/false);
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.imagePaths << imgPath;
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err),
+             "FINISH 失败不得把成功报成失败（数据已落盘）");
+    QVERIFY2(cap.hasErrorLineContaining(QStringLiteral("FINISH 收尾失败")), qPrintable(cap.joined()));
+    QVERIFY2(m->writes.contains(image), "数据确实写了（所以 FINISH 失败只能是告警）");
 }
 
 QTEST_APPLESS_MAIN(TestMtkPayload)

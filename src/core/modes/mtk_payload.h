@@ -26,6 +26,7 @@
 //     sendStage2Config 对非 eMMC 明确拒绝（不瞎写上游 nand 分支的值）
 //   • nandcount 两级都为 0 时上游走 usbread(-4)（读到没有为止），本实现有界化 —— 真机未验证
 
+#include <functional>
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
@@ -38,6 +39,25 @@
 #include "core/modes/mtk_preloader_fetch.h"
 
 namespace mtkbrom {
+
+// ---- 刷写请求与回调（D1-T9；**原先在 mtk_handler.h，T9 审查 I1 后搬到这里**）----
+// 理由：它们是"设备会话上的操作"（bromFlashOnSession）的输入/输出，与它同层；
+// 放在本头文件才能让离线用例（test_mtk_payload）拿到完整签名。mtk_handler.h 仍 include 本文件。
+
+// 回调（注入点：UI 落 OutputPanel，测试收集字符串）
+using BromLogFn = std::function<void(const QString &message, bool isError)>;
+using BromProgressFn = std::function<void(quint64 written, quint64 total)>;
+
+// BROM 直刷请求：调用方只负责"读 DA 文件 + 给镜像路径"，
+// 解析/选条目/引导链/计划/写入全在 bromFlashOnSession 内完成。
+struct BromFlashRequest {
+    QByteArray daFile;                    // DA 文件字节（调用方读入）
+    QString daLabel;                      // 日志用（通常是文件路径）
+    QStringList imagePaths;               // 待写镜像（计划层按文件名匹配**设备分区表**）
+    PreloaderOptions preloader;           // 显式路径 / 固件目录 / 网络开关(默认关) / 缓存目录
+    QList<PreloaderSource> preloaderSources;  // 网络来源清单（loadConfiguredSources）
+    PreloaderDownloader downloader;       // 生产用 makeQtPreloaderDownloader()
+};
 
 // ---- DA1 ----
 
@@ -102,6 +122,17 @@ bool bromBringUpDa(BromSession &s, const DaSelection &sel, quint16 hwCode,
                    QStringList *log, QString *error = nullptr);
 
 // ---- 刷写集成（F1-3）----
+
+// 刷写主体（D1-T9 审查 I1 抽出）：在**已建立**的会话上跑完整条刷写流程，**不含**
+// 枚举/打开 USB/握手 —— 故可用 MockUsbChannel 离线测（尤其"写之前必须先验证"的四道门）。
+//   代际判定（表外/非 LEGACY/IoT）→ DA 解析与条目选择 → v6 拒绝 → 版本口径（0xFC）
+//   → resolvePreloader → bromBringUpDa → listPartitions → buildMtkPlan → 逐分区写
+//   → FINISH(0xD9) 收尾（失败**只告警**）
+// 请求级前置（DA 为空 / 无镜像）在本函数入口检查（runBromFlash 不再重复）。
+// log/progress 可空；error 可空。成功返回 true。
+bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
+                        const BromLogFn &log, const BromProgressFn &progress,
+                        QString *error = nullptr);
 
 // SBC 修补：preloader 字节模式替换（GPLv3 子模块来源标注，5 个核心模式）。
 // 返回是否发生任何替换；不匹配时原样返回。
