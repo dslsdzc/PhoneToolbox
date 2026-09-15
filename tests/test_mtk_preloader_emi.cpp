@@ -4,7 +4,8 @@
 // + 真实 preloader（reference/mtk-samples/preloader.bin）。
 // 真样本实测（直读文件复核）：MMM 魔术 @0、MTK_BLOADER_INFO_v @254392、MTK_BIN @254492、
 // 版本字节 "35"、EMI 块 mlen=0x3EBB8 siglen=0x66C、dramsize=912；
-// LEGACY 切片 = 文件末尾 800B（内层块 [254392, 255304) 的 912B 里 MTK_BIN+0xC 的相对偏移为 112）。
+// LEGACY 切片 = **dramsize 窗口** [254392, 255304)（912B；窗口末尾 255304 **不是** EOF）内
+// MTK_BIN+0xC 之后的 800B（相对偏移 112 = 912 − 800）。**不是"到文件尾"** —— 到 EOF 会是 2704B。
 #include <QtTest>
 #include <QFile>
 
@@ -87,7 +88,9 @@ void TestMtkPreloaderEmi::extractsLegacySliceFromOffsetZeroMarker()
     mtkbrom::EmiData emi;
     QString err;
     QVERIFY2(mtkbrom::extractEmiLegacy(pre, emi, &err), qPrintable(err));
-    QCOMPARE(emi.branch, QStringLiteral("偏移0"));
+    // 分支名描述的是"**未命中 MMM**"（代码只判魔术在不在），不是"标记在偏移 0" ——
+    // 标记不在偏移 0 时这个名字同样成立，故文案不得写"偏移0"。
+    QCOMPARE(emi.branch, QStringLiteral("未命中MMM"));
     QCOMPARE(emi.ver, quint32(38));
     // **LEGACY 切片**：从 MTK_BIN+0xC 起（0x40 + 0xC = 0x4C），长度 64 —— 不是整块
     QCOMPARE(emi.bytes.size(), 64);
@@ -203,8 +206,8 @@ void TestMtkPreloaderEmi::failsWithoutMarkerOrMtkBin()
 
 void TestMtkPreloaderEmi::parsesVersionFromTwoAsciiBytes()
 {
-    // 接受路径：版本 = 标记后**2 个 ASCII 字节**（上游 DC:138/143 的 int(...rstrip(b"\x00"))），
-    // 去 NUL 后**全是数字**才算读得懂。末两例是"合法的 0"：上游 int("0")/int("00") 都是 0，
+    // 接受路径：版本 = 标记后**2 个 ASCII 字节**（上游 DC:138/143 的 int(...rstrip(b"\x00"))）——
+    // **只去尾部 NUL**，去尾后全是数字才算读得懂。末两例是"合法的 0"：int("0")/int("00") 都是 0，
     // 而 emiver==0 在上游是**合法档位**（tier-0）—— 不得把合法 0 一起拒掉。
     struct Case {
         const char *verBytes;
@@ -232,16 +235,19 @@ void TestMtkPreloaderEmi::parsesVersionFromTwoAsciiBytes()
 void TestMtkPreloaderEmi::rejectsNonNumericVersion()
 {
     // 非数字版本 → **整体提取失败**（不是"ver=0 的成功"）：上游 int() 抛异常时是
-    // `except Exception: self.emiver = 0; self.emi = None`（DC:157-160）→ 后面
+    // `except Exception: self.emiver = 0; self.emi = None`（**DC:162-164**；注意 157-160 是
+    // `self.error(...)/exit(1)` 的**硬中止**分支，别引错）→ 后面
     // `if self.daconfig.emi is not None:` 整段跳过、**根本不发 DRAM 配置**。
     // 而 ver==0 在上游是**合法档位**（tier-0）—— 把"读不懂"混进"合法的 0"会让伪造版本
     // 驱动协议分档，属本仓"静默错误值"家族。
     const char *bad[] = {
-        "XX",     // 双字母
-        "\0X",    // 前导 NUL + 字母（去 NUL 后为 "X"）
-        "3X",     // 数字 + 字母（不得"前缀能转就收"）
-        "\0\0",   // 全 NUL（去 NUL 后为空）
-        " X",     // 空格 + 字母（toInt() 会 trim，故判据必须是"**全**数字"）
+        "XX",       // 双字母
+        "\0X",      // 前导 NUL + 字母（只去**尾部** NUL，故这是 2 字节非法）
+        "3X",       // 数字 + 字母（不得"前缀能转就收"）
+        "\0\0",     // 全 NUL（去尾部 NUL 后为空）
+        " X",       // 空格 + 字母（toInt() 会 trim，故判据必须是"**全**数字"）
+        "\0" "5",   // **内嵌** NUL + 数字：上游 int(rstrip 后的 b"\x005") 抛异常 → emi=None
+                    // （相邻字面量拼接，**不能**写 "\x005" —— 那是十六进制转义 0x05）
     };
     for (const char *verBytes : bad) {
         QByteArray pre = buildPreloader(16);

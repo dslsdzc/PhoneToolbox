@@ -35,7 +35,8 @@ struct EmiData {
     quint32 ver = 0;     // 版本号 = "MTK_BLOADER_INFO_v" 之后 2 个 ASCII 字节（如 "38" → 38；
                          // 真样本是 "35" → 35）。**读不懂即整体失败**，绝不返回"ver=0 的成功"：
                          // 0 在上游是**合法档位**（tier-0），不得与"非数字"混用（见 .cpp）。
-    QString branch;      // 诊断：命中的路径（"MMM" / "偏移0"）
+    QString branch;      // 诊断：命中的路径（"MMM" = 命中 MMM 魔术分支；"未命中MMM" = 未命中该魔术）。
+                         // 只表达"魔术在不在"，**不代表**标记位于偏移 0
 };
 
 // 纯函数：从 preloader 字节提取 LEGACY 用的 EMI（不读盘、不碰设备、无副作用）。

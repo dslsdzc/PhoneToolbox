@@ -14,10 +14,12 @@
 //   3. dramsize==0 且裁剪后 ≤0x800：上游 data[-4:] 抛异常 → 本实现报错（同结果，另有诊断）。
 //   4. MTK_BIN+0xC 越过末尾：上游返回**空** EMI 但算成功 → 本实现报错，
 //      不把"空 EMI"当提取成功交给发送端。
-//   另（判据收紧而非放宽）：版本字节要求"去 NUL 后**全**数字"；上游 int() 会 trim 两侧空白，
-//   故 " 5" 上游接受、本实现拒绝 —— 真实 preloader 的该字段恒为 "35"/"38" 这类 2 位数字。
-// **版本非数字不属偏差**：上游 int() 抛异常 → extract_emi 捕获后 emi=None（DC:157-160）→
-// 上层跳过、不发 DRAM 配置；本实现显式 false + error，净效果一致（且不得混进合法的 ver==0）。
+//   另（判据差异）：版本字节**只去尾部 NUL**（上游 `rstrip(b"\x00")` 语义；内嵌 NUL 上游
+//   `int(b"\x005")` 会抛异常 → 不得当数字收），去尾后须为 1-2 位 ASCII 数字。上游 int() 还会
+//   trim 两侧空白（" 5" 上游接受、本实现拒绝）—— 真实 preloader 该字段恒为 "35"/"38" 这类 2 位。
+// **版本非数字不属偏差**：上游 int() 抛异常 → extract_emi 捕获后 emi=None（**DC:162-164**；
+// 注意 157-160 是 `self.error(...)/exit(1)` 的**硬中止**分支，引错会与"失败不中止刷写"相反）→
+// 上层跳过、不发 DRAM 配置；本实现显式 false + error，净效果一致（不得混进合法的 ver==0）。
 #include "mtk_preloader_emi.h"
 
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
@@ -101,7 +103,8 @@ bool extractEmiLegacy(const QByteArray &preloader, EmiData &out, QString *error)
         data = data.mid(qsizetype(quint64(data.size()) - take), qsizetype(dramsize));
         out.branch = QStringLiteral("MMM");
     } else {
-        out.branch = QStringLiteral("偏移0");
+        // 分支名只描述"**未命中 MMM 魔术**"，不是"标记在偏移 0"（标记不在偏移 0 时同样成立）
+        out.branch = QStringLiteral("未命中MMM");
     }
 
     // DC:132-135：搜 MTK_BLOADER_INFO_v，找不到即失败
@@ -112,24 +115,27 @@ bool extractEmiLegacy(const QByteArray &preloader, EmiData &out, QString *error)
     }
     // DC:138/143：版本 = 标记后 **2 个 ASCII 字节**（去尾部 NUL），如 "38" → 38；
     // 真样本 preloader.bin 的字节是 "35" → 35（**整体**两位，不是末位 5）。
-    // 去 NUL 后必须**全是数字**，否则**整体提取失败**：上游 int() 抛异常时是
-    // `except Exception: self.emiver = 0; self.emi = None`（DC:157-160）→ 上层
-    // `if self.daconfig.emi is not None:` 整段跳过、**根本不发 DRAM 配置**；而 ver==0 在上游是
-    // **合法档位**（tier-0）—— 把"读不懂"混进"合法的 0"会让伪造版本驱动协议分档。
+    // **只去尾部 NUL**（上游 `rstrip(b"\x00")` 语义：内嵌 NUL 留着 —— 上游 `int(b"\x005")`
+    // 抛异常，不得当 5 收），去尾后须为 1-2 位 ASCII 数字，否则**整体提取失败**：
+    // 上游 int() 抛异常时是 `except Exception: self.emiver = 0; self.emi = None`（**DC:162-164**）
+    // → 上层 `if self.daconfig.emi is not None:` 整段跳过、**根本不发 DRAM 配置**；
+    // 而 ver==0 在上游是**合法档位**（tier-0）—— 把"读不懂"混进"合法的 0"会让伪造版本驱动协议分档。
     // "0" / "00" 仍接受（上游 int("00") == 0）。
     const QByteArray verBytes = data.mid(info + kBloaderInfoLen, 2);
-    const QString digits = QString::fromLatin1(verBytes.leftJustified(2, '\0')).remove(QChar('\0'));
-    bool verOk = !digits.isEmpty();                       // 空（全 NUL / 字段缺失）不算数字
-    for (const QChar c : std::as_const(digits))
-        if (!c.isDigit())
-            verOk = false;
+    QByteArray digits = verBytes;
+    while (digits.endsWith('\0'))
+        digits.chop(1);                                   // rstrip 语义：只去尾部（内嵌 NUL 视作非数字）
+    bool verOk = digits.size() == 1 || digits.size() == 2;   // 去尾后须 1-2 位
+    for (const char c : std::as_const(digits))
+        if (c < '0' || c > '9')
+            verOk = false;                                // 按字节判 ASCII 数字（不经 QString/Unicode 语义）
     if (!verOk) {
         setErr(error, QStringLiteral("EMI 版本字节不是数字（读到 \"%1\"）—— 与上游一致按**提取失败**"
                                      "处理（上游此时 emi = None，不发 DRAM 配置）")
                           .arg(QString::fromLatin1(verBytes)));
         return false;
     }
-    out.ver = quint32(std::as_const(digits).toUInt());
+    out.ver = quint32(digits.toUInt());
 
     // DC:137-139 的 `idx == 0 且 damode == XFLASH` 整块分支属 XFlash —— D1 不实现，
     // 本函数恒走 LEGACY：EMI = data[find("MTK_BIN")+0xC:]
