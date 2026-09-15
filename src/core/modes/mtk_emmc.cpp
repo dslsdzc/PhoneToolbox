@@ -131,7 +131,8 @@ bool BromSession::writeMemory(quint32 addr, const QByteArray &data, QString *err
 bool DaStorage::ensureDa(QString *error) const
 {
     if (!m_daActive) {
-        if (error) *error = QStringLiteral("DA 未激活：需先成功上传并跳转 DA（sendPayload），EMMC 命令属于 DA 阶段");
+        if (error) *error = QStringLiteral("DA 未激活：需先完成 DA1/DA2 两阶段上传与跳转（sendDa1/bootToDa2Legacy），"
+                                           "EMMC 命令属于 DA 阶段");
         return false;
     }
     return true;

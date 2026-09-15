@@ -94,7 +94,7 @@ bool waitDa1Ready(BromSession &s, int timeoutMs, QString *error)
 
 // 存储信息交换（dalegacy_lib.py:607-633 逐句）：
 //   读 4B NAND_INFO(期望 0xBC4，只记日志) → 2B id 数 → id数×2B → 4B EMMC_INFO → 4×4B → 写 1B ACK → 读 3×1B
-// 顺带按上游规则（:621-628）定存储类型：nandids[0] != 0 → nand；否则 emmcids[0] != 0 → emmc；否则 nor。
+// 顺带按上游规则（:623-628）定存储类型：nandids[0] != 0 → nand；否则 emmcids[0] != 0 → emmc；否则 nor。
 // 不做这一步，DA1 不会进入 stage2 配置（后面所有步骤都会错位）。
 bool exchangeDa1StorageInfo(BromSession &s, QString *flashtype, QStringList *log, QString *error)
 {
@@ -134,25 +134,41 @@ bool exchangeDa1StorageInfo(BromSession &s, QString *flashtype, QStringList *log
     return true;
 }
 
-// bmtflag / bmtpartsize（上游 mtk_config.py:231-283 bmtsettings(hwcode)）。
+// bmtflag / bmtpartsize（上游 mtk_config.py:231-283 bmtsettings(hwcode) 的 **eMMC** 分支）。
 // **D1 只做 eMMC**：上游那些 nand 分支不实现（D1 的存储路径只有 eMMC —— PMT/分区表），
-// flashtype != "emmc" 由调用方拒绝。故下表只列 eMMC 分支，且 blockcount 不上线（不发给设备）：
-//   默认        → flag 1 / partSize 0
-//   [0x6592,0x8127,0x6571]            emmc → partSize 0x1500000（:235-239）
-//   [0x6575]                          emmc → partSize 0x1500000（:253-260）
-//   [0x6582]                          emmc → flag 2 + partSize 0x1500000（:261-265）
-// 其余芯片（0x6570/0x8167/0x6580/0x6735/0x6753/0x6755/0x6752/0x6595/0x6795/0x6767/0x6797/0x8163）
-// 在上游就是"默认值"分支（:240-243），与默认逐字相同 → 不列。
+// flashtype != "emmc" 由调用方拒绝。blockcount 上游只用于内部记录、**不发给设备** → 不上线。
+//   默认                     → flag 1 / partSize 0
+//   [0x6592,0x8127,0x6571]   → partSize 0x1500000（:235-239；0x8127 也在 :240 的列表里，
+//                              但 elif 链先命中 :235 → **先命中者胜**）
+//   [0x6575]                 → partSize 0x1500000（:253-260）
+//   [0x6582]                 → flag 2 + partSize 0x1500000（:261-265，**两个字段都要**）
+//   [0x6572]                 → flag 0 + partSize 0xA8（:266-273）
+// 其余（含 :240-243 那批不看 flashtype 的芯片）→ 默认值。
 namespace {
 struct BmtSettings { quint8 flag = 1; quint32 partSize = 0; };
 BmtSettings bmtSettings(quint16 hwCode)
 {
     BmtSettings s;                                   // 上游默认：bmtflag = 1、bmtpartsize = 0
-    if (hwCode == 0x6592 || hwCode == 0x8127 || hwCode == 0x6571
-        || hwCode == 0x6575 || hwCode == 0x6582)
-        s.partSize = 0x1500000;                      // emmc 分支
-    if (hwCode == 0x6582)
-        s.flag = 2;                                  // emmc 分支（:263）
+    switch (hwCode) {
+    case 0x6592:
+    case 0x8127:
+    case 0x6571:
+    case 0x6575:
+        s.partSize = 0x1500000;
+        break;
+    case 0x6582:
+        s.flag = 2;
+        s.partSize = 0x1500000;
+        break;
+    case 0x6572:
+        // ⚠️ 上游这里疑似把 blockcount(0xA8) 写进了 partsize（它的 nand 分支才是 0x1500000）。
+        // **忠实复刻**：真机收到什么我们就发什么，不"替上游修正"（修正 = 与上游发出不同的字节）。
+        s.flag = 0;
+        s.partSize = 0xA8;
+        break;
+    default:
+        break;
+    }
     return s;
 }
 } // namespace
@@ -283,8 +299,10 @@ bool beginEmiDramInfo(BromSession &s, QByteArray *dramInfo, QStringList *log, QS
 // DA2 存活判据（dalegacy_lib.py:526-552 逐句；调用点 :640）。
 // 上游把这 200+ 字节全读走再解析 —— **必须读走**，否则残留字节会污染随后的 PMT 读取（错位）。
 // 本实现只解析 PassInfo（存活判据），NOR/NAND/EMMC 详情只记字节数（存储详情解析属 D2/D3）。
-// ⚠️ nandcount 两级都为 0 时上游走 `usbread(-4)`（负长度 = 读到没有为止）—— 本实现用**有界读**
-//    （上限 0x1000 字节、每次 100 ms，读到空/失败即停）。该分支**真机未验证**（见计划诚实边界）。
+// ⚠️ nandcount 两级都为 0 时上游走 `usbread(-4)` —— **读 0 字节**（`usblib.py:462-483`：
+//    `resplen <= 0` 只 warning，`bytestoread = resplen` 让 `while bytestoread > 0` 直接不成立）。
+//    这里必须**同上游一样什么都不读**（审查 S1：nandcount == 0 是 eMMC 机器的常态，
+//    多读一包就会把 info2/EMMC/SDC/flashconfig/PassInfo 一起吃掉 → 后续全错位）。
 bool readFlashInfoDa2(BromSession &s, quint16 hwCode, QStringList *log, QString *error)
 {
     IBromUsb *u = s.usb();
@@ -300,21 +318,16 @@ bool readFlashInfoDa2(BromSession &s, quint16 hwCode, QStringList *log, QString 
     if (nandcount == 0) {
         // Legacy_NandInfo32（:170-179）：dword(4)+bytes(1)+short(2)+dword(4)+short(2) → count 在偏移 11
         nandcount = be16At(nand, 11);
-        if (nandcount == 0) {
-            int total = 0;                                       // 上游 usbread(-4)：读到没有为止（有界化）
-            while (total < 0x1000) {
-                QByteArray chunk;
-                if (!u->read(chunk, 0x400, 100, nullptr) || chunk.isEmpty())
-                    break;
-                total += chunk.size();
+        if (nandcount > 2) {
+            // 上游 :535 `nc = data[-4:] + self.usbread(nandcount * 2 - 4)` —— 复用 NAND info 尾部 4B
+            if (!readExactBytes(u, nandcount * 2 - 4,
+                                QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
+                return false;
             }
-            if (log)
-                *log << QStringLiteral("read_flash_info：NAND 计数为 0（上游此处读至超时），有界读走 %1 字节")
-                            .arg(total);
-        } else if (nandcount > 2
-                   && !readExactBytes(u, nandcount * 2 - 4,
-                                      QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
-            return false;                                        // 上游 :535 复用 NAND info 尾部 4B
+        } else if (log) {
+            // nandcount <= 2 → 上游 `usbread(nandcount*2-4)`（0 或**负数**）**读 0 字节**（见函数头注释）
+            *log << QStringLiteral("read_flash_info：NAND id 计数 %1（上游 usbread(%2) ≤ 0 → 读 0 字节）")
+                        .arg(nandcount).arg(int(nandcount) * 2 - 4);
         }
     } else if (!readExactBytes(u, nandcount * 2,
                                QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
@@ -468,7 +481,7 @@ bool sendEmiLegacy(BromSession &s, const EmiData &emi, quint16 hwCode, QString *
 }
 
 // DA2：`>I addr` → `>I size` → `>I packetsize(0x1000)` → 读 1B ACK → 分块写（每块读 1B ACK）→
-//   sleep(0.5) → 写 ACK → 读 1B ACK（dalegacy_lib.py:907-944 的 brom_send(…, stage=2)）。
+//   sleep(0.5) → 写 ACK → 读 1B ACK（dalegacy_lib.py:907-940 的 brom_send(…, stage=2)）。
 // ⚠️ **LEGACY 保留尾部签名**：发送的是 region[2] 的完整 m_len 字节（不裁 sigLen）——
 //   签名在 DA2 内部由它自己校验，裁了反而起不来。
 bool bootToDa2Legacy(BromSession &s, const DaSelection &sel, QString *error)

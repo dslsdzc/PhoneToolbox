@@ -6,10 +6,10 @@
 //   • SEND_DA/JUMP_DA 帧      → 规格 §2.4 完整时序（帧在 Task 4 的 BromSession 侧）
 //   • DA1 就绪 0xC0           → Library/DA/legacy/dalegacy_lib.py:596-601
 //     （LEGACY **没有** SYNC/SETUP_ENVIRONMENT/SETUP_HW_INIT_PARAMS —— 那是 XFlash 的）
-//   • 存储信息交换 + 存储类型 → dalegacy_lib.py:607-633（类型判定在 :621-628）
+//   • 存储信息交换 + 存储类型 → dalegacy_lib.py:607-633（类型判定在 :623-628）
 //   • stage2 配置 + errorcode → dalegacy_lib.py:228-403
 //   • EMI/DRAM 分档           → dalegacy_lib.py:333-398（逐档差异见 sendEmiLegacy 注释）
-//   • boot_to(DA2)            → dalegacy_lib.py:907-944（brom_send）
+//   • boot_to(DA2)            → dalegacy_lib.py:907-940（brom_send）
 //   • read_flash_info         → dalegacy_lib.py:526-552（PassInfo 定义在 :28-39）
 //   • SBC 修补字节模式        → GPLv3 子模块来源标注（5 个核心模式，见 mtk_payload.cpp）
 //   • EMMC 写入               → 规格 §3.5 Legacy 命令集 + §3.6 分区表（F1-2 DaStorage）
@@ -49,7 +49,7 @@ bool sendDa1(BromSession &s, const DaSelection &sel, QString *error = nullptr);
 bool waitDa1Ready(BromSession &s, int timeoutMs, QString *error = nullptr);
 
 // 存储信息交换（dalegacy_lib.py:607-633 逐句）：读 4B NAND_INFO → 2B id 数 → id数×2B →
-// 4B EMMC_INFO → 4×4B → 写 1B ACK → 读 3×1B。顺带按上游规则（:621-628）定出存储类型：
+// 4B EMMC_INFO → 4×4B → 写 1B ACK → 读 3×1B。顺带按上游规则（:623-628）定出存储类型：
 //   nandids[0] != 0 → "nand"；否则 emmcids[0] != 0 → "emmc"；否则 "nor"。
 // 不做这一步，DA1 不会进入 stage2 配置（后面所有步骤都会错位）。
 bool exchangeDa1StorageInfo(BromSession &s, QString *flashtype, QStringList *log,
@@ -74,7 +74,7 @@ bool beginEmiDramInfo(BromSession &s, QByteArray *dramInfo, QStringList *log,
 bool sendEmiLegacy(BromSession &s, const EmiData &emi, quint16 hwCode, QString *error = nullptr);
 
 // DA2：>I addr → >I size → >I packetsize(0x1000) → 读 1B ACK → 分块写（每块读 1B ACK）
-//   → sleep(0.5) → 写 ACK → 读 1B ACK（dalegacy_lib.py:907-944）。
+//   → sleep(0.5) → 写 ACK → 读 1B ACK（dalegacy_lib.py:907-940）。
 // ⚠️ **LEGACY 保留尾部签名**：发送的是 region[2] 的完整 m_len 字节（不裁 sigLen）。
 bool bootToDa2Legacy(BromSession &s, const DaSelection &sel, QString *error = nullptr);
 

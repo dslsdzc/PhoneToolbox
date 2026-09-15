@@ -21,7 +21,7 @@ struct MtkPartition {
 };
 
 // F1-3 集成点：BROM 直刷路由（骨架，绕开 mtk_bridge JSON-RPC 主路径）。
-// 枚举 → libusb 打开 → BromSession → sendPayload（DA 二进制由调用方提供）→ DaStorage 逐分区刷写。
+// 枚举 → libusb 打开 → BromSession → （**未接线**：DA1/DA2 两阶段属 Task 9，见 .cpp 说明）。
 bool runBromFlash(const QByteArray &daBinary,
                   const QList<QPair<QString, QByteArray>> &partitions,
                   QString *error = nullptr);
