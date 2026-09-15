@@ -55,6 +55,11 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
 
     // P9 count_da 不可信：先按最小步长与 EOF 交叉校验
     const quint32 count = rdLe32(data, 0x68);
+    if (count == 0) {                       // 0 条目的 DA 文件没有任何可用条目 —— 明确拒绝
+        setErr(error, QStringLiteral("DA 文件声明 0 个条目（count_da == 0）—— 无可用 DA 条目，拒绝解析")
+                          + QStringLiteral("（独立基准 parse_da.py 同样把 count_da==0 记为 error）"));
+        return false;
+    }
     const quint64 minNeed = quint64(0x6C) + quint64(count) * quint64(kEntryStepD8);
     if (quint64(data.size()) < minNeed) {
         setErr(error, QStringLiteral("DA 截断：声明 %1 条目（至少需要 %2 字节），实际 %3 字节")
@@ -64,6 +69,11 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
 
     // P4 0xD8/0xDC 探测 + 交叉校验：探测点落在 entry[0] 自己的槽内（padding），
     // 若某条目 nregions >= 10 该处会变成真实 region 数据 → 必须与尺寸校验交叉验证。
+    // 实测撞车事实：探测点 0x6C+0xD8 == 0x14 + 9*20 + 16，恰好是 region[9].m_sig_len 的低 16 位；
+    // 真样本 max regionCount = 6、m_sig_len ∈ {0, 0x80, 0x100, 0x114} → 当前不可达，
+    // 万一撞上也是 **fail-closed**（判成老格式 → 明确拒绝，不产错数据）。
+    // 注意：尺寸交叉校验对真实 DA **实际不判别**（尾部 payload 远大于 count*4），真正兜底的是
+    // 探测本身 —— 这是 P4 规定的固有局限，不是实现缺陷。
     const bool oldFormat = (data.mid(0x6C + kEntryStepD8, 2) == QByteArray("\xDA\xDA", 2));
     const int step = oldFormat ? kEntryStepD8 : kEntryStepDc;
     out.oldFormat = oldFormat;

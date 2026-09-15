@@ -121,6 +121,14 @@ inline QByteArray be32(quint32 v)
     return b;
 }
 
+// 样本可用性：**按文件判**，不只看目录（目录在而某个样本缺失时，用例应 SKIP 而不是硬 FAIL ——
+// 审查 Minor：只判目录会让"目录存在但 da_parse_report.json 缺失"变成误 FAIL）
+inline bool sampleFileAvailable(const QString &fileName)
+{
+    const QString d = samplesDir();
+    return !d.isEmpty() && QFile::exists(QDir(d).filePath(fileName));
+}
+
 inline bool samplesAvailable()
 {
     const QString d = samplesDir();

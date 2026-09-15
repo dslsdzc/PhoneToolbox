@@ -20,6 +20,7 @@ private slots:
     void detectsV6ByMarkerNotBanner();
     void probesOldFormatWithCrossValidation();
     void rejectsBadInputs();
+    void rejectsZeroCountDa();
     void toleratesRealWorldShapes();
     // 真样本（reference/mtk-samples/，缺失时 SKIP；验证跑带 -DMTK_SAMPLES_REQUIRED=ON）
     void realSamplesMatchIndependentReport();
@@ -123,7 +124,7 @@ void TestMtkDaFile::rejectsBadInputs()
     putLe32(badCount, 0x68, 1000);
     err.clear();
     QVERIFY(!mtkbrom::parseDaFile(badCount, f, &err));
-    QVERIFY(err.contains(QStringLiteral("截断")) || !err.isEmpty());
+    QVERIFY2(err.contains(QStringLiteral("截断")), qPrintable(err));   // 钉住具体判据（别写 `|| !err.isEmpty()` 这种恒真兜底）
     // P11：m_buf + m_len 越界（把 region[0] 的 m_len 改到超大）
     QByteArray oob = buildDa({entryWith3Regions()});
     putLe32(oob, 0x6C + 0x14 + 4, 0x7FFFFFFF);
@@ -136,6 +137,18 @@ void TestMtkDaFile::rejectsBadInputs()
     err.clear();
     QVERIFY(!mtkbrom::parseDaFile(badMagic, f, &err));
     QVERIFY(!err.isEmpty());
+}
+
+void TestMtkDaFile::rejectsZeroCountDa()
+{
+    // count_da == 0：0 条目的 DA 文件没有任何可用条目 —— 明确拒绝
+    // （该判据原比实现宽：独立基准 parse_da.py:110 同样把 count_da==0 记为 error）
+    QByteArray zeroCount = buildDa({entryWith3Regions()});
+    putLe32(zeroCount, 0x68, 0);
+    mtkbrom::DaFile f;
+    QString err;
+    QVERIFY(!mtkbrom::parseDaFile(zeroCount, f, &err));
+    QVERIFY2(err.contains(QStringLiteral("0 个条目")), qPrintable(err));
 }
 
 void TestMtkDaFile::toleratesRealWorldShapes()
@@ -161,7 +174,7 @@ void TestMtkDaFile::toleratesRealWorldShapes()
 
 void TestMtkDaFile::realSamplesMatchIndependentReport()
 {
-    if (!mtktest::samplesAvailable()) {
+    if (!mtktest::sampleFileAvailable(QStringLiteral("da_parse_report.json"))) {
 #if MTK_SAMPLES_REQUIRED
         QFAIL("真样本目录不存在，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
 #else
