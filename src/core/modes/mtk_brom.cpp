@@ -1,5 +1,7 @@
 #include "core/modes/mtk_brom.h"
 
+#include <QElapsedTimer>
+
 #include <libusb.h>
 
 // 实现对照（核实记录见计划文档）：枚举 usb_ids.py；握手 Port.py run_handshake()；
@@ -130,6 +132,29 @@ public:
 
     int maxPacketSize() const override { return m_wMaxPacketSize; }
 
+    // 覆盖为累加循环（对照 usblib.py usbread()：循环读到 resplen 满）——设备把一个逻辑回复
+    // 拆成多个 USB 包时，单次 bulk transfer 只能拿到一部分（审查 Important-1）
+    bool readExact(QByteArray &out, int len, int timeoutMs, QString *error) override
+    {
+        out.clear();
+        QElapsedTimer t;
+        t.start();
+        while (out.size() < len) {
+            const int left = len - out.size();
+            if (t.elapsed() >= timeoutMs || timeoutMs <= 0) {
+                if (error) *error = QStringLiteral("精确读超时（要 %1 字节，得 %2）").arg(len).arg(out.size());
+                return false;
+            }
+            QByteArray chunk;
+            if (!read(chunk, left, timeoutMs - int(t.elapsed()), nullptr) || chunk.isEmpty()) {
+                if (error) *error = QStringLiteral("精确读失败（要 %1 字节，得 %2）").arg(len).arg(out.size());
+                return false;
+            }
+            out += chunk;
+        }
+        return true;
+    }
+
     bool close() override
     {
         if (m_handle) {
@@ -190,6 +215,20 @@ private:
 };
 
 } // namespace
+
+bool IBromUsb::readExact(QByteArray &out, int len, int timeoutMs, QString *error)
+{
+    // 默认实现 = 单次 read + 严格长度校验：mock（及既有"短包即失败"的断言）语义与判别力不变；
+    // 累加语义只由真机通道（BromUsbLibusb）覆盖
+    QByteArray b;
+    if (!read(b, len, timeoutMs, error) || b.size() != len) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("精确读失败（要 %1 字节，得 %2）").arg(len).arg(b.size());
+        return false;
+    }
+    out = b;
+    return true;
+}
 
 bool enumerateUsb(QList<BromDevice> &out, QString *error)
 {
@@ -411,12 +450,10 @@ bool BromSession::getHwCode(quint16 &hwCode, quint16 &hwVer, QString *error)
     if (!echoCmd(CMD_GET_HW_CODE, error))
         return false;
     QByteArray b;
-    if (!m_usb->read(b, 4, 1000, error))
+    // readExact：真机可能把 4B 拆成多个 USB 包（审查 Important-1），累加读到恰好 4B；
+    // 长度由它保证，故此处不再各自判长度；失败在赋值之前返回 → 出参不被改写
+    if (!m_usb->readExact(b, 4, 1000, error))
         return false;
-    if (b.size() != 4) { // 校验通过后才写出参：失败不留半成品
-        if (error) *error = QStringLiteral("get_hw_code 响应长度不符（%1）").arg(b.size());
-        return false;
-    }
     const quint32 val = getBe32(b, 0);
     hwCode = quint16((val >> 16) & 0xFFFF);
     hwVer  = quint16(val & 0xFFFF);
@@ -431,12 +468,9 @@ bool BromSession::getHwSwVer(HwSwVer &out, QString *error)
     if (!echoCmd(CMD_GET_HW_SW_VER, error))
         return false;
     QByteArray b;
-    if (!m_usb->read(b, 8, 1000, error))
+    // 同上：readExact 保证恰好 8B（拆包累加），失败在赋值之前返回 → 出参不被改写
+    if (!m_usb->readExact(b, 8, 1000, error))
         return false;
-    if (b.size() != 8) { // 校验通过后才写出参：失败不留半成品
-        if (error) *error = QStringLiteral("get_hw_sw_ver 响应长度不符（%1）").arg(b.size());
-        return false;
-    }
     out.hwSubCode = getBe16(b, 0);
     out.hwVer     = getBe16(b, 2);
     out.swVer     = getBe16(b, 4);

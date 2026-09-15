@@ -252,12 +252,12 @@ void TestMtkBrom::getHwCodeShortReplyFails()
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
-    m->reads << QByteArray("\xFD", 1) << QByteArray("\x67\x65", 2); // 只回 2B
+    m->reads << QByteArray("\xFD", 1) << QByteArray("\x67\x65", 2); // 只回 2B（readExact 默认实现：短包即失败）
     // 预置非零：失败不得把半截数据（或 0）冒充成真值写回出参
     quint16 hwCode = 0x1111, hwVer = 0x2222;
     QString err;
     QVERIFY(!s.getHwCode(hwCode, hwVer, &err));
-    QVERIFY(err.contains("长度"));
+    QVERIFY(err.contains("精确读"));
     QCOMPARE(hwCode, quint16(0x1111));
     QCOMPARE(hwVer, quint16(0x2222));
 }
@@ -267,12 +267,12 @@ void TestMtkBrom::getHwSwVerShortReplyFails()
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
-    m->reads << QByteArray("\xFC", 1) << QByteArray("\x8A\x00\xCB\x01", 4); // 少回 4B
+    m->reads << QByteArray("\xFC", 1) << QByteArray("\x8A\x00\xCB\x01", 4); // 少回 4B（短包即失败）
     mtkbrom::HwSwVer out;
     out.hwSubCode = 0x1111; out.hwVer = 0x2222; out.swVer = 0x3333;
     QString err;
     QVERIFY(!s.getHwSwVer(out, &err));
-    QVERIFY(err.contains("长度"));
+    QVERIFY(err.contains("精确读"));
     QCOMPARE(out.hwSubCode, quint16(0x1111));
     QCOMPARE(out.hwVer, quint16(0x2222));
     QCOMPARE(out.swVer, quint16(0x3333));

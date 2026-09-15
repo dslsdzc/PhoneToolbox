@@ -83,6 +83,10 @@ public:
     virtual bool open(QString *error) = 0;
     virtual bool write(const QByteArray &data, QString *error) = 0;
     virtual bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) = 0;
+    // 精确读：读到**恰好 len 字节**。**默认实现 = 单次 read + 长度校验**（mock 与既有"短包即失败"的
+    // 断言保持原样，判别力不变）；libusb 实现**覆盖为累加循环**（预算 = timeoutMs，分段 transfer，
+    // 读满即返回）—— 对齐上游 usblib.usbread 的循环语义。真机拆包行为未验证（见 T12 诚实边界）。
+    virtual bool readExact(QByteArray &out, int len, int timeoutMs, QString *error);
     virtual int maxPacketSize() const { return 0x400; } // SEND_DA 分块上限
     virtual bool close() = 0;
 };
