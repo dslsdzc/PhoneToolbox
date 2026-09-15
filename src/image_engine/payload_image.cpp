@@ -4,6 +4,7 @@
 #include "wire_format.h"
 #include <QFile>
 #include <QCryptographicHash>
+#include <QByteArrayView>   // addData(QByteArrayView) 重载（非弃用，见 :432 的注释）
 #include <QtEndian>
 #include <limits>
 #include <new>
@@ -429,7 +430,8 @@ bool processOps(QFile &in, QFile &out, qint64 totalBase, quint64 blockSize, quin
                 const qint64 n = qMin(remaining, static_cast<qint64>(ioBuf.size()));
                 if (!readExact(&in, ioBuf.data(), n))
                     return streamFail(error, "payload 文件被截断");
-                h.addData(ioBuf.constData(), static_cast<qsizetype>(n));
+                // QByteArrayView 重载（非弃用）；与旧的 addData(const char*, qsizetype) 逐字节等价
+                h.addData(QByteArrayView(ioBuf.constData(), n));
                 if (!w.write(out, ioBuf.constData(), n, error))
                     return false;
                 remaining -= n;
