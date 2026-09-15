@@ -9,10 +9,15 @@
 #include <QResource>
 #include <QTemporaryDir>
 #include <memory>
+#include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 #include "core/modes/mtk_brom.h"
+#include "core/modes/mtk_chip_table.h"   // lookupChip / DaMode / damodeName（代际判定）
+#include "core/modes/mtk_da_file.h"
 #include "core/modes/mtk_emmc.h"
 #include "core/modes/mtk_payload.h"
+#include "core/modes/mtk_preloader_fetch.h"
+#include "core/mtk_flash_plan.h"
 
 // JSON-RPC timeout defaults
 static const int BRIDGE_START_TIMEOUT = 5000;
@@ -561,18 +566,44 @@ bool MtkHandler::resetDevice()
     return false;
 }
 
-// ==================== F1-3: BROM 直刷路由（骨架） ====================
+// ==================== F1-3: BROM 直刷路由（D1-T9 落地） ====================
 
-// F1-3 集成点：BROM 直刷路由（骨架）。枚举 → libusb 打开 → BromSession → （**未接线**）。
-// D1-T6 起旧的 sendPayload（addr=0/sigLen=0 上传整文件）已删除；真正的两阶段
-// （DA 解析 → sendDa1 → 0xC0 → 存储信息 → stage2 → EMI → boot_to → read_flash_info）
-// 是 Task 9 的 bromBringUpDa —— 在那之前本函数在 target_config 检查后明确失败。
-// 诚实边界：SLA/DAA 设备返回明确错误；V6 修补平台标注不支持。
-// 不改动现有 mtk_bridge JSON-RPC 主路径（上方 MtkHandler 成员方法保持原行为）。
-bool runBromFlash(const QByteArray &daBinary,
-                  const QList<QPair<QString, QByteArray>> &partitions,
-                  QString *error)
+namespace {
+
+// 设备实读分区表 → 计划层参照表（**写入判据以设备为准**；预览期的 scatter 到这里可能对不上）
+QList<mtkplan::PartitionRef> toPartitionRefs(const QList<mtkbrom::EmPartition> &parts)
 {
+    QList<mtkplan::PartitionRef> out;
+    out.reserve(parts.size());
+    for (const mtkbrom::EmPartition &p : std::as_const(parts)) {
+        mtkplan::PartitionRef r;
+        r.name = p.name;
+        r.sizeBytes = p.sizeBytes;
+        out << r;
+    }
+    return out;
+}
+
+} // namespace
+
+// 诚实边界：枚举/打开/握手段（libusb 真机路径）离线不可验证；被验证的是它下面两层
+// （bromBringUpDa 逐帧 + 计划层）。失败即停、**不复位**（与 Phase B/C 同口径）。
+// 不改动现有 mtk_bridge JSON-RPC 主路径（上方 MtkHandler 成员方法保持原行为）。
+bool runBromFlash(const mtkbrom::BromFlashRequest &req, const mtkbrom::BromLogFn &log,
+                  const mtkbrom::BromProgressFn &progress, QString *error)
+{
+    auto say = [&log](const QString &m) { if (log) log(m, false); };
+    auto warn = [&log](const QString &m) { if (log) log(m, true); };
+
+    if (req.daFile.isEmpty()) {
+        if (error) *error = QStringLiteral("DA 文件为空");
+        return false;
+    }
+    if (req.imagePaths.isEmpty()) {
+        if (error) *error = QStringLiteral("未选择任何镜像文件（mtk-brom 通道）");
+        return false;
+    }
+
     QList<mtkbrom::BromDevice> devs;
     if (!mtkbrom::enumerateUsb(devs, error))
         return false;
@@ -591,14 +622,158 @@ bool runBromFlash(const QByteArray &daBinary,
         if (error) *error = QStringLiteral("设备启用 SLA/DAA 认证，暂不支持（RSA 响应自研为后续任务）");
         return false;
     }
-    // D1-T6：旧 sendPayload（把**整个文件**按 addr=0/sigLen=0 上传）已删除 —— 真机必错。
-    // 正确路径是「解析 AllInOne DA → 选条目 → sendDa1(region[1]) → 0xC0 → 存储信息交换 →
-    // stage2 配置 → EMI → boot_to(DA2) → read_flash_info」= Task 9 的 bromBringUpDa。
-    // 在它落地前本骨架**明确失败**：不静默回退到旧的无地址上传，也不进 DaStorage 半成品路径。
+
+    // hwcode / 版本 → DA 条目选择（5 元组；判不出 → 明确报错，不猜）
+    // ⚠️ 版本口径（T4 实施期核上游 `mtk_preloader.py:174-232`）：
+    //   • 0xFD 的**低 16 位 hwver** 只用于"关看门狗"等前置动作（`setreg_disablewatchdogtimer(hwcode, hwver)`）
+    //     —— 本实现不做那些前置动作，故 hwVer 只读出、不参与判定；
+    //   • 非 IoT 芯片的 `hwver/swver` **以 0xFC 为准**（上游在 0xFC 段把两者**清零后重填**：
+    //     `hwver = 0; swver = 0; if res != -1: hw_sub_code = res[0]; hwver = res[1]; swver = res[2]`）；
+    //   • 0xFC 失败（-1）时上游**不清零就往下走** → hwver/swver 保持 0 → 版本过滤维**旁路**（`or … == 0`）
+    //     → 取首个候选。故这里**不因 0xFC 失败而中止**：记告警 + 用 0/0（与上游同姿态；IoT 读 A2 寄存器的
+    //     另一条路我们已在芯片表 iot 位处拒绝）。
+    quint16 hwCode = 0, hwVer = 0;
+    if (!session.getHwCode(hwCode, hwVer, error))
+        return false;
+    mtkbrom::HwSwVer sw;
+    if (!session.getHwSwVer(sw, error)) {
+        warn(QStringLiteral("读取 0xFC（hw/sw 版本）失败：%1 —— 版本过滤维按上游口径旁路（hwver/swver = 0）")
+                 .arg(error ? *error : QString()));
+        if (error) error->clear();
+        sw = mtkbrom::HwSwVer{};
+    }
+    quint8 bromVer = 0;
+    quint8 blVer = 0;
+    if (!session.getBromVer(bromVer, error))          // stage2 配置要写这两个值（顺序敏感）
+        return false;
+    if (!session.getBlVer(blVer, error))
+        return false;
+    say(QStringLiteral("芯片 hw_code=0x%1（hw_ver=0x%2，sw_ver=0x%3；BROM 0x%4 / BL 0x%5）")
+            .arg(hwCode, 4, 16, QLatin1Char('0')).arg(sw.hwVer, 4, 16, QLatin1Char('0'))
+            .arg(sw.swVer, 4, 16, QLatin1Char('0'))
+            .arg(bromVer, 2, 16, QLatin1Char('0')).arg(blVer, 2, 16, QLatin1Char('0')));
+
+    // 代际判定（spec §1）：表外芯片 / 非 LEGACY 代 → **明确报错，不猜**（D2/D3 才做另两代）
+    const mtkbrom::ChipInfo *chip = mtkbrom::lookupChip(hwCode);
+    if (!chip) {
+        if (error) *error = QStringLiteral("芯片表未收录 hw_code=0x%1 —— 判不出 DA 代际（不猜）；"
+                                           "补 tools/gen_mtk_chip_table.py 对应表项并重新生成后可支持")
+                                .arg(hwCode, 4, 16, QLatin1Char('0'));
+        return false;
+    }
+    if (chip->damode != mtkbrom::DaMode::Legacy) {
+        if (error) *error = QStringLiteral("本设备 hw_code=0x%1 属 %2 代 —— Phase D1 只支持 LEGACY（D2/D3 另做）")
+                                .arg(hwCode, 4, 16, QLatin1Char('0')).arg(mtkbrom::damodeName(chip->damode));
+        return false;
+    }
+    if (chip->iot) {   // Task 2 审查 ⚠️：IoT 芯片在 LEGACY 里 region 映射不同（上游 upload_da1 的 iot 分支）
+        if (error) *error = QStringLiteral("本设备 hw_code=0x%1 是 IoT 芯片（上游 iot=True）—— D1 未实现 IoT 的 "
+                                           "region 映射（region[0]/region[1]），明确拒绝（不按手机映射硬刷）")
+                                .arg(hwCode, 4, 16, QLatin1Char('0'));
+        return false;
+    }
+    say(QStringLiteral("代际判定：%1（chip_dacode=0x%2）")
+            .arg(mtkbrom::damodeName(chip->damode)).arg(chip->dacode, 4, 16, QLatin1Char('0')));
+
+    mtkbrom::DaFile daFile;
+    if (!mtkbrom::parseDaFile(req.daFile, daFile, error))
+        return false;
+    if (daFile.isV6) {                       // DA 条目自带 v6 = XML 代（spec §1：v6 强制 XML）
+        if (error) *error = QStringLiteral("DA 文件是 v6（XML 代）—— Phase D1 只支持 LEGACY（D2/D3 另做）");
+        return false;
+    }
+    mtkbrom::DaSelection sel;
+    QStringList selWarn;
+    if (!mtkbrom::selectDaEntry(daFile, hwCode, sw.hwVer, sw.swVer, &selWarn, sel, error)) {
+        const QString why = error ? *error : QString();            // 先取值再改写（别自引用）
+        if (error) *error = QStringLiteral("DA 条目选择失败（%1）：%2").arg(req.daLabel, why);
+        return false;
+    }
+    for (const QString &w : std::as_const(selWarn))
+        warn(w);
+    say(QStringLiteral("DA 条目：DA1 %1 字节 @0x%2；DA2 %3 字节 @0x%4")
+            .arg(sel.da1Bytes.size()).arg(sel.da1.startAddr, 8, 16, QLatin1Char('0'))
+            .arg(sel.da2Bytes.size()).arg(sel.da2.startAddr, 8, 16, QLatin1Char('0')));
+
+    // preloader 两路径（显式 > 自动导入 > 网络(默认关) > 跳过）
+    // 注：**跳过 preloader 是否致命由 DA1 决定**（errorcode == 0xBC3 时必须要有）——
+    // 判定在 bromBringUpDa 里，这里不预先告警（否则 errorcode==0 的设备会被无谓地吓一跳）。
+    mtkbrom::PreloaderResult pre;
+    if (!mtkbrom::resolvePreloader(req.preloader, req.preloaderSources, req.downloader, pre, error))
+        return false;
+    for (const QString &line : std::as_const(pre.log))
+        say(line);
+
+    QStringList bringLog;
+    if (!mtkbrom::bromBringUpDa(session, sel, hwCode, bromVer, blVer, pre, &bringLog, error))
+        return false;
+    for (const QString &line : std::as_const(bringLog))
+        say(line);
+
+    // 设备分区表 → 计划（**写入判据以设备为准**；预览期的对照表到这里可能对不上）
+    mtkbrom::DaStorage storage(session);
+    storage.setDaActive(true);
+    QList<mtkbrom::EmPartition> deviceParts;
+    if (!storage.listPartitions(deviceParts, error))
+        return false;
+    if (deviceParts.isEmpty()) {
+        if (error) *error = QStringLiteral("设备分区表为空（read_pmt 无条目）—— 拒绝在未知分区表上写入");
+        return false;
+    }
+    mtkplan::MtkFlashPlan plan;
+    if (!mtkplan::buildMtkPlan(toPartitionRefs(deviceParts), req.imagePaths, plan, error))
+        return false;
+    for (const QString &w : std::as_const(plan.warnings))
+        warn(w);
+    if (plan.entries.isEmpty()) {
+        if (error) *error = QStringLiteral("按设备分区表没有任何可写入的镜像（见上方告警）");
+        return false;
+    }
+    say(QStringLiteral("计划：%1 个分区，合计 %2 字节").arg(plan.entries.size()).arg(plan.totalBytes));
+
+    // 逐分区写（失败即停；错误含分区名与已写字节 —— 由 flashPartition 填）
+    quint64 written = 0;
+    for (const mtkplan::PlanEntry &e : std::as_const(plan.entries)) {
+        QFile f(e.imagePath);
+        if (!f.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("无法读取镜像：%1").arg(e.imagePath);
+            return false;
+        }
+        const QByteArray image = f.readAll();
+        f.close();
+        if (image.size() != qsizetype(e.imageSize)) {
+            if (error) *error = QStringLiteral("镜像 %1 读入字节数与计划不符（%2 != %3）")
+                                    .arg(e.imagePath).arg(image.size()).arg(e.imageSize);
+            return false;
+        }
+        say(QStringLiteral("写入分区 %1（%2 字节）…").arg(e.partition).arg(image.size()));
+        if (!mtkbrom::flashPartition(session, storage, e.partition, image, error))
+            return false;
+        written += quint64(image.size());
+        if (progress)
+            progress(written, plan.totalBytes);
+    }
+
+    // FINISH 收尾：失败只告警（数据已落盘）
+    QString finishErr;
+    if (storage.finishFlash(0, &finishErr))
+        say(QStringLiteral("FINISH（0xD9）收尾完成"));
+    else
+        warn(QStringLiteral("FINISH 收尾失败（数据已写入）：%1").arg(finishErr));
+    return true;
+}
+
+// 【弃用桩 —— **T10 接线时必须删除**】见 mtk_handler.h。
+// 存在的唯一理由：flash_tool.cpp 的旧调用点要到 T10 才改，T9 删净会打断主程序 + test_pipeline
+// 构建（计划裁决 A，见 .superpowers/sdd/progress.md 的 T9 条目）。**不含任何刷写逻辑**。
+bool runBromFlash(const QByteArray &daBinary,
+                  const QList<QPair<QString, QByteArray>> &partitions,
+                  QString *error)
+{
     Q_UNUSED(daBinary)
     Q_UNUSED(partitions)
     if (error)
-        *error = QStringLiteral("BROM 直刷骨架未接线：需先解析 DA 文件并走 DA1/DA2 两阶段"
-                                "（Task 9 交付后启用）");
+        *error = QStringLiteral("旧 runBromFlash 入口已废弃：请改用 runBromFlash(BromFlashRequest)"
+                                "（flash_tool 通道接线属 Task 10）");
     return false;
 }

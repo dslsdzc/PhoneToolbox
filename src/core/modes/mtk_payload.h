@@ -11,6 +11,7 @@
 //   • EMI/DRAM 分档           → dalegacy_lib.py:333-398（逐档差异见 sendEmiLegacy 注释）
 //   • boot_to(DA2)            → dalegacy_lib.py:907-940（brom_send）
 //   • read_flash_info         → dalegacy_lib.py:526-552（PassInfo 定义在 :28-39）
+//   • 两阶段引导链            → bromBringUpDa（顺序 = 上面各帧函数的调用序，dalegacy_lib.py:556-650）
 //   • SBC 修补字节模式        → GPLv3 子模块来源标注（5 个核心模式，见 mtk_payload.cpp）
 //   • EMMC 写入               → 规格 §3.5 Legacy 命令集 + §3.6 分区表（F1-2 DaStorage）
 //
@@ -34,6 +35,7 @@
 #include "core/modes/mtk_da_file.h"
 #include "core/modes/mtk_emmc.h"
 #include "core/modes/mtk_preloader_emi.h"
+#include "core/modes/mtk_preloader_fetch.h"
 
 namespace mtkbrom {
 
@@ -82,6 +84,22 @@ bool bootToDa2Legacy(BromSession &s, const DaSelection &sel, QString *error = nu
 // 只解析 PassInfo 的 ack/下载状态 —— **不解析 NOR/NAND/EMMC 详情**（只记字节数）。
 // hwCode 由调用方从 getHwCode(0xFD) 得来（上游在 :543-545 用它决定是否多读 4B）。
 bool readFlashInfoDa2(BromSession &s, quint16 hwCode, QStringList *log, QString *error = nullptr);
+
+// ---- DA 两阶段引导（D1-T9）----
+
+// 把上面各帧函数按**上游顺序**串成一条引导链（顺序来自 dalegacy_lib.py:556-650）：
+//   sendDa1 → waitDa1Ready(0xC0) → exchangeDa1StorageInfo → sendStage2Config
+//   → [emiNeeded ? beginEmiDramInfo + (extractEmiLegacy → sendEmiLegacy) : 跳过]
+//   → bootToDa2Legacy → readFlashInfoDa2
+// **不含**枚举/打开 USB —— 故可用 mock 逐帧测；真机段（枚举/libusb/握手）在 runBromFlash。
+// 失败即返回 false 且**不继续**（0xC0 不对就一个 DA2 字节都不发）。
+// **emiNeeded（errorcode == 0xBC3）但没有可用 preloader/EMI → 明确失败**：上游同姿态
+// （dalegacy_lib.py:399-402 "Preloader needed due to dram config."）—— 继续只会让 DA2 起不来；
+// 缺 preloader 不致命**只在 errorcode == 0 时**成立（那时它只是 info 级日志）。
+// log 可空；error 可空。成功返回 true。
+bool bromBringUpDa(BromSession &s, const DaSelection &sel, quint16 hwCode,
+                   quint8 bromVer, quint8 blVer, const PreloaderResult &pre,
+                   QStringList *log, QString *error = nullptr);
 
 // ---- 刷写集成（F1-3）----
 

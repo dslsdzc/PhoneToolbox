@@ -1,6 +1,7 @@
 #include "core/modes/mtk_payload.h"
 
 #include <QThread>
+#include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 namespace mtkbrom {
 namespace {
@@ -71,6 +72,66 @@ bool sendDa1(BromSession &s, const DaSelection &sel, QString *error)
     if (!s.sendDa(sel.da1.startAddr, sel.da1.len, sel.da1.sigLen, sel.da1Bytes, error))
         return false;
     return s.jumpDa(sel.da1.startAddr, error);
+}
+
+// DA1 → DA2 的完整引导（顺序来自 dalegacy_lib.py:556-650，逐条见各函数注释）。
+// **不含**枚举/打开 USB —— 故可用 mock 逐帧测；真机段（枚举/libusb/握手）在 runBromFlash。
+bool bromBringUpDa(BromSession &s, const DaSelection &sel, quint16 hwCode,
+                   quint8 bromVer, quint8 blVer, const PreloaderResult &pre,
+                   QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+
+    if (!sendDa1(s, sel, error))
+        return false;
+    say(QStringLiteral("DA1 已上传（地址 0x%1，%2 字节）")
+            .arg(sel.da1.startAddr, 8, 16, QLatin1Char('0')).arg(sel.da1Bytes.size()));
+    if (!waitDa1Ready(s, 10000, error))
+        return false;                                        // 不是 0xC0 = 明确失败（DA2 一个字节都不发）
+    say(QStringLiteral("DA1 就绪（0xC0）"));
+
+    QString flashtype;
+    if (!exchangeDa1StorageInfo(s, &flashtype, log, error))
+        return false;
+
+    bool emiNeeded = false;
+    if (!sendStage2Config(s, hwCode, bromVer, blVer, flashtype, &emiNeeded, log, error))
+        return false;
+
+    if (emiNeeded) {
+        if (!beginEmiDramInfo(s, nullptr, log, error))
+            return false;
+        if (pre.origin == PreloaderOrigin::None) {
+            // 上游同姿态："Preloader needed due to dram config." —— 继续只会让 DA2 起不来
+            if (error)
+                *error = QStringLiteral("DA1 要求 DRAM 配置（errorcode = 0xBC3），但没有可用的 preloader/EMI —— "
+                                        "中止（%1）").arg(pre.skipReason);
+            return false;
+        }
+        for (const QString &line : std::as_const(pre.log))
+            say(line);
+        EmiData emi;
+        QString emiError;
+        if (!extractEmiLegacy(pre.bytes, emi, &emiError)) {
+            if (error) *error = QStringLiteral("DA1 要求 DRAM 配置，但 EMI 提取失败：%1").arg(emiError);
+            return false;
+        }
+        if (!sendEmiLegacy(s, emi, hwCode, error))
+            return false;                                   // 版本被拒/DRAM 初始化失败 = 明确失败（上游同）
+        say(QStringLiteral("DRAM 初始化完成（EMI 版本 0x%1）").arg(emi.ver, 2, 16, QLatin1Char('0')));
+    } else {
+        say(QStringLiteral("DA1 报告不需要 DRAM 配置（errorcode = 0）—— 跳过 EMI"));
+        if (pre.origin == PreloaderOrigin::None && !pre.skipReason.isEmpty())
+            say(pre.skipReason);                            // 信息级：不需要 DRAM 配置，缺 preloader 无妨
+    }
+
+    if (!bootToDa2Legacy(s, sel, error))
+        return false;
+    say(QStringLiteral("DA2 已上传（%1 字节，含尾部签名）").arg(sel.da2Bytes.size()));
+    if (!readFlashInfoDa2(s, hwCode, log, error))
+        return false;
+    say(QStringLiteral("DA2 存活确认"));
+    return true;
 }
 
 // DA1 起来后**只回单字节 0xC0**（dalegacy_lib.py:596-601）。LEGACY 没有 SYNC/SETUP_ENVIRONMENT/

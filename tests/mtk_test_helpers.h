@@ -122,6 +122,26 @@ inline bool makeSelection(quint16 hwCode, mtkbrom::DaSelection &out, QString *er
     return makeSelection(hwCode, out, 48, error);
 }
 
+// 合成"可被 extractEmiLegacy 提取"的 preloader（D1-T9 起共享；EMI 相关的引导链用例用它，
+// **不要**再写 `QByteArray(n,'\x5A')` 那种"非 preloader"当 EMI 来源 —— 提取必然失败）。
+// 布局（与 extractEmiLegacy 的契约逐条对应，见 mtk_preloader_emi.cpp）：
+//   [0x00, 0x12) = "MTK_BLOADER_INFO_v"   标记
+//   [0x12, 0x14) = verBytes               2 位 ASCII 版本（调用方保证是数字，如 "00" / "38"）
+//   [0x40, 0x47) = "MTK_BIN"              LEGACY 切片 = 其后 0xC 起（= 0x4C）
+//   [0x4C, ...)  = emi                    载荷原样放进切片
+// **不含** MMM 魔术（否则 extractEmiLegacy 走 MMM 裁剪分支，切片就不是 emi 了）。
+// 注：test_mtk_preloader_emi.cpp 另有一份带自检的 file-local `buildPreloader(int)`（T5 产物，
+// 覆盖 MMM/零 dramsize 等分支）—— 统一合并留给终审 triage，本 helper 不取代它。
+inline QByteArray buildEmiPreloader(const QByteArray &verBytes, const QByteArray &emi)
+{
+    QByteArray d(0x4C + emi.size(), '\0');
+    d.replace(0x00, 18, QByteArray("MTK_BLOADER_INFO_v", 18));
+    d.replace(0x12, 2, verBytes.left(2));
+    d.replace(0x40, 7, QByteArray("MTK_BIN", 7));
+    d.replace(0x4C, emi.size(), emi);
+    return d;
+}
+
 // ---- 真样本路径（reference/ 为 gitignored；验证跑带 -DMTK_SAMPLES_REQUIRED=ON 且核对 0 skipped）----
 #ifndef MTK_SAMPLES_DIR
 #define MTK_SAMPLES_DIR ""

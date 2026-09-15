@@ -347,11 +347,15 @@ if(ENABLE_IMAGE_TESTS)
                 elseif(_test_stem STREQUAL "test_mtk_payload")
                     # D1-T6：夹具 makeSelection() 走 parseDaFile/selectDaEntry（mtk_test_helpers.h），
                     # 不补 mtk_da_file.cpp 会在链接期炸（undef）。
+                    # D1-T9：bromBringUpDa 走 extractEmiLegacy + PreloaderResult → 补 EMI 提取与
+                    # preloader 解析两个模块（后者只依赖 Qt Core、下载器是注入点 —— 用例不联网）。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
@@ -377,6 +381,14 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
+                        # Phase D1 Task 9：mtk_handler.cpp 实现 runBromFlash 真流程后引用了
+                        # DA 解析/芯片表/EMI/preloader/计划层 —— 不补这些源会在链接期炸（undef）。
+                        # （生产下载器 mtk_preloader_download_qt.cpp 是 T10 的 flash_tool 接线才需要。）
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp
                         # Phase B Task 7：edl_handler.cpp 退化为薄封装（持有 LibusbEdlTransport +

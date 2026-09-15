@@ -131,7 +131,8 @@ bool BromSession::writeMemory(quint32 addr, const QByteArray &data, QString *err
 bool DaStorage::ensureDa(QString *error) const
 {
     if (!m_daActive) {
-        if (error) *error = QStringLiteral("DA 未激活：需先完成 DA1/DA2 两阶段上传与跳转（sendDa1/bootToDa2Legacy），"
+        if (error) *error = QStringLiteral("DA 未激活：需先完成 DA1/DA2 两阶段引导（bromBringUpDa："
+                                           "sendDa1 → 0xC0 → 存储信息 → stage2 → EMI → boot_to → read_flash_info），"
                                            "EMMC 命令属于 DA 阶段");
         return false;
     }
@@ -326,6 +327,34 @@ bool DaStorage::listPartitions(QList<EmPartition> &out, QString *error)
         }
         if (!p.name.isEmpty())
             out.append(p);
+    }
+    return true;
+}
+
+bool DaStorage::finishFlash(quint32 value, QString *error)
+{
+    // 对照 dalegacy_lib.py:972-980 finish()：写 0xD9 → 读 1B ACK → 写 >I value → 读 1B ACK。
+    // 上游只在交互式 reset 里调用；本实现用于刷写收尾（value = 0 = ShutDownModes.NORMAL，
+    // mtk_daloader.py:307-310）——失败由调用方按**告警**处理（数据已落盘）。
+    if (!ensureDa(error))
+        return false;
+    IBromUsb *u = m_session.usb();
+    if (!u->write(QByteArray(1, char(DA_CMD_FINISH)), error))
+        return false;
+    QByteArray ack;
+    if (!u->read(ack, 1, 3000, error) || ack.size() != 1 || quint8(ack.at(0)) != RSP_ACK) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("FINISH 命令未获 ACK");
+        return false;
+    }
+    QByteArray v;
+    putBe32(v, value);                       // >I value（与 read/format 帧同为大端）
+    if (!u->write(v, error))
+        return false;
+    if (!u->read(ack, 1, 3000, error) || ack.size() != 1 || quint8(ack.at(0)) != RSP_ACK) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("FINISH 参数未获 ACK");
+        return false;
     }
     return true;
 }

@@ -6,6 +6,7 @@
 #include "core/modes/mtk_da_file.h"
 #include "core/modes/mtk_emmc.h"
 #include "core/modes/mtk_payload.h"
+#include "core/modes/mtk_preloader_fetch.h"
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
@@ -60,6 +61,51 @@ void queueFlashInfoHead(MockUsbChannel *m)
              << QByteArray(0x26, '\0');     // flashconfig
 }
 
+// ---- D1-T9：引导链（bromBringUpDa）的整条读序列夹具 ----
+// 逐条对齐各函数实际会读的字节数与顺序（漏一节 = 后续全错位，夹具必须与真机同构）。
+
+// 0xC0 之后的固定读序列：存储信息交换（605-631）→ stage2（279-284）→ [可选 EMI 段] → boot_to → read_flash_info
+QList<QByteArray> storageExchangeReads(bool emmc = true)
+{
+    QByteArray emmcIds(16, '\0');
+    if (emmc) emmcIds[3] = char(0x2A);
+    return {QByteArray("\x00\x00\xBC\x04", 4), QByteArray("\x00\x00", 2),
+            QByteArray("\x00\x00\x00\x01", 4), emmcIds, QByteArray("\x5A\x5A\x5A", 3)};
+}
+QList<QByteArray> stage2Reads(quint32 errorcode)
+{
+    return {be32(errorcode)};
+}
+QList<QByteArray> dramInfoReads()                            // 295-327（0xBC3 之后）
+{
+    return {QByteArray(4, '\0'), QByteArray(16, '\x11'), QByteArray("\x00\x00\x0B\xC4", 4),
+            QByteArray("\x00\x00", 2)};
+}
+QList<QByteArray> emiReadsVer0()                             // 333-398（emiver = 0 → 档 D）
+{
+    return {QByteArray("\x5A", 1), be32(16), QByteArray("\x00\x01", 2), be32(0),
+            QByteArray("\x02", 1), QByteArray("\x00", 1), QByteArray(8, '\0')};
+}
+QList<QByteArray> bootToReads()                              // 907-943（48B 一块）
+{
+    return {QByteArray("\x5A", 1), QByteArray("\x5A", 1), QByteArray("\x5A", 1)};
+}
+QList<QByteArray> flashInfoReads()                           // 526-551（PassInfo ack=0x5A）
+{
+    // 注：**没有**"nand id 表"那一笔 —— NAND info 的两级 count 都是 0 时上游读 **0 字节**
+    // （usblib.py:462-467 的 `while bytestoread > 0` 不成立；T6 实测更正），本实现也不发读请求。
+    // 夹具里塞一个空包会与"不发读"相抵：空包留在队列里被下一笔（9B info2）取走 → 用例假红。
+    return {QByteArray(0x1C, '\0'), QByteArray(0x11, '\0'),
+            QByteArray(9, '\0'), QByteArray(0x5C, '\0'), QByteArray(0x1C, '\0'),
+            QByteArray(0x26, '\0'), QByteArray("\x5A\x00\x00\x00\x00\x00\x00\x00\x00\x00", 10)};
+}
+QList<QByteArray> da1UploadReads(const mtkbrom::DaSelection &sel)   // SEND_DA/JUMP_DA 的回显 + 状态
+{
+    return {QByteArray("\xD7", 1), be32(sel.da1.startAddr), be32(sel.da1.len), be32(sel.da1.sigLen),
+            QByteArray("\x00\x00", 2), QByteArray("\x00\x00\x00\x00", 4),
+            QByteArray("\xD5", 1), be32(sel.da1.startAddr), QByteArray("\x00\x00", 2)};
+}
+
 } // namespace
 
 class TestMtkPayload : public QObject {
@@ -97,6 +143,11 @@ private slots:
     void bootToDa2LegacySendsAddressSizeAndBlocks();
     void bootToDa2ChunksEachPacketAndWaitsAckPerPacket();
     void bootToDa2FailsWhenHeaderNotAcked();
+    // ---- D1-T9: DA 两阶段引导链 ----
+    void bringUpOrdersEmiAfterStorageInfoAndBeforeDa2();
+    void bringUpSkipsEmiWhenNotNeeded();
+    void bringUpAbortsWhenDramConfigNeededWithoutPreloader();
+    void bringUpAbortsBeforeDa2WhenSyncIsWrong();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -840,6 +891,120 @@ void TestMtkPayload::bootToDa2FailsWhenHeaderNotAcked()
     QVERIFY(!mtkbrom::bootToDa2Legacy(s, sel, &err));
     QVERIFY(!err.isEmpty());
     QCOMPARE(m->writeFrames.size(), 3);           // 只发了头部，数据一字节没发
+}
+
+// ---- D1-T9: 引导链（bromBringUpDa）----
+
+// 引导链的**顺序**：DA1 → 0xC0 → 存储信息 → stage2(0xBC3) → draminfo → EMI(0xE8) → boot_to → read_flash_info
+void TestMtkPayload::bringUpOrdersEmiAfterStorageInfoAndBeforeDa2()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+
+    mtkbrom::PreloaderResult pre;
+    pre.origin = mtkbrom::PreloaderOrigin::Explicit;
+    // **可提取**的合成 preloader（共享夹具）：版本 "00" → EMI 档 D（emiver == 0），
+    // 载荷 16 字节 —— 与 emiReadsVer0() 里设备回的 dramlength(16) 对齐。
+    pre.bytes = mtktest::buildEmiPreloader(QByteArray("00", 2), QByteArray(16, '\x11'));
+    pre.path = QStringLiteral("/tmp/preloader.bin");
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
+             << stage2Reads(0xBC3) << dramInfoReads() << emiReadsVer0()
+             << bootToReads() << flashInfoReads();
+    QStringList log;
+    QVERIFY2(mtkbrom::bromBringUpDa(s, sel, 0x6765, /*bromVer=*/5, /*blVer=*/1, pre, &log, &err),
+             qPrintable(err));
+
+    // 关键帧的**相对顺序**（帧号比"存在性"更能抓顺序错位）
+    int idxDa1Payload = -1, idxEmi = -1, idxBootHeader = -1, idxStorageAck = -1;
+    for (int i = 0; i < m->writeFrames.size(); ++i) {
+        if (m->writeFrames.at(i) == sel.da1Bytes) idxDa1Payload = i;
+        if (m->writeFrames.at(i) == QByteArray("\xE8", 1)) idxEmi = i;
+        if (idxDa1Payload >= 0 && idxBootHeader < 0 && m->writeFrames.at(i) == be32(sel.da2.startAddr))
+            idxBootHeader = i;                       // 0x80000000 只可能是 boot_to 的地址字段
+        if (idxStorageAck < 0 && idxDa1Payload >= 0 && i > idxDa1Payload
+            && m->writeFrames.at(i) == QByteArray("\x5A", 1))
+            idxStorageAck = i;                       // DA1 载荷之后第一个单字节 0x5A = 存储交换的 ACK
+    }
+    // 先钉"存在"再钉"相对位置"：缺了 EMI 时 idxEmi 保持 -1，`idxBootHeader > idxEmi` 会**无意义地成立**
+    // （跳过整段的实现也过），所以两步都要。
+    QVERIFY2(idxDa1Payload >= 0, "必须发过 DA1 载荷");
+    QVERIFY2(idxStorageAck >= 0, "必须发过存储信息交换的 ACK");
+    QVERIFY2(idxEmi >= 0, "errorcode == 0xBC3 时必须发过 ENABLE_DRAM(0xE8)");
+    QVERIFY2(idxStorageAck > idxDa1Payload, "存储信息交换必须在 DA1 之后");
+    QVERIFY2(idxEmi > idxStorageAck, "EMI(0xE8) 必须在存储信息交换之后");
+    QVERIFY2(idxBootHeader > idxEmi, "boot_to 必须在 EMI 之后（顺序错 = 真机必挂）");
+    QVERIFY2(log.join('\n').contains(QStringLiteral("emmc")), qPrintable(log.join('\n')));
+}
+
+// errorcode == 0 → **不发 0xE8**，流程继续（DA1 不需要 DRAM 配置；没有 preloader 也只是信息级）
+void TestMtkPayload::bringUpSkipsEmiWhenNotNeeded()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+    mtkbrom::PreloaderResult pre;                       // origin = None
+    pre.skipReason = QStringLiteral("未提供 preloader，且网络获取默认关闭");
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
+             << stage2Reads(0x0) << bootToReads() << flashInfoReads();
+    QStringList log;
+    QVERIFY2(mtkbrom::bromBringUpDa(s, sel, 0x6765, 5, 1, pre, &log, &err), qPrintable(err));
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        QVERIFY2(f != QByteArray("\xE8", 1), "errorcode==0 时不得发 ENABLE_DRAM");
+    QVERIFY2(log.join('\n').contains(QStringLiteral("不需要 DRAM 配置")), qPrintable(log.join('\n')));
+}
+
+// **0xBC3 但没有 preloader → 明确中止**（上游同姿态："Preloader needed due to dram config"；
+// 这是 spec §7 的更正点：缺 preloader 不中止**只在 errorcode == 0 时**成立）
+void TestMtkPayload::bringUpAbortsWhenDramConfigNeededWithoutPreloader()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+    mtkbrom::PreloaderResult pre;                       // origin = None
+    pre.skipReason = QStringLiteral("未提供 preloader");
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
+             << stage2Reads(0xBC3) << dramInfoReads();
+    QStringList log;
+    QVERIFY(!mtkbrom::bromBringUpDa(s, sel, 0x6765, 5, 1, pre, &log, &err));
+    QVERIFY2(err.contains(QStringLiteral("DRAM 配置")), qPrintable(err));
+    // 钉住**是哪条失败**（缺 preloader），不是"随便什么错都算过"：
+    // 变异实测 —— 把本分支的 if 去掉后，空 preloader 会掉进"EMI 提取失败"那条路，
+    // 错误文案里同样含"DRAM 配置" → 只断言前半句时**该变异不被捕获**。
+    QVERIFY2(err.contains(QStringLiteral("没有可用的 preloader")), qPrintable(err));
+    QVERIFY2(err.contains(pre.skipReason), qPrintable(err));   // 跳过原因必须透出给用户
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        QVERIFY2(f != QByteArray("\xE8", 1), "没有 EMI 时不得发 ENABLE_DRAM");
+}
+
+// 0xC0 不对 → 立即失败，且**一个 DA2 字节都不许发**
+void TestMtkPayload::bringUpAbortsBeforeDa2WhenSyncIsWrong()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+    mtkbrom::PreloaderResult pre;
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << da1UploadReads(sel) << QByteArray("\x00", 1);      // 不是 0xC0
+    QStringList log;
+    QVERIFY(!mtkbrom::bromBringUpDa(s, sel, 0x6765, 5, 1, pre, &log, &err));
+    QVERIFY2(err.contains(QStringLiteral("0xC0")), qPrintable(err));
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        QVERIFY2(f != be32(sel.da2.startAddr), "DA1 未就绪时不得进入 boot_to(DA2)");
 }
 
 QTEST_APPLESS_MAIN(TestMtkPayload)

@@ -94,6 +94,9 @@ private slots:
     void listPartitionsParses60ByteEntries();
     void listPartitionsParses58ByteEntries();
     void listPartitionsParses4cByteEntries();
+    // ---- D1-T9: FINISH 收尾 ----
+    void daStorageFinishFlashFrames();
+    void daStorageFinishFlashRequiresDa();
 };
 
 void TestMtkBrom::checksumXorsLittleEndianU16()
@@ -646,6 +649,33 @@ void TestMtkBrom::listPartitionsParses4cByteEntries()
     QCOMPARE(parts[1].name, QStringLiteral("system"));
     QCOMPARE(parts[1].sizeBytes, quint64(0x20000));
     QCOMPARE(parts[1].offsetBytes, quint64(0x20000));
+}
+
+// FINISH 收尾（dalegacy_param.py:91 + dalegacy_lib.py:972-980）：0xD9 → 读 ACK → >I value → 读 ACK
+void TestMtkBrom::daStorageFinishFlashFrames()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    m->reads << QByteArray("\x5A", 1) << QByteArray("\x5A", 1);
+    QString err;
+    QVERIFY2(st.finishFlash(0, &err), qPrintable(err));
+    QCOMPARE(m->writes, QByteArray("\xD9\x00\x00\x00\x00", 5));   // 命令 + >I value
+}
+
+// 未激活 DA 时必须明确报错（不许假装发过）
+void TestMtkBrom::daStorageFinishFlashRequiresDa()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::DaStorage st(s);
+    QString err;
+    QVERIFY(!st.finishFlash(0, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY2(m->writes.isEmpty(), "未激活 DA 时一个字节都不许发");
 }
 
 QTEST_APPLESS_MAIN(TestMtkBrom)
