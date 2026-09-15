@@ -11,6 +11,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include "core/bytes_format.h"
+
 class QCheckBox;
 class QLabel;
 class QListWidget;
@@ -18,16 +20,11 @@ class QPushButton;
 class QStandardItemModel;
 class QTableView;
 
-// 字节数人性化（两个对话框共用）
+// 字节数人性化（两个对话框共用）。实现已抽到 core/bytes_format.h（计划层与 UI 同源一份，
+// D1 Task 7）—— 这里只保留转发，签名与调用方不变。
 inline QString planBytesText(quint64 bytes)
 {
-    if (bytes >= 1024ull * 1024 * 1024)
-        return QStringLiteral("%1 GiB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 2);
-    if (bytes >= 1024ull * 1024)
-        return QStringLiteral("%1 MiB").arg(bytes / (1024.0 * 1024), 0, 'f', 1);
-    if (bytes >= 1024ull)
-        return QStringLiteral("%1 KiB").arg(bytes / 1024.0, 0, 'f', 0);
-    return QStringLiteral("%1 B").arg(bytes);
+    return humanBytes(bytes);
 }
 
 class PlanPreviewWidget : public QWidget
