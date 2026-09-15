@@ -308,7 +308,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_da_file.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_table.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_table.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_emi.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -493,6 +494,12 @@ if(ENABLE_IMAGE_TESTS)
                     # hwconfig 转写；src/core/modes 已 GLOB 编入主程序，不属任何静态库）
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_preloader_emi")
+                    # D1 Task 5：preloader EMI 提取（纯函数，只依赖 Qt Core；src/core/modes
+                    # 已 GLOB 编入主程序，不属任何静态库）。真样本宏（MTK_SAMPLES_DIR /
+                    # MTK_SAMPLES_REQUIRED）已在下方按名命中本 stem，无需重复。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
