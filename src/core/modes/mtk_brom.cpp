@@ -613,6 +613,46 @@ bool BromSession::jumpDa64(quint32 addr, QString *error)
     return true;
 }
 
+bool BromSession::getBromVer(quint8 &out, QString *error)
+{
+    // 对照 get_bromver()（mtk_preloader.py:657-662）：写 0xFF → 读 1B。**无回显校验**
+    // （与 echoCmd 不同：上游直接 usbwrite+usbread）。读不到就不写 out（不把 0 当版本号）
+    if (!m_usb) {
+        if (error) *error = QStringLiteral("未打开 USB 通道");
+        return false;
+    }
+    if (!m_usb->write(QByteArray(1, char(CMD_GET_VERSION)), error))
+        return false;
+    QByteArray res;
+    if (!m_usb->read(res, 1, 1000, error) || res.size() != 1) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("BROM 版本读取失败（0xFF 无回应）");
+        return false;
+    }
+    out = quint8(res.at(0));
+    return true;
+}
+
+bool BromSession::getBlVer(quint8 &out, QString *error)
+{
+    // 对照 get_blver()（mtk_preloader.py:664-673）：写 0xFE → 读 1B；值 == 0xFE 表示仍在 BROM
+    // （上游据此置 is_brom）—— 本实现只记录值，不据此分支
+    if (!m_usb) {
+        if (error) *error = QStringLiteral("未打开 USB 通道");
+        return false;
+    }
+    if (!m_usb->write(QByteArray(1, char(CMD_GET_BL_VER)), error))
+        return false;
+    QByteArray res;
+    if (!m_usb->read(res, 1, 1000, error) || res.size() != 1) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("BL 版本读取失败（0xFE 无回应）");
+        return false;
+    }
+    out = quint8(res.at(0));
+    return true;
+}
+
 bool BromSession::close(QString *error)
 {
     Q_UNUSED(error)

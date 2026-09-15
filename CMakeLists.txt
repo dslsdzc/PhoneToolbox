@@ -343,8 +343,11 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_payload")
+                    # D1-T6：夹具 makeSelection() 走 parseDaFile/selectDaEntry（mtk_test_helpers.h），
+                    # 不补 mtk_da_file.cpp 会在链接期炸（undef）。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")

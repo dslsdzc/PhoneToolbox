@@ -563,8 +563,10 @@ bool MtkHandler::resetDevice()
 
 // ==================== F1-3: BROM 直刷路由（骨架） ====================
 
-// F1-3 集成点：BROM 直刷路由（骨架）。枚举 → libusb 打开 → BromSession →
-// sendPayload（DA 二进制由调用方提供）→ DaStorage 逐分区刷写。
+// F1-3 集成点：BROM 直刷路由（骨架）。枚举 → libusb 打开 → BromSession → （**未接线**）。
+// D1-T6 起旧的 sendPayload（addr=0/sigLen=0 上传整文件）已删除；真正的两阶段
+// （DA 解析 → sendDa1 → 0xC0 → 存储信息 → stage2 → EMI → boot_to → read_flash_info）
+// 是 Task 9 的 bromBringUpDa —— 在那之前本函数在 target_config 检查后明确失败。
 // 诚实边界：SLA/DAA 设备返回明确错误；V6 修补平台标注不支持。
 // 不改动现有 mtk_bridge JSON-RPC 主路径（上方 MtkHandler 成员方法保持原行为）。
 bool runBromFlash(const QByteArray &daBinary,
@@ -589,15 +591,14 @@ bool runBromFlash(const QByteArray &daBinary,
         if (error) *error = QStringLiteral("设备启用 SLA/DAA 认证，暂不支持（RSA 响应自研为后续任务）");
         return false;
     }
-    // 当前 sendPayload 使用地址 0/签名长度 0 —— 仅协议验证用途；真实刷写需 DA 头解析
-    // （brom_payload_addr 每芯片不同）落地后启用
-    if (!mtkbrom::sendPayload(session, daBinary, error))
-        return false;
-    mtkbrom::DaStorage st(session);
-    st.setDaActive(true);
-    for (const auto &p : partitions) {
-        if (!mtkbrom::flashPartition(session, st, p.first, p.second, error))
-            return false;
-    }
-    return true;
+    // D1-T6：旧 sendPayload（把**整个文件**按 addr=0/sigLen=0 上传）已删除 —— 真机必错。
+    // 正确路径是「解析 AllInOne DA → 选条目 → sendDa1(region[1]) → 0xC0 → 存储信息交换 →
+    // stage2 配置 → EMI → boot_to(DA2) → read_flash_info」= Task 9 的 bromBringUpDa。
+    // 在它落地前本骨架**明确失败**：不静默回退到旧的无地址上传，也不进 DaStorage 半成品路径。
+    Q_UNUSED(daBinary)
+    Q_UNUSED(partitions)
+    if (error)
+        *error = QStringLiteral("BROM 直刷骨架未接线：需先解析 DA 文件并走 DA1/DA2 两阶段"
+                                "（Task 9 交付后启用）");
+    return false;
 }

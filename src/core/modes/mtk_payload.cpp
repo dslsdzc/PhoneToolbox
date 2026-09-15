@@ -1,21 +1,519 @@
 #include "core/modes/mtk_payload.h"
 
-namespace mtkbrom {
+#include <QThread>
 
-bool sendPayload(BromSession &s, const QByteArray &daBinary, QString *error)
+namespace mtkbrom {
+namespace {
+
+// 读满 n 字节（走 IBromUsb::readExact：真机由传输层累加拆包，见 mtk_brom.h）。
+// dst 可为 nullptr（只读走、不解析 —— 上游那些"读了就扔"的字段）。
+bool readExactBytes(IBromUsb *u, int n, const QString &what, QByteArray *dst, QString *error)
 {
-    // 对照规格 §2.4 SEND_DA 完整时序：echo 0xD7 → addr/size/sig_len（4B BE 回显）
-    // → 状态字（0x1D0D=SLA）→ 数据上传 → checksum+status；随后 JUMP_DA：
-    // echo 0xD5 → addr 回显 → status==0 跳转成功。
-    // 地址默认 0x0、签名长度默认 0（DA 载荷头部解析为后续任务）。
-    if (daBinary.isEmpty()) {
-        if (error) *error = QStringLiteral("DA 二进制为空（需调用方提供，自研提取为后续任务）");
+    QByteArray b;
+    if (!u->readExact(b, n, 3000, error)) {
+        if (error && error->isEmpty())
+            *error = QStringLiteral("%1 读取不足（要 %2 字节）").arg(what).arg(n);
         return false;
     }
-    if (!s.sendDa(0, quint32(daBinary.size()), 0, daBinary, error))
+    if (dst) *dst = b;
+    return true;
+}
+
+quint16 be16At(const QByteArray &b, int off)
+{
+    return quint16((quint8(b.at(off)) << 8) | quint8(b.at(off + 1)));
+}
+
+quint32 be32At(const QByteArray &b, int off)
+{
+    return (quint32(quint8(b.at(off))) << 24) | (quint32(quint8(b.at(off + 1))) << 16)
+         | (quint32(quint8(b.at(off + 2))) << 8) | quint32(quint8(b.at(off + 3)));
+}
+
+// 大端 4B 编码（**本文件唯一的实现**：sendStage2Config / sendEmiLegacy / bootToDa2Legacy 共用）
+QByteArray be32(quint32 v)
+{
+    QByteArray b(4, '\0');
+    b[0] = char((v >> 24) & 0xFF); b[1] = char((v >> 16) & 0xFF);
+    b[2] = char((v >> 8) & 0xFF);  b[3] = char(v & 0xFF);
+    return b;
+}
+
+// 读 4B 大端字段（EMI 各档位的 dramlength 共用 —— 逐档读的位置不同，但字段本身同构）
+bool readBe32Field(IBromUsb *u, quint32 &out, const QString &what, QString *error)
+{
+    QByteArray b;
+    if (!readExactBytes(u, 4, what, &b, error))
         return false;
-    if (!s.jumpDa(0, error))
+    out = be32At(b, 0);
+    return true;
+}
+
+constexpr quint8 kAck = 0x5A;        // Rsp.ACK（dalegacy_param.py:139）
+constexpr quint8 kNack = 0xA5;       // Rsp.NACK（:140）
+
+} // namespace
+
+// ---- DA1 ----
+
+// DA1：取代旧 sendPayload。地址/长度/签名长度**全部来自 region[1]**（三代共同硬编码，spec §2 P5）。
+bool sendDa1(BromSession &s, const DaSelection &sel, QString *error)
+{
+    if (sel.da1Bytes.isEmpty()) {
+        if (error) *error = QStringLiteral("DA1 载荷为空（region[1].m_len == 0 的条目应在选择阶段被跳过）");
         return false;
+    }
+    if (sel.da1Bytes.size() != int(sel.da1.len)) {
+        if (error) *error = QStringLiteral("DA1 切片长度异常（%1 != m_len %2）")
+                                .arg(sel.da1Bytes.size()).arg(sel.da1.len);
+        return false;
+    }
+    if (!s.sendDa(sel.da1.startAddr, sel.da1.len, sel.da1.sigLen, sel.da1Bytes, error))
+        return false;
+    return s.jumpDa(sel.da1.startAddr, error);
+}
+
+// DA1 起来后**只回单字节 0xC0**（dalegacy_lib.py:596-601）。LEGACY 没有 SYNC/SETUP_ENVIRONMENT/
+// SETUP_HW_INIT_PARAMS —— 那些是 XFlash 的；这里只等这一个字节。
+bool waitDa1Ready(BromSession &s, int timeoutMs, QString *error)
+{
+    QByteArray b;
+    if (!s.usb()->read(b, 1, timeoutMs, error))
+        return false;
+    if (b.size() != 1 || quint8(b.at(0)) != 0xC0) {
+        if (error)
+            *error = QStringLiteral("DA1 就绪信号不是 0xC0（收到 %1 字节%2）")
+                         .arg(b.size())
+                         .arg(b.isEmpty() ? QString()
+                                          : QStringLiteral("，首字节 0x%1")
+                                                .arg(quint8(b.at(0)), 2, 16, QLatin1Char('0')));
+        return false;
+    }
+    return true;
+}
+
+// 存储信息交换（dalegacy_lib.py:607-633 逐句）：
+//   读 4B NAND_INFO(期望 0xBC4，只记日志) → 2B id 数 → id数×2B → 4B EMMC_INFO → 4×4B → 写 1B ACK → 读 3×1B
+// 顺带按上游规则（:621-628）定存储类型：nandids[0] != 0 → nand；否则 emmcids[0] != 0 → emmc；否则 nor。
+// 不做这一步，DA1 不会进入 stage2 配置（后面所有步骤都会错位）。
+bool exchangeDa1StorageInfo(BromSession &s, QString *flashtype, QStringList *log, QString *error)
+{
+    IBromUsb *u = s.usb();
+    QByteArray nandInfo;
+    if (!readExactBytes(u, 4, QStringLiteral("DA1 存储信息：NAND_INFO"), &nandInfo, error))
+        return false;
+    QByteArray idsRaw;
+    if (!readExactBytes(u, 2, QStringLiteral("DA1 存储信息：NAND id 数量"), &idsRaw, error))
+        return false;
+    const quint16 ids = be16At(idsRaw, 0);
+    QByteArray nandIds;
+    if (ids > 0 && !readExactBytes(u, int(ids) * 2, QStringLiteral("DA1 存储信息：NAND id 表"), &nandIds, error))
+        return false;
+    QByteArray emmcInfo;
+    if (!readExactBytes(u, 4, QStringLiteral("DA1 存储信息：EMMC_INFO"), &emmcInfo, error))
+        return false;
+    QByteArray emmcIds;
+    if (!readExactBytes(u, 16, QStringLiteral("DA1 存储信息：EMMC id 表(4×4B)"), &emmcIds, error))
+        return false;
+    if (!u->write(QByteArray(1, char(kAck)), error))             // usbwrite(ACK)
+        return false;
+    if (!readExactBytes(u, 3, QStringLiteral("DA1 存储信息：装置确认字节(3×1B)"), nullptr, error))
+        return false;
+
+    const bool hasNand = !nandIds.isEmpty() && be16At(nandIds, 0) != 0;
+    const bool hasEmmc = be32At(emmcIds, 0) != 0;
+    const QString type = hasNand ? QStringLiteral("nand")
+                                 : (hasEmmc ? QStringLiteral("emmc") : QStringLiteral("nor"));
+    if (flashtype) *flashtype = type;
+    if (log)
+        *log << QStringLiteral("DA1 存储信息：NAND_INFO=0x%1，NAND id 数=%2，EMMC_INFO=0x%3 → 存储类型 %4")
+                    .arg(be32At(nandInfo, 0), 8, 16, QLatin1Char('0'))
+                    .arg(ids)
+                    .arg(be32At(emmcInfo, 0), 8, 16, QLatin1Char('0'))
+                    .arg(type);
+    return true;
+}
+
+// bmtflag / bmtpartsize（上游 mtk_config.py:231-283 bmtsettings(hwcode)）。
+// **D1 只做 eMMC**：上游那些 nand 分支不实现（D1 的存储路径只有 eMMC —— PMT/分区表），
+// flashtype != "emmc" 由调用方拒绝。故下表只列 eMMC 分支，且 blockcount 不上线（不发给设备）：
+//   默认        → flag 1 / partSize 0
+//   [0x6592,0x8127,0x6571]            emmc → partSize 0x1500000（:235-239）
+//   [0x6575]                          emmc → partSize 0x1500000（:253-260）
+//   [0x6582]                          emmc → flag 2 + partSize 0x1500000（:261-265）
+// 其余芯片（0x6570/0x8167/0x6580/0x6735/0x6753/0x6755/0x6752/0x6595/0x6795/0x6767/0x6797/0x8163）
+// 在上游就是"默认值"分支（:240-243），与默认逐字相同 → 不列。
+namespace {
+struct BmtSettings { quint8 flag = 1; quint32 partSize = 0; };
+BmtSettings bmtSettings(quint16 hwCode)
+{
+    BmtSettings s;                                   // 上游默认：bmtflag = 1、bmtpartsize = 0
+    if (hwCode == 0x6592 || hwCode == 0x8127 || hwCode == 0x6571
+        || hwCode == 0x6575 || hwCode == 0x6582)
+        s.partSize = 0x1500000;                      // emmc 分支
+    if (hwCode == 0x6582)
+        s.flag = 2;                                  // emmc 分支（:263）
+    return s;
+}
+} // namespace
+
+// stage2 配置写入 + errorcode 握手（dalegacy_lib.py:228-403 逐句）。
+// ⚠️ 顺序/取值必须与上游逐字节一致（真机不接受就整条链失败）：
+//   B bromver → B blver → >H 0x0008 → B 0x00 → >I 0x7007FFFF → B bmtflag → >I bmtpartsize
+//   → B 0x01(force_charge) → B resetkeys(1；0x6583 为 0) → B 0x02(ext_clock) → B 0x00(msdc_boot_ch)
+//   → 按 hwcode 追加（:256-278）：0x6592 写 >I 0；{0x6580,0x8163,0x8127} 写 [0x8127 先 >I 0]
+//     + >I 0x1 + 20B 常量；{0x6583,0x6589} 写 >I forcedram(0/1)；0x6582 写 >I 1
+//     （上游 :273 的 `elif hwcode == 0x8127` 分支在 :258 已被捕获 → **不可达**，本实现同序）
+//   → sleep(0.350) → 读 4B errorcode（大端）
+//     0x0   → *emiNeeded = false（不需要 DRAM 配置，本步正常结束；0x6592 另读 5×4B）
+//     0xBC3 → *emiNeeded = true（调用方再接 beginEmiDramInfo + sendEmiLegacy）
+//     其它  → 失败（上游 eh.status(errorcode) 报错）
+bool sendStage2Config(BromSession &s, quint16 hwCode, quint8 bromVer, quint8 blVer,
+                      const QString &flashtype, bool *emiNeeded, QStringList *log, QString *error)
+{
+    if (emiNeeded) *emiNeeded = false;
+    if (flashtype != QStringLiteral("emmc")) {
+        if (error) *error = QStringLiteral("存储类型为 %1 —— Phase D1 只支持 eMMC（NAND/NOR 的 BMT 分支未实现）")
+                                .arg(flashtype);
+        return false;
+    }
+    IBromUsb *u = s.usb();
+    const BmtSettings bmt = bmtSettings(hwCode);
+
+    if (!u->write(QByteArray(1, char(bromVer)), error))
+        return false;
+    if (!u->write(QByteArray(1, char(blVer)), error))
+        return false;
+    if (!u->write(QByteArray("\x00\x08", 2), error))             // m_nor_chip = 0x08
+        return false;
+    if (!u->write(QByteArray(1, '\x00'), error))                 // m_nor_chip_select = CS_0
+        return false;
+    if (!u->write(be32(0x7007FFFF), error))                      // m_nand_acccon
+        return false;
+    if (!u->write(QByteArray(1, char(bmt.flag)), error))
+        return false;
+    if (!u->write(be32(bmt.partSize), error))
+        return false;
+    if (!u->write(QByteArray(1, '\x01'), error))                 // force_charge = 1
+        return false;
+    if (!u->write(QByteArray(1, char(hwCode == 0x6583 ? 0 : 1)), error))   // resetkeys
+        return false;
+    if (!u->write(QByteArray(1, '\x02'), error))                 // ext_clock = EXT_26M
+        return false;
+    if (!u->write(QByteArray(1, '\x00'), error))                 // msdc_boot_ch = 0
+        return false;
+
+    if (hwCode == 0x6592) {
+        if (!u->write(be32(0), error))                           // is_gpt_solution = 0
+            return false;
+    } else if (hwCode == 0x6580 || hwCode == 0x8163 || hwCode == 0x8127) {
+        if (hwCode == 0x8127 && !u->write(be32(0), error))       // is_gpt_solution（仅 0x8127）
+            return false;
+        if (!u->write(be32(1), error))                           // slc_percent = 1
+            return false;
+        // 上游 :264 的常量 = **20 字节**（4646 + 00×14 + ff000000）
+        if (!u->write(QByteArray::fromHex("46460000000000000000000000000000ff000000"), error))
+            return false;
+    } else if (hwCode == 0x6583 || hwCode == 0x6589) {
+        if (!u->write(be32(hwCode == 0x6589 ? 1u : 0u), error))  // forcedram
+            return false;
+    } else if (hwCode == 0x6582) {
+        if (!u->write(be32(1), error))                           // newcombo = 1
+            return false;
+    }
+
+    QThread::msleep(350);                                        // 上游 time.sleep(0.350)
+    quint32 errorcode = 0;
+    if (!readBe32Field(u, errorcode, QStringLiteral("stage2 errorcode"), error))
+        return false;
+    if (errorcode == 0x0) {
+        if (hwCode == 0x6592)                                    // 上游特例：另读 5×4B（:286-291）
+            if (!readExactBytes(u, 20, QStringLiteral("stage2（0x6592 特例 5×4B）"), nullptr, error))
+                return false;
+        if (log)
+            *log << QStringLiteral("stage2 配置完成：不需要 DRAM 配置（errorcode = 0）");
+        return true;
+    }
+    if (errorcode == 0xBC3) {
+        if (emiNeeded) *emiNeeded = true;
+        if (log)
+            *log << QStringLiteral("stage2：DA1 要求 DRAM 配置（errorcode = 0xBC3）");
+        return true;
+    }
+    if (error) *error = QStringLiteral("stage2 配置被拒绝：errorcode = 0x%1")
+                            .arg(errorcode, 8, 16, QLatin1Char('0'));
+    return false;
+}
+
+// errorcode == 0xBC3 之后的读取（dalegacy_lib.py:295-327 逐句）：
+//   读 4B（丢弃）→ 读 16B draminfo（**大端**；上游还会做 4 字节组反转的第二种排列用于本地 preloader 匹配）
+//   → 读 4B **必须 == 0xBC4** → 读 2B nand_id_count → count×2B。
+// draminfo 交回调用方 —— **仅用于日志**（D1 不做"按 draminfo 在固件目录里找 preloader"的自动匹配：
+// 那是上游在 EMI 未定时的补救路径，我们把"EMI 必须显式给出"作为诚实边界）。
+bool beginEmiDramInfo(BromSession &s, QByteArray *dramInfo, QStringList *log, QString *error)
+{
+    IBromUsb *u = s.usb();
+    if (!readExactBytes(u, 4, QStringLiteral("dram 配置前的 4B"), nullptr, error))
+        return false;
+    QByteArray info;
+    if (!readExactBytes(u, 16, QStringLiteral("draminfo(16B)"), &info, error))
+        return false;
+    if (dramInfo) *dramInfo = info;
+    quint32 retval = 0;
+    if (!readBe32Field(u, retval, QStringLiteral("dram read 回执"), error))
+        return false;
+    if (retval != 0xBC4) {
+        if (error) *error = QStringLiteral("dram read 回执不是 0xBC4（收到 0x%1）")
+                                .arg(retval, 8, 16, QLatin1Char('0'));
+        return false;
+    }
+    QByteArray cnt;
+    if (!readExactBytes(u, 2, QStringLiteral("dram nand id 数量"), &cnt, error))
+        return false;
+    const quint16 nandIdCount = be16At(cnt, 0);
+    if (nandIdCount > 0 && !readExactBytes(u, int(nandIdCount) * 2,
+                                           QStringLiteral("dram nand id 表"), nullptr, error))
+        return false;
+    if (log)
+        *log << QStringLiteral("DRAM info（16B，仅供参考）：%1")
+                    .arg(QString::fromLatin1(info.toHex(' ')));
+    return true;
+}
+
+// DA2 存活判据（dalegacy_lib.py:526-552 逐句；调用点 :640）。
+// 上游把这 200+ 字节全读走再解析 —— **必须读走**，否则残留字节会污染随后的 PMT 读取（错位）。
+// 本实现只解析 PassInfo（存活判据），NOR/NAND/EMMC 详情只记字节数（存储详情解析属 D2/D3）。
+// ⚠️ nandcount 两级都为 0 时上游走 `usbread(-4)`（负长度 = 读到没有为止）—— 本实现用**有界读**
+//    （上限 0x1000 字节、每次 100 ms，读到空/失败即停）。该分支**真机未验证**（见计划诚实边界）。
+bool readFlashInfoDa2(BromSession &s, quint16 hwCode, QStringList *log, QString *error)
+{
+    IBromUsb *u = s.usb();
+    if (!readExactBytes(u, 0x1C, QStringLiteral("read_flash_info：NOR info"), nullptr, error))
+        return false;
+    QByteArray nand;
+    if (!readExactBytes(u, 0x11, QStringLiteral("read_flash_info：NAND info"), &nand, error))
+        return false;
+
+    // Legacy_NandInfo64（dalegacy_flash_param.py:69-78）：dword(4)+bytes(1)+short(2)+qword(8)+short(2)
+    //   → m_nand_flash_id_count 在偏移 15
+    quint16 nandcount = be16At(nand, 15);
+    if (nandcount == 0) {
+        // Legacy_NandInfo32（:170-179）：dword(4)+bytes(1)+short(2)+dword(4)+short(2) → count 在偏移 11
+        nandcount = be16At(nand, 11);
+        if (nandcount == 0) {
+            int total = 0;                                       // 上游 usbread(-4)：读到没有为止（有界化）
+            while (total < 0x1000) {
+                QByteArray chunk;
+                if (!u->read(chunk, 0x400, 100, nullptr) || chunk.isEmpty())
+                    break;
+                total += chunk.size();
+            }
+            if (log)
+                *log << QStringLiteral("read_flash_info：NAND 计数为 0（上游此处读至超时），有界读走 %1 字节")
+                            .arg(total);
+        } else if (nandcount > 2
+                   && !readExactBytes(u, nandcount * 2 - 4,
+                                      QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
+            return false;                                        // 上游 :535 复用 NAND info 尾部 4B
+        }
+    } else if (!readExactBytes(u, nandcount * 2,
+                               QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
+        return false;
+    }
+
+    if (!readExactBytes(u, 9, QStringLiteral("read_flash_info：NAND info2"), nullptr, error))
+        return false;
+    if (!readExactBytes(u, 0x5C, QStringLiteral("read_flash_info：EMMC info"), nullptr, error))
+        return false;
+    if (!readExactBytes(u, 0x1C, QStringLiteral("read_flash_info：SDC info"), nullptr, error))
+        return false;
+    if (!readExactBytes(u, 0x26, QStringLiteral("read_flash_info：flashconfig"), nullptr, error))
+        return false;
+    // hwcode ∈ {0x8127, 0x8163} 时上游另读 4B（dalegacy_lib.py:543-545）
+    if (hwCode == 0x8127 || hwCode == 0x8163) {
+        if (!readExactBytes(u, 4, QStringLiteral("read_flash_info：hwcode 附加 4B"), nullptr, error))
+            return false;
+    }
+
+    // PassInfo（dalegacy_lib.py:28-39，共 0xA）：ack(1B) + m_download_status(4B BE)
+    //   + m_boot_style(4B BE) + soc_ok(1B)
+    QByteArray pass;
+    if (!readExactBytes(u, 0xA, QStringLiteral("read_flash_info：PassInfo"), &pass, error))
+        return false;
+    const quint8 ack = quint8(pass.at(0));
+    const quint32 dlStatus = be32At(pass, 1);
+    if (log)
+        *log << QStringLiteral("DA2 存活判据：PassInfo ack=0x%1，download_status=0x%2，boot_style=0x%3")
+                    .arg(ack, 2, 16, QLatin1Char('0'))
+                    .arg(dlStatus, 8, 16, QLatin1Char('0'))
+                    .arg(be32At(pass, 5), 8, 16, QLatin1Char('0'));
+    if (ack == 0x5A)
+        return true;                                             // 上游第一分支（:547-548）
+    if ((dlStatus & 0xFF) == 0x5A) {                             // 上游第二分支（:549-551）：再读 1B
+        if (!readExactBytes(u, 1, QStringLiteral("read_flash_info：状态补充字节"), nullptr, error))
+            return false;
+        return true;
+    }
+    if (error)
+        *error = QStringLiteral("DA2 未就绪：PassInfo ack=0x%1 且 download_status=0x%2（都不含 0x5A）")
+                     .arg(ack, 2, 16, QLatin1Char('0'))
+                     .arg(dlStatus, 8, 16, QLatin1Char('0'));
+    return false;
+}
+
+// LEGACY EMI/DRAM 初始化（dalegacy_lib.py:333-398 逐句对应；地址/长度全**大端**）。
+bool sendEmiLegacy(BromSession &s, const EmiData &emi, quint16 hwCode, QString *error)
+{
+    if (emi.bytes.isEmpty()) {
+        if (error) *error = QStringLiteral("EMI 数据为空");
+        return false;
+    }
+    IBromUsb *u = s.usb();
+
+    if (!u->write(QByteArray(1, char(0xE8)), error))                        // ENABLE_DRAM（:334）
+        return false;
+    if (!u->write(be32(emi.ver == 0 ? 0xFFFFFFFFu : emi.ver), error))       // emiver==0 → 0xFFFFFFFF
+        return false;
+    QByteArray ret;
+    if (!readExactBytes(u, 1, QStringLiteral("EMI 版本应答"), &ret, error))
+        return false;
+    if (quint8(ret.at(0)) == kNack) {
+        if (error) *error = QStringLiteral("设备拒绝 EMI 配置（NACK）—— preloader 可能不匹配");
+        return false;
+    }
+    if (quint8(ret.at(0)) != kAck) {
+        if (error) *error = QStringLiteral("EMI 阶段期望 ACK，收到 0x%1")
+                                .arg(quint8(ret.at(0)), 2, 16, QLatin1Char('0'));
+        return false;
+    }
+
+    // ---- 逐档差异（dalegacy_lib.py:345-371）----
+    // ⚠️ **读 dramlength 的位置逐档不同**，不是统一在分档之前：
+    //   档 A [0xF,0x10,0x11,0x14,0x15]：先读 4B dramlength → 写 ACK → （非 0x8127）写 >I lendram
+    //   档 B [0x0A,0x0B]：**先读 0x10 字节 info** → 再读 4B dramlength → 写 ACK
+    //   档 C [0x0C,0x0D]：读 4B dramlength → 写 ACK → 改写 EMI 本体（>I 0x100 + emi[4:dramlength]）
+    //   档 D [0x00]：读 4B dramlength → 写 ACK → 截断 EMI → 写 >I dramlength
+    //   其它档：上游只 warning，**不读不写**（EMI 原样发出）
+    QByteArray emiBytes = emi.bytes;
+    quint32 dramlength = 0;
+    if (emi.ver == 0x0F || emi.ver == 0x10 || emi.ver == 0x11 || emi.ver == 0x14 || emi.ver == 0x15) {
+        if (!readBe32Field(u, dramlength, QStringLiteral("EMI 档 A：RAM-Length"), error))
+            return false;
+        if (!u->write(QByteArray(1, char(kAck)), error))
+            return false;
+        if (hwCode != 0x8127)                                        // 上游对 0x8127 特例**不写** lendram（:350）
+            if (!u->write(be32(quint32(emiBytes.size())), error))
+                return false;                                        // lendram = len(emi)（未截断）
+    } else if (emi.ver == 0x0A || emi.ver == 0x0B) {
+        if (!readExactBytes(u, 0x10, QStringLiteral("EMI 档 B：RAM-Info(0x10B)"), nullptr, error))
+            return false;
+        if (!readBe32Field(u, dramlength, QStringLiteral("EMI 档 B：RAM-Length"), error))
+            return false;
+        if (!u->write(QByteArray(1, char(kAck)), error))
+            return false;                                            // 本档**不写** dramlength（:353-356）
+    } else if (emi.ver == 0x0C || emi.ver == 0x0D) {
+        if (!readBe32Field(u, dramlength, QStringLiteral("EMI 档 C：RAM-Length"), error))
+            return false;
+        if (!u->write(QByteArray(1, char(kAck)), error))
+            return false;
+        if (dramlength > quint32(emiBytes.size())) {
+            if (error) *error = QStringLiteral("EMI 长度不足（dramlength=%1 > %2）")
+                                    .arg(dramlength).arg(emiBytes.size());
+            return false;
+        }
+        // 上游 :361-362：先 emi[:dramlength]，再 >I 0x100 + emi[4:dramlength]（dramlength < 4 时后半为空）
+        emiBytes = be32(0x100) + emiBytes.left(int(dramlength)).mid(4);
+    } else if (emi.ver == 0x00) {
+        if (!readBe32Field(u, dramlength, QStringLiteral("EMI 档 D：RAM-Length"), error))
+            return false;
+        if (!u->write(QByteArray(1, char(kAck)), error))
+            return false;
+        if (dramlength > quint32(emiBytes.size())) {
+            if (error) *error = QStringLiteral("EMI 长度不足（dramlength=%1 > %2）")
+                                    .arg(dramlength).arg(emiBytes.size());
+            return false;
+        }
+        emiBytes = emiBytes.left(int(dramlength));                   // 上游 :367-369
+        if (!u->write(be32(dramlength), error))
+            return false;
+    }
+    // else：未知版本 → 上游 warning 后**继续**（不读不写、EMI 原样发出）
+
+    if (!u->write(emiBytes, error))                                  // 发 EMI 本体（:372）
+        return false;
+    if (!readExactBytes(u, 2, QStringLiteral("EMI checksum"), nullptr, error))
+        return false;                                                // checksum（>H）只记日志（上游同）
+    if (!u->write(QByteArray(1, char(kAck)), error))
+        return false;
+    if (!u->write(be32(0x80000001), error))                          // "Send DRAM config"（:376）
+        return false;
+    quint32 mExtRamRet = 0;
+    if (!readBe32Field(u, mExtRamRet, QStringLiteral("M_EXT_RAM_RET"), error))
+        return false;
+    if (mExtRamRet != 0) {
+        if (error) *error = QStringLiteral("DRAM 初始化失败：M_EXT_RAM_RET = 0x%1")
+                                .arg(mExtRamRet, 8, 16, QLatin1Char('0'));
+        return false;
+    }
+    if (!readExactBytes(u, 1, QStringLiteral("M_EXT_RAM_TYPE"), nullptr, error)
+        || !readExactBytes(u, 1, QStringLiteral("M_EXT_RAM_CHIP_SELECT"), nullptr, error)
+        || !readExactBytes(u, 8, QStringLiteral("M_EXT_RAM_SIZE"), nullptr, error))
+        return false;                                                // 三者都只记日志（上游同）
+    if (emi.ver == 0x0D) {
+        for (int i = 0; i < 5; ++i)                                  // 上游固定读 5×4B（Raw/CJ，:392-398）
+            if (!readExactBytes(u, 4, QStringLiteral("EMI 档 D 附加字段"), nullptr, error))
+                return false;
+    }
+    return true;
+}
+
+// DA2：`>I addr` → `>I size` → `>I packetsize(0x1000)` → 读 1B ACK → 分块写（每块读 1B ACK）→
+//   sleep(0.5) → 写 ACK → 读 1B ACK（dalegacy_lib.py:907-944 的 brom_send(…, stage=2)）。
+// ⚠️ **LEGACY 保留尾部签名**：发送的是 region[2] 的完整 m_len 字节（不裁 sigLen）——
+//   签名在 DA2 内部由它自己校验，裁了反而起不来。
+bool bootToDa2Legacy(BromSession &s, const DaSelection &sel, QString *error)
+{
+    if (sel.da2Bytes.isEmpty()) {
+        if (error) *error = QStringLiteral("DA2 载荷为空（region[2].m_len == 0）");
+        return false;
+    }
+    IBromUsb *u = s.usb();
+    const quint32 kPacketsize = 0x1000;
+    if (!u->write(be32(sel.da2.startAddr), error))
+        return false;
+    if (!u->write(be32(quint32(sel.da2Bytes.size())), error))        // size = m_len（不是 m_len - sigLen）
+        return false;
+    if (!u->write(be32(kPacketsize), error))
+        return false;
+    QByteArray ack;
+    if (!readExactBytes(u, 1, QStringLiteral("boot_to 头部 ACK"), &ack, error))
+        return false;
+    if (quint8(ack.at(0)) != kAck) {
+        if (error) *error = QStringLiteral("boot_to 头部后未收到 ACK（收到 0x%1）")
+                                .arg(quint8(ack.at(0)), 2, 16, QLatin1Char('0'));
+        return false;
+    }
+    for (int off = 0; off < sel.da2Bytes.size(); off += int(kPacketsize)) {
+        if (!u->write(sel.da2Bytes.mid(off, int(kPacketsize)), error))
+            return false;
+        if (!readExactBytes(u, 1, QStringLiteral("boot_to 数据块 ACK"), &ack, error))
+            return false;
+        if (quint8(ack.at(0)) != kAck) {
+            if (error) *error = QStringLiteral("boot_to 第 %1 块后未收到 ACK（收到 0x%2）")
+                                    .arg(off / int(kPacketsize))
+                                    .arg(quint8(ack.at(0)), 2, 16, QLatin1Char('0'));
+            return false;
+        }
+    }
+    QThread::msleep(500);                                           // 上游 time.sleep(0.5)
+    if (!u->write(QByteArray(1, char(kAck)), error))
+        return false;
+    if (!readExactBytes(u, 1, QStringLiteral("boot_to 收尾 ACK"), &ack, error))
+        return false;
+    if (quint8(ack.at(0)) != kAck) {
+        if (error) *error = QStringLiteral("boot_to 收尾未收到 ACK（DA2 可能没起来）");
+        return false;
+    }
     return true;
 }
 

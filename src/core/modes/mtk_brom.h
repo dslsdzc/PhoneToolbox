@@ -122,6 +122,12 @@ public:
     bool jumpDa(quint32 addr, QString *error);
     bool jumpDa64(quint32 addr, QString *error);
 
+    // ---- D1-T6: BROM 版本（对照 mtk_preloader.py:657-662 get_bromver() / :664-673 get_blver()）----
+    // 写 1B 命令 → 读 1B 值；**无回显校验**（与 echoCmd 不同）。blver 读到 0xFE 表示仍在 BROM
+    // （上游据此置 is_brom），本实现只记录不分支。
+    bool getBromVer(quint8 &out, QString *error = nullptr);
+    bool getBlVer(quint8 &out, QString *error = nullptr);
+
     // ---- F1-2: BROM 内存协议（对照 mtk_preloader.py read()/write()）----
     bool readMemory(quint32 addr, quint32 dwords, QByteArray &out, QString *error);
     bool writeMemory(quint32 addr, const QByteArray &data, QString *error);

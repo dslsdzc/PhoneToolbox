@@ -3,11 +3,15 @@
 
 #include "core/modes/mtk_brom.h"
 #include "core/modes/mtk_emmc.h"
+#include "mtk_test_helpers.h"
+
+using mtktest::be32;
 
 // ---- MockUsbChannel：记录写入序列、预置读取队列（IBromUsb 注入）----
 class MockUsbChannel : public mtkbrom::IBromUsb {
 public:
     QByteArray writes;              // 全部写入字节（含空包）
+    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔，**含空包**）—— 帧级断言用
     QList<QByteArray> reads;        // 按序弹出的读取响应；空表示返回空
     bool failOpen = false;
     QString openError;
@@ -25,6 +29,7 @@ public:
     {
         Q_UNUSED(error)
         writes += data;
+        writeFrames << data;
         return true;
     }
     bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
@@ -65,6 +70,9 @@ private slots:
     void getHwSwVerParsesBigEndianQuad();
     void getHwCodeShortReplyFails();
     void getHwSwVerShortReplyFails();
+    // ---- get_bromver / get_blver（D1-T6）----
+    void bromVerAndBlVerAreSingleByteReads();
+    void bromVerFailsWhenDeviceSilent();
     // ---- sendDa ----
     void sendDaFrameConstruction();
     void sendDaChunksAtPacketSize();
@@ -276,6 +284,36 @@ void TestMtkBrom::getHwSwVerShortReplyFails()
     QCOMPARE(out.hwSubCode, quint16(0x1111));
     QCOMPARE(out.hwVer, quint16(0x2222));
     QCOMPARE(out.swVer, quint16(0x3333));
+}
+
+// BROM 版本（mtk_preloader.py:657-662/664-673）：写 1B 命令 → 读 1B 值（**无回显校验**）
+void TestMtkBrom::bromVerAndBlVerAreSingleByteReads()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\x05", 1) << QByteArray("\x02", 1);
+    quint8 bromVer = 0;
+    quint8 blVer = 0;
+    QString err;
+    QVERIFY2(s.getBromVer(bromVer, &err), qPrintable(err));
+    QVERIFY2(s.getBlVer(blVer, &err), qPrintable(err));
+    QCOMPARE(bromVer, quint8(0x05));
+    QCOMPARE(blVer, quint8(0x02));
+    QCOMPARE(m->writeFrames.size(), 2);
+    QCOMPARE(m->writeFrames.at(0), QByteArray("\xFF", 1));      // GET_VERSION
+    QCOMPARE(m->writeFrames.at(1), QByteArray("\xFE", 1));      // GET_BL_VER
+}
+
+// 读不到值 → 明确失败（不把 0 当版本号蒙过去）
+void TestMtkBrom::bromVerFailsWhenDeviceSilent()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    quint8 v = 0;
+    QString err;
+    QVERIFY(!s.getBromVer(v, &err));
+    QVERIFY(!err.isEmpty());
 }
 
 void TestMtkBrom::sendDaFrameConstruction()

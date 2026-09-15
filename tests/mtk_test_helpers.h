@@ -8,6 +8,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "core/modes/mtk_da_file.h"
+
 // 合成 DA 夹具（共享：test_mtk_da_file / test_mtk_payload）——布局按 spec §2。
 // **不得**复用被测模块的读写原语（夹具与解析器共用同一原语时，方向性错误会自洽通过）。
 namespace mtktest {
@@ -92,6 +94,32 @@ inline QByteArray buildDa(const QList<EntrySpec> &entries, bool v6 = false, bool
         }
     }
     return head + body + payloads;
+}
+
+// 从内存里的合成 DA 造一个 DaSelection（test_mtk_payload 用；不落盘）
+// 返回 false = 夹具 DA 本身不合法（用例应当 QVERIFY 它）
+// da2Len 可放大以测 boot_to 的**分块**路径（> 0x1000 才会分块）
+inline bool makeSelection(quint16 hwCode, mtkbrom::DaSelection &out, quint32 da2Len,
+                          QString *error = nullptr)
+{
+    EntrySpec e;
+    e.hwCode = hwCode;
+    RegionSpec r0; r0.startAddr = 0x200000;   r0.len = 16;                    // region[0] = EMI/env（不用）
+    RegionSpec r1; r1.startAddr = 0x2007000;  r1.len = 32;                    // region[1] = DA1
+    RegionSpec r2; r2.startAddr = 0x80000000; r2.len = da2Len; r2.sigLen = 0x10; // region[2] = DA2（带签名）
+    e.regions << r0 << r1 << r2;
+    mtkbrom::DaFile f;
+    if (!mtkbrom::parseDaFile(buildDa({e}), f, error))
+        return false;
+    QStringList warn;
+    return mtkbrom::selectDaEntry(f, hwCode, 0, 0, &warn, out, error);
+}
+
+// 3 参重载：`makeSelection(hw, sel, &err)` 的简写（da2Len = 48 → 单块送完，不分块）。
+// 与 4 参版并存是因为用例两种写法都有；两者语义完全一致。
+inline bool makeSelection(quint16 hwCode, mtkbrom::DaSelection &out, QString *error)
+{
+    return makeSelection(hwCode, out, 48, error);
 }
 
 // ---- 真样本路径（reference/ 为 gitignored；验证跑带 -DMTK_SAMPLES_REQUIRED=ON 且核对 0 skipped）----
