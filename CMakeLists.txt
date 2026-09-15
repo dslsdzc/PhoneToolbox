@@ -310,7 +310,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_da_file.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_table.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_emi.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_flash_plan.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_flash_plan.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_fetch.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -510,6 +511,12 @@ if(ENABLE_IMAGE_TESTS)
                     # 下方按名命中本 stem，无需重复。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_preloader_fetch")
+                    # D1 Task 8：preloader 两路径解析（只依赖 Qt Core、下载器是注入点 ——
+                    # 用例全程不联网）。**只编纯模块**：生产下载器 mtk_preloader_download_qt.cpp
+                    # （Qt Network）不进本目标，由主程序 GLOB 编译。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
