@@ -398,6 +398,51 @@ bool BromSession::getTargetConfig(TargetConfig &out, QString *error)
     return true;
 }
 
+bool BromSession::getHwCode(quint16 &hwCode, quint16 &hwVer, QString *error)
+{
+    // 对照 mtk_preloader.py get_hwcode()（0xFD）：echo → 读 4B → regular mode 拆分（:190-191）
+    // ⚠️ 4B 之后**没有**尾随状态字（D1-T4 实施期裁决，三源一致，勿"补"）：
+    //   • 上游 :880-882 `sendcmd(GET_HW_CODE, 4)` → `unpack(">HH")`，恰好 4B；
+    //   • `Port.mtk_cmd()`（Port.py:210-226）= 写命令 → 读回显 1B → 读 bytestoread，无 status 段；
+    //   • lx 文档《02-联发科-BROM-DA-协议》表在有状态字的命令上会明写（0xD8 回 6B `>IH`、
+    //     0xD0/0xD1 有 status）—— 0xFD/0xFC 没写。
+    //   若按"回 4B + 2B 状态"实现：真机上 libusb 读超时 → 每台设备第一条命令就失败
+    //   （单测测不出来：mock 的读队列是预置的）。
+    if (!echoCmd(CMD_GET_HW_CODE, error))
+        return false;
+    QByteArray b;
+    if (!m_usb->read(b, 4, 1000, error))
+        return false;
+    if (b.size() != 4) { // 校验通过后才写出参：失败不留半成品
+        if (error) *error = QStringLiteral("get_hw_code 响应长度不符（%1）").arg(b.size());
+        return false;
+    }
+    const quint32 val = getBe32(b, 0);
+    hwCode = quint16((val >> 16) & 0xFFFF);
+    hwVer  = quint16(val & 0xFFFF);
+    return true;
+}
+
+bool BromSession::getHwSwVer(HwSwVer &out, QString *error)
+{
+    // 对照 mtk_preloader.py get_hw_sw_ver()（0xFC）：sendcmd(0xFC, 8) → unpack(">HHHH")（:928-930）
+    // 同样无尾随状态字（三源同上）。IoT 芯片上游不走这条路径（:182-187 改读 A2 寄存器），
+    // D1 由调用方按芯片表 iot 位明确拒绝。
+    if (!echoCmd(CMD_GET_HW_SW_VER, error))
+        return false;
+    QByteArray b;
+    if (!m_usb->read(b, 8, 1000, error))
+        return false;
+    if (b.size() != 8) { // 校验通过后才写出参：失败不留半成品
+        if (error) *error = QStringLiteral("get_hw_sw_ver 响应长度不符（%1）").arg(b.size());
+        return false;
+    }
+    out.hwSubCode = getBe16(b, 0);
+    out.hwVer     = getBe16(b, 2);
+    out.swVer     = getBe16(b, 4);
+    return true;
+}
+
 bool BromSession::sendCommand(quint8 cmd, const QByteArray &payload, QByteArray &reply,
                               int replyMaxLen, QString *error)
 {

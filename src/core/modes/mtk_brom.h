@@ -33,6 +33,7 @@ enum Cmd : quint8 {
     CMD_GET_TARGET_CONFIG = 0xD8,
     CMD_SEND_ENV_PREPARE = 0xD9,
     CMD_JUMP_DA64 = 0xDE,
+    CMD_GET_HW_SW_VER = 0xFC,
     CMD_GET_HW_CODE = 0xFD,
     CMD_GET_BL_VER = 0xFE,
     CMD_GET_VERSION = 0xFF,
@@ -67,6 +68,14 @@ struct TargetConfig {
     bool cmdC8 = false;    // bit7
 };
 
+// get_hw_sw_ver(0xFC) 的 8B 响应（对照 mtk_preloader.py:928-930 的 unpack(">HHHH")；
+// 末字段上游未使用 = 保留）
+struct HwSwVer {
+    quint16 hwSubCode = 0;
+    quint16 hwVer = 0;
+    quint16 swVer = 0;
+};
+
 // 抽象 USB 通道（协议层只依赖此接口；mock 注入单测，libusb 生产实现）
 class IBromUsb {
 public:
@@ -95,6 +104,13 @@ public:
     bool echoCmd(quint8 cmd, QString *error);
     bool readStatus(quint16 &status, QString *error);
     bool getTargetConfig(TargetConfig &out, QString *error);
+
+    // ---- D1: BROM 芯片信息（对照 mtk_preloader.py get_hwcode() / get_hw_sw_ver()）----
+    // 0xFD：回 4B >I，hwCode = 高 16 位、hwVer = 低 16 位（上游 :190-191 的 regular 拆分）。
+    // IoT 芯片上游改走 A2 寄存器读（:182-187 的 iot 分支）—— D1 不实现，调用方按芯片表 iot 位明确拒绝。
+    bool getHwCode(quint16 &hwCode, quint16 &hwVer, QString *error);
+    // 0xFC：回 8B >HHHH = (hwSubCode, hwVer, swVer, 保留)
+    bool getHwSwVer(HwSwVer &out, QString *error);
     bool sendCommand(quint8 cmd, const QByteArray &payload, QByteArray &reply,
                      int replyMaxLen, QString *error);
     bool sendDa(quint32 address, quint32 length, quint32 sigLen,

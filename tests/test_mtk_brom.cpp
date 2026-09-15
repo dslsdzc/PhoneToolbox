@@ -60,6 +60,11 @@ private slots:
     // ---- get_target_config ----
     void targetConfigParsesBitfield();
     void targetConfigBadStatusFails();
+    // ---- get_hw_code / get_hw_sw_ver（D1-T4）----
+    void getHwCodeSplits32BitReply();
+    void getHwSwVerParsesBigEndianQuad();
+    void getHwCodeShortReplyFails();
+    void getHwSwVerShortReplyFails();
     // ---- sendDa ----
     void sendDaFrameConstruction();
     void sendDaChunksAtPacketSize();
@@ -203,6 +208,74 @@ void TestMtkBrom::targetConfigBadStatusFails()
     QString err;
     QVERIFY(!s.getTargetConfig(cfg, &err)); // status 0x0100 > 0xFF → 失败
     QVERIFY(err.contains("状态"));
+}
+
+// 0xFD：回 4B >I = (hwCode<<16)|hwVer（mtk_preloader.py:190-191 的 regular mode 拆分）
+void TestMtkBrom::getHwCodeSplits32BitReply()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    // echo 0xFD 后设备只回 4 字节 —— **无尾随状态字**（T4 裁决：上游 sendcmd(0xFD, 4)）
+    m->reads << QByteArray("\xFD", 1) << QByteArray("\x67\x65\xCA\x00", 4);
+    quint16 hwCode = 0, hwVer = 0;
+    QString err;
+    QVERIFY2(s.getHwCode(hwCode, hwVer, &err), qPrintable(err));
+    QCOMPARE(hwCode, quint16(0x6765));
+    QCOMPARE(hwVer, quint16(0xCA00));
+    // Qt 6.11 的 QByteArray::first() 需参数 → 比整串（顺带断言除命令回显外没有别的写）
+    QCOMPARE(m->writes, QByteArray("\xFD", 1));
+    QVERIFY(m->reads.isEmpty()); // 恰好消费「echo + 4B」：若有人再加状态字读，这里会失败
+}
+
+// 0xFC：回 8B >HHHH = (hw_sub_code, hw_ver, sw_ver, 保留)（mtk_preloader.py:928-930）
+void TestMtkBrom::getHwSwVerParsesBigEndianQuad()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    // 同样无尾随状态字（T4 裁决：上游 sendcmd(0xFC, 8) → unpack(">HHHH")）
+    m->reads << QByteArray("\xFC", 1)
+             << QByteArray("\x8A\x00\xCB\x01\x00\x35\x00\x00", 8);
+    mtkbrom::HwSwVer out;
+    QString err;
+    QVERIFY2(s.getHwSwVer(out, &err), qPrintable(err));
+    QCOMPARE(out.hwSubCode, quint16(0x8A00));
+    QCOMPARE(out.hwVer, quint16(0xCB01));
+    QCOMPARE(out.swVer, quint16(0x0035));
+    QCOMPARE(m->writes, QByteArray("\xFC", 1));
+    QVERIFY(m->reads.isEmpty());
+}
+
+void TestMtkBrom::getHwCodeShortReplyFails()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\xFD", 1) << QByteArray("\x67\x65", 2); // 只回 2B
+    // 预置非零：失败不得把半截数据（或 0）冒充成真值写回出参
+    quint16 hwCode = 0x1111, hwVer = 0x2222;
+    QString err;
+    QVERIFY(!s.getHwCode(hwCode, hwVer, &err));
+    QVERIFY(err.contains("长度"));
+    QCOMPARE(hwCode, quint16(0x1111));
+    QCOMPARE(hwVer, quint16(0x2222));
+}
+
+void TestMtkBrom::getHwSwVerShortReplyFails()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << QByteArray("\xFC", 1) << QByteArray("\x8A\x00\xCB\x01", 4); // 少回 4B
+    mtkbrom::HwSwVer out;
+    out.hwSubCode = 0x1111; out.hwVer = 0x2222; out.swVer = 0x3333;
+    QString err;
+    QVERIFY(!s.getHwSwVer(out, &err));
+    QVERIFY(err.contains("长度"));
+    QCOMPARE(out.hwSubCode, quint16(0x1111));
+    QCOMPARE(out.hwVer, quint16(0x2222));
+    QCOMPARE(out.swVer, quint16(0x3333));
 }
 
 void TestMtkBrom::sendDaFrameConstruction()
