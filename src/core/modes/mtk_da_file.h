@@ -1,6 +1,6 @@
 #pragma once
 
-// AllInOne DA 文件解析（纯函数，计划 D1 Task 1）
+// AllInOne DA 文件解析 + 条目选择（纯函数，计划 D1 Task 1/2）
 //
 // 布局与判据全部来自**实测**，不是推测：
 //   6 个真实文件 / 161 条目 = reference/mtk-samples/（gitignored，不进仓库），
@@ -35,12 +35,19 @@
 //  12. P4 0xD8/0xDC 探测必须与 0x6C + count*size <= filesize 交叉校验，不自洽就报错
 //      （探测点落在 entry[0] 自己的槽内，nregions >= 10 时会变成真实数据）。
 //
-// 本文件**只做解析**：P2/P5/P6 属选择层（后续任务），此处仅保证字段被完整读出；
+// 本文件做**解析**与**条目选择**两层：解析层只把字段完整读出（不做选择、不按内容去重 —— P6），
+// 选择层（D1 Task 2，`selectDaEntry`）落实 P2（5 元组才是唯一键）与 P5（region[1]/[2] 硬编码）；
 // P12 的协议端序属协议层，本文件只按 LE 读文件字段。
+//
+// 选择层规则出处（mtkclient v2.1.4-20-g71b0175，GPL-3.0，**只读引用不复制代码**）：
+//   Library/DA/daconfig.py:208-218       按 hw_code 找候选 + hw_version/sw_version 过滤
+//   Library/DA/legacy/dalegacy_lib.py:563-571  region[1]=DA1 / region[2]=DA2 硬编码
+// 版本过滤的**旁路**（设备值为 0）与"空 region 跳过"来自本仓真样本实测（见 `selectDaEntry` 注释）。
 
 #include <QByteArray>
 #include <QList>
 #include <QString>
+#include <QStringList>
 #include <QtGlobal>
 
 namespace mtkbrom {
@@ -80,5 +87,29 @@ struct DaFile {
 // 解析 AllInOne DA。成功返回 true 并填充 out；失败返回 false 且 error（可空）写中文诊断。
 // fail-closed：头部标记/条目 magic/count 越界/region 越界任一不成立即整体拒绝（不返回半份数据）。
 bool parseDaFile(const QByteArray &data, DaFile &out, QString *error);
+
+// 选中一条 DA 条目 + 切出两阶段载荷（D1 Task 2）。仅查已解析的 DaFile（不再读文件，raw 即来源）。
+struct DaSelection {
+    int entryIndex = -1;      // 命中的条目下标（诊断用）
+    DaEntry entry;
+    DaRegion da1;             // **恒 region[1]**（三代共同硬编码；不得改用 entryRegionIndex ——
+    DaRegion da2;             //   P5：按它取 stage1 会把 region[0]（EMI/env）当 DA1 上传）
+    QByteArray da1Bytes;      // 文件切片 [da1.fileOffset, +da1.len)
+    QByteArray da2Bytes;      // 文件切片 —— **LEGACY 保留尾部签名**，调用方不得裁剪
+    bool isXmlForced = false; // 所在文件 isV6（只能推向 XML，不能推向 LEGACY）
+};
+
+// 选择规则（daconfig.py:208-218 + 实测）：
+//   1. 候选 = hwCode == dacode 的条目（dacode 由芯片表给出，默认 = 设备 hw_code）。
+//   2. 版本过滤：hwVersion <= deviceHwVer 且 swVersion <= deviceSwVer；**设备值为 0 时该维旁路**
+//      （IoT/取不到版本的真实情形）。
+//   3. 跳过 regionCount < 3 或 region[1]/region[2] 长度为 0 的候选（真实文件里大量 region[1].len == 0；
+//      DA1/DA2 缺一不可）—— 跳过的条目写进 warnings，**不得**"上传 0 字节后静默成功"（P7）。
+//   4. 取最兼容：hwVersion 最大者，再 swVersion 最大者；仍并列 → 取**最前**一个 + warnings 记明
+//      （P2 的 5 元组才是唯一键，本层不做 pagesize 匹配）。
+//   5. 无候选 → false + 中文 error，并列出该文件里出现过的 hw_code（诊断）。
+// 成功返回 true 并填充 out；warnings/error 可空。out 在入口处被重置，失败时保持默认值。
+bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
+                   QStringList *warnings, DaSelection &out, QString *error);
 
 } // namespace mtkbrom

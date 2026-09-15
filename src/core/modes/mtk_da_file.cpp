@@ -8,6 +8,8 @@
 //   Library/DA/legacy/dalegacy_lib.py:563-571（region[1]/[2] 硬编码）。
 #include "mtk_da_file.h"
 
+#include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
+
 namespace mtkbrom {
 namespace {
 
@@ -29,6 +31,26 @@ quint32 rdLe32(const QByteArray &d, int off)
 }
 
 void setErr(QString *error, const QString &msg) { if (error) *error = msg; }
+
+// 该条目的 region 是否可用于两阶段（regionCount>=3 且 region[1]/region[2] 非空）。
+// 真实文件里大量 region[1].m_len == 0（da_parse_report.json 的 warnings）—— DA1/DA2 缺一不可，
+// 缺了就只能跳过（跳过的原因写进 whyNot，供 warnings 诊断）。
+bool hasUsableDaRegions(const DaEntry &e, QString *whyNot)
+{
+    if (e.regionCount < 3 || e.regions.size() < 3) {
+        if (whyNot) *whyNot = QStringLiteral("region 数不足 3（DA1/DA2 缺位）");
+        return false;
+    }
+    if (e.regions.at(1).len == 0) {
+        if (whyNot) *whyNot = QStringLiteral("region[1]（DA1）长度为 0");
+        return false;
+    }
+    if (e.regions.at(2).len == 0) {
+        if (whyNot) *whyNot = QStringLiteral("region[2]（DA2）长度为 0");
+        return false;
+    }
+    return true;
+}
 
 } // namespace
 
@@ -140,6 +162,74 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
         }
         out.entries.append(e);
     }
+    return true;
+}
+
+bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
+                   QStringList *warnings, DaSelection &out, QString *error)
+{
+    out = DaSelection{};
+    out.isXmlForced = f.isV6;
+
+    QList<int> candidates;
+    QStringList availableCodes;
+    for (int i = 0; i < f.entries.size(); ++i) {
+        const DaEntry &e = f.entries.at(i);
+        const QString code = QStringLiteral("0x%1").arg(e.hwCode, 4, 16, QLatin1Char('0'));
+        if (!availableCodes.contains(code))
+            availableCodes << code;
+        if (e.hwCode != dacode)
+            continue;
+        // 版本过滤：设备值为 0 时该维旁路（IoT/取不到版本的真实情形）
+        if (deviceHwVer != 0 && e.hwVersion > deviceHwVer)
+            continue;
+        if (deviceSwVer != 0 && e.swVersion > deviceSwVer)
+            continue;
+        QString whyNot;
+        if (!hasUsableDaRegions(e, &whyNot)) {
+            if (warnings)
+                *warnings << QStringLiteral("条目[%1] hw_code=%2 跳过：%3").arg(i).arg(code, whyNot);
+            continue;
+        }
+        candidates << i;
+    }
+    if (candidates.isEmpty()) {
+        setErr(error, QStringLiteral("DA 文件里没有可用于 hw_code=0x%1（设备版本 hw=%2/sw=%3）的条目；"
+                                     "文件内的 hw_code：%4")
+                          .arg(dacode, 4, 16, QLatin1Char('0'))
+                          .arg(deviceHwVer, 4, 16, QLatin1Char('0'))
+                          .arg(deviceSwVer, 4, 16, QLatin1Char('0'))
+                          .arg(availableCodes.join(QStringLiteral(", "))));
+        return false;
+    }
+    // 取最兼容：hwVersion 最大，再 swVersion 最大；并列取最前 + 告警（P2：5 元组才是唯一键）
+    int best = candidates.first();
+    for (int i : std::as_const(candidates)) {
+        const DaEntry &a = f.entries.at(i);
+        const DaEntry &b = f.entries.at(best);
+        if (a.hwVersion > b.hwVersion
+            || (a.hwVersion == b.hwVersion && a.swVersion > b.swVersion))
+            best = i;
+    }
+    int ties = 0;
+    for (int i : std::as_const(candidates)) {
+        const DaEntry &a = f.entries.at(i);
+        const DaEntry &b = f.entries.at(best);
+        if (a.hwVersion == b.hwVersion && a.swVersion == b.swVersion)
+            ++ties;
+    }
+    if (ties > 1 && warnings)
+        *warnings << QStringLiteral("hw_code=0x%1 有 %2 个条目的版本完全相同，取最前一个（条目[%3]）——"
+                                    "唯一键是 5 元组（含 pagesize），本层不做 pagesize 匹配")
+                         .arg(dacode, 4, 16, QLatin1Char('0')).arg(ties).arg(best);
+
+    out.entryIndex = best;
+    out.entry = f.entries.at(best);
+    out.da1 = out.entry.regions.at(1);   // **硬编码 region[1]**（三代共同）
+    out.da2 = out.entry.regions.at(2);   // **硬编码 region[2]**
+    out.da1Bytes = f.raw.mid(int(out.da1.fileOffset), int(out.da1.len));
+    // da2 **保留尾部签名**（LEGACY 语义）：长度取 m_len，绝不裁 sigLen
+    out.da2Bytes = f.raw.mid(int(out.da2.fileOffset), int(out.da2.len));
     return true;
 }
 
