@@ -30,6 +30,18 @@ bool fileSize(const QString &path, quint64 &out)
     return true;
 }
 
+// 规则中文名：**未知规则原样输出**（可见即正确）—— 回落成"推导"会在将来加规则（D2/D3）时误标
+QString ruleLabel(const QString &rule)
+{
+    if (rule == QLatin1String("exact"))
+        return QStringLiteral("精确");
+    if (rule == QLatin1String("prefix"))
+        return QStringLiteral("前缀");
+    if (rule == QLatin1String("derived"))
+        return QStringLiteral("推导");
+    return rule;
+}
+
 } // namespace
 
 QStringList planHeaders()
@@ -45,9 +57,7 @@ QList<QStringList> planRows(const MtkFlashPlan &plan)
         rows << QStringList{fileNameOf(e.imagePath), e.partition,
                             humanBytes(e.imageSize),
                             e.partitionSize > 0 ? humanBytes(e.partitionSize) : QStringLiteral("未知"),
-                            e.matchRule == QStringLiteral("exact") ? QStringLiteral("精确")
-                            : e.matchRule == QStringLiteral("prefix") ? QStringLiteral("前缀")
-                                                                     : QStringLiteral("推导")};
+                            ruleLabel(e.matchRule)};
     }
     return rows;
 }
@@ -237,6 +247,10 @@ bool parseScatter(const QString &text, QList<PartitionRef> &out, QString *error)
             size = 0;
             haveSize = false;
         } else if (key == QLatin1String("partition_size")) {
+            // 只有**当前已有 name** 时 size 才归属该分区：散落在 name 之前的 size 一律忽略，
+            // 否则会与上一个分区的 size 争夺同一个槽位（真 scatter 里顺序固定，纯防御）。
+            if (name.isEmpty())
+                continue;
             bool ok = false;
             const quint64 v = value.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
                                   ? value.mid(2).toULongLong(&ok, 16)

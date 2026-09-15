@@ -41,7 +41,8 @@ struct MtkFlashPlan {
 };
 
 // 参照表为空 → 目标分区名由镜像文件名推导（"derived"）+ 一条告警；镜像列表为空 → 明确失败。
-// 只返回 false 的三种情况：镜像列表为空 / 镜像读不到 / 计划构建本身出错（不含"没匹配上"）。
+// 只返回 false 的两种情况：镜像列表为空 / 有镜像读不到。其余一律只告警并返回 true
+// （含"没匹配上""放不下"——调用方按 entries.isEmpty() / skippedOversize 自行门控）。
 bool buildMtkPlan(const QList<PartitionRef> &partitions, const QStringList &imagePaths,
                   MtkFlashPlan &out, QString *error = nullptr);
 

@@ -185,7 +185,8 @@ private slots:
     }
 
     // scatter 解析：真文件的分区名/大小行**不带前导 '-'**（只有 partition_index 带）——
-    // 按 key 解析而不是按行首 '-' 解析，两种写法（带/不带 '-'）都要认
+    // **两种拼法各自钉住**：分区 1 用真 scatter 的缩进裸键，分区 2/3 用带 '-' 的拼法。
+    // 去掉"剥前导 '-'"→ 带横线的两个分区解析不出来（本用例红）；改成"必须有 '-'"→ 分区 1 丢（本用例红）。
     void scatterParsesIndentedKeysWithoutLeadingDash()
     {
         const QString text = QStringLiteral(
@@ -194,24 +195,60 @@ private slots:
             "  partition_size: 0x2000000\n"
             "\n"
             "- partition_index: SYS1\n"
-            "  partition_name: recovery\n"
-            "  partition_size: 0x4000000\n"
+            "- partition_name: recovery\n"
+            "- partition_size: 0x4000000\n"
             "\n"
-            "  partition_name: userdata\n"
-            "  partition_size: 0x1000\n");
+            "- partition_name: userdata\n"
+            "- partition_size: 0x1000\n");
         QList<PartitionRef> parts; QString err;
         QVERIFY2(mtkplan::parseScatter(text, parts, &err), qPrintable(err));
         QCOMPARE(parts.size(), 3);
         QCOMPARE(parts.at(0).name, QStringLiteral("boot"));
         QCOMPARE(parts.at(0).sizeBytes, quint64(0x2000000));
+        QCOMPARE(parts.at(1).name, QStringLiteral("recovery"));
+        QCOMPARE(parts.at(1).sizeBytes, quint64(0x4000000));
         QCOMPARE(parts.at(2).name, QStringLiteral("userdata"));
         QCOMPARE(parts.at(2).sizeBytes, quint64(0x1000));
         // 十进制写法也认（老 scatter 有十进制分区大小）
         QList<PartitionRef> dec; QString derr;
-        QVERIFY(mtkplan::parseScatter(QStringLiteral("  partition_name: para\n  partition_size: 1048576\n"),
-                                      dec, &derr));
+        QVERIFY2(mtkplan::parseScatter(QStringLiteral("  partition_name: para\n  partition_size: 1048576\n"),
+                                       dec, &derr), qPrintable(derr));
         QCOMPARE(dec.size(), 1);
         QCOMPARE(dec.at(0).sizeBytes, quint64(1048576));
+    }
+
+    // scatter 解析：size 的归属 —— 分区只在"name 之后紧跟 size"时成立。
+    // **有判别力**：若去掉 name 分支的 size/haveSize 重置，"name 之前出现的 size"就会被当成
+    // boot 的大小从而凭空造出一个分区（本用例红）。
+    void sizeMustFollowItsOwnName()
+    {
+        // 前导 size 不属于任何分区，也不能被后来的 name 认领 → boot 缺 size → 一个分区都解析不出
+        QList<PartitionRef> parts; QString err;
+        QVERIFY(!mtkplan::parseScatter(QStringLiteral("partition_size: 0x400\n"
+                                                      "partition_name: boot\n"),
+                                       parts, &err));
+        QVERIFY(!err.isEmpty());
+        QVERIFY(parts.isEmpty());
+
+        // 正常顺序（name 后跟 size）不受影响；中间夹一个前导 size 也无害
+        QList<PartitionRef> ok; QString oerr;
+        QVERIFY2(mtkplan::parseScatter(QStringLiteral("partition_size: 0x400\n"
+                                                      "partition_name: boot\n"
+                                                      "partition_size: 0x800\n"),
+                                       ok, &oerr), qPrintable(oerr));
+        QCOMPARE(ok.size(), 1);
+        QCOMPARE(ok.at(0).name, QStringLiteral("boot"));
+        QCOMPARE(ok.at(0).sizeBytes, quint64(0x800));   // 认领 name 之后那个，不是前导那个
+
+        // 只有 name 没有 size 的分区不成立（不能凭相邻分区的 size 蒙一个）
+        QList<PartitionRef> mixed; QString merr;
+        QVERIFY2(mtkplan::parseScatter(QStringLiteral("partition_name: boot\n"
+                                                      "partition_name: vbmeta\n"
+                                                      "partition_size: 0x800\n"),
+                                       mixed, &merr), qPrintable(merr));
+        QCOMPARE(mixed.size(), 1);
+        QCOMPARE(mixed.at(0).name, QStringLiteral("vbmeta"));
+        QCOMPARE(mixed.at(0).sizeBytes, quint64(0x800));
     }
 
     // 预览渲染：表头 5 列、逐行映射（文件名/分区/humanBytes/未知/规则中文名）、摘要含跳过数
@@ -246,6 +283,10 @@ private slots:
         QCOMPARE(rows.at(0).at(4), QStringLiteral("精确"));
         QCOMPARE(rows.at(1).at(3), QStringLiteral("4 KiB"));
         QCOMPARE(rows.at(1).at(4), QStringLiteral("推导"));
+        // 未知规则（将来 D2/D3 新增）**原样输出**，不回落成"推导"（可见即正确，别猜）
+        plan.entries.last().matchRule = QStringLiteral("future_rule");
+        QCOMPARE(mtkplan::planRows(plan).at(1).at(4), QStringLiteral("future_rule"));
+        QCOMPARE(mtkplan::planRows(plan).at(0).at(4), QStringLiteral("精确"));   // 已知规则不受影响
 
         const QString html = mtkplan::planSummaryHtml(plan);
         QVERIFY2(html.contains(QStringLiteral("2 个分区")), qPrintable(html));
