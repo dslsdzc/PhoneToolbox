@@ -44,29 +44,9 @@ private slots:
 
 using namespace odintest;
 
-// 夹具 bootSbootNv()（BOOT/spl.img、SBOOT/sboot.bin、wfixnv2/nvitem.bin）由 odin_test_helpers.h 提供。
-// 造一个含若干条目的 .tar.md5（磁盘上），返回路径与条目名→(偏移,大小)
-static QString writeTarMd5(const QString &dir, const QString &name,
-                           const QList<imgtar::TarEntry> &entries, bool withFooter = true)
-{
-    const QByteArray tar = imgtar::buildTar(entries);
-    const QByteArray out = withFooter ? imgtar::appendMd5Footer(tar) : tar;
-    const QString path = dir + QLatin1Char('/') + name;
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly) || f.write(out) != out.size())
-        return QString();
-    f.close();
-    return path;
-}
-
-static imgtar::TarEntry tarEntry(const QString &name, const QByteArray &data)
-{
-    imgtar::TarEntry e;
-    e.name = name;
-    e.data = data;
-    return e;
-}
-
+// 夹具 bootSbootNv()（BOOT/spl.img、SBOOT/sboot.bin、wfixnv2/nvitem.bin）与
+// writeTarMd5() / tarEntry()（合成 .tar.md5）均由 odin_test_helpers.h 提供 ——
+// Phase C Task 9 起与 test_samsung_plan_dialog 共用（原为本地 static，两份各写一份会漂）。
 void TestSamsungPlan::matchesByPitFilename()
 {
     QTemporaryDir dir;

@@ -7,6 +7,14 @@
 
 namespace {
 
+// 三态契约的兜底：调用方（FlashPanel / buildAndShow 自身）以"false + *error 空 = 用户取消 /
+// 非空 = 失败"分派 —— 故每个失败分支的文案**必须**非空。不能押在"被调方永不返回空串"上：
+// 被调方换实现（或 PIT 层将来改文案）就会静默退化成"用户取消"，刷写悄悄不开始。
+QString failureText(const QString &prefix, const QString &detail)
+{
+    return detail.isEmpty() ? prefix + QStringLiteral("（未提供原因）") : prefix + detail;
+}
+
 // "来源包"列：表里只显文件名，完整路径走 tooltip（与 FlashPlanDialog 的「文件」列同款口径）。
 // fileIndex 越界（计划层契约：-1 = 无来源）给 "-"，不静默显示成第一个包。
 QString sourceFileLabel(const odin::SamsungPlan &plan, int fileIndex)
@@ -89,14 +97,14 @@ bool SamsungPlanDialog::buildAndShow(const QStringList &tarMd5Files, const QStri
     if (!pitPath.isEmpty()) {
         QString pitErr;
         if (!odin::parsePitFile(pitPath, pit, &pitErr)) {
-            if (error) *error = QStringLiteral("读取 PIT 失败：%1").arg(pitErr);
+            if (error) *error = failureText(QStringLiteral("读取 PIT 失败："), pitErr);
             return false;
         }
         pitSource = QStringLiteral("用户指定 PIT：%1").arg(QFileInfo(pitPath).fileName());
     } else {
         QString pitErr;
         if (!odin::loadPitFromPackage(tarMd5Files, pit, &pitSource, &pitErr)) {
-            if (error) *error = pitErr;
+            if (error) *error = failureText(QStringLiteral("读取包内 PIT 失败："), pitErr);
             return false;
         }
     }
@@ -104,7 +112,7 @@ bool SamsungPlanDialog::buildAndShow(const QStringList &tarMd5Files, const QStri
     odin::SamsungPlan plan;
     QString planErr;
     if (!odin::buildSamsungPlan(tarMd5Files, pit, plan, &planErr, pitSource)) {
-        if (error) *error = QStringLiteral("构建刷写计划失败：%1").arg(planErr);
+        if (error) *error = failureText(QStringLiteral("构建刷写计划失败："), planErr);
         return false;
     }
 

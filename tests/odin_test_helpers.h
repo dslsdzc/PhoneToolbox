@@ -1,9 +1,11 @@
 // tests/odin_test_helpers.h
 #pragma once
 #include <QByteArray>
+#include <QFile>
 #include <QList>
 #include <QString>
 #include "core/odin/pit.h"
+#include "image_engine/tar_image.h"
 
 // 合成 PIT 夹具（共享：test_pit / test_samsung_plan / test_odin_session 都用它，勿各写一份）。
 // 字段默认值：deviceType=2（MMC ⇒ 512 B/扇区）、updateAttributes=1、attributes=0x5。
@@ -110,6 +112,30 @@ inline QList<PitSpec> bootSbootNv()
     PitSpec nv; nv.name = QByteArray("wfixnv2"); nv.identifier = 4; nv.flashFilename = QByteArray("nvitem.bin");
     nv.blockCount = 2048; es << nv;
     return es;
+}
+
+// 合成 .tar.md5 夹具（共享：test_samsung_plan / test_samsung_plan_dialog，勿各写一份）。
+// 返回落盘路径；打不开/写不全返回空串（调用方 QVERIFY）。withFooter=false = 无 MD5 校验行的包
+// （计划层 verifyOk=false 的用例要用它）。
+inline imgtar::TarEntry tarEntry(const QString &name, const QByteArray &data)
+{
+    imgtar::TarEntry e;
+    e.name = name;
+    e.data = data;
+    return e;
+}
+
+inline QString writeTarMd5(const QString &dir, const QString &name,
+                           const QList<imgtar::TarEntry> &entries, bool withFooter = true)
+{
+    const QByteArray tar = imgtar::buildTar(entries);
+    const QByteArray out = withFooter ? imgtar::appendMd5Footer(tar) : tar;
+    const QString path = dir + QLatin1Char('/') + name;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly) || f.write(out) != out.size())
+        return QString();
+    f.close();
+    return path;
 }
 
 } // namespace odintest

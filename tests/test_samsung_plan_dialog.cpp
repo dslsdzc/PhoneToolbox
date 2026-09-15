@@ -7,8 +7,10 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QTableView>
+#include <QTemporaryDir>
 
 #include "core/odin/samsung_plan.h"
+#include "odin_test_helpers.h"
 #include "ui/samsung_plan_dialog.h"
 
 class TestSamsungPlanDialog : public QObject
@@ -18,6 +20,7 @@ private slots:
     void startButtonGatedByCheckbox();
     void rejectLeavesConfirmedFalse();
     void previewsEntriesAndWarnings();
+    void buildAndShowStopsBeforeShowingDialog();
 };
 
 static odin::SamsungPlan oneEntryPlan()
@@ -87,6 +90,52 @@ void TestSamsungPlanDialog::previewsEntriesAndWarnings()
     QVERIFY(warn);
     QCOMPARE(warn->count(), 2);              // 两类不匹配都在预览里（不静默）
     QVERIFY(warn->isVisibleTo(&dlg));
+}
+
+// 失败路径必须在**弹窗前**返回，且给出非空 *error —— 调用方（FlashPanel）按
+// "false + error 空 = 用户取消 / 非空 = 失败"分派，失败一旦静默成"取消"，刷写就不开始且没有报错。
+// 红线由"无人交互"承担：本用例 parent = nullptr、不驱动任何对话框 —— 一旦实现走到
+// SamsungPlanDialog::exec()，模态循环再也出不来（ctest 超时），用例必红（与 Phase B 的
+// buildAndShowFailsBeforeShowingDialog 同款判别力）。
+// 四条失败来源：包打不开 / 一个包都没选 / 包内无 .pit / 显式 PIT 打不开。
+// "err != 初值"比"非空"更强：证明失败结论是**本次调用写进去**的，不是赖调用方的老值。
+void TestSamsungPlanDialog::buildAndShowStopsBeforeShowingDialog()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString sentinel = QStringLiteral("未回填的初值");
+    QString err;
+
+    // (a) 包路径不存在：包索引（indexTarStream）打不开文件即失败
+    err = sentinel;
+    QVERIFY(!SamsungPlanDialog::buildAndShow({QStringLiteral("/不存在/x.tar.md5")}, QString(),
+                                             nullptr, &err));
+    QVERIFY(err != sentinel);
+    QVERIFY(!err.isEmpty());
+
+    // (b) 一个包都没选（包内 PIT 查找必然落空）
+    err = sentinel;
+    QVERIFY(!SamsungPlanDialog::buildAndShow({}, QString(), nullptr, &err));
+    QVERIFY(err != sentinel);
+    QVERIFY(!err.isEmpty());
+
+    // (c) 包在、可索引，但内部没有 .pit（合成夹具：只有 boot.img —— 与 test_samsung_plan 共用
+    //     odin_test_helpers.h 的 writeTarMd5/tarEntry，不各写一份）
+    const QString noPit = odintest::writeTarMd5(
+        dir.path(), QStringLiteral("BL.tar.md5"),
+        {odintest::tarEntry(QStringLiteral("boot.img"), QByteArray(3000, 'A'))});
+    QVERIFY(!noPit.isEmpty());
+    err = sentinel;
+    QVERIFY(!SamsungPlanDialog::buildAndShow({noPit}, QString(), nullptr, &err));
+    QVERIFY(err != sentinel);
+    QVERIFY(!err.isEmpty());
+
+    // (d) 显式 PIT 指向不存在的文件（显式优先于包内 → 先炸在 PIT 上）
+    err = sentinel;
+    QVERIFY(!SamsungPlanDialog::buildAndShow({noPit}, dir.filePath(QStringLiteral("nope.pit")),
+                                             nullptr, &err));
+    QVERIFY(err != sentinel);
+    QVERIFY(!err.isEmpty());
 }
 
 QTEST_MAIN(TestSamsungPlanDialog)

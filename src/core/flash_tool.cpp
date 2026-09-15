@@ -1413,7 +1413,13 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
             QString pitDesc;
             QString pitErr;
             if (!odin::loadPitFromPackage(tars, pit, &pitDesc, &pitErr)) {
-                if (error) *error = pitErr;
+                // 三态契约（与 SamsungPlanDialog::buildAndShow 的 failureText 同口径，**措辞必须一致**，
+                // 否则"预览报的"与"通道报的"会分叉）：false + 空 error = 用户取消 / 非空 = 失败
+                // —— 故失败文案必须非空，不能押在"被调方永不返回空串"上。
+                if (error)
+                    *error = pitErr.isEmpty()
+                        ? QStringLiteral("读取包内 PIT 失败：（未提供原因）")
+                        : QStringLiteral("读取包内 PIT 失败：%1").arg(pitErr);
                 return false;
             }
             pitSource = pitDesc;
