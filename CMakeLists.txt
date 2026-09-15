@@ -307,7 +307,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_odin_libusb_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_samsung_plan_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_da_file.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_da_file.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_table.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -487,6 +488,11 @@ if(ENABLE_IMAGE_TESTS)
                 elseif(_test_stem STREQUAL "test_mtk_da_file")
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_chip_table")
+                    # D1 Task 3：芯片表（由 tools/gen_mtk_chip_table.py 从 mtkclient 的
+                    # hwconfig 转写；src/core/modes 已 GLOB 编入主程序，不属任何静态库）
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
