@@ -18,20 +18,22 @@ private slots:
 
 void TestMtkChipTable::tableIsPopulated()
 {
-    // "更大的表"（用户决策）：**整表转写**（不是挑几十个常用芯片挑着来）；太少说明生成脚本读错了表
-    //   下限取 80 而非 brief 里的 100：上游 v2.1.4.1-20-g71b0175 的 hwconfig **实际只有 89 条**
-    //   （交叉核对上游 main 分支同为 ~89 条）—— 100 是不可达的圆整数。
-    //   本用例只钉"表没被换成 stub / 没被截断"；解析回归由生成脚本的结构不变量（逐 key 校验）
-    //   在生成期就拦住，不靠这个数字。
+    // "更大的表"（用户决策）的落地口径是**整表转写**（不是挑几十个常用芯片），不是条目数绝对值。
+    //   下限 80 而非 100：上游 71b0175 = **89 条**（v2.1.4.1-20），master 同样 ~89 ——
+    //   100 是不可达的圆整数；下限 80 = 留约 10% 余量。
+    //   本用例只钉"表没被换成 stub / 没被截断"；解析回归由生成脚本的结构不变量
+    //   （解析条数 == dict int key 数 + 逐 key 校验）在生成期就拦住，不靠这个数字。
     QVERIFY2(mtkbrom::chipTableSize() >= 80,
-             qPrintable(QStringLiteral("表项数 %1").arg(mtkbrom::chipTableSize())));
+             qPrintable(QStringLiteral("表项数 %1（上游 71b0175 = 89）").arg(mtkbrom::chipTableSize())));
 }
 
 void TestMtkChipTable::knownChipsHaveExpectedGeneration()
 {
     // 已知机型（与真样本 da_parse_report.json 的实测一致）：
     //   0x907/0x992/0x1066/0x1129 = V6 文件里的条目 → XML 代
-    //   0x6752/0x6765 = 现代老平台 → 非 XML（LEGACY 或 XFLASH，两者都由 damode 给出）
+    //   0x6752 = 现代老平台 → 非 XML（LEGACY 或 XFLASH，两者都由 damode 给出）
+    //   （不列 0x6765：上游**表里没有**这个 hw_code —— 它只出现在 DA 真样本里，
+    //     拿它断言表内容会假红。）
     // 更正（实测上游表，非推测）："出现在 V6 文件里" **不等于**代际是 XML —— 文件格式（isV6，
     // 见 mtk_da_file.h 的 P10）与 DA 协议代是两条轴。上游表里 0x907/0x1129 = XML，
     // 而 0x992/0x1066 = **XFLASH**（真样本 MTK_DA_V6.bin 里两者都有条目）。
