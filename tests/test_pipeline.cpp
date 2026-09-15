@@ -15,6 +15,9 @@ private slots:
     void edlKeepsPartitionFlashPath();
     void edlChannelRejectsMissingPlanDir();
     void resolveProgrammerPicksFirstCandidate();
+    void bromParamsRejectMissingDaAndImages();
+    void bromParamsNormalizeDefaults();
+    void bromChannelRejectsMissingDaBeforeUsb();
 };
 
 void TestPipeline::channelMapping()
@@ -132,6 +135,56 @@ void TestPipeline::resolveProgrammerPicksFirstCandidate()
     QVERIFY(FlashTool::resolveProgrammer(empty.path(), QString(), &emptyMsgs, &emptyErr).isEmpty());
     QVERIFY2(emptyErr.contains(QStringLiteral("prog_*firehose*")), qPrintable(emptyErr));
     QVERIFY(emptyMsgs.isEmpty());
+}
+
+// mtk-brom 通道参数：缺 DA / 缺镜像都必须**明确失败**（不让空计划走到 USB 才炸）
+void TestPipeline::bromParamsRejectMissingDaAndImages()
+{
+    QString da, err;
+    QStringList images, dirs;
+    bool net = true;
+    QVERIFY(!FlashTool::parseBromParams({{QStringLiteral("imagePaths"), QStringList{QStringLiteral("/a/boot.img")}}},
+                                        &da, &images, &dirs, &net, &err));
+    QVERIFY2(err.contains(QStringLiteral("DA")), qPrintable(err));
+
+    err.clear();
+    QVERIFY(!FlashTool::parseBromParams({{QStringLiteral("daPath"), QStringLiteral("/a/da.bin")}},
+                                        &da, &images, &dirs, &net, &err));
+    QVERIFY2(err.contains(QStringLiteral("镜像")), qPrintable(err));
+}
+
+// 参数齐全：字段规范化正确（allowNetwork 缺省 false —— 网络默认关闭）
+void TestPipeline::bromParamsNormalizeDefaults()
+{
+    QString da, err;
+    QStringList images, dirs;
+    bool net = true;                       // 故意给 true，验证缺省会被覆盖成 false
+    const QVariantMap params{{QStringLiteral("daPath"), QStringLiteral("/a/da.bin")},
+                             {QStringLiteral("imagePaths"),
+                              QStringList{QStringLiteral("/a/boot.img"), QStringLiteral("/a/super.img")}},
+                             {QStringLiteral("firmwareDirs"), QStringList{QStringLiteral("/a/fw")}}};
+    QVERIFY2(FlashTool::parseBromParams(params, &da, &images, &dirs, &net, &err), qPrintable(err));
+    QCOMPARE(da, QStringLiteral("/a/da.bin"));
+    QCOMPARE(images.size(), 2);
+    QCOMPARE(dirs, QStringList{QStringLiteral("/a/fw")});
+    QVERIFY(!net);
+}
+
+// mtk-brom 通道：params 缺 DA → **在碰 USB 之前**就拒（与上面 edlChannelRejectsMissingPlanDir
+// 同款守门用例，覆盖 T10 接线的通道体早退路径 —— 这条**离线可测**，通道体其余部分才不可）。
+// 断言"不产生任何日志"= 没有走到通道日志/多设备警告/USB：真机段（枚举→握手）在
+// runBromFlash 里，本用例用空 params 在 parseBromParams 处返回。
+void TestPipeline::bromChannelRejectsMissingDaBeforeUsb()
+{
+    FlashTool tool;
+    QList<QString> logged;
+    connect(&tool, &FlashTool::outputMessage, this,
+            [&logged](const QString &msg, bool) { logged << msg; });
+
+    QString err;
+    QVERIFY(!tool.flashFullPackage(QString(), DeviceDetector::MODE_MTK_BROM, QVariantMap(), &err));
+    QVERIFY2(err.contains(QStringLiteral("DA")), qPrintable(err));
+    QVERIFY(logged.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestPipeline)

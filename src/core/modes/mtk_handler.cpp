@@ -584,18 +584,3 @@ bool runBromFlash(const mtkbrom::BromFlashRequest &req, const mtkbrom::BromLogFn
         return false;
     return mtkbrom::bromFlashOnSession(session, req, log, progress, error);
 }
-
-// 【弃用桩 —— **T10 接线时必须删除**】见 mtk_handler.h。
-// 存在的唯一理由：flash_tool.cpp 的旧调用点要到 T10 才改，T9 删净会打断主程序 + test_pipeline
-// 构建（计划裁决 A，见 .superpowers/sdd/progress.md 的 T9 条目）。**不含任何刷写逻辑**。
-bool runBromFlash(const QByteArray &daBinary,
-                  const QList<QPair<QString, QByteArray>> &partitions,
-                  QString *error)
-{
-    Q_UNUSED(daBinary)
-    Q_UNUSED(partitions)
-    if (error)
-        *error = QStringLiteral("旧 runBromFlash 入口已废弃：请改用 runBromFlash(BromFlashRequest)"
-                                "（flash_tool 通道接线属 Task 10）");
-    return false;
-}

@@ -387,12 +387,16 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_payload.cpp
                         # Phase D1 Task 9：mtk_handler.cpp 实现 runBromFlash 真流程后引用了
                         # DA 解析/芯片表/EMI/preloader/计划层 —— 不补这些源会在链接期炸（undef）。
-                        # （生产下载器 mtk_preloader_download_qt.cpp 是 T10 的 flash_tool 接线才需要。）
+                        # Phase D1 Task 10：flash_tool.cpp 的 mtk-brom 通道接线后调用
+                        # makeQtPreloaderDownloader（生产下载器，Qt Network；默认关闭、仅
+                        # allowNetworkPreloader 时构造）——不补此源同样链接期 undef。
+                        # Qt6::Network 在循环后补链给本目标（见 add_subdirectory(src/plugins) 之后）。
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_download_qt.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp
                         # Phase B Task 7：edl_handler.cpp 退化为薄封装（持有 LibusbEdlTransport +

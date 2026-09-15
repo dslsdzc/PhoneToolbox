@@ -101,7 +101,11 @@ public:
 
     // F5: 整包刷写入口——按设备模式分派到协议通道（MTK BROM/华为插件/展锐）。
     // params 承载通道所需文件参数（键名见各通道实现）：
-    //   mtk-brom:            daPath(DA 二进制路径)(分区列表待接线)
+    //   mtk-brom:            daPath(DA 二进制路径，必填) + imagePaths(QStringList，必填，待刷分区镜像)
+    //                        + preloaderPath(可选，显式 preloader) + firmwareDirs(可选，QStringList，
+    //                        自动导入目录) + allowNetworkPreloader(可选，默认 false —— 网络默认关闭)
+    //                        + preloaderCacheDir(可选，preloader 命中后的落盘目录)
+    //                        （计划按**设备实读分区表**匹配镜像文件名，见 buildMtkPlan）
     //   huawei-usb-update:   updateApp(update.app 路径)
     //   spd:                 pacPath + fdl1Path + fdl2Path
     //   oppo-edl:            planDir(解包产物目录) + programmerPath(可选，缺省在 planDir 内探测
@@ -127,6 +131,13 @@ public:
     // 由调用方逐条 emit outputMessage。**不碰设备/USB**（探测逻辑可离线钉住）。
     static QString resolveProgrammer(const QString &planDir, const QString &explicitPath,
                                      QStringList *messages, QString *error);
+
+    // 纯函数（单测）：mtk-brom 通道的文件参数校验与规范化（缺 DA/镜像 → 明确报错）。
+    // 失败 = 明确 error（缺 DA / 缺镜像）；成功时 outDaPath 非空、outImages 非空；
+    // outFirmwareDirs 可空、outAllowNetwork 缺省 false（网络获取默认关闭）。
+    // 出参指针可空（不需要的字段传 nullptr）。
+    static bool parseBromParams(const QVariantMap &params, QString *outDaPath, QStringList *outImages,
+                                QStringList *outFirmwareDirs, bool *outAllowNetwork, QString *error);
 
 signals:
     void outputMessage(const QString &msg, bool isError);

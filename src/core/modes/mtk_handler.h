@@ -6,7 +6,6 @@
 #include <QString>
 #include <QStringList>
 #include <QList>
-#include <QPair>
 #include <QProcess>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -31,13 +30,6 @@ struct MtkPartition {
 // 诚实边界：枚举/打开/握手段**离线不可验证**。失败即停、**不复位**（与 Phase B/C 同口径）。
 bool runBromFlash(const mtkbrom::BromFlashRequest &req, const mtkbrom::BromLogFn &log,
                   const mtkbrom::BromProgressFn &progress, QString *error = nullptr);
-
-// 【弃用桩 —— **T10 接线时必须删除**】F1 时代的旧入口（分区以字节列表传入）。
-// 保留原因：flash_tool.cpp 的调用点要 T10 才改，删净会同时打断主程序与 test_pipeline 构建。
-// 函数体只明确失败，不含任何刷写逻辑（真实现见上方 runBromFlash(BromFlashRequest)）。
-bool runBromFlash(const QByteArray &daBinary,
-                  const QList<QPair<QString, QByteArray>> &partitions,
-                  QString *error = nullptr);
 
 class MtkHandler : public QObject
 {

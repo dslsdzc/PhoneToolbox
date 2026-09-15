@@ -9,6 +9,10 @@
 #include "core/odin/odin_libusb_transport.h"
 #include "core/odin/odin_session.h"
 #include "core/odin/samsung_plan.h"
+// D1 Task 10：mtk-brom 通道 —— preloader 两路径（显式/自动导入 + 网络来源清单）与
+// 生产下载器（Qt Network；默认关闭，仅 allowNetworkPreloader 时构造）
+#include "core/modes/mtk_preloader_fetch.h"
+#include "core/modes/mtk_preloader_download_qt.h"
 #include "src/plugins/plugin_manager.h"
 #include <libusb.h>
 #include <QProcess>
@@ -18,7 +22,7 @@
 #include <QDir>
 #include <QCoreApplication>
 #include <QThread>
-#include <QPair>
+#include <utility>      // std::as_const（遍历 Qt 容器）
 
 #ifdef Q_OS_WIN
 static const char *kPlatformScript = "flash-all.bat";
@@ -1182,6 +1186,30 @@ QString FlashTool::resolveProgrammer(const QString &planDir, const QString &expl
     return found.first();
 }
 
+// mtk-brom 通道的文件参数校验与规范化（纯函数，可离线测）。**在碰 USB 之前**把空计划拒掉：
+// 缺 DA 或一个镜像都没有时，走到 BROM 层只会白握手一遍再失败（且真机段离线不可验证）。
+// 其余键（preloader 三件套）不是必填 —— 缺 preloader 只在 errorcode==0xBC3 时才是致命
+// （见 bromBringUpDa 注释），由协议层按需报错，此处不越权拦截。
+bool FlashTool::parseBromParams(const QVariantMap &params, QString *outDaPath, QStringList *outImages,
+                                QStringList *outFirmwareDirs, bool *outAllowNetwork, QString *error)
+{
+    const QString daPath = params.value(QStringLiteral("daPath")).toString();
+    if (daPath.isEmpty()) {
+        if (error) *error = QStringLiteral("缺少 DA 二进制路径（mtk-brom 通道）");
+        return false;
+    }
+    const QStringList images = params.value(QStringLiteral("imagePaths")).toStringList();
+    if (images.isEmpty()) {
+        if (error) *error = QStringLiteral("未选择任何镜像文件（mtk-brom 通道需要待刷分区镜像）");
+        return false;
+    }
+    if (outDaPath) *outDaPath = daPath;
+    if (outImages) *outImages = images;
+    if (outFirmwareDirs) *outFirmwareDirs = params.value(QStringLiteral("firmwareDirs")).toStringList();
+    if (outAllowNetwork) *outAllowNetwork = params.value(QStringLiteral("allowNetworkPreloader")).toBool();
+    return true;
+}
+
 bool FlashTool::isPackageChannelMode(DeviceDetector::DeviceMode mode)
 {
     // oppo-edl（9008）**不在**此列：EDL 的分区列表是真实条目，分区刷写/读取都按 lun<N> 工作。
@@ -1216,35 +1244,55 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         return false;
     }
     if (channel == QStringLiteral("mtk-brom")) {
-        // F1 通道：DA 二进制路径由 params 提供，读入字节交 runBromFlash
-        // （F1 签名为 QByteArray daBinary——路径→字节转换在此完成）。
-        const QString daPath = params.value(QStringLiteral("daPath")).toString();
-        if (daPath.isEmpty()) {
-            if (error) *error = QStringLiteral("缺少 DA 二进制路径（mtk-brom 通道）");
+        // F5-1 的"仅 DA 协议握手"到此为止：本通道现在按**设备分区表**做计划并逐分区刷写
+        // （计划：buildMtkPlan；写入判据一律以设备实读分区表为准 —— 见 Task 7 裁决 1）。
+        QString daPath;
+        QStringList images, firmwareDirs;
+        bool allowNetwork = false;
+        if (!parseBromParams(params, &daPath, &images, &firmwareDirs, &allowNetwork, error))
             return false;
-        }
-        QFile daFile(daPath);
-        if (!daFile.open(QIODevice::ReadOnly)) {
+        QFile f(daPath);
+        if (!f.open(QIODevice::ReadOnly)) {
             if (error) *error = QStringLiteral("无法读取 DA 二进制: %1").arg(daPath);
             return false;
         }
-        const QByteArray daBinary = daFile.readAll();
-        daFile.close();
-        if (daBinary.isEmpty()) {
-            if (error) *error = QStringLiteral("DA 文件为空");
+        mtkbrom::BromFlashRequest req;
+        req.daFile = f.readAll();
+        f.close();
+        if (req.daFile.isEmpty()) {
+            if (error) *error = QStringLiteral("DA 文件为空：%1").arg(daPath);
             return false;
         }
-        // 分区列表（分区名→镜像路径）由 F5-3 FlashPanel 构建并经 params 传入——
-        // 结构待接线，先空列表（诚实边界，详见 F5-2 报告）。
-        const QList<QPair<QString, QByteArray>> partitions;
-        // 多设备防护：BROM 层取枚举首个设备（devs.first()）——多台 MTK 同连时警告
+        req.daLabel = daPath;
+        req.imagePaths = images;
+        req.preloader.explicitPath = params.value(QStringLiteral("preloaderPath")).toString();
+        req.preloader.firmwareDirs = firmwareDirs;
+        req.preloader.allowNetwork = allowNetwork;
+        req.preloader.cacheDir = params.value(QStringLiteral("preloaderCacheDir")).toString();
+
+        QStringList sourceLog;
+        req.preloaderSources = mtkbrom::loadConfiguredSources(&sourceLog);
+        for (const QString &line : std::as_const(sourceLog))
+            emit outputMessage(line, false);
+        if (allowNetwork) {
+            req.downloader = mtkbrom::makeQtPreloaderDownloader();
+            emit outputMessage(QStringLiteral("已按用户选择开启 preloader 网络获取（默认关闭项）"), false);
+        }
+
+        // 多设备防护（F5 终审口径保留）：BROM 层取枚举首个设备（devs.first()）
         const int mtkCount = countDevicesOfVid(0x0E8D, nullptr);
         if (mtkCount > 1)
             emit outputMessage(QStringLiteral(
                 "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
                 .arg(mtkCount), false);
-        emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1").arg(deviceId), false);
-        return runBromFlash(daBinary, partitions, error);
+        emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1（%2 个镜像）")
+                               .arg(deviceId).arg(images.size()), false);
+
+        const auto logFn = [this](const QString &m, bool isErr) { emit outputMessage(m, isErr); };
+        const auto progressFn = [this](quint64 done, quint64 total) {
+            emit flashProgress(total > 0 ? int(done * 100 / total) : 0);
+        };
+        return runBromFlash(req, logFn, progressFn, error);
     }
     if (channel == QStringLiteral("huawei-usb-update")) {
         // F2 插件通道：经 PluginManager 运行时加载（法务隔离保持——删除插件文件即完整移除）。
