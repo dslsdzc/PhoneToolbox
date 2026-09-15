@@ -139,13 +139,13 @@ QByteArray pmtEntry60(const QByteArray &name, quint64 size, quint64 offset)
     return pd;
 }
 
-// 整会话读序列（走到底的成功路径：无 preloader、errorcode == 0、单分区写 + FINISH）。
+// 引导链 + 刷写段（prologue 之后的全部；无 preloader、errorcode == 0、单分区写 + FINISH）。
 // ⚠️ PMT **读两次**：计划层一次 + flashPartition 内部再读一次（T6 既有语义：每个分区重读设备表）。
 // answerFinish=false → 省掉 FINISH 的两个 ACK（测"收尾失败只告警、仍返回 true"）。
-QList<QByteArray> fullSessionReads(const mtkbrom::DaSelection &sel, const QByteArray &pmt,
-                                   bool answerHwSwVer = true, bool answerFinish = true)
+QList<QByteArray> chainAndFlashReads(const mtkbrom::DaSelection &sel, const QByteArray &pmt,
+                                     bool answerFinish = true)
 {
-    QList<QByteArray> r = prologueReads(sel.entry.hwCode, answerHwSwVer);
+    QList<QByteArray> r;
     r << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
       << stage2Reads(0) << bootToReads() << flashInfoReads();
     r << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（计划）
@@ -153,6 +153,15 @@ QList<QByteArray> fullSessionReads(const mtkbrom::DaSelection &sel, const QByteA
       << QByteArray("\x5A", 1) << QByteArray(1, char(0x69));              // 写命令 ACK + 块 CONT
     if (answerFinish)
         r << QByteArray("\x5A", 1) << QByteArray("\x5A", 1);
+    return r;
+}
+
+// 整会话读序列（设备 hw_code == DA 条目 hw_code 的常规情形）
+QList<QByteArray> fullSessionReads(const mtkbrom::DaSelection &sel, const QByteArray &pmt,
+                                   bool answerHwSwVer = true, bool answerFinish = true)
+{
+    QList<QByteArray> r = prologueReads(sel.entry.hwCode, answerHwSwVer);
+    r << chainAndFlashReads(sel, pmt, answerFinish);
     return r;
 }
 
@@ -262,6 +271,7 @@ private slots:
     void bromFlashOnSessionRejectsV6DaFile();
     void bromFlashOnSessionContinuesWhenHwSwVerUnavailable();
     void bromFlashOnSessionWarnsButSucceedsWhenFinishFails();
+    void bromFlashOnSessionLooksUpDaByDacode();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -1324,6 +1334,44 @@ void TestMtkPayload::bromFlashOnSessionWarnsButSucceedsWhenFinishFails()
              "FINISH 失败不得把成功报成失败（数据已落盘）");
     QVERIFY2(cap.hasErrorLineContaining(QStringLiteral("FINISH 收尾失败")), qPrintable(cap.joined()));
     QVERIFY2(m->writes.contains(image), "数据确实写了（所以 FINISH 失败只能是告警）");
+}
+
+// **DA 条目查找键必须是 chip->dacode**（T9 复审修复）：设备报的 hw_code 与芯片表的 dacode 不同时
+// 必须用 dacode 去 DA 文件里找条目 —— 0x0321（表内 LEGACY）的 dacode 是 0x6735，DA 文件里只有
+// hw_code == 0x6735 的条目。上游 `daconfig.py:208-209` 用 chipconfig.dacode 查、`dasetup` 按条目
+// 自己的 hw_code 建（:190/:192）→ 键 = dacode；本仓 `mtk_chip_table.h:29-30` 同口径。
+// 判别力：把实现里的键改回 hwCode（变异）→ 本用例必须红（选不中条目 → 无候选）。
+void TestMtkPayload::bromFlashOnSessionLooksUpDaByDacode()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6735, sel, &err), qPrintable(err));   // 条目 hw_code = dacode
+    QCOMPARE(sel.entry.hwCode, quint16(0x6735));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    // 设备报 **0x0321**（其 dacode = 0x6735）；引导链/刷写段与常规路径完全一致
+    m->reads << prologueReads(0x0321)
+             << chainAndFlashReads(sel, pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000));
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(0x6735);          // 文件里条目的 hw_code 就等于 dacode
+    req.daLabel = QStringLiteral("合成 DA（dacode 键）");
+    req.imagePaths << imgPath;
+
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err),
+             qPrintable(err));
+    QVERIFY2(cap.joined().contains(QStringLiteral("DA 条目")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("FINISH（0xD9）收尾完成")), qPrintable(cap.joined()));
+    QVERIFY2(m->writes.contains(image), "镜像字节必须真的写出去");
 }
 
 QTEST_APPLESS_MAIN(TestMtkPayload)

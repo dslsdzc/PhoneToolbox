@@ -745,7 +745,12 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     }
     DaSelection sel;
     QStringList selWarn;
-    if (!selectDaEntry(daFile, hwCode, sw.hwVer, sw.swVer, &selWarn, sel, error)) {
+    // ⚠️ 查找键是 **chip->dacode**，不是设备报的 hwCode（两者在 31/89 个表项上不同）。
+    // 上游 `daconfig.py:208-209`：`dacode = self.config.chipconfig.dacode; if dacode in self.dasetup`，
+    // 而 `dasetup` 是按**条目自己的** `da.hw_code` 建的（`:190/:192/:201`）→ 键 = dacode。
+    // 本仓同口径：`mtk_chip_table.h:29-30`、`mtk_da_file.h` 的 selectDaEntry 参数名。
+    // 反例（修前）：设备 0x0321（dacode 0x6735）会拿 0x0321 去查 → 无候选 → 该类机型刷不了。
+    if (!selectDaEntry(daFile, chip->dacode, sw.hwVer, sw.swVer, &selWarn, sel, error)) {
         const QString why = error ? *error : QString();            // 先取值再改写（别自引用）
         if (error) *error = QStringLiteral("DA 条目选择失败（%1）：%2").arg(req.daLabel, why);
         return false;

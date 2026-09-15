@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
+#include "core/modes/mtk_chip_table.h"   // T9 复审：查找键 = chip->dacode 的真样本用例
 #include "core/modes/mtk_da_file.h"
 #include "mtk_test_helpers.h"
 
@@ -34,6 +35,8 @@ private slots:
     void realSamplesMatchIndependentReport();
     void realSamplesSelectExpectedEntries();
     void realSamplesCoverCollisionAndVersionFilter();
+    // T9 复审修复的真样本方向：查找键 = chip->dacode（不是设备报的 hw_code）
+    void realSamplesLookUpByDacodeNotHwCode();
 };
 
 using namespace mtktest;
@@ -556,6 +559,61 @@ void TestMtkDaFile::realSamplesSelectExpectedEntries()
     QVERIFY2(mtkbrom::selectDaEntry(v6, 0x907, 0, 0, &warn, sel, &err), qPrintable(err));
     QVERIFY(sel.isXmlForced);
     QCOMPARE(sel.da2.startAddr, quint32(0x40000000));
+}
+
+// **DA 条目查找键 = 芯片表的 dacode，不是设备报的 hw_code**（T9 复审修复的真样本方向）。
+// 出处：上游 `mtkclient/Library/DA/daconfig.py:208-209` 用 `chipconfig.dacode` 查，
+// 而 `dasetup` 是按**条目自己的** `da.hw_code` 建的（:190/:192/:201）；本仓
+// `mtk_chip_table.h:29-30` 同口径（"dacode 才是查 DA 条目的键"）。
+// 真样本实测（reference/mtk-samples/，与独立解析器报告 da_parse_report.json 对拍）：
+//   MTK_DA_V5.bin 里有 `hw_code == 0x6735`（index 14）/`0x6758`（19）/`0x8173`（43）的条目，
+//   而**没有** `0x0321` —— 芯片表把 0x0321/0x0335/0x0337 映射到 dacode 0x6735。
+// 于是：① 用 dacode(0x6735) 查 → 命中；② 用设备 hw_code(0x0321) 查 → 无候选（正是修前的行为）。
+void TestMtkDaFile::realSamplesLookUpByDacodeNotHwCode()
+{
+    if (!mtktest::sampleFileAvailable(QStringLiteral("MTK_DA_V5.bin"))) {
+#if MTK_SAMPLES_REQUIRED
+        QFAIL("真样本缺失，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
+#else
+        QSKIP("真样本缺失（reference/ 为 gitignored）");
+#endif
+    }
+    QFile f(mtktest::samplesDir() + QStringLiteral("/MTK_DA_V5.bin"));
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    mtkbrom::DaFile v5;
+    QString err;
+    QVERIFY2(mtkbrom::parseDaFile(f.readAll(), v5, &err), qPrintable(err));
+
+    // 本仓芯片表里**全部 5 个 dacode != hw_code 的 LEGACY 条目**（映射到 3 个 dacode）：
+    // 设备报的 hw_code（左）≠ 真正要拿去找 DA 条目的 dacode（右）。
+    struct Case { quint16 deviceHwCode; quint16 dacode; };
+    const Case kCases[] = {{0x0321, 0x6735}, {0x0335, 0x6735}, {0x0337, 0x6735},
+                           {0x0507, 0x6758}, {0x8172, 0x8173}};
+    for (const Case &c : kCases) {
+        const mtkbrom::ChipInfo *chip = mtkbrom::lookupChip(c.deviceHwCode);
+        QVERIFY2(chip != nullptr, qPrintable(QStringLiteral("表内应有 0x%1")
+                                                 .arg(c.deviceHwCode, 4, 16, QLatin1Char('0'))));
+        QCOMPARE(chip->dacode, c.dacode);
+        QCOMPARE(chip->damode, mtkbrom::DaMode::Legacy);
+
+        QStringList warn;
+        mtkbrom::DaSelection sel;
+        // ① 用 **dacode** 查 → 命中（真实条目三条 region 齐全，DA1/DA2 切片非空）
+        QVERIFY2(mtkbrom::selectDaEntry(v5, chip->dacode, 0, 0, &warn, sel, &err), qPrintable(err));
+        QCOMPARE(sel.entry.hwCode, c.dacode);      // 条目的 hw_code 就等于 dacode
+        QVERIFY(sel.da1.len > 0);
+        QVERIFY(sel.da2.len > 0);
+        QCOMPARE(sel.da1Bytes.size(), int(sel.da1.len));
+
+        // ② 用**设备报的 hw_code** 当键 → 无候选；诊断里必须列出该 dacode
+        //    （证明"文件里确实有这条，只是键用错了"—— 正是修前的行为）
+        warn.clear();
+        err.clear();
+        QVERIFY2(!mtkbrom::selectDaEntry(v5, c.deviceHwCode, 0, 0, &warn, sel, &err),
+                 "设备 hw_code 不是查找键，用它查必须失败");
+        QVERIFY2(err.contains(QStringLiteral("0x%1").arg(c.dacode, 4, 16, QLatin1Char('0'))),
+                 qPrintable(err));
+    }
 }
 
 void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()

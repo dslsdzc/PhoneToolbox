@@ -508,8 +508,11 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/pit.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_da_file")
+                    # T9 复审：真样本用例要拿芯片表的 dacode 做查找键（0x0321 → 0x6735），
+                    # 故补 mtk_chip_table.cpp（纯 Qt Core，无 libusb）。
                     set(_test_extra_sources
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_chip_table")
                     # D1 Task 3：芯片表（由 tools/gen_mtk_chip_table.py 从 mtkclient 的
                     # hwconfig 转写；src/core/modes 已 GLOB 编入主程序，不属任何静态库）
