@@ -36,6 +36,19 @@ QString sha256Hex(const QByteArray &data)
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
 }
 
+// 64 位十六进制谓词（大小写不敏感）。**唯一实现**：`verifySha256` 与"下载前的 fail-closed 拒绝"
+// 共用同一口径 —— 两处各写一份会漂移（M1：原来下载前只查长度，64 个 'z' 也会真发一次请求）。
+bool isHexSha256(const QString &hex)
+{
+    const QString t = hex.trimmed().toLower();
+    if (t.size() != 64)
+        return false;
+    for (const QChar c : std::as_const(t))
+        if (!((c >= QLatin1Char('0') && c <= QLatin1Char('9')) || (c >= QLatin1Char('a') && c <= QLatin1Char('f'))))
+            return false;
+    return true;
+}
+
 bool readWholeFile(const QString &path, QByteArray &out, QString *error)
 {
     QFile f(path);
@@ -85,12 +98,7 @@ bool writeCache(const QString &cacheDir, const QString &name, const QByteArray &
 bool verifySha256(const QByteArray &bytes, const QString &expectedHex)
 {
     const QString expected = expectedHex.trimmed().toLower();
-    if (expected.size() != 64)
-        return false;
-    for (const QChar c : std::as_const(expected))
-        if (!((c >= QLatin1Char('0') && c <= QLatin1Char('9')) || (c >= QLatin1Char('a') && c <= QLatin1Char('f'))))
-            return false;
-    return sha256Hex(bytes) == expected;
+    return isHexSha256(expected) && sha256Hex(bytes) == expected;
 }
 
 QStringList findPreloaderCandidates(const QStringList &dirs)
@@ -247,8 +255,11 @@ bool resolvePreloader(const PreloaderOptions &opt, const QList<PreloaderSource> 
     QStringList failures;
     for (const PreloaderSource &src : std::as_const(sources)) {
         const QString label = src.name.isEmpty() ? src.url : src.name;   // 日志里点名的口径
-        if (src.sha256.trimmed().size() != 64) {
-            failures << QStringLiteral("%1：来源未提供 64 位 sha256，拒绝下载（fail-closed）").arg(label);
+        // fail-closed：**可判定无效**的期望哈希（缺失/长度不对/含非十六进制字符）在**发请求之前**就拒
+        // —— 判据与 verifySha256 共用 isHexSha256（M1：原来只查长度，64 个 'z' 也会真下载一次）
+        if (!isHexSha256(src.sha256)) {
+            failures << QStringLiteral("%1：来源未提供 64 位十六进制 sha256，拒绝下载（fail-closed）")
+                            .arg(label);
             continue;
         }
         QByteArray data;

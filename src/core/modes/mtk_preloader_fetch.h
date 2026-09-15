@@ -54,7 +54,9 @@ struct PreloaderResult {
     QString path;               // 命中文件路径（Network = 缓存路径；缓存失败/未启用 = 空）
     QByteArray bytes;           // origin != None 时非空
     QStringList log;            // 需落日志（来源/风险/校验）；调用方逐条 emit
-    QString skipReason;         // origin == None 时的原因（非空 → 调用方按 warning 落日志）
+    QString skipReason;         // **成功返回**且 origin == None 时的原因（非空 → 调用方按 warning
+                                // 落日志）。返回 false 时 origin 也是 None 但 skipReason 恒为空 ——
+                                // 那条路径以 `error` 为准（不变量见文件头）
 };
 
 // 注入点：返回 false 或给空数据 = 该来源不可用（调用方继续试下一条）。
@@ -72,8 +74,12 @@ QStringList findPreloaderCandidates(const QStringList &dirs);
 // 解析来源清单 JSON：`{"sources":[{"name","url","sha256"}, ...]}`。
 // 失败（false + error）：不是合法 JSON 对象 / 条目缺 url / 清单为空 —— **整份拒绝**。
 bool parsePreloaderSources(const QByteArray &json, QList<PreloaderSource> &out, QString *error = nullptr);
-QString configuredSourcesPath();                                    // 标准配置路径（UI 展示/用户填写）
-QList<PreloaderSource> loadConfiguredSources(QStringList *log = nullptr);  // 缺失/为空 → 空表 + log 说明
+// 标准配置路径（UI 展示/用户填写）：QStandardPaths::AppConfigLocation + mtk_preloader_sources.json。
+// 该位置**依赖运行环境**：无 QCoreApplication（如 QTEST_APPLESS_MAIN 用例）时不带 org/app 两级目录；
+// **HOME 缺失时 Qt 返回空** → 退化为**相对路径** `mtk_preloader_sources.json`（当前工作目录）。
+QString configuredSourcesPath();
+// 读标准路径上的清单。缺失/打不开/清单非法 → **空表 + log 说明**（不抛、不崩、不静默）。
+QList<PreloaderSource> loadConfiguredSources(QStringList *log = nullptr);
 
 // 64 位十六进制、大小写不敏感；长度或字符不合法 → false（不抛异常、不静默当真）。
 bool verifySha256(const QByteArray &bytes, const QString &expectedHex);

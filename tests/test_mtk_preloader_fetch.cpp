@@ -14,6 +14,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 
 #include "core/modes/mtk_preloader_fetch.h"
@@ -43,6 +44,21 @@ class TestMtkPreloaderFetch : public QObject
 {
     Q_OBJECT
 private slots:
+    // XDG_CONFIG_HOME 是"配置路径重定向"用例组唯一的开关：进来先存原值，**每个用例之后**恢复
+    // （cleanup 而非 cleanupTestCase —— 任一用例中途 QVERIFY 早退也不会把 env 漏给下一个用例）。
+    void initTestCase()
+    {
+        m_xdgWasSet = qEnvironmentVariableIsSet("XDG_CONFIG_HOME");
+        m_savedXdg = qgetenv("XDG_CONFIG_HOME");
+    }
+    void cleanup()
+    {
+        if (m_xdgWasSet)
+            qputenv("XDG_CONFIG_HOME", m_savedXdg);
+        else
+            qunsetenv("XDG_CONFIG_HOME");
+    }
+
     // ① 显式路径优先于自动导入
     void explicitPathWins()
     {
@@ -294,6 +310,26 @@ private slots:
         QVERIFY(!QFile::exists(d.filePath(QStringLiteral("escaped_preloader.bin"))));   // 没逃到上层
     }
 
+    // M1：期望哈希**可判定无效**（64 字符但含非十六进制）→ 与"缺失"同口径，在**发请求之前**拒绝
+    // （判据与 verifySha256 共用 isHexSha256；原来只查长度 → 64 个 'z' 也会真发一次下载请求）
+    void networkRefusesSourceWithNonHexSha256()
+    {
+        int calls = 0;
+        PreloaderSource src{QStringLiteral("t"), QStringLiteral("https://example.invalid/p.bin"),
+                            QString(64, QLatin1Char('z'))};
+        PreloaderOptions opt;
+        opt.allowNetwork = true;
+        PreloaderResult res; QString err;
+        QVERIFY2(mtkbrom::resolvePreloader(opt, {src},
+                                           [&calls](const PreloaderSource &, QByteArray *, QString *) {
+                                               ++calls; return true;
+                                           }, res, &err), qPrintable(err));
+        QCOMPARE(calls, 0);                 // 不是"下载后再拒"——一次请求都不发
+        QCOMPARE(res.origin, PreloaderOrigin::None);
+        QVERIFY2((res.log.join('\n') + res.skipReason).contains(QStringLiteral("sha256")),
+                 qPrintable(res.log.join('\n') + res.skipReason));
+    }
+
     // ② 来源没有 sha256 → fail-closed：不下载、告警
     void networkRefusesSourceWithoutSha256()
     {
@@ -396,6 +432,68 @@ private slots:
         QVERIFY(out.at(0).sha256.isEmpty());
     }
 
+    // I1①：配置清单**不存在** → 空表 + log 说明（真实调用方的默认处境：没配就如实说，不是静默空表）
+    void configuredSourcesMissingFileIsReported()
+    {
+        QTemporaryDir cfg;
+        QVERIFY(cfg.isValid());
+        const QString path = redirectConfigTo(cfg);
+        QCOMPARE(QFileInfo(path).absolutePath(), QFileInfo(cfg.path()).absoluteFilePath());  // 没跑去用户真实配置目录
+        QVERIFY(!QFile::exists(path));
+
+        QStringList log;
+        const QList<PreloaderSource> out = mtkbrom::loadConfiguredSources(&log);
+        QVERIFY(out.isEmpty());
+        QCOMPARE(log.size(), 1);
+        QVERIFY2(log.first().contains(QStringLiteral("不存在")), qPrintable(log.join('\n')));
+        QVERIFY(mtkbrom::loadConfiguredSources().isEmpty());    // log 出参可省（默认 nullptr）
+    }
+
+    // I1②：合法清单 → **真的解析出条目**。loadConfiguredSources 是真实调用方唯一的 sources 来源：
+    // 它若静默退化成空表（永远走 skip 分支），此前没有任何用例能抓 —— 本用例就是防这个。
+    void configuredSourcesLoadsValidList()
+    {
+        QTemporaryDir cfg;
+        QVERIFY(cfg.isValid());
+        const QString path = redirectConfigTo(cfg);
+        QCOMPARE(QFileInfo(path).absolutePath(), QFileInfo(cfg.path()).absoluteFilePath());
+
+        // JSON 先落变量再进宏（内联 R"(...)" 含 "//" 会被 moc 误词法化 —— 见文件头注释）
+        const QByteArray json = R"({"sources":[{"name":"a","url":"https://h/p.bin",)"
+                                R"("sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]})";
+        QFile f(path);
+        QVERIFY2(f.open(QIODevice::WriteOnly), qPrintable(path));
+        QCOMPARE(f.write(json), qint64(json.size()));
+        f.close();
+
+        QStringList log;
+        const QList<PreloaderSource> out = mtkbrom::loadConfiguredSources(&log);
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out.at(0).name, QStringLiteral("a"));
+        QCOMPARE(out.at(0).url, QStringLiteral("https://h/p.bin"));
+        QCOMPARE(out.at(0).sha256.size(), 64);
+        QVERIFY2(log.join('\n').contains(QStringLiteral("1 条")), qPrintable(log.join('\n')));
+    }
+
+    // I1③：清单**非法**（坏 JSON）→ 空表 + log 写明无效（与"文件不存在"必须能区分开）
+    void configuredSourcesRejectsBrokenJson()
+    {
+        QTemporaryDir cfg;
+        QVERIFY(cfg.isValid());
+        const QString path = redirectConfigTo(cfg);
+        QCOMPARE(QFileInfo(path).absolutePath(), QFileInfo(cfg.path()).absoluteFilePath());
+
+        QFile f(path);
+        QVERIFY2(f.open(QIODevice::WriteOnly), qPrintable(path));
+        QCOMPARE(f.write(QByteArray("not json")), qint64(8));
+        f.close();
+
+        QStringList log;
+        const QList<PreloaderSource> out = mtkbrom::loadConfiguredSources(&log);
+        QVERIFY(out.isEmpty());
+        QVERIFY2(log.join('\n').contains(QStringLiteral("无效")), qPrintable(log.join('\n')));
+    }
+
     // 候选扫描：大小写不敏感、只认 preloader*.bin、顺序确定
     void findCandidatesIsCaseInsensitiveAndSorted()
     {
@@ -427,6 +525,19 @@ private slots:
         QVERIFY(!mtkbrom::verifySha256(d, QString(64, QLatin1Char('f'))));
         QVERIFY(!mtkbrom::verifySha256(d, QStringLiteral("short")));
     }
+
+private:
+    // 配置路径重定向：XDG_CONFIG_HOME → 临时目录（用例组专用；env 由 cleanup() 恢复）。
+    // **调用方必须先 QVERIFY(cfg.isValid())**：空的 XDG 会被 Qt 当成"未设置"，用例就会去动
+    // 用户真实的 ~/.config（我们只读不写，但也不必冒这个险）。返回清单文件的完整路径。
+    QString redirectConfigTo(const QTemporaryDir &cfg)
+    {
+        qputenv("XDG_CONFIG_HOME", cfg.path().toUtf8());
+        return mtkbrom::configuredSourcesPath();
+    }
+
+    QByteArray m_savedXdg;
+    bool m_xdgWasSet = false;
 };
 QTEST_APPLESS_MAIN(TestMtkPreloaderFetch)
 #include "test_mtk_preloader_fetch.moc"
