@@ -45,7 +45,9 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
         return false;
     }
     // P10 世代判别式**负向**：hdr[:0x68] 内含 "MTK_DA_v6" 才是 V6；横幅版本号不得用于逻辑分支
-    out.isV6 = data.left(kHeaderSize).contains(QByteArray("MTK_DA_v6"));
+    out.isV6 = data.left(kHeaderSize).contains(QByteArray("MTK_DA_v6"));   // 9 字节 needle（P10）——
+    // ⚠️ 不要写 `QByteArray("MTK_DA_v6", 11)`：字面量只有 9 字符，指定 11 会读越界（ASan global-buffer-overflow）
+    //    且功能上是错的（真 V6 头 "MTK_DA_v6_2021-11-03…" 会判不出）。
     out.banner = data.mid(0x20, kHeaderSize - 0x20);
     while (out.banner.endsWith('\0'))
         out.banner.chop(1);
@@ -73,6 +75,15 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
         return false;
     }
     out.count = count;
+    // P8：0xD8 老格式的**字段偏移也不同**（upstream daconfig 在 0xD8 下 pagesize 在 0x08、
+    // region 表少 4 字节），而本实现只有新格式偏移。按新偏移硬解 = **静默读出垃圾**
+    // （本仓反复出现的"入口判据比实现宽"家族）→ 故：**探测结果照填，解析明确拒绝**。
+    if (oldFormat) {
+        setErr(error, QStringLiteral("DA 文件是老格式（0xD8，条目 %1 个）：本实现按 P8 明确拒绝解析"
+                                     "（无真实样本，且老格式字段偏移不同，硬解会读出垃圾）")
+                          .arg(count));
+        return false;
+    }
     out.entries.reserve(int(count));
 
     for (quint32 i = 0; i < count; ++i) {

@@ -17,7 +17,10 @@
 //      使用 —— 按它取 stage1 会把 region[0]（EMI/env）当 DA1 上传。
 //   3. P6 不得按内容去重 region：V6 的 region[0] 与 region[1] **逐字节相同**（9/9）；
 //      按 md5 去重会把 EMI 槽与 DA1 合并。也不得断言两者必不同。
-//   4. P8 0xD8 老格式无真实样本 → 只能合成夹具，**不得**在文档/提交信息里写"已验证"。
+//   4. P8 0xD8 老格式无真实样本 → 只能合成夹具，**不得**在文档/提交信息里写"已验证"；
+//      **探测到老格式一律明确拒绝解析**（老格式字段偏移不同 —— upstream daconfig 在 0xD8 下
+//      pagesize 在 0x08、region 表少 4 字节 —— 按新格式偏移硬解会静默读出垃圾；
+//      DaFile.oldFormat/count 仍照填，供调用方观测探测结果）。
 //   5. P9 count_da 不可信：必须与 EOF 交叉校验并在越界时报错（不得按它循环 seek）。
 //   6. P10 世代判别式是负向的：isV6 = data.left(0x68).contains("MTK_DA_v6")；
 //      **横幅版本号不得用于逻辑分支**。
@@ -67,7 +70,7 @@ struct DaEntry {
 // 整个 AllInOne DA 文件。
 struct DaFile {
     bool isV6 = false;             // 头部含 "MTK_DA_v6"（P10 负向判别式）
-    bool oldFormat = false;        // 0xD8 条目步长（P8：无真实样本，仅合成夹具覆盖）
+    bool oldFormat = false;        // 0xD8 条目步长（P8：探测结果照填；命中即整体拒绝，仅合成夹具覆盖）
     quint32 count = 0;             // count_da（已与 EOF 交叉校验，P9）
     QByteArray banner;             // 0x20 起 0x48 字节横幅，去尾部 NUL；**不得**用于世代判别（P10）
     QByteArray raw;                // 原始字节（选择层据此切 region 载荷，免二次读盘）

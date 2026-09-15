@@ -84,14 +84,25 @@ void TestMtkDaFile::probesOldFormatWithCrossValidation()
     mtkbrom::DaFile f;
     QString err;
     // P8：0xD8 老格式**无真实样本** —— 只合成夹具，用例注释里如实标注。
-    // 夹具必须 >= 2 条目：0xD8 的探测点 0x6C+0xD8 只有落在 entry[1] 起始处才读到 magic
-    // （单条目时那里是尾部载荷首字节 —— 探测语义本身即"entry[1] 是否紧跟其后"）。
-    QVERIFY2(mtkbrom::parseDaFile(buildDa({entryWith3Regions(), entryWith3Regions(0x6752)}, false,
-                                          /*oldFormat=*/true), f, &err),
-             qPrintable(err));
+    // **必须 2 条目**：探测点 0x6C+0xD8 要正好落在 entry[1] 的 magic 上（单条目时该处是尾部载荷，
+    // 探不到 0xDADA —— brief 初版给的单条目夹具会让本用例必红）。P4 的探测语义不变。
+    // （`entryWith3Regions(hwCode = 0x6765)` 是 brief 里已有的夹具；第二条换个 hwCode 便于区分）
+    QVERIFY(!mtkbrom::parseDaFile(buildDa({entryWith3Regions(), entryWith3Regions(0x6752)}, false,
+                                          /*oldFormat=*/true),
+                                  f, &err));
+    // 探测结果**照填**（可观测），解析**明确拒绝**（不按新格式偏移硬解老格式）
     QVERIFY(f.oldFormat);
-    QCOMPARE(f.entries.size(), 2);
-    QCOMPARE(f.entries.at(0).magic, quint16(0xDADA));
+    QCOMPARE(f.count, quint32(2));
+    QVERIFY(f.entries.isEmpty());
+    QVERIFY2(err.contains(QStringLiteral("0xD8")) || err.contains(QStringLiteral("老格式")), qPrintable(err));
+
+    // 反向：新格式（0xDC）文件不许被判成老格式
+    mtkbrom::DaFile ok;
+    err.clear();
+    QVERIFY2(mtkbrom::parseDaFile(buildDa({entryWith3Regions(), entryWith3Regions(0x6752)}), ok, &err),
+             qPrintable(err));
+    QVERIFY(!ok.oldFormat);
+    QCOMPARE(ok.entries.size(), 2);
 }
 
 void TestMtkDaFile::rejectsBadInputs()
@@ -201,10 +212,12 @@ void TestMtkDaFile::realSamplesMatchIndependentReport()
                 const QJsonObject ro = regions.at(r).toObject();
                 QCOMPARE(int(e.regions.at(r).fileOffset), ro.value("m_buf").toInt());
                 QCOMPARE(int(e.regions.at(r).len), ro.value("m_len").toInt());
-                // toInt() 对 >= 0x80000000 返回 0（实测 0xf1000000→0），而真样本 m_start_addr
-                // 多为 0xf0000000/0xf1000000 → 按 quint32 精确比较（判据不变：逐字段与报告相等）
-                QCOMPARE(e.regions.at(r).startAddr, quint32(ro.value("m_start_addr").toDouble()));
-                QCOMPARE(int(e.regions.at(r).startOffset), ro.value("m_start_offset").toInt());
+                // 注：m_start_addr / m_start_offset 常用 0xf1000000 一类值（**超 INT_MAX**）——
+                // QJsonValue::toInt() 对越界值静默返回 0（Qt6），必须走 toDouble 再转 quint32。
+                QCOMPARE(e.regions.at(r).startAddr,
+                         quint32(ro.value("m_start_addr").toDouble()));
+                QCOMPARE(e.regions.at(r).startOffset,
+                         quint32(ro.value("m_start_offset").toDouble()));
                 QCOMPARE(int(e.regions.at(r).sigLen), ro.value("m_sig_len").toInt());
             }
             ++totalEntries;
