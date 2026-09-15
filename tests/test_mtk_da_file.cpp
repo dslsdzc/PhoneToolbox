@@ -28,6 +28,8 @@ private slots:
     void skipsCandidatesWithEmptyDaRegions();
     void reportsNoCandidateWithAvailableCodes();
     void breaksVersionTiesByTakingFirst();
+    void rejectsZeroDacode();
+    void rejectsOversizedRegionSlice();
     // 真样本（reference/mtk-samples/，缺失时 SKIP；验证跑带 -DMTK_SAMPLES_REQUIRED=ON）
     void realSamplesMatchIndependentReport();
     void realSamplesSelectExpectedEntries();
@@ -192,23 +194,49 @@ void TestMtkDaFile::selectsByVersionFilterAndHardcodedRegions()
 
     QStringList warn;
     mtkbrom::DaSelection sel;
-    // deviceHwVer=0/0 → 版本维**全部旁路** → 取最兼容（hwVersion 最大 = 第二条）
+    // deviceHwVer=0/0 → 版本维**全部旁路**（两条都满足）→ **上游 first-match：取文件顺序首个**（条目[0]，0xCA00）
     QVERIFY2(mtkbrom::selectDaEntry(f, 0x6765, 0, 0, &warn, sel, &err), qPrintable(err));
-    QCOMPARE(sel.entryIndex, 1);
-    QCOMPARE(sel.entry.hwVersion, quint16(0xCB00));
+    QCOMPARE(sel.entryIndex, 0);
+    QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
+    QVERIFY2(!warn.isEmpty(), "并列（2 条满足）必须留告警（取首个是上游语义，但不能静默）");
     // region 硬编码：da1=region[1]、da2=region[2]（**不是** region[0]）
     QCOMPARE(sel.da1.startAddr, quint32(0x2007000));
     QCOMPARE(sel.da2.startAddr, quint32(0x80000000));
     QCOMPARE(sel.da2.sigLen, quint32(0x100));
     QCOMPARE(sel.da1Bytes.size(), 16);
     QCOMPARE(sel.da2Bytes.size(), 16);
-    // da2 切片 = 文件里 region[2] 的载荷（**保留签名**：本模块不裁剪，长度即 m_len）
-    QCOMPARE(sel.da2Bytes, QByteArray(16, char(1 + 1 * 3 + 2)));
+    // da2 切片 = 文件里 region[2] 的载荷（**保留签名**：本模块不裁剪，长度即 m_len）；
+    // 填充字节按**条目下标**变（builder 写 char(1 + i*3 + r)）—— 命中条目[0] ⇒ 1 + 0*3 + 2
+    QCOMPARE(sel.da2Bytes, QByteArray(16, char(1 + 0 * 3 + 2)));
 
-    // 版本过滤生效：deviceHwVer=0xCA00 → 只能选第一条（第二条 0xCB00 > 设备值）
+    // 版本过滤生效：deviceHwVer=0xCA00 → 第二条 0xCB00 > 设备值被滤掉 → 首个**满足者**仍是条目[0]
     warn.clear();
     QVERIFY2(mtkbrom::selectDaEntry(f, 0x6765, 0xCA00, 0, &warn, sel, &err), qPrintable(err));
     QCOMPARE(sel.entryIndex, 0);
+    QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
+
+    // 但上面那条在 first-match 下**不判别**"有没有做版本过滤"（不过滤也是条目[0]）——
+    // 判别的构造是**把高版本条目放到文件顺序前面**：不过滤就会选到它。
+    mtkbrom::DaFile fHi;
+    err.clear();
+    QVERIFY2(mtkbrom::parseDaFile(buildDa({new1, old1}), fHi, &err), qPrintable(err));
+    warn.clear();
+    QVERIFY2(mtkbrom::selectDaEntry(fHi, 0x6765, 0xCA00, 0, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 1);                          // 条目[0] 的 0xCB00 > 设备 0xCA00 → 被滤掉
+    QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
+
+    // swVersion 维同理（deviceSwVer 过滤；hw 维给 0 旁路，避免两个维度互相掩盖）
+    EntrySpec hiSw = entryWith3Regions(0x6765);
+    hiSw.swVersion = 0xE201;
+    EntrySpec loSw = entryWith3Regions(0x6765);
+    loSw.swVersion = 0xE100;
+    mtkbrom::DaFile fSw;
+    err.clear();
+    QVERIFY2(mtkbrom::parseDaFile(buildDa({hiSw, loSw}), fSw, &err), qPrintable(err));
+    warn.clear();
+    QVERIFY2(mtkbrom::selectDaEntry(fSw, 0x6765, 0, 0xE100, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 1);                          // 条目[0] 的 sw 0xE201 > 设备 0xE100 → 被滤掉
+    QCOMPARE(sel.entry.swVersion, quint16(0xE100));
 }
 
 void TestMtkDaFile::skipsCandidatesWithEmptyDaRegions()
@@ -240,14 +268,16 @@ void TestMtkDaFile::skipsCandidatesWithEmptyDaRegions()
 
     // 规则 3 的另两个子条件（自审补：上面只覆盖了 region[1].len == 0）：
     // region 数不足 3 与 region[2].len == 0 同样必须跳过并记明原因。
+    // 前两条的版本**故意高于** good2：first-match 下若不跳过它们，选中的就是它们 → entryIndex 断言才有判别力。
     EntrySpec twoRegions;                       // 只有 region[0]/[1]：DA2 缺位
+    twoRegions.hwVersion = 0xCB00;
     RegionSpec r0; r0.startAddr = 0x200000;
     RegionSpec r1; r1.startAddr = 0x2007000;
     twoRegions.regions << r0 << r1;
     EntrySpec emptyDa2 = entryWith3Regions(0x6765);
+    emptyDa2.hwVersion = 0xCC00;
     emptyDa2.regions[2].len = 0;
-    EntrySpec good2 = entryWith3Regions(0x6765);
-    good2.hwVersion = 0xCB00;                   // 只有前两条都被跳过，才会选中它
+    EntrySpec good2 = entryWith3Regions(0x6765);   // hwVersion 0xCA00（三条里最低）
 
     mtkbrom::DaFile f2;
     err.clear();
@@ -255,6 +285,7 @@ void TestMtkDaFile::skipsCandidatesWithEmptyDaRegions()
     warn.clear();
     QVERIFY2(mtkbrom::selectDaEntry(f2, 0x6765, 0, 0, &warn, sel, &err), qPrintable(err));
     QCOMPARE(sel.entryIndex, 2);
+    QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
     bool notedCount = false, notedR2 = false;
     for (const QString &w : std::as_const(warn)) {
         notedCount = notedCount || w.contains(QStringLiteral("region 数不足"));
@@ -262,6 +293,60 @@ void TestMtkDaFile::skipsCandidatesWithEmptyDaRegions()
     }
     QVERIFY(notedCount);
     QVERIFY(notedR2);
+}
+
+void TestMtkDaFile::rejectsZeroDacode()
+{
+    // P7：hw_code == 0 是占位条目，**不得**被选中。dacode 由芯片表给出（默认 = 设备 hw_code），
+    // 取不到时是 0 —— 若放行就会与占位条目相撞。上游在装载阶段就剔除它们（daconfig.py:200
+    // `if da.hw_code != 0:`）→ 本层对 dacode == 0 明确拒绝。
+    if (!mtktest::sampleFileAvailable(QStringLiteral("MTK_AllInOne_DA_iot.bin"))) {
+#if MTK_SAMPLES_REQUIRED
+        QFAIL("真样本缺失，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
+#else
+        QSKIP("真样本缺失（reference/ 为 gitignored）");
+#endif
+    }
+    const QString dir = mtktest::samplesDir();
+    QFile fi(dir + QStringLiteral("/MTK_AllInOne_DA_iot.bin"));
+    QVERIFY(fi.open(QIODevice::ReadOnly));
+    mtkbrom::DaFile iot;
+    QString err;
+    QVERIFY2(mtkbrom::parseDaFile(fi.readAll(), iot, &err), qPrintable(err));
+    // 该文件里**确实有** hw_code == 0 的占位条目（否则本用例是空转）
+    bool hasPlaceholder = false;
+    for (const mtkbrom::DaEntry &e : std::as_const(iot.entries))
+        hasPlaceholder = hasPlaceholder || e.hwCode == 0;
+    QVERIFY2(hasPlaceholder, "iot 文件里应有 hw_code == 0 的占位条目");
+
+    QStringList warn;
+    mtkbrom::DaSelection sel;
+    QVERIFY(!mtkbrom::selectDaEntry(iot, 0, 0, 0, &warn, sel, &err));
+    QVERIFY2(err.contains(QStringLiteral("dacode == 0")), qPrintable(err));
+    QCOMPARE(sel.entryIndex, -1);      // 失败时 out 保持默认（不返回半份选择）
+}
+
+void TestMtkDaFile::rejectsOversizedRegionSlice()
+{
+    // >2GiB 的 region 在 int 截断下会静默给出空切片（"上传 0 字节后静默成功"家族）。
+    // 真文件造不出来（真实样本 1–4 MiB）→ 手工构造 DaFile 直接喂选择层是正当手段。
+    mtkbrom::DaFile f;
+    f.raw = QByteArray(64, '\0');
+    mtkbrom::DaEntry e;
+    e.hwCode = 0x6765;
+    e.regionCount = 3;
+    mtkbrom::DaRegion r0, r1, r2;
+    r2.len = 16;                       // region[2] 非空（否则先被"空 region"规则跳过，测不到 >2GiB 守卫）
+    r1.len = 0xFFFFFFFF;               // > INT_MAX（region[1] = DA1）
+    e.regions << r0 << r1 << r2;
+    f.entries << e;
+
+    QStringList warn;
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY(!mtkbrom::selectDaEntry(f, 0x6765, 0, 0, &warn, sel, &err));
+    QVERIFY2(err.contains(QStringLiteral("int 范围")), qPrintable(err));
+    QCOMPARE(sel.entryIndex, -1);
 }
 
 void TestMtkDaFile::reportsNoCandidateWithAvailableCodes()
@@ -280,9 +365,10 @@ void TestMtkDaFile::reportsNoCandidateWithAvailableCodes()
 
 void TestMtkDaFile::breaksVersionTiesByTakingFirst()
 {
-    // 规则 4 的并列分支：版本过滤后仍可能并列（P2 的唯一键是 5 元组，含 pagesize；
-    // 本层不做 pagesize 匹配）→ 取**最前**一个 + warnings 记明。
-    // 自审补：brief 的规则 4 若无用例，"取最前 + 告警"这条分支就是没跑过的代码。
+    // 规则 4：**上游 first-match**（daconfig.py:207-218 `if self.da_loader is None` 取文件顺序首个满足者，
+    // 不是"取最大版本"——Important-1 已核上游）→ 多条满足时取**首个** + warnings 记明
+    // （P2 的唯一键是 5 元组含 pagesize，本层不做 pagesize 匹配）。
+    // 自审补：这条分支若无用例，就是没跑过的代码。
     EntrySpec lowPg = entryWith3Regions(0x6765);   // 前四字段与下一条完全相同，只有 pagesize 不同
     lowPg.pagesize = 0;
     EntrySpec highPg = entryWith3Regions(0x6765);
@@ -440,13 +526,15 @@ void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()
 
     // iot: hw_code=0x6226 的条目 [2]/[3] 前四字段完全相同（sub=0/hw_ver=0x8A00/sw_ver=0x8A00），
     // 只有 pagesize（0 / 1）不同 —— 用 4 元组建 map 会在这里静默丢条目。
+    // P5 caveat：本层按 brief **恒用 region[1]/region[2]**（手机侧映射）；IoT 芯片走另一套 region 映射，
+    // D1 在通道层（Task 9）显式拒绝 —— 本用例只验证"选中哪一条"，不代表 IoT 的 region 语义已被支持。
     QFile fi(dir + QStringLiteral("/MTK_AllInOne_DA_iot.bin"));
     QVERIFY(fi.open(QIODevice::ReadOnly));
     const QByteArray iotData = fi.readAll();
     mtkbrom::DaFile iot;
     QVERIFY2(mtkbrom::parseDaFile(iotData, iot, &err), qPrintable(err));
     QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6226, 0, 0, &warn, sel, &err), qPrintable(err));
-    QCOMPARE(sel.entryIndex, 2);                     // 并列 → 取最前（条目[2]，pagesize=0）
+    QCOMPARE(sel.entryIndex, 2);                     // 两条版本相同 → first-match 取文件顺序首个（条目[2]）
     QCOMPARE(sel.entry.pagesize, quint16(0));
     bool noted = false;
     for (const QString &w : std::as_const(warn))
@@ -456,8 +544,21 @@ void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()
     QCOMPARE(sel.da1.fileOffset, quint32(325852));
     QCOMPARE(sel.da1Bytes, iotData.mid(325852, int(sel.da1.len)));
 
-    // mt6590: hw_code=0x6575 两条目版本不同（hw 0xCA00/sw 0xE100 与 hw 0xCB00/sw 0xE201）
-    // → 设备版本旁路时取最兼容；设备 hw=0xCA00 时高版本被滤掉。
+    // iot: hw_code=0x6270 是**真样本上唯一能判别 swVersion 过滤**的点 —— 首个可用条目[17]（sw 0x8000）
+    // 排在条目[27]（sw 0x0100）前面：设备 sw 给 0x0100 时，条目[17] 必须被滤掉才会选到条目[27]。
+    // （不做过滤的实现两次都返回条目[17] → 下面的断言杀得掉它。）
+    warn.clear();
+    err.clear();
+    QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6270, 0, 0x8000, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 17);
+    QCOMPARE(sel.entry.swVersion, quint16(0x8000));
+    warn.clear();
+    QVERIFY2(mtkbrom::selectDaEntry(iot, 0x6270, 0, 0x0100, &warn, sel, &err), qPrintable(err));
+    QCOMPARE(sel.entryIndex, 27);                    // 条目[17] 的 sw 0x8000 > 设备 0x0100 → 被滤掉
+    QCOMPARE(sel.entry.swVersion, quint16(0x0100));
+
+    // mt6590: hw_code=0x6575 两条目（[1] hw 0xCA00/sw 0xE100、[2] hw 0xCB00/sw 0xE201）
+    // → 设备版本旁路时 **first-match = 文件顺序首个**（条目[1]，不是版本更大的条目[2]）。
     QFile fm(dir + QStringLiteral("/MTK_AllInOne_DA_mt6590.bin"));
     QVERIFY(fm.open(QIODevice::ReadOnly));
     const QByteArray mtData = fm.readAll();
@@ -467,14 +568,7 @@ void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()
 
     warn.clear();
     QVERIFY2(mtkbrom::selectDaEntry(mt, 0x6575, 0, 0, &warn, sel, &err), qPrintable(err));
-    QCOMPARE(sel.entryIndex, 2);
-    QCOMPARE(sel.entry.hwVersion, quint16(0xCB00));
-    QCOMPARE(sel.da1.len, quint32(137184));
-
-    warn.clear();
-    err.clear();
-    QVERIFY2(mtkbrom::selectDaEntry(mt, 0x6575, 0xCA00, 0, &warn, sel, &err), qPrintable(err));
-    QCOMPARE(sel.entryIndex, 1);                     // 0xCB00 > 设备 0xCA00 → 被版本过滤掉
+    QCOMPARE(sel.entryIndex, 1);                     // 上游 first-match：取文件顺序首个，非最大版本
     QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
     QCOMPARE(sel.da1.len, quint32(137884));
     QCOMPARE(sel.da1Bytes.size(), int(sel.da1.len));

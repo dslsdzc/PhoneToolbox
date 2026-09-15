@@ -1,13 +1,17 @@
 // src/core/modes/mtk_da_file.cpp
 //
-// AllInOne DA 解析（纯函数）。布局与判据全部来自实测：
+// AllInOne DA 解析 + 条目选择（纯函数）。布局与判据全部来自实测：
 //   6 个真实文件 / 161 条目 = reference/mtk-samples/（gitignored），
 //   独立解析器基准 = reference/mtk-samples/parse_da.py，
 //   逐字段实测表 = reference/mtk-samples/da_parse_report.json。
-// 出处（mtkclient，GPL-3.0，只读引用不复制代码）：Library/DA/daconfig.py:120-205（解析/选择）、
-//   Library/DA/legacy/dalegacy_lib.py:563-571（region[1]/[2] 硬编码）。
+// 出处（mtkclient，GPL-3.0，只读引用不复制代码）：
+//   Library/DA/daconfig.py:120-205            解析（字段序 / count_da / 条目步长探测）
+//   Library/DA/daconfig.py:200                装载阶段剔除 hw_code==0 占位条目
+//   Library/DA/daconfig.py:207-218            选择：按 hw_code + hw/sw 版本过滤，取**文件顺序首个**满足者
+//   Library/DA/legacy/dalegacy_lib.py:563-571 region[1] = DA1 / region[2] = DA2 硬编码
 #include "mtk_da_file.h"
 
+#include <climits>   // INT_MAX（>2GiB 切片守卫）
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 namespace mtkbrom {
@@ -171,6 +175,11 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
     out = DaSelection{};
     out.isXmlForced = f.isV6;
 
+    if (dacode == 0) {   // 设备报 hw_code=0 = 判不出芯片；且 0 会与占位条目（hw_code==0）相撞
+        setErr(error, QStringLiteral("无法判定芯片（dacode == 0）—— 拒绝选择：上游在装载阶段就把 "
+                                     "hw_code==0 的占位条目剔除（daconfig.py:200），占位条目不得被选中"));
+        return false;
+    }
     QList<int> candidates;
     QStringList availableCodes;
     for (int i = 0; i < f.entries.size(); ++i) {
@@ -202,34 +211,31 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
                           .arg(availableCodes.join(QStringLiteral(", "))));
         return false;
     }
-    // 取最兼容：hwVersion 最大，再 swVersion 最大；并列取最前 + 告警（P2：5 元组才是唯一键）
-    int best = candidates.first();
-    for (int i : std::as_const(candidates)) {
-        const DaEntry &a = f.entries.at(i);
-        const DaEntry &b = f.entries.at(best);
-        if (a.hwVersion > b.hwVersion
-            || (a.hwVersion == b.hwVersion && a.swVersion > b.swVersion))
-            best = i;
-    }
-    int ties = 0;
-    for (int i : std::as_const(candidates)) {
-        const DaEntry &a = f.entries.at(i);
-        const DaEntry &b = f.entries.at(best);
-        if (a.hwVersion == b.hwVersion && a.swVersion == b.swVersion)
-            ++ties;
-    }
-    if (ties > 1 && warnings)
-        *warnings << QStringLiteral("hw_code=0x%1 有 %2 个条目的版本完全相同，取最前一个（条目[%3]）——"
-                                    "唯一键是 5 元组（含 pagesize），本层不做 pagesize 匹配")
-                         .arg(dacode, 4, 16, QLatin1Char('0')).arg(ties).arg(best);
+    // 取**文件顺序上首个满足者**（上游 daconfig.py:207-218 的 first-match：`if self.da_loader is None`）
+    // —— **不是**"取最大版本"（Task 2 审查 Important-1 已核上游）。并列只记告警（P2：5 元组才是唯一键）。
+    const int best = candidates.first();
+    if (candidates.size() > 1 && warnings)
+        *warnings << QStringLiteral("hw_code=0x%1 有 %2 个条目满足版本过滤，取**文件顺序首个**（条目[%3]）——"
+                                    "上游同语义；唯一键是 5 元组（含 pagesize），本层不做 pagesize 匹配")
+                         .arg(dacode, 4, 16, QLatin1Char('0')).arg(candidates.size()).arg(best);
 
+    // 硬编码 region[1]=DA1 / region[2]=DA2（三代共同；不得改用 entryRegionIndex —— P5）
+    const DaRegion da1 = f.entries.at(best).regions.at(1);
+    const DaRegion da2 = f.entries.at(best).regions.at(2);
+    // >2GiB 的 region 在 int 截断下会静默给出空切片（"上传 0 字节后静默成功"家族）—— 明确拒绝。
+    // 守卫放在**填 out 之前**：失败时 out 保持默认，不返回半份选择（真实样本 1–4 MiB，此路不可达）
+    if (da1.len > quint32(INT_MAX) || da2.len > quint32(INT_MAX)
+        || da1.fileOffset > quint32(INT_MAX) || da2.fileOffset > quint32(INT_MAX)) {
+        setErr(error, QStringLiteral("region 切片超出 int 范围（>2GiB）—— 拒绝（真实样本 1–4 MiB，不可达）"));
+        return false;
+    }
     out.entryIndex = best;
     out.entry = f.entries.at(best);
-    out.da1 = out.entry.regions.at(1);   // **硬编码 region[1]**（三代共同）
-    out.da2 = out.entry.regions.at(2);   // **硬编码 region[2]**
-    out.da1Bytes = f.raw.mid(int(out.da1.fileOffset), int(out.da1.len));
+    out.da1 = da1;
+    out.da2 = da2;
+    out.da1Bytes = f.raw.mid(int(da1.fileOffset), int(da1.len));
     // da2 **保留尾部签名**（LEGACY 语义）：长度取 m_len，绝不裁 sigLen
-    out.da2Bytes = f.raw.mid(int(out.da2.fileOffset), int(out.da2.len));
+    out.da2Bytes = f.raw.mid(int(da2.fileOffset), int(da2.len));
     return true;
 }
 

@@ -40,9 +40,11 @@
 // P12 的协议端序属协议层，本文件只按 LE 读文件字段。
 //
 // 选择层规则出处（mtkclient v2.1.4-20-g71b0175，GPL-3.0，**只读引用不复制代码**）：
-//   Library/DA/daconfig.py:208-218       按 hw_code 找候选 + hw_version/sw_version 过滤
+//   Library/DA/daconfig.py:200            装载阶段剔除 hw_code==0 占位条目（本层对 dacode==0 拒绝）
+//   Library/DA/daconfig.py:207-218        按 hw_code 找候选 + hw/sw 版本过滤（`or … == 0` 即设备值 0 旁路），
+//                                         取**文件顺序首个满足者**（first-match，非"取最大版本"）
 //   Library/DA/legacy/dalegacy_lib.py:563-571  region[1]=DA1 / region[2]=DA2 硬编码
-// 版本过滤的**旁路**（设备值为 0）与"空 region 跳过"来自本仓真样本实测（见 `selectDaEntry` 注释）。
+// "空 region 跳过"与"跳过的原因要记明"来自本仓真样本实测（见 `selectDaEntry` 注释）。
 
 #include <QByteArray>
 #include <QList>
@@ -99,16 +101,17 @@ struct DaSelection {
     bool isXmlForced = false; // 所在文件 isV6（只能推向 XML，不能推向 LEGACY）
 };
 
-// 选择规则（daconfig.py:208-218 + 实测）：
+// 选择规则（daconfig.py:207-218 + 实测）：
+//   0. dacode == 0 → 直接拒绝（判不出芯片；0 会与 hw_code==0 的占位条目相撞，上游装载阶段已剔除它们）。
 //   1. 候选 = hwCode == dacode 的条目（dacode 由芯片表给出，默认 = 设备 hw_code）。
 //   2. 版本过滤：hwVersion <= deviceHwVer 且 swVersion <= deviceSwVer；**设备值为 0 时该维旁路**
-//      （IoT/取不到版本的真实情形）。
+//      （上游 `or hw_ver == 0`；IoT/取不到版本的真实情形）。
 //   3. 跳过 regionCount < 3 或 region[1]/region[2] 长度为 0 的候选（真实文件里大量 region[1].len == 0；
 //      DA1/DA2 缺一不可）—— 跳过的条目写进 warnings，**不得**"上传 0 字节后静默成功"（P7）。
-//   4. 取最兼容：hwVersion 最大者，再 swVersion 最大者；仍并列 → 取**最前**一个 + warnings 记明
-//      （P2 的 5 元组才是唯一键，本层不做 pagesize 匹配）。
+//   4. 取**文件顺序上首个满足者**（上游 first-match，`if self.da_loader is None` 即不再覆盖）；
+//      多条满足 → warnings 记明（P2 的 5 元组才是唯一键，本层不做 pagesize 匹配）。
 //   5. 无候选 → false + 中文 error，并列出该文件里出现过的 hw_code（诊断）。
-// 成功返回 true 并填充 out；warnings/error 可空。out 在入口处被重置，失败时保持默认值。
+// 成功返回 true 并填充 out；warnings/error 可空。out 在入口处被重置，失败时不返回半份选择。
 bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
                    QStringList *warnings, DaSelection &out, QString *error);
 
