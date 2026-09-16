@@ -1,0 +1,291 @@
+// tests/test_mtk_xflash_payload.cpp
+//
+// MTK XFlash 引导层（Phase D2 Task 4）：七步握手 / bring-up 四步 / 只读查询。
+//
+// 夹具约定（与 T2 测试同款，**先读再改**）：默认 `IBromUsb::readExact` 是"单次读 + 严格长度"
+// （`mtk_brom.cpp:219-231`），本层先读 12B 帧头、再读载荷 —— **每次 readExact 消耗一笔队列项**。
+// 把整帧塞成一笔会让"读头"吃掉载荷、后续读全部错位。负向用例同理：要"短读失败"就少给字节。
+//
+// 读帧数（**逐条对照上游核过**，是这些用例的主要判据）：
+//   • 七步握手 = 2 帧 status（两个 setup 各一次 send_param，XFL:986-994）+ 1 帧 SYNC 回包。
+//     **裸 SYNC 命令没有 status**（上游 sync() 只发送，XFL:903-907）—— 多给这一帧，
+//     实现会把它读成 ENV 的 status，整体错位一帧，最后的 SYNC 回包读到 HW_INIT 的 status 而判失败。
+//   • 有回包的 devctrl 查询 = 2 帧 status（DEVICE_CTRL、子命令）+ 回包 + **尾部 status**
+//     （上游拿到回包后再读一次：XFL:571-578 / :330-338 / :396-418 / :623-636 / :421-436）。
+//     漏读尾部 status 会让后续读错位一帧：10 字节的 expire_date 文本会被当成 status 载荷
+//     （readStatus 取首 u32 → 非 0）而当场判失败。
+//   • GET_PARTITION_TBL_CATA 是**唯一例外**：上游不读尾部 status（XFL:612-621），本层同样不读。
+#include <QtTest>
+#include <QByteArray>
+
+#include "core/modes/mtk_xflash_payload.h"
+#include "core/modes/mtk_xflash_session.h"
+#include "core/modes/mtk_brom.h"
+
+// mock 与 T2 同款（从 T2 的测试文件复制一份到本文件；两个测试文件各自独立，符合既有惯例）
+class MockUsbChannel : public mtkbrom::IBromUsb
+{
+public:
+    QByteArray writes;              // 全部写入字节（拼接）
+    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
+    QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
+    int pktSize = 0x400;
+
+    bool open(QString *) override { return true; }
+    bool write(const QByteArray &data, QString *) override { writes += data; writeFrames << data; return true; }
+    bool read(QByteArray &out, int maxLen, int, QString *) override
+    {
+        if (reads.isEmpty()) { out.clear(); return false; }
+        const QByteArray r = reads.takeFirst();
+        out = r.left(maxLen);
+        return !r.isEmpty();
+    }
+    int maxPacketSize() const override { return pktSize; }
+    bool close() override { return true; }
+};
+
+namespace {
+QByteArray le32(quint32 v)
+{
+    QByteArray b(4, '\0');
+    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
+    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
+    return b;
+}
+QByteArray le16(quint16 v) { QByteArray b(2, '\0'); b[0] = char(v & 0xFF); b[1] = char(v >> 8); return b; }
+// ⚠️ **一帧应答 = 两笔队列项**：12B 帧头 + 载荷（见文件头夹具约定）。
+QList<QByteArray> frameReads(quint32 dt, const QByteArray &payload)
+{
+    return {le32(0xFEEEEEEF) + le32(dt) + le32(quint32(payload.size())), payload};
+}
+QList<QByteArray> statusReads(quint32 code) { return frameReads(1, le32(code)); }   // length==4 → <I
+} // namespace
+
+class TestMtkXflashPayload : public QObject
+{
+    Q_OBJECT
+private slots:
+    void handshakeOrderAndBytes();
+    void handshakeRejectsNonSync();
+    void handshakeRejectsSetupStatusError();
+    void bringUpStepsOrder();
+    void getChipIdParsesFiveShorts();
+    void getPacketLengthParsesTwoU32();
+    void getPartitionCataMapsGptAndPmt();
+    void getRamInfoAccepts24And48Bytes();
+};
+
+// 七步握手：SYNC 帧 → SETUP_ENV（命令帧 + 20B）→ SETUP_HW_INIT（命令帧 + 4B）→ 读回 "SYNC"
+void TestMtkXflashPayload::handshakeOrderAndBytes()
+{
+    MockUsbChannel m;
+    // 读队列：SETUP_ENV 的 status → SETUP_HW_INIT 的 status → 最后的 SYNC 回包（共 3 帧，无 SYNC status）
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953));
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QStringList log;
+    QString err;
+    QVERIFY2(mtkbrom::xflashDa1Handshake(x, &log, &err), qPrintable(err));
+
+    // 写帧顺序（每条命令一个**独立帧**：xsend(cmd) 两笔 + send_param 帧头/载荷两笔，XFL:911/921-922 / :928-930）：
+    //   SYNC(头+值) → SETUP_ENV(命令头+命令) + (载荷头+载荷) → SETUP_HW_INIT(命令头+命令) + (载荷头+载荷) = 10 笔
+    QCOMPARE(m.writeFrames.size(), 10);
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));   // SYNC 帧头
+    QCOMPARE(m.writeFrames.at(1), le32(0x434E5953));                       // SYNC 值
+    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(4));   // SETUP_ENV 命令帧头
+    QCOMPARE(m.writeFrames.at(3), le32(quint32(mtkbrom::X_CMD_SETUP_ENV)));          // 命令 0x010100
+    QCOMPARE(m.writeFrames.at(4), le32(0xFEEEEEEF) + le32(1) + le32(20));  // SETUP_ENV 载荷帧头
+    QCOMPARE(m.writeFrames.at(5).size(), 20);                              // 载荷 = 20 字节
+    QCOMPARE(m.writeFrames.at(6), le32(0xFEEEEEEF) + le32(1) + le32(4));   // SETUP_HW_INIT 命令帧头
+    QCOMPARE(m.writeFrames.at(7), le32(quint32(mtkbrom::X_CMD_SETUP_HW_INIT)));      // 命令 0x010101
+    QCOMPARE(m.writeFrames.at(8), le32(0xFEEEEEEF) + le32(1) + le32(4));   // SETUP_HW_INIT 载荷帧头
+    QCOMPARE(m.writeFrames.at(9), le32(0));                                // 参数 0
+
+    // SETUP_ENV 载荷字段（小端，5×u32 = 20B；XFP:83-85 的 OS_LINUX=1、上游默认 logchannel="UART"→1）
+    const QByteArray env = m.writeFrames.at(5);
+    QCOMPARE(env.size(), 20);
+    QCOMPARE(env.mid(0, 4), le32(0));                                      // da_log_level
+    QCOMPARE(env.mid(4, 4), le32(1));                                      // log_channel = UART
+    QCOMPARE(env.mid(8, 4), le32(1));                                      // system_os = OS_LINUX
+    QCOMPARE(env.mid(12, 8), le32(0) + le32(0));                           // ufs_provision=0、保留 0
+}
+
+// 最终读回不是 SYNC → 明确失败（铁律 1）
+void TestMtkXflashPayload::handshakeRejectsNonSync()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0xDEADBEEF));
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY(!mtkbrom::xflashDa1Handshake(x, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("SYNC")), qPrintable(err));
+}
+
+// 本层比上游更严的一处：两个 setup 的 status 非 0 必须失败
+// （上游 XFL:989-990 不检查返回值、失败也继续；静默继续会让后续帧全部错位 —— 见文件头纪律）
+void TestMtkXflashPayload::handshakeRejectsSetupStatusError()
+{
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0xC0020053);        // SETUP_ENV 的 status = anti-rollback 硬错误码
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY(!mtkbrom::xflashDa1Handshake(x, nullptr, &err));
+        QVERIFY2(err.contains(QStringLiteral("0xC0020053")), qPrintable(err));
+    }
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0xC0040050);   // SETUP_HW_INIT 的 status
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY(!mtkbrom::xflashDa1Handshake(x, nullptr, &err));
+        QVERIFY2(err.contains(QStringLiteral("0xC0040050")), qPrintable(err));
+    }
+}
+
+// bring-up 四步顺序（XFL:1103-1107）：expire_date → reset_key(0x68) → checksum_level(0) → connection_agent
+void TestMtkXflashPayload::bringUpStepsOrder()
+{
+    MockUsbChannel m;
+    // 四步的读帧（**上游逐条核过**，多一帧/少一帧都会让后续错位）：
+    //   get_expire_date    : 2×status + 回包 + 尾部 status（XFL:571-578）
+    //   set_reset_key      : 3×status（DEVICE_CTRL、子命令、send_param 各一次；XFL:206-209）
+    //   set_checksum_level : 3×status（XFL:241-244）
+    //   get_connection_agent: 2×status + 回包 + 尾部 status（XFL:330-338）
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+            << statusReads(0) << statusReads(0) << statusReads(0)
+            << statusReads(0) << statusReads(0) << statusReads(0)
+            << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0);
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray agent;
+    QStringList log;
+    QString err;
+    QVERIFY2(mtkbrom::xflashBringUpSteps(x, &agent, &log, &err), qPrintable(err));
+    QCOMPARE(agent, QByteArray("brom"));
+
+    // 顺序断言：四步的子命令号都是本链独占值 —— 记**首次出现的下标**再比大小（顺序错即红）
+    int iExpire = -1, iResetKey = -1, iChecksum = -1, iAgent = -1, iResetKeyParam = -1;
+    for (int i = 0; i < m.writeFrames.size(); ++i) {
+        const QByteArray &f = m.writeFrames.at(i);
+        if (iExpire < 0 && f == le32(quint32(mtkbrom::X_CTRL_GET_EXPIRE_DATE)))       iExpire = i;
+        if (iResetKey < 0 && f == le32(quint32(mtkbrom::X_CTRL_SET_RESET_KEY)))       iResetKey = i;
+        if (iChecksum < 0 && f == le32(quint32(mtkbrom::X_CTRL_SET_CHECKSUM_LEVEL)))  iChecksum = i;
+        if (iAgent < 0 && f == le32(quint32(mtkbrom::X_CTRL_GET_CONNECTION_AGENT)))   iAgent = i;
+        if (iResetKeyParam < 0 && f == le32(0x68))                                    iResetKeyParam = i;
+    }
+    QVERIFY2(iExpire >= 0, "必须发 GET_EXPIRE_DATE 子命令");
+    QVERIFY2(iResetKey >= 0, "必须发 SET_RESET_KEY 子命令");
+    QVERIFY2(iChecksum >= 0, "必须发 SET_CHECKSUM_LEVEL 子命令");
+    QVERIFY2(iAgent >= 0, "必须发 GET_CONNECTION_AGENT 子命令");
+    QVERIFY2(iResetKeyParam > iResetKey, "set_reset_key 的参数 0x68 必须跟在它的子命令之后");
+    QVERIFY(iExpire < iResetKey);
+    QVERIFY(iResetKey < iChecksum);
+    QVERIFY(iChecksum < iAgent);
+}
+
+// GET_CHIP_ID：回包 5×u16（XFL:396-418）
+void TestMtkXflashPayload::getChipIdParsesFiveShorts()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0)
+            << frameReads(1, le16(0x6765) + le16(0x8A00) + le16(0xCA00) + le16(0x0000) + le16(1))
+            << statusReads(0);                                   // 尾部 status（XFL:409）
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    mtkbrom::XChipId id;
+    QString err;
+    QVERIFY2(mtkbrom::xflashGetChipId(x, id, &err), qPrintable(err));
+    QCOMPARE(id.hwCode, quint16(0x6765));
+    QCOMPARE(id.hwSubCode, quint16(0x8A00));
+    QCOMPARE(id.hwVersion, quint16(0xCA00));
+    QCOMPARE(id.swVersion, quint16(0x0000));
+    QCOMPARE(id.chipEvolution, quint16(1));
+    QCOMPARE(m.reads.size(), 0);                                 // 尾部 status 已被消费（读帧数精确）
+}
+
+// GET_PACKET_LENGTH：回包 <II（XFL:623-636）
+void TestMtkXflashPayload::getPacketLengthParsesTwoU32()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x10000) + le32(0x20000))
+            << statusReads(0);                                   // 尾部 status（XFL:626）
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    mtkbrom::XPacketLength pl;
+    QString err;
+    QVERIFY2(mtkbrom::xflashGetPacketLength(x, pl, &err), qPrintable(err));
+    QCOMPARE(pl.writeLength, quint32(0x10000));
+    QCOMPARE(pl.readLength, quint32(0x20000));
+    QCOMPARE(m.reads.size(), 0);
+}
+
+// GET_PARTITION_TBL_CATA：0x64=GPT / 0x65=PMT / 其它=Unknown（XFL:612-621）
+void TestMtkXflashPayload::getPartitionCataMapsGptAndPmt()
+{
+    {
+        MockUsbChannel m;
+        // 唯一的"不读尾部 status"查询：多塞一帧**毒药**（status 0xDEAD）——实现若读它就会判失败，
+        // 读走则队列不再剩两笔。本层照上游不读（XFL:612-621 拿到回包即返回），故毒药必须原封不动。
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x64)) << statusReads(0xDEAD);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        mtkbrom::PartitionCata c = mtkbrom::PartitionCata::Unknown;
+        QVERIFY(mtkbrom::xflashGetPartitionCata(x, c, nullptr));
+        QCOMPARE(c, mtkbrom::PartitionCata::Gpt);
+        QCOMPARE(m.reads.size(), 2);                             // 毒药帧（头+载荷）没被读走
+    }
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x65));
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        mtkbrom::PartitionCata c = mtkbrom::PartitionCata::Unknown;
+        QVERIFY(mtkbrom::xflashGetPartitionCata(x, c, nullptr));
+        QCOMPARE(c, mtkbrom::PartitionCata::Pmt);
+    }
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x63));
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        mtkbrom::PartitionCata c = mtkbrom::PartitionCata::Gpt;
+        QVERIFY(mtkbrom::xflashGetPartitionCata(x, c, nullptr));
+        QCOMPARE(c, mtkbrom::PartitionCata::Unknown);            // 其它值 → Unknown（调用方按"两者都试"处理）
+    }
+}
+
+// GET_RAM_INFO：回包 24B（32 位）或 48B（64 位）**原样**返回；其它长度明确失败（XFL:421-436）
+void TestMtkXflashPayload::getRamInfoAccepts24And48Bytes()
+{
+    {
+        MockUsbChannel m;
+        const QByteArray ram24 = le32(1) + le32(0x40000000) + le32(0x8000)
+                               + le32(2) + le32(0x80000000) + le32(0x40000000);
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, ram24) << statusReads(0);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QByteArray raw;
+        QString err;
+        QVERIFY2(mtkbrom::xflashGetRamInfo(x, &raw, &err), qPrintable(err));
+        QCOMPARE(raw, ram24);
+        QCOMPARE(m.reads.size(), 0);                             // 尾部 status 已被消费（读帧数精确）
+    }
+    {
+        MockUsbChannel m;
+        QByteArray ram48;
+        for (int i = 0; i < 6; ++i)                              // 6×u64 = 48B：(sram, dram) 三元组 ×2
+            ram48 += le32(quint32(0x1000 + i)) + le32(quint32(0x2000 + i));
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, ram48) << statusReads(0);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QByteArray raw;
+        QVERIFY(mtkbrom::xflashGetRamInfo(x, &raw, nullptr));
+        QCOMPARE(raw, ram48);
+        QCOMPARE(m.reads.size(), 0);
+    }
+    {
+        MockUsbChannel m;
+        const QByteArray bad(20, '\x33');                        // 20B：上游只认 24/48，本层明确报错（更严）
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, bad) << statusReads(0);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QByteArray raw;
+        QString err;
+        QVERIFY(!mtkbrom::xflashGetRamInfo(x, &raw, &err));
+        QVERIFY2(err.contains(QStringLiteral("24")), qPrintable(err));   // 文案给出期望长度
+        QCOMPARE(m.reads.size(), 0);                             // 长度不符也要先把尾部 status 读掉（先对齐、后校验）
+    }
+}
+QTEST_APPLESS_MAIN(TestMtkXflashPayload)
+#include "test_mtk_xflash_payload.moc"
