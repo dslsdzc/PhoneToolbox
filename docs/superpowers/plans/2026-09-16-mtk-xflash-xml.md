@@ -773,6 +773,8 @@ git commit -m "feat(mtk): GPT 解析纯函数（真 4096 扇区样本 + 双 CRC 
       bool sendParam(const QList<QByteArray> &params, QString *error = nullptr);  // 0x200 分块 + 一次 status
       bool sendData(const QByteArray &data, QString *error = nullptr);            // 帧头 + wMaxPacketSize 分块 + 一次 status
       bool sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteArray *reply, QString *error = nullptr);
+      // 有回包的查询：sendDevCtrl(无参) + **尾部 status**（上游调用方自己读；唯一例外 GET_PARTITION_TBL_CATA 不调本函数）
+      bool devCtrlQuery(quint32 subcmd, QByteArray *reply, QString *error = nullptr);
   private:
       // **只写 12B 帧头**（sendParam/sendData 用；无生产消费者 → T2 审查后定为 private，YAGNI）
       bool xsendHeader(quint32 length, QString *error = nullptr);
@@ -1146,6 +1148,18 @@ bool XFlashSession::sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteAr
     return sendParam({param}, error);
 }
 
+// ⚠️ **尾部 status 是逐查询不同的（不得统一化）** —— T4 实施期实测（上游逐函数读过）：
+//   · 有回包的查询（GET_CHIP_ID `XFL:396-418`、GET_PACKET_LENGTH `:623-635`、GET_EXPIRE_DATE `:571-578`、
+//     GET_CONNECTION_AGENT `:330-338`）：`send_devctrl` 返回回包后，**调用方再读一次 status**（读总数为 4）。
+//   · **唯一例外**：GET_PARTITION_TBL_CATA（`XFL:612-621`）**不读尾部 status**（连 status 校验都没有）。
+//   我们在 `sendDevCtrl` 里保持上游 `send_devctrl` 的原样（不替调用方读尾巴），查询类走 `devCtrlQuery`。
+bool XFlashSession::devCtrlQuery(quint32 subcmd, QByteArray *reply, QString *error)
+{
+    if (!sendDevCtrl(subcmd, QByteArray(), reply, error))
+        return false;
+    return checkStatus(error);                   // 上游调用方的尾部 status（唯一例外见上：分区表类别查询不调本函数）
+}
+
 } // namespace mtkbrom
 ```
 
@@ -1442,7 +1456,8 @@ void TestMtkXflashPayload::handshakeOrderAndBytes()
 {
     MockUsbChannel m;
     // 回包顺序：SYNC 的 status（0）→ SETUP_ENV 的 status（0）→ SETUP_HW_INIT 的 status（0）→ 最终 SYNC 帧
-    m.reads << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953));
+    // ⚠️ 计划期更正（T4）：SYNC **只发不读**（XFL:903-907）→ 握手读 = SETUP_ENV status + SETUP_HW_INIT status + SYNC 回帧
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953));
     mtkbrom::XFlashSession x(&m, 0x6765);
     QStringList log;
     QString err;
@@ -1465,7 +1480,7 @@ void TestMtkXflashPayload::handshakeOrderAndBytes()
 void TestMtkXflashPayload::handshakeRejectsNonSync()
 {
     MockUsbChannel m;
-    m.reads << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, le32(0xDEADBEEF));
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0xDEADBEEF));
     mtkbrom::XFlashSession x(&m, 0x6765);
     QString err;
     QVERIFY(!mtkbrom::xflashDa1Handshake(x, nullptr, &err));
@@ -1477,10 +1492,12 @@ void TestMtkXflashPayload::bringUpStepsOrder()
 {
     MockUsbChannel m;
     // 四步各自 devctrl：每步 = 0x010009 的 status + 子命令的 status + 回包/参数结果
-    m.reads << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101"))   // get_expire_date（回包文本）
-            << statusReads(0) << statusReads(0)                                        // set_reset_key（无回包，参数写出）
-            << statusReads(0) << statusReads(0)                                        // set_checksum_level
-            << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom"));       // get_connection_agent
+    // ⚠️ 计划期更正（T4）：**有回包的查询在回包后还要读一次尾部 status**（上游 `if res != b"": status = self.status()`，
+    //    XFL:571-578 / :330-338）→ expire = 3×status + 回包；SET_* = 3×status（devctrl 2 + 参数 1）；connagent = 3×status + 回包
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+            << statusReads(0) << statusReads(0)                                        // set_reset_key（2 + 参数 status）
+            << statusReads(0) << statusReads(0)                                        // set_checksum_level（2 + 参数 status）
+            << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0);
     mtkbrom::XFlashSession x(&m, 0x6765);
     QByteArray agent;
     QStringList log;
@@ -1504,7 +1521,8 @@ void TestMtkXflashPayload::getChipIdParsesFiveShorts()
 {
     MockUsbChannel m;
     m.reads << statusReads(0) << statusReads(0)
-            << frameReads(1, le16(0x6765) + le16(0x8A00) + le16(0xCA00) + le16(0x0000) + le16(1));
+            << frameReads(1, le16(0x6765) + le16(0x8A00) + le16(0xCA00) + le16(0x0000) + le16(1))
+            << statusReads(0);                                    // 尾部 status（XFL:396-418）
     mtkbrom::XFlashSession x(&m, 0x6765);
     mtkbrom::XChipId id;
     QString err;
@@ -1520,7 +1538,8 @@ void TestMtkXflashPayload::getChipIdParsesFiveShorts()
 void TestMtkXflashPayload::getPacketLengthParsesTwoU32()
 {
     MockUsbChannel m;
-    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x10000) + le32(0x20000));
+    m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x10000) + le32(0x20000))
+            << statusReads(0);                                    // 尾部 status（XFL:623-635）
     mtkbrom::XFlashSession x(&m, 0x6765);
     mtkbrom::XPacketLength pl;
     QString err;
@@ -1534,6 +1553,8 @@ void TestMtkXflashPayload::getPartitionCataMapsGptAndPmt()
 {
     {
         MockUsbChannel m;
+        // GET_PARTITION_TBL_CATA 是**唯一不读尾部 status** 的查询（XFL:612-621）→ 用"毒药帧"钉住：
+        // 队列里多放一帧 status；若实现多读了一帧，它会被消费掉 → 断言 reads 仍有剩余
         m.reads << statusReads(0) << statusReads(0) << frameReads(1, le32(0x64));
         mtkbrom::XFlashSession x(&m, 0x6765);
         mtkbrom::PartitionCata c = mtkbrom::PartitionCata::Unknown;
@@ -1592,12 +1613,13 @@ quint32 le32At(const QByteArray &b, int off)
 bool xflashDa1Handshake(XFlashSession &x, QStringList *log, QString *error)
 {
     auto say = [log](const QString &m) { if (log) *log << m; };
-    // 1) SYNC：xsend(0x434E5953) + status 必须 0（XFL:903-907）
+    // 1) SYNC：**只发不读**（上游 `sync()` = `xsend(SYNC_SIGNAL)` 且无 status 读，XFL:903-907）
+    //    ⚠️ 计划期更正（T4 实施期实测）：原稿在这里**多读了一帧 status** —— 真机上那一读会吃掉设备
+    //    后续才发的帧（或直接超时）→ 握手必失败。整段握手的读**只有 3 次**：SETUP_ENV 的 status、
+    //    SETUP_HW_INIT 的 status、最后读回的 SYNC 帧（XFL:986-994 的读序列）。
     if (!x.xsendInt(kXSync, error))
         return false;
-    if (!x.checkStatus(error))
-        return false;
-    say(QStringLiteral("XFlash：SYNC 已发送并确认"));
+    say(QStringLiteral("XFlash：SYNC 已发送（无回读）"));
     // 2) SETUP_ENVIRONMENT：0x010100 + 20B（XFL:909-924）
     QByteArray env;
     env += le32(0);            // da_log_level（uartloglevel，默认 0）
@@ -3420,15 +3442,16 @@ void TestMtkPayload::xflashChainOrderWithEmi()
     pre.path = QStringLiteral("/tmp/preloader_6765.bin");
     pre.bytes = preBytes;
 
-    // 读队列：D1 的 DA1 上传（9 笔，含 SEND_DA + JUMP_DA）→ 0xC0 → 握手（3×status + SYNC 回读）
-    //        → bring-up 四步（8×status + 2 回包）→ EMI 两笔 → boot_to 三笔。**一帧 = 两笔**（见 T2 注释）
+    // 读队列：D1 的 DA1 上传（9 笔，含 SEND_DA + JUMP_DA）→ 0xC0 → 握手（**2×status** + SYNC 回读）
+    //        → bring-up 四步（**12×status + 2 回包**）→ EMI 两笔 → boot_to 三笔。**一帧 = 两笔**（见 T2 注释）
+    // （数字按 T4 实测更正：SYNC 只发不读；四个查询的尾部 status 见 T4 的逐查询表）
     m->reads = da1UploadReads(sel);
     m->reads << QByteArray("\xC0", 1)
-             << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101"))
-             << statusReads(0) << statusReads(0)                                  // set_reset_key
-             << statusReads(0) << statusReads(0)                                  // set_checksum_level
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom"))
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)                // set_reset_key（2 + 参数 status）
+             << statusReads(0) << statusReads(0) << statusReads(0)                // set_checksum_level（同上）
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
              << statusReads(0) << statusReads(0)                                  // INIT_EXT_RAM / EMI 数据
              << statusReads(0) << statusReads(0) << statusReads(0);               // BOOT_TO / 数据 / 最终 status
 
@@ -3469,11 +3492,11 @@ void TestMtkPayload::xflashChainSkipsEmiForPreloaderAgent()
     const mtkbrom::PreloaderResult pre;                     // origin = None
     m->reads = da1UploadReads(sel);
     m->reads << QByteArray("\xC0", 1)
-             << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101"))
-             << statusReads(0) << statusReads(0)
-             << statusReads(0) << statusReads(0)
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("preloader"))
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("preloader")) << statusReads(0)
              << statusReads(0) << statusReads(0) << statusReads(0);
 
     mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
@@ -3500,11 +3523,11 @@ void TestMtkPayload::xflashChainWarnsButContinuesWithoutPreloader()
     pre.skipReason = QStringLiteral("未提供 preloader 路径");
     m->reads = da1UploadReads(sel);
     m->reads << QByteArray("\xC0", 1)
-             << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101"))
-             << statusReads(0) << statusReads(0)
-             << statusReads(0) << statusReads(0)
-             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom"))
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
              << statusReads(0) << statusReads(0) << statusReads(0);
 
     mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
