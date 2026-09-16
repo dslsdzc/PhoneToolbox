@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
@@ -265,6 +266,94 @@ bool parseScatter(const QString &text, QList<PartitionRef> &out, QString *error)
         return false;
     }
     return true;
+}
+
+// —— 现代 XML 方言 scatter + GPT 适配（Phase D2 T7）——
+
+bool parseScatterXml(const QString &text, ScatterStorage want, QList<PartitionRef> &out, QString *error)
+{
+    out.clear();
+    const QString wantStorage = (want == ScatterStorage::Emmc) ? QStringLiteral("HW_STORAGE_EMMC")
+                                                               : QStringLiteral("HW_STORAGE_UFS");
+    // 以 <partition_index ...>…</partition_index> 为块切分（真样本的块标签带 name 属性）
+    static const QRegularExpression blockRe(QStringLiteral("<partition_index[^>]*>(.*?)</partition_index>"),
+                                            QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression nameRe(QStringLiteral("<partition_name>([^<]*)</partition_name>"));
+    static const QRegularExpression sizeRe(QStringLiteral("<partition_size>([^<]*)</partition_size>"));
+    static const QRegularExpression storageRe(QStringLiteral("<storage>([^<]*)</storage>"));
+
+    auto it = blockRe.globalMatch(text);
+    while (it.hasNext()) {
+        const QString body = it.next().captured(1);
+        const QString storage = storageRe.match(body).captured(1).trimmed();
+        if (storage != wantStorage)
+            continue;                                  // **按 storage 过滤**（EMMC/UFS 两份副本）
+        const QString name = nameRe.match(body).captured(1).trimmed();
+        if (name.isEmpty())
+            continue;
+        const QString sizeText = sizeRe.match(body).captured(1).trimmed();
+        bool ok = false;
+        const quint64 size = sizeText.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
+                                 ? sizeText.mid(2).toULongLong(&ok, 16)
+                                 : sizeText.toULongLong(&ok, 10);
+        PartitionRef r;
+        r.name = name;
+        r.sizeBytes = ok ? size : 0;                   // 解析不出 → 0（= 未知，不参与大小校验）
+        out << r;
+    }
+    if (out.isEmpty()) {
+        if (error) *error = QStringLiteral("scatter XML 里没有解析出任何 %1 分区（partition_name/partition_size）")
+                                .arg(wantStorage);
+        return false;
+    }
+    return true;
+}
+
+bool parseScatterAnyDialect(const QString &text, QList<PartitionRef> &out, QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+    if (!text.contains(QStringLiteral("<partition_index")))
+        return parseScatter(text, out, error);            // 文本方言：D1 既有实现原样
+    QList<PartitionRef> emmc, ufs;
+    QString emmcErr, ufsErr;
+    const bool okE = parseScatterXml(text, ScatterStorage::Emmc, emmc, &emmcErr);
+    const bool okU = parseScatterXml(text, ScatterStorage::Ufs, ufs, &ufsErr);
+    if (!okE && !okU) {
+        if (error) *error = QStringLiteral("XML scatter 两份副本都解析失败：EMMC（%1）；UFS（%2）").arg(emmcErr, ufsErr);
+        return false;
+    }
+    if (!okE || !okU) {                                   // 只有一份可用 → 用它，并说明另一份为何不可用
+        say(QStringLiteral("XML scatter：只有 %1 副本可用（另一份：%2）")
+                .arg(okE ? QStringLiteral("EMMC") : QStringLiteral("UFS"), okE ? ufsErr : emmcErr));
+        out = okE ? emmc : ufs;
+        return true;
+    }
+    if (emmc.size() == ufs.size()) {                      // 两份都成功 → 名字→大小完全一致才采信
+        bool same = true;
+        for (int i = 0; i < emmc.size() && same; ++i)
+            same = (emmc.at(i).name == ufs.at(i).name && emmc.at(i).sizeBytes == ufs.at(i).sizeBytes);
+        if (same) {
+            out = emmc;
+            return true;
+        }
+    }
+    say(QStringLiteral("XML scatter：EMMC 与 UFS 两份副本不一致（%1 vs %2 条）—— 预览采用 EMMC 副本，"
+                       "**写入判据仍以设备实读的分区表为准**").arg(emmc.size()).arg(ufs.size()));
+    out = emmc;
+    return true;
+}
+
+QList<PartitionRef> toPartitionRefs(const QList<mtkgpt::Partition> &parts, quint32 sectorSize)
+{
+    QList<PartitionRef> out;
+    out.reserve(parts.size());
+    for (const mtkgpt::Partition &p : std::as_const(parts)) {
+        PartitionRef r;
+        r.name = p.name;
+        r.sizeBytes = mtkgpt::sizeBytes(p, sectorSize);
+        out << r;
+    }
+    return out;
 }
 
 } // namespace mtkplan

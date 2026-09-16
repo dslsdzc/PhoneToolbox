@@ -18,6 +18,8 @@
 #include <QStringList>
 #include <QtGlobal>
 
+#include "core/modes/mtk_gpt.h"   // 只依赖 Qt Core 的纯函数模块（不拖进 libusb）
+
 namespace mtkplan {
 
 struct PartitionRef {
@@ -48,6 +50,22 @@ bool buildMtkPlan(const QList<PartitionRef> &partitions, const QStringList &imag
 
 // MTK 固件包内的 Android_scatter.txt（只取 partition_name / partition_size）；0 个分区 → 明确失败。
 bool parseScatter(const QString &text, QList<PartitionRef> &out, QString *error = nullptr);
+
+// 现代 scatter 是 **XML 方言**（真样本 MT6789_Android_scatter.xml）：以 `<partition_index name="SYSx">` 为块，
+// 块内 `<partition_name>` / `<partition_size>` / `<storage>`。⚠️ 真样本 130 块 = EMMC 与 UFS **两份完整副本**
+// （每份 65）→ **必须按 storage 过滤**，否则每个分区翻倍且大小对不上。
+enum class ScatterStorage { Emmc, Ufs };
+bool parseScatterXml(const QString &text, ScatterStorage want, QList<PartitionRef> &out,
+                     QString *error = nullptr);
+
+// **方言识别 + 双副本调和**（UI 只调这一个）：文本方言 → parseScatter；XML 方言 → 两份副本都解析，
+// 名字→大小**完全一致**才采信；不一致 → 用 EMMC 那份 + 往 log 写告警（**不猜**：预览是咨询性的，
+// 写入判据永远以设备实读的分区表为准）；只有一份可用时说明另一份为何失败。
+bool parseScatterAnyDialect(const QString &text, QList<PartitionRef> &out,
+                            QStringList *log = nullptr, QString *error = nullptr);
+
+// GPT 表 → 参照表（预览用；写入判据仍以设备实读为准）
+QList<PartitionRef> toPartitionRefs(const QList<mtkgpt::Partition> &parts, quint32 sectorSize);
 
 QStringList planHeaders();                    // 表头（5 列）
 QList<QStringList> planRows(const MtkFlashPlan &plan);

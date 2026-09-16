@@ -5,6 +5,7 @@
 #include "core/filename_parser.h"
 #include "core/mtk_flash_plan.h"        // D1 Task 11：MTK 入口的计划构建（scatter 参照表 + 镜像）
 #include "core/restart_tool.h"
+#include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 #include <QFile>                        // D1 Task 11：MTK 入口读 scatter
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -718,18 +719,23 @@ void FlashPanel::onFlashClicked()
             if (wantScatter == QMessageBox::Yes) {
                 const QString scatter = QFileDialog::getOpenFileName(
                     this, QStringLiteral("选择 scatter 文件"), QString(),
-                    QStringLiteral("scatter (*.txt);;所有文件 (*)"));
+                    QStringLiteral("scatter (*.txt *.xml);;所有文件 (*)"));
                 if (scatter.isEmpty()) return;
                 QFile sf(scatter);
                 if (!sf.open(QIODevice::ReadOnly)) {
                     emit outputMessage(QStringLiteral("无法读取 scatter：%1").arg(scatter), true);
                     return;
                 }
+                // 两种方言（D1 文本 / D2 XML）由计划层自动识别；XML 的 EMMC/UFS 双副本在那里调和，
+                // 分歧/只有一份可用的说明逐条落到日志（**不猜**：预览是咨询性的，写入判据以设备实读为准）。
                 QString parseErr;
-                if (!mtkplan::parseScatter(QString::fromUtf8(sf.readAll()), refs, &parseErr)) {
+                QStringList scatterLog;
+                if (!mtkplan::parseScatterAnyDialect(QString::fromUtf8(sf.readAll()), refs, &scatterLog, &parseErr)) {
                     emit outputMessage(QStringLiteral("scatter 解析失败：%1").arg(parseErr), true);
                     return;
                 }
+                for (const QString &line : std::as_const(scatterLog))
+                    emit outputMessage(line, false);
             }
 
             // preloader（EMI/DRAM 初始化用）：显式选择优先；否则在镜像目录里自动找（唯一命中才用）

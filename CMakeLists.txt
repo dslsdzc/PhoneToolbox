@@ -536,8 +536,10 @@ if(ENABLE_IMAGE_TESTS)
                     # D1 Task 7：刷写计划层（只依赖 Qt Core —— **不拖 libusb**：设备侧分区表
                     # 由 T9 转换后传入，本模块不 include mtk_emmc/mtk_brom）。真样本宏已在
                     # 下方按名命中本 stem，无需重复。
+                    # D2 Task 7：计划层新增 GPT→参照表适配 → 依赖 mtk_gpt.cpp（同为纯 Qt Core 模块）。
                     set(_test_extra_sources
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_preloader_fetch")
                     # D1 Task 8：preloader 两路径解析（只依赖 Qt Core、下载器是注入点 ——
                     # 用例全程不联网）。**只编纯模块**：生产下载器 mtk_preloader_download_qt.cpp

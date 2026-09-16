@@ -11,6 +11,7 @@
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 #include "core/bytes_format.h"
+#include "core/modes/mtk_gpt.h"   // GPT→参照表适配（T7）
 #include "core/mtk_flash_plan.h"
 #include "mtk_test_helpers.h"   // samplesDir() / sampleFileAvailable() / MTK_SAMPLES_REQUIRED
 
@@ -177,6 +178,102 @@ private slots:
     }
 
     // scatter 解析：坏输入明确失败
+    // —— T7：XML 方言（真样本 130 块 = EMMC/UFS 两份，按 storage 过滤后各 65）——
+    void xmlScatterFiltersByStorage()
+    {
+        const QString path = QDir(mtktest::samplesDir()).filePath(QStringLiteral("MT6789_Android_scatter.xml"));
+        if (!QFile::exists(path)) {
+#if MTK_SAMPLES_REQUIRED
+            QFAIL("真样本缺失：MT6789_Android_scatter.xml（MTK_SAMPLES_REQUIRED=ON）");
+#else
+            QSKIP("真样本缺失（reference/mtk-samples/，gitignored）");
+#endif
+        }
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QString text = QString::fromUtf8(f.readAll());
+
+        QList<PartitionRef> emmc, ufs;
+        QString err;
+        QVERIFY2(mtkplan::parseScatterXml(text, mtkplan::ScatterStorage::Emmc, emmc, &err), qPrintable(err));
+        QVERIFY2(mtkplan::parseScatterXml(text, mtkplan::ScatterStorage::Ufs, ufs, &err), qPrintable(err));
+        QCOMPARE(emmc.size(), 65);                  // **不翻倍**（真样本实测 130 = 2×65）
+        QCOMPARE(ufs.size(), 65);
+        auto sizeOf = [](const QList<PartitionRef> &l, const QString &n) -> quint64 {
+            for (const PartitionRef &p : std::as_const(l))
+                if (p.name == n) return p.sizeBytes;
+            return 0;
+        };
+        QCOMPARE(sizeOf(emmc, QStringLiteral("preloader")), quint64(0x100000));
+        QCOMPARE(sizeOf(emmc, QStringLiteral("pgpt")), quint64(0x8000));
+        QCOMPARE(sizeOf(emmc, QStringLiteral("misc")), quint64(0x80000));
+        QCOMPARE(sizeOf(emmc, QStringLiteral("expdb")), quint64(0x8000000));
+        QVERIFY(sizeOf(ufs, QStringLiteral("preloader")) > 0);   // UFS 副本也在（同名、不同 storage）
+    }
+
+    // XML 方言：坏输入 / 无匹配 storage → 明确失败
+    void xmlScatterRejectsGarbage()
+    {
+        QList<PartitionRef> out;
+        QString err;
+        QVERIFY(!mtkplan::parseScatterXml(QStringLiteral("hello"), mtkplan::ScatterStorage::Emmc, out, &err));
+        QVERIFY(!err.isEmpty());
+        err.clear();
+        // 块在，但 storage 不是我们要的那份 → 没有可用分区 → 失败（不得静默返回空表）
+        const QString onlyUfs = QStringLiteral(
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size><storage>HW_STORAGE_UFS</storage></partition_index>");
+        QVERIFY(!mtkplan::parseScatterXml(onlyUfs, mtkplan::ScatterStorage::Emmc, out, &err));
+        QVERIFY(!err.isEmpty());
+    }
+
+    // 方言识别 + 双副本调和：一致 → 采信不翻倍；不一致 → 用 EMMC + 日志说明；文本方言走原路
+    void scatterAnyDialectReconcilesXmlCopies()
+    {
+        const QString same = QStringLiteral(
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size><storage>HW_STORAGE_EMMC</storage></partition_index>"
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size><storage>HW_STORAGE_UFS</storage></partition_index>");
+        QList<PartitionRef> refs;
+        QStringList log;
+        QString err;
+        QVERIFY2(mtkplan::parseScatterAnyDialect(same, refs, &log, &err), qPrintable(err));
+        QCOMPARE(refs.size(), 1);                       // 两份一致 → **不翻倍**
+        QCOMPARE(refs.at(0).sizeBytes, quint64(0x100000));
+
+        const QString diff = QStringLiteral(
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size><storage>HW_STORAGE_EMMC</storage></partition_index>"
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x200000</partition_size><storage>HW_STORAGE_UFS</storage></partition_index>");
+        QList<PartitionRef> refs2;
+        QStringList log2;
+        QVERIFY2(mtkplan::parseScatterAnyDialect(diff, refs2, &log2, &err), qPrintable(err));
+        QCOMPARE(refs2.at(0).sizeBytes, quint64(0x100000));   // 取 EMMC 那份
+        QVERIFY2(anyContains(log2, QStringLiteral("不一致")), qPrintable(log2.join(QLatin1Char('\n'))));
+
+        QList<PartitionRef> refs3;
+        QVERIFY2(mtkplan::parseScatterAnyDialect(
+                     QStringLiteral("partition_name: boot\npartition_size: 0x400\n"), refs3, nullptr, &err),
+                 qPrintable(err));
+        QCOMPARE(refs3.size(), 1);                      // 文本方言仍走 D1 老路
+        QCOMPARE(refs3.at(0).name, QStringLiteral("boot"));
+    }
+
+    // GPT → 参照表（用 T1 的合成 GPT，避免真样本依赖）
+    void gptToPartitionRefsUsesSectorSize()
+    {
+        const QByteArray raw = mtkgpt::testBuildSyntheticGpt(512, 64);
+        mtkgpt::Table t;
+        QString err;
+        QVERIFY2(mtkgpt::parsePrimary(raw, 512, t, &err), qPrintable(err));
+        const QList<PartitionRef> refs = mtkplan::toPartitionRefs(t.partitions, t.sectorSize);
+        QCOMPARE(refs.size(), 1);
+        QCOMPARE(refs.at(0).name, QStringLiteral("boot"));
+        QCOMPARE(refs.at(0).sizeBytes, quint64(2 * 512));   // (last-first+1) × sectorSize
+    }
+
     void scatterParseRejectsGarbage()
     {
         QList<PartitionRef> parts; QString err;
