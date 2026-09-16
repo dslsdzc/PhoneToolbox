@@ -2867,7 +2867,19 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             quint32 dt = 0, flen = 0;
             if (!xreadHeader(dt, flen, error))             // 数据帧 = 12B 头 + 载荷
                 return false;
-            if (dt != kDtProtocolFlow) {                   // 中途的日志帧不跳（上游 get_response_data 同姿态，`XL:221-233`）
+            // ⚠️ **计划期更正（T8 审查，控制方原判断错）**：数据路径**也跳** DT_MESSAGE 日志帧 —— 跳帧发生在
+            //    `xread()` 内部（`while True`，`XL:112-135`），而 `get_response_data`（`XL:234-246`）第 235 行就调它。
+            //    我此前只看 `get_response_data` 的 datatype 判断就说"数据路径不跳"，是错的（我引的 `:221-233` 其实是 `get_response`）。
+            //    真实后果：DA 一发日志帧，我们的多帧读就会**中途失败**，而上游能读完。
+            if (dt == kDtMessage) {
+                QString logMsg;
+                if (!readPayload(flen, logMsg, error))
+                    return false;
+                if (m_logSink)
+                    m_logSink(logMsg.remove(QChar('\0')));
+                continue;                                  // 不计入 bytes/got（日志帧不是数据）
+            }
+            if (dt != kDtProtocolFlow) {                   // 其它 datatype：上游 loop 里什么都不做（会死循环），我们明确报错（fail-closed）
                 if (error) *error = QStringLiteral("XML：数据路径收到非协议流帧（datatype=%1）").arg(dt);
                 return false;
             }
