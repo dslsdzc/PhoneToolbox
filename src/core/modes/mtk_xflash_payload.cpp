@@ -1,5 +1,7 @@
 #include "core/modes/mtk_xflash_payload.h"
 
+#include <QThread>
+
 // 事实与行号出处见头文件注释（mtkclient GPL-3.0，只读参照，代码文本不进仓库）。
 
 namespace mtkbrom {
@@ -12,6 +14,9 @@ QByteArray le32(quint32 v)
     b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
     return b;
 }
+
+// 与 session.cpp 的实现同款（跨文件不共享匿名命名空间，各留一份）
+QByteArray le64(quint64 v) { return le32(quint32(v & 0xFFFFFFFFu)) + le32(quint32(v >> 32)); }
 
 quint16 le16At(const QByteArray &b, int off)
 {
@@ -186,6 +191,90 @@ bool xflashGetRamInfo(XFlashSession &x, QByteArray *raw, QString *error)
     }
     if (raw) *raw = r;
     return true;
+}
+
+// ---- ④ 载荷发送（T5）----
+
+// EMI（DRAM 初始化数据，XFL:251-270）。读帧数：INIT_EXT_RAM 的 status + send_param 的一次 status = 2 帧。
+// 注意长度帧**不带自己的 status**（上游 xsend 不读），它与 send_param 共用后者的那一次。
+bool xflashSendEmi(XFlashSession &x, const QByteArray &emi, QString *error)
+{
+    if (emi.isEmpty()) {
+        if (error) *error = QStringLiteral("XFlash EMI 数据为空");
+        return false;
+    }
+    if (!x.xsendInt(X_CMD_INIT_EXT_RAM, error))       // 0x01000A
+        return false;
+    if (!x.checkStatus(error))                        // status 必须 0（XFL:253-254）
+        return false;
+    QThread::msleep(10);                              // XFL:256：长度帧之前上游等 10ms
+    if (!x.xsendInt(quint32(emi.size()), error))      // **长度单独一帧**（XFL:257）
+        return false;
+    return x.sendParam({emi}, error);                 // EMI 本体（0x200 分块 + 一次 status）
+}
+
+// boot_to（跳 DA2，XFL:288-328）。读帧数：BOOT_TO 的 status + **send_data 自带的一次**（XFL:282）
+// + sleep 后的终判 = 3 帧。终判接受 0 与 SYNC 两个值（XFL:315）。
+// `da2` 必须已剥尾部签名 —— 上游 XFL:1164 传进来的就是剥过的切片，本层**不剥**（只拒空）。
+bool xflashBootTo(XFlashSession &x, quint64 addr, const QByteArray &da2, QString *error)
+{
+    if (da2.isEmpty()) {
+        if (error) *error = QStringLiteral("XFlash boot_to：DA2 为空（调用方须给已剥签名的切片）");
+        return false;
+    }
+    if (!x.xsendInt(X_CMD_BOOT_TO, error))            // 0x010008
+        return false;
+    if (!x.checkStatus(error))
+        return false;
+    QByteArray param;
+    param += le64(addr);
+    param += le64(quint64(da2.size()));
+    if (param.size() != 16) {
+        if (error) *error = QStringLiteral("内部错误：boot_to 参数 %1 字节（应为 16）").arg(param.size());
+        return false;
+    }
+    if (!x.xsend(param, error))                       // 16B 作为**独立帧**（XFL:291-294）
+        return false;
+    if (!x.sendData(da2, error))                      // 数据块 + 一次 status（XFL:295 → :282）
+        return false;
+    QThread::msleep(500);                             // XFL:304：终判之前上游等 timeout=0.5s（默认值）
+    quint32 st = 0;
+    if (!x.readStatus(st, error))
+        return false;
+    if (st != 0 && st != kXSync) {                    // XFL:315：0 或 SYNC 都算成功
+        if (error) *error = QStringLiteral("XFlash boot_to：DA2 未就绪（status = 0x%1）")
+                                .arg(st, 8, 16, QLatin1Char('0'));
+        return false;
+    }
+    return true;
+}
+
+// SHUTDOWN（XFL:813-833）。读帧数：命令后 + 参数后 = 2 帧。参数 32B，字段序即 pack("<IIIIIIII", ...)
+// 的实参序。上游两条路径都会 port.close(reset=True)（XFL:828/:832）—— 关端口是调用方的事，本层不发。
+bool xflashShutdown(XFlashSession &x, quint32 bootmode, QString *error)
+{
+    if (!x.xsendInt(X_CMD_SHUTDOWN, error))           // 0x010007
+        return false;
+    if (!x.checkStatus(error))
+        return false;
+    const quint32 asyncMode = 0, dlBit = 0;           // 上游签名默认值（XFL:813）
+    const quint32 hasFlags = (asyncMode || dlBit || bootmode != 0) ? 1u : 0u;   // XFL:817-820
+    QByteArray p;
+    p += le32(hasFlags);
+    p += le32(0);              // enablewdt = 0（禁用看门狗，XFL:821）
+    p += le32(asyncMode);
+    p += le32(bootmode);
+    p += le32(dlBit);
+    p += le32(0);              // dont_resetrtc = 0（复位 RTC，XFL:822）
+    p += le32(0);              // leaveusb = 0（断开 USB，XFL:823）
+    p += le32(0);              // 保留（上游恒 0）
+    if (p.size() != 32) {      // 长度是线协议契约：字段增删时在此失败，别把错长帧发出去
+        if (error) *error = QStringLiteral("内部错误：SHUTDOWN 参数 %1 字节（应为 32）").arg(p.size());
+        return false;
+    }
+    if (!x.xsend(p, error))
+        return false;
+    return x.checkStatus(error);
 }
 
 } // namespace mtkbrom

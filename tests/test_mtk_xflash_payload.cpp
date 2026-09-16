@@ -86,6 +86,11 @@ private slots:
     void queryRejectsNonZeroTrailingStatus();
     void devCtrlQuerySkipsTrailingStatusWhenReplyEmpty();
     void chipIdWarnsOnOverlongReply();
+    void sendEmiSequence();
+    void bootToAcceptsZeroOrSyncStatus();
+    void bootToRejectsBadStatus();
+    void shutdownParameterLayout();
+    void emptyPayloadsRejectedBeforeAnyWrite();
 };
 
 // 七步握手：SYNC 帧 → SETUP_ENV（命令帧 + 20B）→ SETUP_HW_INIT（命令帧 + 4B）→ 读回 "SYNC"
@@ -382,6 +387,127 @@ void TestMtkXflashPayload::chipIdWarnsOnOverlongReply()
     QVERIFY2(logHas(log, QStringLiteral("GET_CHIP_ID"), QStringLiteral("12")),
              qPrintable(log.join(QLatin1Char('|'))));            // 截断不再静默
     QCOMPARE(m.reads.size(), 0);
+}
+
+// EMI（DRAM 初始化，XFL:251-270）：INIT_EXT_RAM → status → sleep → **长度单独一帧** → 数据分块（0x200）→ 一次 status
+void TestMtkXflashPayload::sendEmiSequence()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0)          // INIT_EXT_RAM 的 status
+            << statusReads(0);         // send_param 的 status
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    const QByteArray emi(912, '\xA5');
+    QString err;
+    QVERIFY2(mtkbrom::xflashSendEmi(x, emi, &err), qPrintable(err));
+    // 写调用**逐笔**核对（先钉次数再取下标）：912 = 0x200 + 400 两笔 —— 只对字节流求和
+    // 抓不到"整段写一遍再分块写一遍"的双写，笔数与每笔长度都要对
+    QCOMPARE(m.writeFrames.size(), 7);
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));   // INIT_EXT_RAM 帧头
+    QCOMPARE(m.writeFrames.at(1), le32(0x01000A));                         // 命令值
+    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(4));   // 长度帧头
+    QCOMPARE(m.writeFrames.at(3), le32(912));                              // **长度单独一帧**
+    QCOMPARE(m.writeFrames.at(4), le32(0xFEEEEEEF) + le32(1) + le32(912)); // EMI 帧头
+    QCOMPARE(m.writeFrames.at(5), emi.left(0x200));                        // 第一块 = 512
+    QCOMPARE(m.writeFrames.at(6), emi.mid(0x200));                         // 第二块 = 剩余 400
+    int dataBytes = 0;
+    for (int i = 5; i < m.writeFrames.size(); ++i) dataBytes += m.writeFrames.at(i).size();
+    QCOMPARE(dataBytes, 912);                                              // 载荷分块（0x200）合计
+    QCOMPARE(m.reads.size(), 0);                                           // 恰读 2 帧 status
+}
+
+// boot_to：BOOT_TO 帧 → <QQ addr,len> → 数据 → sleep → status（0 或 SYNC 都算成功）
+// **整段读 3 帧 status**：BOOT_TO / send_data（XFL:282 自带一次）/ 终判（XFL:307）。
+// 只给 2 帧（原稿的写法）会让终判读到空队列 → 正确实现也被判红。
+void TestMtkXflashPayload::bootToAcceptsZeroOrSyncStatus()
+{
+    const QByteArray da2(0x300, '\x11');         // 已剥签名的 DA2
+    for (quint32 st : {0u, 0x434E5953u}) {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0) << statusReads(st);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY2(mtkbrom::xflashBootTo(x, 0x40000000ull, da2, &err), qPrintable(err));
+        QCOMPARE(m.writeFrames.size(), 6);                                     // 命令 + 16B 参数 + DA2 单块
+        QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));    // BOOT_TO 帧头
+        QCOMPARE(m.writeFrames.at(1), le32(0x010008));                         // 命令值
+        QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(16));   // 参数帧头（16B）
+        QCOMPARE(m.writeFrames.at(3), le32(quint32(0x40000000)) + le32(0) + le32(quint32(da2.size())) + le32(0));
+        QCOMPARE(m.writeFrames.at(4), le32(0xFEEEEEEF) + le32(1) + le32(quint32(da2.size())));
+        QCOMPARE(m.writeFrames.at(5), da2);                                    // **不剥**：原样送出（0x300 < 0x400 单块）
+        QCOMPARE(m.reads.size(), 0);                                           // 恰读 3 帧 status
+    }
+}
+
+// boot_to：最终 status 既非 0 也非 SYNC → 明确失败（前两帧正常，确保失败**来自终判**）
+void TestMtkXflashPayload::bootToRejectsBadStatus()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0xDEAD);
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY(!mtkbrom::xflashBootTo(x, 0x40000000ull, QByteArray(16, '\x11'), &err));
+    QVERIFY2(err.contains(QStringLiteral("boot_to")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("dead"), Qt::CaseInsensitive), qPrintable(err));   // 文案带码值
+    QCOMPARE(m.reads.size(), 0);                                           // 终判那帧也读掉了，不留给下一次读
+}
+
+// SHUTDOWN：32B 参数（hasflags 依 async_mode/dl_bit/bootmode 推导）
+void TestMtkXflashPayload::shutdownParameterLayout()
+{
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0);        // SHUTDOWN 的两处 status
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY2(mtkbrom::xflashShutdown(x, /*bootmode=*/0, &err), qPrintable(err));
+        QCOMPARE(m.writeFrames.size(), 4);                  // 命令帧（头+值）+ 参数帧（头+32B）
+        QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));
+        QCOMPARE(m.writeFrames.at(1), le32(0x010007));      // SHUTDOWN
+        QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(32));
+        const QByteArray p = m.writeFrames.at(3);
+        QCOMPARE(p.size(), 32);
+        QCOMPARE(p.mid(0, 4), le32(0));                     // hasflags = 0（NORMAL、未异步）
+        QCOMPARE(p.mid(4, 4), le32(0));                     // enablewdt = 0（禁用看门狗）
+        QCOMPARE(p.mid(8, 4), le32(0));                     // async_mode
+        QCOMPARE(p.mid(12, 4), le32(0));                    // bootmode = NORMAL
+        QCOMPARE(p.mid(16), le32(0) + le32(0) + le32(0) + le32(0));   // dl_bit/dont_resetrtc/leaveusb/保留
+        QCOMPARE(m.reads.size(), 0);                        // 恰读 2 帧 status
+    }
+    {
+        // bootmode = FASTBOOT(2)：hasflags 必须推导为 1（XFL:817-825），bootmode 字段原样带入。
+        // 少了这个子用例，"hasflags 恒 0"的实现在上面也能过。
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY2(mtkbrom::xflashShutdown(x, /*bootmode=*/2, &err), qPrintable(err));
+        const QByteArray p = m.writeFrames.at(3);
+        QCOMPARE(p.size(), 32);
+        QCOMPARE(p.mid(0, 4), le32(1));                     // hasflags = 1（bootmode != NORMAL）
+        QCOMPARE(p.mid(12, 4), le32(2));                    // bootmode = FASTBOOT
+        QCOMPARE(m.reads.size(), 0);
+    }
+}
+
+// 空载荷**一个字节都不发**就拒绝（同 D1/F5"空 DA 早拒"的纪律）：漏过校验会把空帧发到设备上
+void TestMtkXflashPayload::emptyPayloadsRejectedBeforeAnyWrite()
+{
+    {
+        MockUsbChannel m;
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY(!mtkbrom::xflashSendEmi(x, QByteArray(), &err));
+        QVERIFY(!err.isEmpty());
+        QCOMPARE(m.writeFrames.size(), 0);                  // 早拒：一帧未发
+    }
+    {
+        MockUsbChannel m;
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QString err;
+        QVERIFY(!mtkbrom::xflashBootTo(x, 0x40000000ull, QByteArray(), &err));
+        QVERIFY2(err.contains(QStringLiteral("签名")), qPrintable(err));   // 文案点出"已剥签名"是调用方义务
+        QCOMPARE(m.writeFrames.size(), 0);
+    }
 }
 QTEST_APPLESS_MAIN(TestMtkXflashPayload)
 #include "test_mtk_xflash_payload.moc"
