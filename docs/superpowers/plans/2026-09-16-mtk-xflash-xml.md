@@ -2893,7 +2893,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             if (error) *error = QStringLiteral("XML：数据长度不符（要 %1，得 %2）").arg(len).arg(bytes.size());
             return false;
         }
-        if (!ack(error))                                   // **尾部一次** ack（`XL:386`）
+        if (!ack(error))                                   // **尾部一次** ack（`XL:388`）
             return false;
         out.command = QString();
         out.bytes = bytes;
