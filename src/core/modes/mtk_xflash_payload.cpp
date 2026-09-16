@@ -336,6 +336,17 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
         if (error) *error = QStringLiteral("XFlash 写：write_packet_length 为 0（GET_PACKET_LENGTH 未取到）");
         return false;
     }
+    // packet 长不是 512 的整数倍 → **拒绝写入**（比上游更严，控制器裁决 2026-09-17）：
+    // 循环只在 `writePacketLength % 512 == 0` 时才与上游等价。否则每个块是"先切原始数据、再补零"，
+    // 补的零落在**实时数据之间**，实发字节也不等于参数里承诺的总长 —— 结果是**静默写坏镜像**，
+    // 不是"少写几个字节"。真机报的 0x200/0x400/0x1000 都对齐，这条分支实际不可达；
+    // "不可达且静默破坏"正是本项目 fail-closed 的那一类（同 GPT CRC、未知分区表、未知代际）。
+    // 早拒在**任何写之前**（与上面的 0 值检查同位）。
+    if (writePacketLength % 512 != 0) {
+        if (error) *error = QStringLiteral("XFlash 写：write_packet_length = 0x%1 不是 512 的整数倍 —— 拒绝写入（分块补齐会把零插进数据中间）")
+                                .arg(writePacketLength, 0, 16);
+        return false;
+    }
     if (!x.xsendInt(X_CMD_WRITE_DATA, error))            // 0x010004
         return false;
     if (!x.checkStatus(error))                           // status 必须 0（XFL:673-674）
@@ -348,6 +359,8 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
     if (!x.sendParam({xflashStorageParam(storage, partType, addr, total)}, error))   // 56B + 一次 status
         return false;
 
+    // ⚠️ 下面的分块循环**只在 `writePacketLength % 512 == 0` 时正确**（此时 dsize 恒为 512 的整数倍，
+    // 只有最后一块需要补零）；其它值已在入口拒绝，不进入本循环。
     quint64 pos = 0;
     while (pos < total) {
         const int dsize = int(qMin<quint64>(writePacketLength, total - pos));       // min(packet, 剩余)（XFL:865）
@@ -372,7 +385,7 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
         pos += quint64(dsize);
     }
 
-    // 循环**之后**的收尾 status（XFL:883-893）：非 0 → 写失败（上游在此报 "Error on writeflash"）。
+    // 循环**之后**的收尾 status（XFL:883-893）：非 0 → 写失败（上游在此报错并返回 False）。
     // 这一帧必须读掉：漏读会把它留在设备侧，让**下一个**操作的每次读整体错位一帧。
     QString stErr;
     if (!x.checkStatus(&stErr)) {
@@ -437,7 +450,7 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
             }
             continue;
         }
-        // 其它长度（含 0）：上游只打印 "Invalid slength" 就 break（XFL:766-768），本层明确报错
+        // 其它长度（含 0）：上游只打印一行就 break（XFL:766-768），本层明确报错
         if (error) *error = QStringLiteral("XFlash 读：收到未知长度的帧（%1 字节）").arg(payload.size());
         return false;
     }

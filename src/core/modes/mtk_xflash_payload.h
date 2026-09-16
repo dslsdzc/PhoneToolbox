@@ -49,7 +49,7 @@
 //   • 写（XFL:670-685 + :835-901）：WRITE_DATA → status 0 → 56B 参数（**length 取 512 对齐后的总长**）→
 //     每块 `dsize = min(write_packet_length, 剩余)` → 补零到 512 的整数倍 → `checksum = sum(data) & 0xFFFF`
 //     → `send_param([<I 0>, <I checksum>, data])`（**一次 status**）→ **循环之后再读一次 status**
-//     （XFL:883-893，非 0 即 "Error on writeflash"）→ 成功才发 CC_OPTIONAL_DOWNLOAD_ACT
+//     （XFL:883-893，非 0 即写失败）→ 成功才发 CC_OPTIONAL_DOWNLOAD_ACT
 //     （XFL:885；上游不检查其返回值，本层失败只告警 —— 数据此时已写入）。
 //   • 读（XFL:687-704 + :706-806）：READ_DATA → status 0 → 56B 参数 → **参数帧之后的第二个 status**
 //     （XFL:698-702；漏读会让之后每个数据帧整体错位一帧）→ 帧循环：slength **> 4** 是数据帧
@@ -135,8 +135,10 @@ bool xflashShutdown(XFlashSession &x, quint32 bootmode = 0, QString *error = nul
 // 56B 存储参数（铁律 15，见文件头）：24B 包头 + 32B NandExtension（全 0）。恒 56 字节。
 QByteArray xflashStorageParam(quint32 storage, quint32 partType, quint64 addr, quint64 length);
 // 写一个区间（XFL:670-685 + :835-901）。`writePacketLength` 取 GET_PACKET_LENGTH 的
-// write_packet_length，**为 0 即拒绝（无回退，铁律 14）**。读帧数：2 + 块数 + 1（收尾）+ 2（CC devctrl）
-// + 1（CC 回包）。CC_OPTIONAL_DOWNLOAD_ACT 失败**只告警不判失败**（数据已写入，上游也不检查）。
+// write_packet_length，**为 0 即拒绝（无回退，铁律 14）**；**非 512 的整数倍也拒绝**（fail-closed：
+// 那种取值下补零会插进数据中间、实发字节与参数承诺不符 —— 静默写坏镜像，真机不会报这种值）。
+// 读帧数：2 + 块数 + 1（收尾）+ 2（CC devctrl）+ 1（CC 回包）。
+// CC_OPTIONAL_DOWNLOAD_ACT 失败**只告警不判失败**（数据已写入，上游也不检查）。
 bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
                      quint32 storage, quint32 partType, quint32 writePacketLength,
                      QStringList *log = nullptr, QString *error = nullptr);

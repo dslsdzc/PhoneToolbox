@@ -109,8 +109,15 @@ private slots:
     void writeDataRejectsZeroPacketLength();
     void writeDataRejectsNonZeroTrailingStatus();
     void writeDataWarnsWhenOptionalDownloadActFails();
+    void writeDataAnnounces512AlignedLength();
+    void writeDataRejectsUnalignedPacketLength();
+    void writeDataZeroLengthSendsZeroLengthParam();
     void readDataCollectsFramesAndAcks();
     void readDataRejectsNonZeroFlag();
+    void readDataRejectsUnknownFrameLength();
+    void readDataRejectsNonZeroFlagAfterDataFrame();
+    void readDataRejectsNonZeroFinalFlag();
+    void readDataZeroLengthReadsFinalFrameOnly();
 };
 
 // 七步握手：SYNC 帧 → SETUP_ENV（命令帧 + 20B）→ SETUP_HW_INIT（命令帧 + 4B）→ 读回 "SYNC"
@@ -627,7 +634,9 @@ void TestMtkXflashPayload::writeDataChunkingAndChecksum()
     QCOMPARE(m.writeFrames.at(6), le32(0xFEEEEEEF) + le32(1) + le32(4));
     QCOMPARE(m.writeFrames.at(7), le32(0xFC00));                  // sum(0x400×0xFF) & 0xFFFF
     QCOMPARE(m.writeFrames.at(8), le32(0xFEEEEEEF) + le32(1) + le32(0x400));
-    QCOMPARE(m.writeFrames.at(9) + m.writeFrames.at(10), data.left(0x400));   // 数据按 0x200 分块（铁律 5）
+    // 数据按 0x200 分块（铁律 5）：**每一笔单独断言**（只拼起来比对会放过 0x300+0x100 这种拆分）
+    QCOMPARE(m.writeFrames.at(9), data.mid(0, 0x200));
+    QCOMPARE(m.writeFrames.at(10), data.mid(0x200, 0x200));
 
     // 第二块（0x300 → 补零到 0x400）：补的是 0，且**补零部分不进校验和**
     QCOMPARE(m.writeFrames.at(11), le32(0xFEEEEEEF) + le32(1) + le32(4));
@@ -635,10 +644,11 @@ void TestMtkXflashPayload::writeDataChunkingAndChecksum()
     QCOMPARE(m.writeFrames.at(13), le32(0xFEEEEEEF) + le32(1) + le32(4));
     QCOMPARE(m.writeFrames.at(14), le32(0xFD00));                 // sum(0x300×0xFF) & 0xFFFF
     QCOMPARE(m.writeFrames.at(15), le32(0xFEEEEEEF) + le32(1) + le32(0x400));
-    const QByteArray tail = m.writeFrames.at(16) + m.writeFrames.at(17);   // 同样按 0x200 分块
-    QCOMPARE(tail.size(), 0x400);
-    QCOMPARE(tail.mid(0, 0x300), data.mid(0x400));                // 实数据
-    QCOMPARE(tail.mid(0x300), QByteArray(0x100, '\0'));           // 补零
+    QByteArray tail(0x400, '\0');
+    tail.replace(0, 0x300, data.mid(0x400));                      // 实数据 0x300 + **补零 0x100**
+    QCOMPARE(m.writeFrames.at(16), tail.left(0x200));             // 同样按 0x200 分块，逐笔断言
+    QCOMPARE(m.writeFrames.at(17), tail.mid(0x200));
+    QCOMPARE(tail.mid(0x300), QByteArray(0x100, '\0'));           // 补的是 0
 
     // 收尾：CC_OPTIONAL_DOWNLOAD_ACT 是**无参** devctrl（DEVICE_CTRL → 子命令 → 读回包，不读尾部 status）
     QCOMPARE(m.writeFrames.at(18), le32(0xFEEEEEEF) + le32(1) + le32(4));
@@ -664,7 +674,7 @@ void TestMtkXflashPayload::writeDataRejectsZeroPacketLength()
     QCOMPARE(m.reads.size(), 0);              // 早拒：一帧未读
 }
 
-// 循环**之后**的收尾 status 是判据（XFL:883-893，"Error on writeflash"）：非 0 → 失败，
+// 循环**之后**的收尾 status 是判据（XFL:883-893，上游在此判错并打印）：非 0 → 失败，
 // 且**不再发** CC_OPTIONAL_DOWNLOAD_ACT（上游把它放在 "status == 0" 分支里）。
 // 毒药帧没被读走 = 失败点确实在收尾 status，不在更早处。
 void TestMtkXflashPayload::writeDataRejectsNonZeroTrailingStatus()
@@ -707,6 +717,69 @@ void TestMtkXflashPayload::writeDataWarnsWhenOptionalDownloadActFails()
     QCOMPARE(m.writeFrames.at(10), le32(0xFEEEEEEF) + le32(1) + le32(4));
     QCOMPARE(m.writeFrames.at(11), le32(0x010009));             // DEVICE_CTRL
     QCOMPARE(m.reads.size(), 2);                                // 毒药帧（头+载荷）没被读走
+}
+
+// 判别器：参数里的 length 必须是 **512 对齐**（上游 XFL:847-849 的规则），不是"补齐到 packet 的整数倍"。
+// 取 data 0x600 / packet 0x400：ceil512(0x600) = **0x600**，而 ceil-to-packet = **0x800** —— 两种规则在这一组
+// 输入上结果不同（0x700/0x400 那组两者都是 0x800，判别不了）。分块也一并钉住：0x400 + 0x200 两块、不加块。
+void TestMtkXflashPayload::writeDataAnnounces512AlignedLength()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0) << statusReads(0)   // 命令/参数/两块
+            << statusReads(0)                                                         // 收尾
+            << statusReads(0) << statusReads(0) << frameReads(1, le32(0));            // CC 二连 + 回包
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    const QByteArray data(0x600, '\x11');
+    QString err;
+    QVERIFY2(mtkbrom::xflashWriteData(x, 0x100000, data, 0x1, 0x8, /*writePacketLength=*/0x400, nullptr, &err),
+             qPrintable(err));
+    QCOMPARE(m.reads.size(), 0);
+    QCOMPARE(m.writeFrames.size(), 21);                      // 2 + 2 + 7（0x400 一块）+ 6（0x200 一块）+ 4（CC）
+    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(56));
+    QCOMPARE(m.writeFrames.at(3).mid(16, 8), le32(0x600) + le32(0));   // **0x600**（ceil-to-packet 会给 0x800）
+    // 第一块 0x400（无需补零；字节 0x11 → 校验和 0x400×0x11）
+    QCOMPARE(m.writeFrames.at(7), le32(0x4400));
+    QCOMPARE(m.writeFrames.at(8), le32(0xFEEEEEEF) + le32(1) + le32(0x400));
+    QCOMPARE(m.writeFrames.at(9), data.mid(0, 0x200));
+    QCOMPARE(m.writeFrames.at(10), data.mid(0x200, 0x200));
+    // 第二块 0x200（正好对齐，不补零）
+    QCOMPARE(m.writeFrames.at(14), le32(0x2200));
+    QCOMPARE(m.writeFrames.at(15), le32(0xFEEEEEEF) + le32(1) + le32(0x200));
+    QCOMPARE(m.writeFrames.at(16), data.mid(0x400));         // 0x200 字节，单笔写完
+    QCOMPARE(m.writeFrames.at(20), le32(0x800005));          // CC 仍照发
+}
+
+// packet 长不是 512 的整数倍 → **拒绝写入**（控制器裁决，比上游更严）：此时循环会"切原始数据再补零"，
+// 补的零落在实时数据之间，实发字节也不再等于参数里承诺的长度 —— 是"静默写坏镜像"，不是"少写几个字节"。
+// 真机报的 0x200/0x400/0x1000 都对齐，所以这条分支实际不可达；**不可达且静默破坏** → fail-closed
+// （同 GPT CRC、未知分区表、未知代际的处置）。早拒在**任何写之前**。
+void TestMtkXflashPayload::writeDataRejectsUnalignedPacketLength()
+{
+    MockUsbChannel m;
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY(!mtkbrom::xflashWriteData(x, 0x200000, QByteArray(0x600, '\x11'), 0x1, 0x8, /*writePacketLength=*/0x300, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("0x300")), qPrintable(err));      // 点名拿到的值
+    QVERIFY2(err.contains(QStringLiteral("512")), qPrintable(err));        // 点名要求
+    QCOMPARE(m.writeFrames.size(), 0);      // 早拒：命令帧都没发（不是"发到一半才停"）
+    QCOMPARE(m.reads.size(), 0);            // 早拒：一帧未读
+}
+
+// 空数据（0 字节）**不特殊对待**：照上游的时序走完（参数长度 0、无块、收尾 status、CC）。
+// 这是"钉住现状"的用例，不是"这是好行为"的用例 —— 要改行为得先改这条。
+void TestMtkXflashPayload::writeDataZeroLengthSendsZeroLengthParam()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)                     // 命令/参数/收尾
+            << statusReads(0) << statusReads(0) << frameReads(1, le32(0));            // CC 二连 + 回包
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY2(mtkbrom::xflashWriteData(x, 0x200000, QByteArray(), 0x1, 0x8, 0x400, nullptr, &err), qPrintable(err));
+    QCOMPARE(m.reads.size(), 0);
+    QCOMPARE(m.writeFrames.size(), 8);                    // 命令 2 + 参数 2 + CC 4：**一块都没有**
+    const QByteArray p = m.writeFrames.at(3);
+    QCOMPARE(p.size(), 56);
+    QCOMPARE(p.mid(16, 8), le32(0) + le32(0));            // 参数长度 = 0
 }
 
 // 读（XFL:687-704 + :706-806）：命令 status → 56B 参数 status → **参数后的第二个 status**（XFL:698-702）
@@ -764,6 +837,80 @@ void TestMtkXflashPayload::readDataRejectsNonZeroFlag()
             ++acks;
     }
     QCOMPARE(acks, 0);                        // flag 帧不回 ack
+}
+
+// 收帧长度既不是数据帧（> 4）也不是 flag 帧（== 4）→ 协议错误，明确失败（上游 XFL:766-768 只打印后 break）。
+// 用 2 字节载荷构造（**不能**用空载荷：mock 对空笔返回 false，那是"读失败"而不是"长度未知"）。
+void TestMtkXflashPayload::readDataRejectsUnknownFrameLength()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
+            << frameReads(1, QByteArray(2, '\x01'));          // 2 字节：两头都不沾
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x100, 0x1, 0x8, got, &err));
+    QVERIFY2(err.contains(QStringLiteral("未知长度")), qPrintable(err));   // 失败原因是"长度"而不是别的
+    QVERIFY2(err.contains(QStringLiteral("2")), qPrintable(err));         // 带上实际长度
+    QCOMPARE(m.writeFrames.size(), 4);   // 只有命令与参数两帧（4 笔），没有 ack
+    QCOMPARE(m.reads.size(), 0);         // 出错帧已读掉，不留给下一次读
+}
+
+// 循环内**靠后**的 flag 帧非 0（前面已经收过一帧数据）→ 失败，但**之前那帧数据必须先被收下并 ack**。
+// 这条钉住"收数据 → ack → 继续 → 遇 flag 判错"的顺序：把 flag 判据挪到收数据之前、
+// 或只在收尾帧上判 flag 的实现都会在这里红。
+void TestMtkXflashPayload::readDataRejectsNonZeroFlagAfterDataFrame()
+{
+    MockUsbChannel m;
+    const QByteArray blk(0x40, '\x5A');
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
+            << frameReads(1, blk)                             // 数据帧（不足 0x100）
+            << frameReads(1, le32(0x1234));                   // 循环内靠后的 flag 非 0
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x100, 0x1, 0x8, got, &err));
+    QVERIFY2(err.contains(QStringLiteral("0x00001234")), qPrintable(err));
+    QCOMPARE(got, blk);                   // 报错前那帧数据已收下（数据帧先于 flag 帧被处理）
+    QCOMPARE(m.writeFrames.size(), 6);    // 命令 2 + 参数 2 + **该数据帧的一次 ack（2 笔）**
+    QCOMPARE(m.writeFrames.at(4), le32(0xFEEEEEEF) + le32(1) + le32(4));
+    QCOMPARE(m.writeFrames.at(5), le32(0));
+    QCOMPARE(m.reads.size(), 0);
+}
+
+// **收尾帧** flag 非 0（数据已按 length 读满）→ 失败。与上一条的区别在**位置**：此处循环已因字节数收尾，
+// 失败只能来自收尾帧那一读 —— 忽略收尾帧的实现会返回 true，在这里红（XFL:770-776）。
+void TestMtkXflashPayload::readDataRejectsNonZeroFinalFlag()
+{
+    MockUsbChannel m;
+    const QByteArray blk(0x100, '\x5A');
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
+            << frameReads(1, blk)                             // 数据帧恰好凑满 0x100
+            << frameReads(1, le32(0xDEAD));                   // 收尾帧 flag 非 0
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x100, 0x1, 0x8, got, &err));
+    QVERIFY2(err.contains(QStringLiteral("0x0000DEAD")), qPrintable(err));
+    QCOMPARE(got, blk);                   // 数据本身收全了，失败来自收尾帧
+    QCOMPARE(m.writeFrames.size(), 6);    // 命令 2 + 参数 2 + ack 2
+    QCOMPARE(m.reads.size(), 0);          // 收尾帧必须被读掉，不能留在设备侧
+}
+
+// length == 0 的读**照上游形状走**：三帧 status 之后循环一帧不读，只读一帧收尾（XFL:770-776
+// 在 bytestoread == 0 时同样会读）—— 钉住现状，不是"这是好行为"。
+void TestMtkXflashPayload::readDataZeroLengthReadsFinalFrameOnly()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
+            << frameReads(1, le32(0));                        // 唯一的收尾帧
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY2(mtkbrom::xflashReadData(x, 0, 0, 0x1, 0x8, got, &err), qPrintable(err));
+    QVERIFY(got.isEmpty());
+    QCOMPARE(m.writeFrames.size(), 4);    // 命令 2 + 参数 2（0 字节没有 ack）
+    QCOMPARE(m.reads.size(), 0);
 }
 
 QTEST_APPLESS_MAIN(TestMtkXflashPayload)
