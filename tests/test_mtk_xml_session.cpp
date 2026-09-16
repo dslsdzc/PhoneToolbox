@@ -59,10 +59,10 @@ QList<QByteArray> textReads(const QString &s)
     return {le32(0xFEEEEEEF) + le32(1) + le32(quint32(body.size())), body};
 }
 
-// 原始数据帧（裸 OK@ 路径；datatype 仍走协议流）：**两笔**
-QList<QByteArray> dataFrameReads(const QByteArray &payload)
+// 原始数据帧（裸 OK@ 路径；datatype 默认走协议流）：**两笔**
+QList<QByteArray> dataFrameReads(const QByteArray &payload, quint32 datatype = 1)
 {
-    return {le32(0xFEEEEEEF) + le32(1) + le32(quint32(payload.size())), payload};
+    return {le32(0xFEEEEEEF) + le32(datatype) + le32(quint32(payload.size())), payload};
 }
 
 // DA 日志帧（DT_MESSAGE）：**三笔** —— 12B 头（宣布长度 = 载荷 + 4）、priority:u32、载荷（XL:124-127）
@@ -88,6 +88,12 @@ private slots:
     void readCommandResultParsesDownloadFilePacketLengthHex();
     void readCommandResultHandlesProgressReportKeepAlive();
     void readCommandResultHandlesBareOkAtDataPath();
+    void dataPathSkipsLogFramesMidRead();
+    void dataPathBoundsSkippedLogFrames();
+    void dataPathRejectsUnknownDatatype();
+    void readCommandResultRejectsFrameWithoutCommandOrOkAt();
+    void sendCommandFailsOnUnparseableFollowUp();
+    void readCommandResultKeepsUnknownNamedCommandForCaller();
 };
 
 // XC:18-25 create_cmd：`<da><version>v</version><command>CMD:<name></command>[<arg>…</arg>]</da>`；
@@ -266,6 +272,99 @@ void TestMtkXmlSession::readCommandResultHandlesBareOkAtDataPath()
     QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
     QCOMPARE(r.bytes, payload);
     QVERIFY(r.command.isEmpty());
+}
+
+// 2026-09-17 审查更正 #1/#2：数据路径同样经上游 `xread`（`get_response_data` XL:234-246 → `xread` XL:112-135），
+// **DT_MESSAGE 日志帧在数据读取途中也被跳过**（头 + priority + 载荷 → uartlog），**不计入数据长度**。
+// 旧实现遇到日志帧会直接把日志载荷当数据收（长度对不上/读偏），上游能正常读完。
+void TestMtkXmlSession::dataPathSkipsLogFramesMidRead()
+{
+    MockUsbChannel m;
+    const QByteArray part1(0x20, '\x11');
+    const QByteArray part2(0x10, '\x22');
+    m.reads << textReads(QStringLiteral("OK@0x30"))                 // 宣布 0x30 = 0x20 + 0x10
+            << textReads(QStringLiteral("OK"))
+            << dataFrameReads(part1)
+            << logReads(QStringLiteral("[DA] erase progress 50%"))   // 中途插一条 DA 日志
+            << dataFrameReads(part2);
+    mtkbrom::XmlSession s(&m);
+    QStringList logged;
+    s.setLogSink([&logged](const QString &line) { logged << line; });
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
+    QCOMPARE(r.bytes, part1 + part2);                               // 日志帧不计入数据
+    QCOMPARE(logged.size(), 1);
+    QCOMPARE(logged.at(0), QStringLiteral("[DA] erase progress 50%"));
+}
+
+// 跳帧有上限（kMaxLogFramesToSkip = 64，private 故此处写死 65）：设备刷屏不能把我们钉死
+void TestMtkXmlSession::dataPathBoundsSkippedLogFrames()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK@0x10"))
+            << textReads(QStringLiteral("OK"));
+    for (int i = 0; i <= 64; ++i)                                   // 65 连续日志帧 > 上限 64
+        m.reads << logReads(QStringLiteral("spam %1").arg(i));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY(!s.readCommandResult(r, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("连续跳过")), qPrintable(err));
+}
+
+// 数据路径遇**未知 datatype**：上游 `xread` 的 `while True:` 对其它类型什么都不做（= 空转），本层 fail-closed
+void TestMtkXmlSession::dataPathRejectsUnknownDatatype()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK@0x10"))
+            << textReads(QStringLiteral("OK"))
+            << dataFrameReads(QByteArray(0x10, '\x33'), 7);         // datatype=7：既非协议流也非日志
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY(!s.readCommandResult(r, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("datatype=7")), qPrintable(err));
+}
+
+// 审查 Important #3：无 `<command>` 且无 `OK@` 的帧必须 **fail-closed**
+// （原实现 `return true` + 空 Result = fail-open，sendCommand 尾部还会当成功上报）
+void TestMtkXmlSession::readCommandResultRejectsFrameWithoutCommandOrOkAt()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("<host><thing>nothing-useful</thing></host>"));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY(!s.readCommandResult(r, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("nothing-useful")), qPrintable(err));   // 文案须含实收内容
+}
+
+// 同上：失败必须穿透到 sendCommand（不得报成功）
+void TestMtkXmlSession::sendCommandFailsOnUnparseableFollowUp()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"))                       // 命令被接受
+            << textReads(QStringLiteral("bogus-garbage"));           // 既无 <command> 也无 OK@
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
+    QVERIFY2(err.contains(QStringLiteral("bogus-garbage")), qPrintable(err));
+}
+
+// 窄化的边界：**具名但未列举**的命令（如扩展命令 CMD:CUSTOM*）不算"不可解析" ——
+// 上游 get_command_result 返回 (cmd, "") 把处置交给调用方（read_register XL:357-359 即 `if cmd != '': return False`），
+// 本层保留命令名（T9/T10 的调用方必须查 out.command），**不**在此失败
+void TestMtkXmlSession::readCommandResultKeepsUnknownNamedCommandForCaller()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("<host><command>CMD:CUSTOM</command></host>"));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
+    QCOMPARE(r.command, QStringLiteral("CMD:CUSTOM"));
+    QVERIFY(r.text.isEmpty());
 }
 QTEST_APPLESS_MAIN(TestMtkXmlSession)
 #include "test_mtk_xml_session.moc"

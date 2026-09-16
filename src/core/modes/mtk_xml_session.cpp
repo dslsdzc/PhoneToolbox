@@ -207,12 +207,35 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
         // XL:381-385：按宣布长度**逐帧**收数据，收满后才 ack **一次**。
         // （上游 `download_raw`（XL:508-589，T10 的读路径）是"每帧 ack → 读 OK → 再 ack"的逐帧节奏；
         //   本函数对应的是 `get_command_result`，其数据分支**不**逐帧 ack —— 两者不要混。）
+        // 但**帧类型**与上游一致：数据帧也经 `xread` 取（`get_response_data` XL:234-246 → `xread` XL:112-135），
+        // 而 xread 是 `while True:` —— **DT_MESSAGE 日志帧在内部被跳过**（头+priority+载荷 → uartlog），
+        // 只把 DT_PROTOCOL_FLOW 返回给调用方。2026-09-17 审查更正：跳过发生在 xread 里，不在
+        // get_response_data 里 —— 原先"数据路径不跳帧是上游忠实"的说法是错的。
         QByteArray bytes;
         quint32 got = 0;
+        int consecutiveLogs = 0;
         while (got < len) {
             quint32 dt = 0, flen = 0;
             if (!xreadHeader(dt, flen, error))
                 return false;
+            if (dt == kDtMessage) {                            // DA 日志：读掉、交给 sink、**不计入数据**
+                QByteArray logPayload;
+                if (!readPayload(flen, logPayload, error))
+                    return false;
+                if (m_logSink)
+                    m_logSink(QString::fromUtf8(logPayload).remove(QChar('\0')));
+                if (++consecutiveLogs > kMaxLogFramesToSkip) {  // 上限：不给设备"刷屏刷死"的机会
+                    if (error) *error = QStringLiteral("XML：连续跳过 %1 帧 DA 日志仍未收满数据（已收 %2/%3 字节）")
+                                            .arg(consecutiveLogs).arg(got).arg(len);
+                    return false;
+                }
+                continue;
+            }
+            if (dt != kDtProtocolFlow) {                        // 未知 datatype：上游 xread 会**空转死循环**
+                if (error) *error = QStringLiteral("XML：数据路径收到未知帧类型（datatype=%1，已收 %2/%3 字节）")
+                                        .arg(dt).arg(got).arg(len);
+                return false;
+            }
             QByteArray chunk;
             if (!readPayload(flen, chunk, error))
                 return false;
@@ -222,6 +245,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             }
             bytes += chunk;
             got += quint32(chunk.size());
+            consecutiveLogs = 0;                               // 有进展 → 连击清零
         }
         if (!ack(error))                                       // XL:386
             return false;
@@ -298,7 +322,21 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
         }
         return true;
     }
-    return true;                                               // 其它命令：原样返回 command/text
+    // 落在下面两条的只有两种情况 —— 分开处置（2026-09-17 审查 Important #3：原先一律 `return true`，
+    // 对"无 <command> 且无 OK@"的帧就是 fail-open，sendCommand 尾部还会当成功上报，与"ERR! 当成功"
+    // 同类，铁律 18 不复刻）：
+    //   ① **具名但未列举**的命令（如扩展命令 CMD:CUSTOM*，事实报告 §5.2）：上游 get_command_result
+    //      返回 `(cmd, "")`，把处置交给调用方（`read_register` XL:357-359 即 `if cmd != '': return False`）。
+    //      本层保留这个形态（out.command 已置名），**不**在此失败 —— T9/T10 的调用方必须查 out.command。
+    //   ② 无 <command> 且无 OK@：空 cmd（裸 "OK"、空帧、垃圾）—— **无信息**，一律失败关闭。
+    if (!cmd.isEmpty())
+        return true;
+    if (error) {
+        const QString shown = data.size() > 120 ? data.left(120) + QStringLiteral("…") : data;
+        *error = QStringLiteral("XML：响应既无 <command> 也不是 OK@ 数据帧（收到 %1）")
+                     .arg(shown.isEmpty() ? QStringLiteral("空帧") : shown);
+    }
+    return false;
 }
 
 // XL:188-219 send_command
