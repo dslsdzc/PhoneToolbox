@@ -1,0 +1,254 @@
+// tests/test_mtk_xml_session.cpp
+//
+// MTK XML（D3）帧层（Phase D2+D3 Task 8）：文本帧 / OK / OK@0x<len> / OK!EOT 保活 /
+// get_command_result 分派。对照 mtkclient v2.1.4-20-g71b0175（GPL-3.0，**只读参照，代码文本不进仓库**）：
+//   XL = mtkclient/Library/DA/xmlflash/xml_lib.py；XC = .../xmlflash/xml_cmd.py
+//
+// 夹具约定（**先读再改**，同 T2/T4）：默认 `IBromUsb::readExact` 是"单次读 + 严格长度"
+// （`mtk_brom.cpp:219-231`），本层每次 readExact 消耗**一笔**队列项 ——
+//   • 文本帧（DT_PROTOCOL_FLOW）= **两笔**：12B 帧头、载荷；
+//   • DA 日志帧（DT_MESSAGE）= **三笔**：12B 帧头、`priority:u32`、日志载荷
+//     （`XL:124-127` 的 16B 头 = 本层"12B 头 + 独立读 4B"）。
+// 把整帧塞成一笔会让"读头"截断载荷、后续读全部错位；空队列项也会被 mock 判成 false。
+
+#include <QtTest>
+#include <QByteArray>
+#include <QStringList>
+#include <utility>      // std::as_const
+
+#include "core/modes/mtk_xml_session.h"
+#include "core/modes/mtk_brom.h"
+
+class MockUsbChannel : public mtkbrom::IBromUsb   // 与 T2/T4 同款
+{
+public:
+    QByteArray writes;              // 全部写入字节（拼接）
+    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
+    QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
+    int pktSize = 0x400;            // XML 层不使用（无分块写），保留接口语义
+
+    bool open(QString *) override { return true; }
+    bool write(const QByteArray &data, QString *) override { writes += data; writeFrames << data; return true; }
+    bool read(QByteArray &out, int maxLen, int, QString *) override
+    {
+        if (reads.isEmpty()) { out.clear(); return false; }
+        const QByteArray r = reads.takeFirst();
+        out = r.left(maxLen);
+        return !r.isEmpty();
+    }
+    int maxPacketSize() const override { return pktSize; }
+    bool close() override { return true; }
+};
+
+namespace {
+QByteArray le32(quint32 v)
+{
+    QByteArray b(4, '\0');
+    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
+    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
+    return b;
+}
+
+// 文本/日志帧载荷 = utf8 字节 + **NUL**（XL:146-153：str 载荷 length = len+1）
+QByteArray textBody(const QString &s) { return s.toUtf8() + QByteArray(1, '\0'); }
+
+// 文本帧（DT_PROTOCOL_FLOW）读队列：**两笔**（12B 头 declare length = 可见字节 + 1，载荷）
+QList<QByteArray> textReads(const QString &s)
+{
+    const QByteArray body = textBody(s);
+    return {le32(0xFEEEEEEF) + le32(1) + le32(quint32(body.size())), body};
+}
+
+// 原始数据帧（裸 OK@ 路径；datatype 仍走协议流）：**两笔**
+QList<QByteArray> dataFrameReads(const QByteArray &payload)
+{
+    return {le32(0xFEEEEEEF) + le32(1) + le32(quint32(payload.size())), payload};
+}
+
+// DA 日志帧（DT_MESSAGE）：**三笔** —— 12B 头（宣布长度 = 载荷 + 4）、priority:u32、载荷（XL:124-127）
+QList<QByteArray> logReads(const QString &s, quint32 priority = 7)
+{
+    const QByteArray body = textBody(s);
+    return {le32(0xFEEEEEEF) + le32(2) + le32(quint32(body.size()) + 4), le32(priority), body};
+}
+} // namespace
+
+class TestMtkXmlSession : public QObject
+{
+    Q_OBJECT
+private slots:
+    void envelopeAndFieldHelpers();
+    void xsendTextAddsNulAndLengthPlusOne();
+    void ackValueSendsLowercaseHexWith0xPrefix();
+    void getResponseStripsNulAndDecodes();
+    void getResponseSkipsDaLogFrames();
+    void sendCommandRequiresOkAndEndsWithEndThenStart();
+    void sendCommandDrainsUnsupportedHandshakeAndFails();
+    void readCommandResultParsesDownloadFilePacketLengthHex();
+    void readCommandResultHandlesProgressReportKeepAlive();
+    void readCommandResultHandlesBareOkAtDataPath();
+};
+
+// XC:18-25 create_cmd：`<da><version>v</version><command>CMD:<name></command>[<arg>…</arg>]</da>`；
+// 字段取值 = 上游 get_field（XL:35-43）
+void TestMtkXmlSession::envelopeAndFieldHelpers()
+{
+    const QString xml = mtkbrom::XmlSession::envelope(QStringLiteral("NOTIFY-INIT-HW"));
+    QCOMPARE(xml, QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?><da><version>1.0</version>"
+                                 "<command>CMD:NOTIFY-INIT-HW</command></da>"));
+    const QString withArgs = mtkbrom::XmlSession::envelope(QStringLiteral("READ-FLASH"),
+                                                           {QStringLiteral("<partition>EMMC-USER</partition>"),
+                                                            QStringLiteral("<offset>0x0</offset>")});
+    QVERIFY(withArgs.contains(QStringLiteral("<arg><partition>EMMC-USER</partition><offset>0x0</offset></arg>")));
+    QCOMPARE(mtkbrom::XmlSession::field(QStringLiteral("<host><command>CMD:START</command></host>"),
+                                        QStringLiteral("command")),
+             QStringLiteral("CMD:START"));
+}
+
+// 铁律 17：str 载荷 length = len+1 且带 NUL（XL:146-153）
+void TestMtkXmlSession::xsendTextAddsNulAndLengthPlusOne()
+{
+    MockUsbChannel m;
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY2(s.xsendText(QStringLiteral("OK"), &err), qPrintable(err));
+    QCOMPARE(m.writeFrames.size(), 2);
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(3));   // "OK" 3 字节（含 NUL）
+    QCOMPARE(m.writeFrames.at(1), QByteArray("OK\0", 3));
+}
+
+// XL:161-163 `f"OK@{hex(length)}\0"`：Python hex() = **小写、0x 前缀、不补零**。
+// （本用例由简令的实现者注记要求补上。）
+void TestMtkXmlSession::ackValueSendsLowercaseHexWith0xPrefix()
+{
+    MockUsbChannel m;
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY2(s.ackValue(0x1000, &err), qPrintable(err));
+    QCOMPARE(m.writeFrames.size(), 2);
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(10));
+    QCOMPARE(m.writeFrames.at(1), QByteArray("OK@0x1000\0", 10));
+    QString err2;
+    QVERIFY2(s.ackValue(0xFF, &err2), qPrintable(err2));                    // 不补零：0xff 而非 0x00ff
+    QCOMPARE(m.writeFrames.at(3), QByteArray("OK@0xff\0", 8));
+}
+
+// XL:221-232 get_response：读一帧 → rstrip NUL → utf-8
+void TestMtkXmlSession::getResponseStripsNulAndDecodes()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"));
+    mtkbrom::XmlSession s(&m);
+    QString text;
+    QString err;
+    QVERIFY2(s.getResponse(text, &err), qPrintable(err));
+    QCOMPARE(text, QStringLiteral("OK"));
+}
+
+// 计划期更正（控制方预核对 XL:107-132）：上游 xread() 是**循环** —— DT_MESSAGE（DA 日志帧）的载荷被读掉、
+// 追加进 UART log，然后**继续读下一帧**；只有 DT_PROTOCOL_FLOW 才返回给调用方。
+// 故日志帧**不打断协议**（本层把文本交给 logSink），且不能被当成"响应"。
+void TestMtkXmlSession::getResponseSkipsDaLogFrames()
+{
+    MockUsbChannel m;
+    m.reads << logReads(QStringLiteral("[DA] boot stage 1"))
+            << logReads(QStringLiteral("[DA] dram init ok"), 3)
+            << textReads(QStringLiteral("OK"));
+    mtkbrom::XmlSession s(&m);
+    QStringList logged;
+    s.setLogSink([&logged](const QString &line) { logged << line; });
+    QString text;
+    QString err;
+    QVERIFY2(s.getResponse(text, &err), qPrintable(err));
+    QCOMPARE(text, QStringLiteral("OK"));
+    QCOMPARE(logged.size(), 2);
+    QCOMPARE(logged.at(0), QStringLiteral("[DA] boot stage 1"));
+    QCOMPARE(logged.at(1), QStringLiteral("[DA] dram init ok"));
+}
+
+// sendCommand（XL:188-219）：xsend → 响应必须 OK → 非 noack 时等 CMD:END(result OK) → ack → CMD:START
+void TestMtkXmlSession::sendCommandRequiresOkAndEndsWithEndThenStart()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"))                                        // 命令被接受
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY2(s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err), qPrintable(err));
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(quint32(QByteArray("<da><command>CMD:FOO</command></da>").size() + 1)));
+    QVERIFY(m.reads.isEmpty());     // 三帧都被消费
+}
+
+// XL:212-217：`ERR!UNSUPPORTED` 特判 —— 上游读一条结果 → ack → **再读一条**（期望 CMD:START 收尾）。
+// 本层同样把流读干净（否则下一条命令的 "OK" 会被残留的 CMD:START 顶掉），但**返回 false + 中文文案**
+// —— 上游此处 `return False` 一致；上游**未复刻**的是"`ERR!*` 当成功用"那类调用方缺陷（铁律 18）。
+void TestMtkXmlSession::sendCommandDrainsUnsupportedHandshakeAndFails()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("ERR!UNSUPPORTED"))
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>ERR</result>"
+                                        "<message>unsupported</message></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:BOOT-TO</command></da>"), nullptr, false, &err));
+    QVERIFY2(err.contains(QStringLiteral("ERR!UNSUPPORTED")), qPrintable(err));
+    QVERIFY(m.reads.isEmpty());     // 前导帧 + CMD:START 都被吃掉：流干净
+}
+
+// DOWNLOAD-FILE 的 packet_length 是**十六进制**（XL:422 `int(get_field(...), 16)`）
+void TestMtkXmlSession::readCommandResultParsesDownloadFilePacketLengthHex()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral(
+        "<host><version>1.0</version><command>CMD:DOWNLOAD-FILE</command><arg>"
+        "<checksum>CHK_NO</checksum><info>2nd-DA</info>"
+        "<source_file>MEM://0x7fe83c09a04c:0x50c78</source_file>"
+        "<packet_length>0x1000</packet_length></arg></host>"));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
+    QCOMPARE(r.command, QStringLiteral("CMD:DOWNLOAD-FILE"));
+    QVERIFY(r.hasPacketLength);
+    QCOMPARE(r.packetLength, quint32(0x1000));
+    QCOMPARE(r.info, QStringLiteral("2nd-DA"));
+    QCOMPARE(r.file, QStringLiteral("MEM://0x7fe83c09a04c:0x50c78"));
+}
+
+// PROGRESS-REPORT：ack 保活直到 "OK!EOT"，再读下一条命令（XL:390-407）
+void TestMtkXmlSession::readCommandResultHandlesProgressReportKeepAlive()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("<host><command>CMD:PROGRESS-REPORT</command></host>"))
+            << textReads(QStringLiteral("OK!EOT"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
+    QCOMPARE(r.command, QStringLiteral("CMD:START"));
+    int acks = 0;
+    for (const QByteArray &f : std::as_const(m.writeFrames))
+        if (f == QByteArray("OK\0", 3)) ++acks;
+    QVERIFY2(acks >= 2, "PROGRESS-REPORT 期间必须持续 ack");
+}
+
+// 裸 "OK@0x<len>" 数据路径（无 <command>）：解析长度 → ack → 收数据（XL:373-388）
+void TestMtkXmlSession::readCommandResultHandlesBareOkAtDataPath()
+{
+    MockUsbChannel m;
+    const QByteArray payload(0x40, '\x99');
+    m.reads << textReads(QStringLiteral("OK@0x40"))     // 宣布长度
+            << textReads(QStringLiteral("OK"))          // ack 后的确认
+            << dataFrameReads(payload);                 // 数据帧（**两笔**：头、载荷）
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
+    QCOMPARE(r.bytes, payload);
+    QVERIFY(r.command.isEmpty());
+}
+QTEST_APPLESS_MAIN(TestMtkXmlSession)
+#include "test_mtk_xml_session.moc"
