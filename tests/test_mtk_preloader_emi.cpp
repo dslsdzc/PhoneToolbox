@@ -303,15 +303,15 @@ void TestMtkPreloaderEmi::realPreloaderExtracts()
 // XFlash：整块切片（真样本 912 B），与 LEGACY 的 800 B 在同一 preloader 上并存
 void TestMtkPreloaderEmi::xflashSliceIsWholeWindow()
 {
-    const QString path = mtktest::samplesDir() + QStringLiteral("/preloader.bin");
-    if (!QFile::exists(path)) {
+    // 用共享 helper 判"文件在不在"（目录在而样本缺失时应 SKIP 而非误 FAIL）—— 与真样本用例同一套
+    if (!mtktest::sampleFileAvailable(QStringLiteral("preloader.bin"))) {
 #if MTK_SAMPLES_REQUIRED
-        QFAIL("真样本缺失：preloader.bin（MTK_SAMPLES_REQUIRED=ON）");
+        QFAIL("preloader.bin 缺失，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
 #else
-        QSKIP("真样本缺失（reference/mtk-samples/，gitignored）");
+        QSKIP("preloader.bin 缺失（reference/ 为 gitignored）");
 #endif
     }
-    QFile f(path);
+    QFile f(mtktest::samplesDir() + QStringLiteral("/preloader.bin"));
     QVERIFY(f.open(QIODevice::ReadOnly));
     const QByteArray pre = f.readAll();
 
@@ -333,13 +333,21 @@ void TestMtkPreloaderEmi::xflashSliceIsWholeWindow()
 void TestMtkPreloaderEmi::xflashAndLegacySlicesFromSyntheticFixture()
 {
     const QByteArray pre = buildPreloader(64);            // 既有夹具（含标记 + MTK_BIN + 尾部 EMI）
+    QVERIFY(pre.indexOf(QByteArray(kMmmMagic, 8)) == -1); // 夹具自检：无 MMM ⇒ **窗口 = 整块输入**
+    const int bin = pre.indexOf(QByteArray("MTK_BIN"));
+    QCOMPARE(bin, 0x40);
+
     mtkbrom::EmiData legacy, xflash;
     QString err;
     QVERIFY2(mtkbrom::extractEmiLegacy(pre, legacy, &err), qPrintable(err));
     err.clear();
     QVERIFY2(mtkbrom::extractEmiXflash(pre, xflash, &err), qPrintable(err));
-    QVERIFY(xflash.bytes.size() > legacy.bytes.size());
-    QVERIFY(xflash.bytes.endsWith(legacy.bytes));
+    // 两条都要有，才钉得住"XFlash = **整块窗口**"而不是"LEGACY 的弱式扩展"：
+    // 长度断言钉住窗口长度；逐字节断言钉住窗口内 MTK_BIN+0xC 之后与 LEGACY 相同。
+    // （只看 `xflash.bytes.endsWith(legacy.bytes)` 是判别不出退化的 —— 把 XFlash 换成 LEGACY
+    //   切片时它照样为真；判别力证明见 task-3 报告 "Fix wave 1" 一节。）
+    QCOMPARE(xflash.bytes.size(), pre.size());            // 窗口 = 整块输入（未命中 MMM 分支）
+    QCOMPARE(xflash.bytes.mid(bin + 0xC), legacy.bytes);  // 且窗口的该偏移之后 == LEGACY 切片
 }
 
 // XFlash 的整块取法**不是无条件的**：上游 DC:137 把整块返回系于 `idx == 0`（标记正在窗口起点），
@@ -362,6 +370,8 @@ void TestMtkPreloaderEmi::xflashRejectsMarkerNotAtWindowOrigin()
     QVERIFY(!err.isEmpty());
     QVERIFY2(err.contains(QStringLiteral("extractEmiLegacy")), qPrintable(err));   // 诊断须给出替代调用
     QVERIFY(xflash.bytes.isEmpty());      // fail-closed：失败不留半份结果
+    // 实现细节，**不是契约**：失败后 ver 不可读（头文件只保证 bytes 恒空）；此断言只钉当前
+    // fail-closed 行为（重置后守卫先于赋值），不得被调用方当作可依赖的取值
     QVERIFY(xflash.ver == 0);
 }
 
