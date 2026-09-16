@@ -284,7 +284,15 @@ bool xflashShutdown(XFlashSession &x, quint32 bootmode, QString *error)
     }
     if (!x.xsend(p, error))
         return false;
-    return x.checkStatus(error);
+    // 尾部 status 非 0：**点名是哪条命令**（对齐本层其它两条的 "XFlash <op>：" 前缀），
+    // session 层给的码值与措辞原样接在后面（它自带 "XFlash：" 层名前缀，不做二次加工）。
+    // 命令后那一处 status 仍按 send_emi/boot_to 的写法直通 session 文案（失败在更早的位置）。
+    QString stErr;
+    if (!x.checkStatus(&stErr)) {
+        if (error) *error = QStringLiteral("XFlash SHUTDOWN：%1").arg(stErr);
+        return false;
+    }
+    return true;
 }
 
 } // namespace mtkbrom

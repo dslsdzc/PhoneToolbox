@@ -87,9 +87,11 @@ private slots:
     void devCtrlQuerySkipsTrailingStatusWhenReplyEmpty();
     void chipIdWarnsOnOverlongReply();
     void sendEmiSequence();
+    void sendEmiRejectsNonZeroStatus();
     void bootToAcceptsZeroOrSyncStatus();
     void bootToRejectsBadStatus();
     void shutdownParameterLayout();
+    void shutdownRejectsNonZeroTrailingStatus();
     void emptyPayloadsRejectedBeforeAnyWrite();
 };
 
@@ -415,6 +417,23 @@ void TestMtkXflashPayload::sendEmiSequence()
     QCOMPARE(m.reads.size(), 0);                                           // 恰读 2 帧 status
 }
 
+// EMI 的 INIT_EXT_RAM status 非 0 → 立即失败，且**其后一帧都不发**：长度帧与 EMI 本体都不得出现。
+// 毒药帧（预置的 send_param status）没被读走 = 恰读 1 帧 status，失败点确实在第一步。
+void TestMtkXflashPayload::sendEmiRejectsNonZeroStatus()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0xC0020053)      // INIT_EXT_RAM 的 status = anti-rollback（硬错误码）
+            << statusReads(0xDEAD);         // 毒药
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY(!mtkbrom::xflashSendEmi(x, QByteArray(912, '\xA5'), &err));
+    QVERIFY2(err.contains(QStringLiteral("0xC0020053")), qPrintable(err));   // session 层码值文案
+    QCOMPARE(m.writeFrames.size(), 2);      // 只到 INIT_EXT_RAM 的命令帧（头+值）为止
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));
+    QCOMPARE(m.writeFrames.at(1), le32(0x01000A));
+    QCOMPARE(m.reads.size(), 2);            // 毒药帧（头+载荷）没被读走
+}
+
 // boot_to：BOOT_TO 帧 → <QQ addr,len> → 数据 → sleep → status（0 或 SYNC 都算成功）
 // **整段读 3 帧 status**：BOOT_TO / send_data（XFL:282 自带一次）/ 终判（XFL:307）。
 // 只给 2 帧（原稿的写法）会让终判读到空队列 → 正确实现也被判红。
@@ -483,12 +502,28 @@ void TestMtkXflashPayload::shutdownParameterLayout()
         mtkbrom::XFlashSession x(&m, 0x6765);
         QString err;
         QVERIFY2(mtkbrom::xflashShutdown(x, /*bootmode=*/2, &err), qPrintable(err));
+        QCOMPARE(m.writeFrames.size(), 4);                  // 同上：先钉笔数再取下标（空队列取下标会 Q_ASSERT 崩）
         const QByteArray p = m.writeFrames.at(3);
         QCOMPARE(p.size(), 32);
         QCOMPARE(p.mid(0, 4), le32(1));                     // hasflags = 1（bootmode != NORMAL）
         QCOMPARE(p.mid(12, 4), le32(2));                    // bootmode = FASTBOOT
         QCOMPARE(m.reads.size(), 0);
     }
+}
+
+// SHUTDOWN 的**尾部** status 非 0 → 失败：命令帧与 32B 参数帧照发（失败点在第二处 status），
+// 文案既要带 session 层的码值、也要点名是哪条命令（其它两条函数都点名）
+void TestMtkXflashPayload::shutdownRejectsNonZeroTrailingStatus()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0xDEADBEEF);   // 命令后 0；参数后非 0
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QString err;
+    QVERIFY(!mtkbrom::xflashShutdown(x, /*bootmode=*/0, &err));
+    QVERIFY2(err.contains(QStringLiteral("0xDEADBEEF")), qPrintable(err));   // session 层码值原样保留
+    QVERIFY2(err.contains(QStringLiteral("SHUTDOWN")), qPrintable(err));     // 且点出是哪条命令
+    QCOMPARE(m.writeFrames.size(), 4);      // 命令帧与参数帧都已发出（失败不早于第二处 status）
+    QCOMPARE(m.reads.size(), 0);            // 两帧 status 都读满，不留给下一次读
 }
 
 // 空载荷**一个字节都不发**就拒绝（同 D1/F5"空 DA 早拒"的纪律）：漏过校验会把空帧发到设备上
