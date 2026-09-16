@@ -43,6 +43,9 @@
 16. **XML 不发 EMI**（`initialize_dram=YES` 交给 DA 自己）：代码事实是 XML 库**零 `emi` 引用**（`xml_cmd.py:100-128` 只有该参数、`XL:185` 传 True）——**D3 不实现 EMI 发送**。
 17. **XML 信封**（`XC:18-27`，**单行、无空格**）：`<?xml version="1.0" encoding="utf-8"?><da><version>1.0</version><command>CMD:<NAME></command><arg>…</arg></da>`；`str` 载荷 `length = len+1` 且**带 NUL 结尾**（`XL:146-153`）。
 18. **XML 应答**：`OK`；错误含 `ERR!`；带长度 `OK@0x<hexlen>\0`；**完成永远两步** `CMD:END` → `CMD:START`（`XL:195-209`）；写的数据流 = `CMD:DOWNLOAD-FILE` 回包里的 `packet_length`（`XL:419-424`），读 = `CMD:UPLOAD-FILE`（`XL:425-431`）。
+    ⚠️ **两处上游缺陷不复刻**（计划期预核对补记）：① 上游 `send_command` 对 `"ERR!" in result` 是 `return result` —— 返回的是**非空字符串**，
+    调用方 `if not res:` 会把它当**成功**（`xml_lib.py:218-219`）；我们**返回 false + 中文**（fail-closed）。② 上游 `DT_MESSAGE` 日志帧是**跳过并继续**的
+    （`xread()` 内循环，`xml_lib.py:107-132`）—— 我们的 `getResponse` 同样跳过（有上限 `kMaxLogFramesToSkip`）而不是报错。
 19. **代际判定 = 芯片表 `damode` + DA 文件 `v6`**（`v6` 强制 XML，`DC:216`）；**设备不上报 damode**；`plcap`/`blver` 那条"提升到 XFLASH"是**死代码**（`plcap` 全仓零调用），**不实现**。
 20. **不做**：`DOWNLOAD`/`UPLOAD`/`FORMAT_PARTITION`（上游零调用）、`FORMAT`/格式化、SLA/DAA（明确报错）、UFS 专有命令族、RPMB、seccfg、DA 提取/签名绕过。
 
@@ -2444,7 +2447,10 @@ git commit -m "feat(mtk): 计划层扩 XML scatter 方言（按 storage 过滤 E
       // 读一帧：头 12B（DT_MESSAGE 为 16B → length -= 4）→ 载荷由调用方读（XL:112-135）
       bool xreadHeader(quint32 &datatype, quint32 &length, QString *error = nullptr);
       bool readPayload(quint32 length, QByteArray &out, QString *error = nullptr);
-      // 读一条**文本**响应（DT_PROTOCOL_FLOW → rstrip NUL → utf8）（XL:221-232）
+      // 读一条**文本**响应（DT_PROTOCOL_FLOW → rstrip NUL → utf8）（XL:221-232）。
+      // 途中的 DA 日志帧（DT_MESSAGE）被**跳过**并交给 logSink（上游同姿态：日志帧不打断协议，只记 UART log）
+      using LogSink = std::function<void(const QString &)>;
+      void setLogSink(LogSink sink) { m_logSink = std::move(sink); }
       bool getResponse(QString &text, QString *error = nullptr);
       bool ack(QString *error = nullptr);                        // xsend("OK\0")（XL:158-159）
       bool ackValue(quint32 length, QString *error = nullptr);   // xsend("OK@0x<hex>\0")（XL:161-163）
@@ -2466,6 +2472,8 @@ git commit -m "feat(mtk): 计划层扩 XML scatter 方言（按 storage 过滤 E
       static QString envelope(const QString &command, const QStringList &argItems = {}, const QString &version = QStringLiteral("1.0"));
       static QString field(const QString &xml, const QString &name);
   private:
+      static constexpr int kMaxLogFramesToSkip = 64;   // 连续日志帧上限（防御设备刷屏；上游无上限，我们只加上界）
+      LogSink m_logSink;
       IBromUsb *m_usb;
   };
   }
@@ -2744,18 +2752,28 @@ bool XmlSession::readPayload(quint32 length, QByteArray &out, QString *error)
 
 bool XmlSession::getResponse(QString &text, QString *error)
 {
-    quint32 dt = 0, len = 0;
-    if (!xreadHeader(dt, len, error))
-        return false;
-    QByteArray payload;
-    if (!readPayload(len, payload, error))
-        return false;
-    if (dt != kDtProtocolFlow) {
-        if (error) *error = QStringLiteral("XML：期望文本响应，收到 datatype=%1（DA 日志帧）").arg(dt);
-        return false;
+    // ⚠️ 计划期更正（T8 预核对）：上游 `xread()` 是**循环**的 —— `DT_MESSAGE`（DA 日志帧）的载荷被读掉、
+    //    追加进 UART log，然后**继续读下一帧**（`xml_lib.py:107-132`）。只有 `DT_PROTOCOL_FLOW` 才返回给调用方。
+    //    原稿在收到日志帧时直接失败 → 设备只要在应答前插一条日志我们就硬失败，上游不会。
+    //    这里同样跳过（文本交给 logSink），但**限定跳过次数**避免设备刷屏导致死循环。
+    text.clear();
+    for (int skipped = 0; skipped < kMaxLogFramesToSkip; ++skipped) {
+        quint32 dt = 0, len = 0;
+        if (!xreadHeader(dt, len, error))
+            return false;
+        QByteArray payload;
+        if (!readPayload(len, payload, error))
+            return false;
+        if (dt == kDtProtocolFlow) {
+            text = QString::fromUtf8(payload).remove(QChar('\0'));   // rstrip NUL 的等价物（中段 NUL 也去掉更稳）
+            return true;
+        }
+        if (m_logSink)
+            m_logSink(QString::fromUtf8(payload).remove(QChar('\0')));   // DA 日志：进 UART log，不打断协议
     }
-    text = QString::fromUtf8(payload).remove(QChar('\0'));      // rstrip NUL 的等价物（中段 NUL 也去掉更稳）
-    return true;
+    if (error) *error = QStringLiteral("XML：连续收到 %1 帧 DA 日志仍未等到文本响应（上限 %2）")
+                            .arg(kMaxLogFramesToSkip).arg(kMaxLogFramesToSkip);
+    return false;
 }
 
 bool XmlSession::ack(QString *error) { return xsendText(QStringLiteral("OK"), error); }
@@ -3021,6 +3039,27 @@ void TestMtkXmlPayload::handshakeSequence()
     QVERIFY(sent.at(2).contains(QStringLiteral("CMD:NOTIFY-INIT-HW")));
     QVERIFY(sent.at(3).contains(QStringLiteral("CMD:SET-HOST-INFO")));
     QVERIFY2(log.join('\n').contains(QStringLiteral("CMD:START")), qPrintable(log.join('\n')));
+}
+
+// DA 日志帧（DT_MESSAGE，16B 头）夹在文本响应之前 → 必须**跳过**并把日志交给 sink，仍读到 "OK"
+void TestMtkXmlSession::logFrameIsSkippedNotFatal()
+{
+    MockUsbChannel m;
+    const QByteArray logMsg("da: init dram ok", 17);
+    // 日志帧：16B 头（含 priority）+ NUL 结尾的文本；随后才是协议响应 "OK"
+    m.reads << le32(0xFEEEEEEF) + le32(2) + le32(quint32(logMsg.size() + 1)) + le32(0)   // DT_MESSAGE + priority
+            << logMsg + QByteArray(1, '\0')
+            << textReads(QStringLiteral("OK"));
+    mtkbrom::XmlSession x(&m);
+    QStringList logs;
+    x.setLogSink([&logs](const QString &s) { logs << s; });
+    QString text;
+    QString err;
+    QVERIFY2(x.getResponse(text, &err), qPrintable(err));
+    QCOMPARE(text, QStringLiteral("OK"));
+    QCOMPARE(logs.size(), 1);
+    QVERIFY2(logs.at(0).contains(QStringLiteral("init dram")), qPrintable(logs.at(0)));
+    QCOMPARE(m.reads.size(), 0);                       // 两帧都读掉了（日志帧没有被留在队列里）
 }
 
 // 设备没发 CMD:START（发别的命令）→ 明确失败
