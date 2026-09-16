@@ -3067,7 +3067,7 @@ git commit -m "feat(mtk): XML 帧层（文本帧/OK/OK@0x<len>/OK!EOT 保活/get
   //    `create_cmd("NOTIFY-INIT-HW")` 时 content=None，`create_cmd` 的 `if content is not None` 直接跳过（`XC:18-25`/`:32-42`）。
   //    该函数的 **docstring 画的 `<arg></arg>` 与实现不符**（我预核对时只读了 docstring，判定错）。本层 `envelope(cmd)` 对空列表**不写** `<arg>` ✓ 与上游同形。
   bool xmlSetupHwInit(XmlSession &x, QString *error = nullptr);
-  // SET-HOST-INFO（XL:329-331 + XC:614）：<info>%Y%m%dT%H%M%S</info>
+  // SET-HOST-INFO（XL:329-331 + XC:600-612）：<info>%Y%m%dT%H%M%S</info>
   bool xmlSetHostInfo(XmlSession &x, QString *error = nullptr);
   }
   ```
