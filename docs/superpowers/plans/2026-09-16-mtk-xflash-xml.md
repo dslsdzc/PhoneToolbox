@@ -2501,6 +2501,9 @@ git commit -m "feat(mtk): 计划层扩 XML scatter 方言（按 storage 过滤 E
       // XL:369-449 的 C++ 形态：读响应 → 解析 <command> → 分派（含 PROGRESS-REPORT 的 OK!EOT 保活）
       bool readCommandResult(Result &out, QStringList *log = nullptr, QString *error = nullptr);
       // XL:188-219：xsend → 响应必须 "OK" → （非 noack）readCommandResult → CMD:END/CMD:START 收尾
+      // ⚠️ **调用方契约（T8 审查后补）**：`Result.command` 为空的帧可能是"无名帧"（sendCommand 已拦成失败），也可能是
+      //    **具名但未列举**的命令（如 `CMD:CUSTOM*`；上游 `get_command_result` 返回 `(cmd,"")` 交调用方判，`XL:449`）。
+      //    ⇒ **调用方必须自己查 `out.command`**（T9 的 `CMD:START` 校验、T10 的 `CMD:DOWNLOAD-FILE`/`UPLOAD-FILE`/`FILE-SYS-OPERATION` 判定都依赖这条）。
       bool sendCommand(const QString &xml, Result *out, bool noack = false, QString *error = nullptr);
 
       // 纯函数辅助（可单测）：信封与字段
