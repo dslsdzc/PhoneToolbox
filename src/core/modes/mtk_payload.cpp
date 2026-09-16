@@ -63,8 +63,7 @@ constexpr quint8 kNack = 0xA5;       // Rsp.NACK（:140）
 
 // XFlash 存储寻址口径（STORAGE_PARAM 的 storage/parttype，ST:16-49）：eMMC(0x1) 的 user 区(0x8)。
 // 两者都是设备侧枚举值（不是本仓自造）：0x1 = eMMC、0x8 = user —— 传给 xflashStorageParam。
-constexpr quint32 kXStorageEmmc = 0x1;
-constexpr quint32 kXEmmcPartUser = 0x8;
+// （kXStorageEmmc / kXEmmcPartUser 已在 mtk_payload.h 定义 —— T11 审查 Minor 收敛为单一来源）
 
 } // namespace
 
@@ -837,8 +836,14 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     if (!parseDaFile(req.daFile, daFile, error))     // **提前**到判定之前：v6 是判定的输入之一
         return false;
     MtkGeneration gen = MtkGeneration::Legacy;
-    if (!decideGeneration(chip, daFile.isV6, gen, error))
+    if (!decideGeneration(chip, daFile.isV6, gen, error)) {
+        // T11 审查 Minor：`decideGeneration` 拿不到 hw_code（它只收 chip），由**调用方**补上值 + 补救提示
+        // （恢复 D1 该错误的可诊断性；模式同 D1 的"DA 条目选择失败（%1）：%2"）。
+        const QString why = error ? *error : QString();
+        if (error) *error = QStringLiteral("代际判定失败（hw_code=0x%1）：%2")
+                                .arg(hwCode, 4, 16, QLatin1Char('0')).arg(why);
         return false;
+    }
     say(QStringLiteral("代际判定：%1（chip_dacode=0x%2；DA %3）")
             .arg(generationName(gen)).arg(chip->dacode, 4, 16, QLatin1Char('0'))
             .arg(daFile.isV6 ? QStringLiteral("v6") : QStringLiteral("非 v6")));
@@ -949,6 +954,12 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
             partAddr.insert(p.name, mtkgpt::offsetBytes(p, tbl.sectorSize));
         say(QStringLiteral("XFlash：GPT 读出 %1 个分区（扇区 %2 字节）")
                 .arg(tbl.partitions.size()).arg(tbl.sectorSize));
+        // T11 审查 Minor：空表要**在这里**点名（否则计划层走"derived"分支，最终报成
+        // "内部错误：分区 X 不在设备表地址映射里"，把真因（分区表为空）说成内部错位）。
+        if (refs.isEmpty()) {
+            if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
+            return false;
+        }
     } else {
         // T12 在此写入 READ-FLASH 读表 + partAddr 填充（T11 阶段明确拒绝，不假装支持）
         if (error) *error = QStringLiteral("XML 代：分区表读取在 Task 12 接线（当前明确拒绝）");

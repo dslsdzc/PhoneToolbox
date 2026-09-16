@@ -1261,7 +1261,7 @@ void TestMtkPayload::bromFlashOnSessionRejectsUnknownHwCode()
 // 设备 0x0766 → DA1 上传 → 0xC0 → 七步握手 → bring-up 四步（agent=brom，无 preloader → 不发 EMI）
 // → boot_to（剥签名）→ GET_PACKET_LENGTH / GET_CHIP_ID / GET_PARTITION_TBL_CATA → GPT 读（READ_DATA）
 // → 逐分区 xflashWriteData → SHUTDOWN 收尾。
-// 判别力：**写地址必须来自 GPT 的分区偏移**（0x4400 = LBA 34 × 512）、storage/parttype = eMMC/user(1/8)
+// 判别力：**写地址必须来自 GPT 的分区条目 first_lba**（0x5000 = LBA 40 × 512；若误用头里的 first_usable(34) 会得 0x4400）、storage/parttype = eMMC/user(1/8)
 // —— 地址算错就是往别的分区里写；把 XFlash 当 LEGACY 处理则会在第一条 BROM 级帧就错位。
 void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
 {
@@ -1276,8 +1276,9 @@ void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
     QVERIFY(!imgPath.isEmpty());
 
     // GPT 夹具：16 扇区 × 512 = 8192 = readTable 的探测长度（kProbeLen）→ 一笔读满足，不触发补读；
-    // 单分区 "boot" = LBA 34..35（1024 字节 > 2 字节镜像）。
-    const QByteArray gpt = mtkgpt::testBuildSyntheticGpt(512, 16);
+    // 单分区 "boot" = **LBA 40..41**（T11 审查 Minor 4：故意让 first_lba(40) ≠ first_usable_lba(34)，
+    // 这样"读错字段"的变异会给出 0x4400 而不是 0x5000 → 断言判红）。
+    const QByteArray gpt = mtkgpt::testBuildSyntheticGpt(512, 16, /*firstLba=*/40);
 
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
@@ -1311,13 +1312,22 @@ void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
     QVERIFY2(cap.joined().contains(QStringLiteral("SHUTDOWN 收尾完成")), qPrintable(cap.joined()));
 
     // 写参数必须点名 **GPT 给的分区偏移** + eMMC/user（56B = <IIQQ + 32B NandExtension，全 0）
-    const QByteArray expectedParam = le32(1) + le32(8) + le32(0x4400) + le32(0) + le32(0x200) + le32(0)
+    const QByteArray expectedParam = le32(1) + le32(8) + le32(0x5000) + le32(0) + le32(0x200) + le32(0)
                                      + QByteArray(32, '\0');
-    QVERIFY2(m->writes.contains(expectedParam), "WRITE_DATA 参数里的地址必须来自 GPT（LBA 34 × 512）");
+    QVERIFY2(m->writes.contains(expectedParam), "WRITE_DATA 参数里的地址必须来自 GPT 条目 first_lba（LBA 40 × 512 = 0x5000，"
+                                               "误用 first_usable(34) 会得 0x4400）");
     QVERIFY2(m->writes.contains(image + QByteArray(510, '\0')), "镜像必须补零到 512 的整数倍写出");
     QCOMPARE(cap.progress.size(), 1);
     QCOMPARE(cap.progress.at(0).first, quint64(2));
     QCOMPARE(cap.progress.at(0).second, quint64(2));
+    // 顺序：**先读分区表（READ_DATA）后写（WRITE_DATA）** —— T11 审查 Minor 4 的后半（原先只断言了各自出现）
+    {
+        const QByteArray &stream = m->writes;
+        const int iRead = stream.indexOf(le32(mtkbrom::X_CMD_READ_DATA));
+        const int iWrite = stream.indexOf(le32(mtkbrom::X_CMD_WRITE_DATA));
+        QVERIFY2(iRead >= 0 && iWrite >= 0, "读写命令都必须出现");
+        QVERIFY2(iWrite > iRead, "WRITE_DATA 必须在 READ_DATA 之后（先取表、后写）");
+    }
 }
 
 // 代际拒绝 ③：**IoT 芯片**（0x6226 = LEGACY + iot）→ 明确报错（上游 IoT 走另一套 region 映射）

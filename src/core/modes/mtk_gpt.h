@@ -67,6 +67,8 @@ quint64 offsetBytes(const Partition &p, quint32 sectorSize);
 quint64 sizeBytes(const Partition &p, quint32 sectorSize);
 
 // **用例辅助**（生产 .cpp 里，理由见计划 Step 3 注）：造一份含单分区 "boot"（LBA 34..35）的合法 GPT
-QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount);
+// `firstLba` 默认 34（= first_usable_lba，既有用例行为不变）。传入不等于 34 的值可让两者**可区分** ——
+// 用于钉住"写入地址取自分区条目的 first_lba，而不是头里的 first_usable_lba"（T11 审查 Minor 4）。
+QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount, quint64 firstLba = 34);
 
 } // namespace mtkgpt

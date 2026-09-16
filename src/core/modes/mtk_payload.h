@@ -155,7 +155,12 @@ bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel
 
 // GPT 读回调适配器：把 mtkgpt::ReadFn 的 (byteOffset, len) 映射成 XFlash READ_DATA。
 // storage/partType 默认 eMMC(0x1) / user 区(0x8)（ST:16-49）—— 调用方按设备实际存储改。
-mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage = 0x1, quint32 partType = 0x8);
+// XFlash 的存储/分区类型（`storage.py:17` eMMC=0x1、`:39` PART_USER=8）——**单一来源**，
+// 供本函数默认值与 bromFlashOnSession 的写路径共用（T11 审查 Minor：原先两处各写一份 magic）。
+constexpr quint32 kXStorageEmmc = 0x1;
+constexpr quint32 kXEmmcPartUser = 0x8;
+mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage = kXStorageEmmc,
+                                  quint32 partType = kXEmmcPartUser);
 
 // ---- 刷写集成（F1-3）----
 

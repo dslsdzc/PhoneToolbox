@@ -310,7 +310,7 @@ bool readTable(const ReadFn &read, quint64 diskSectors, Table &out, QStringList 
     return true;
 }
 
-QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount)
+QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount, quint64 firstLba)
 {
     // 单分区 "boot"（LBA 34..35）：头部合法 + 双 CRC 正确（供正/负向用例）
     const quint32 entryCount = 4;
@@ -331,8 +331,8 @@ QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount)
     const int entriesPos = int(2 * sectorSize);
     QByteArray entries(int(entryCount * entrySize), '\0');
     entries[0] = char(0xEB); entries[1] = char(0xA0); entries[2] = char(0xD0);   // 非 0 type GUID
-    wrU64(entries, 32, 34);
-    wrU64(entries, 40, 35);
+    wrU64(entries, 32, firstLba);
+    wrU64(entries, 40, firstLba + 1);
     const QString nm = QStringLiteral("boot");
     for (int i = 0; i < nm.size(); ++i) {
         entries[56 + i * 2] = char(nm.at(i).unicode() & 0xFF);
