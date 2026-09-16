@@ -312,7 +312,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_emi.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_flash_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_fetch.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_plan_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_plan_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_gpt.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -548,6 +549,12 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/mtk_plan_dialog.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/plan_preview_widget.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_gpt")
+                    # Phase D2 Task 1：GPT 解析纯函数（只依赖 Qt Core；src/core/modes 已 GLOB
+                    # 编入主程序，不属任何静态库）。真样本宏（MTK_SAMPLES_DIR /
+                    # MTK_SAMPLES_REQUIRED）已在下方按名命中本 stem，无需重复。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -562,7 +569,7 @@ if(ENABLE_IMAGE_TESTS)
                 # MTK_SAMPLES_REQUIRED=ON 时缺失即 FAIL（QSKIP 不改退出码，ctest 绿灯会骗人）。
                 set(MTK_SAMPLES_DIR_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/reference/mtk-samples")
                 if(_test_stem STREQUAL "test_mtk_da_file" OR _test_stem STREQUAL "test_mtk_preloader_emi"
-                   OR _test_stem STREQUAL "test_mtk_flash_plan")
+                   OR _test_stem STREQUAL "test_mtk_flash_plan" OR _test_stem STREQUAL "test_mtk_gpt")
                     target_compile_definitions(${_test_target} PRIVATE
                         MTK_SAMPLES_DIR="${MTK_SAMPLES_DIR_DEFAULT}")
                     if(MTK_SAMPLES_REQUIRED)
