@@ -92,6 +92,8 @@ private slots:
     void dataPathBoundsSkippedLogFrames();
     void dataPathRejectsUnknownDatatype();
     void readCommandResultRejectsFrameWithoutCommandOrOkAt();
+    void readCommandResultRejectsMalformedOkAtLength();
+    void sendCommandFailsOnEmptyResult();
     void sendCommandFailsOnUnparseableFollowUp();
     void readCommandResultKeepsUnknownNamedCommandForCaller();
 };
@@ -350,6 +352,33 @@ void TestMtkXmlSession::sendCommandFailsOnUnparseableFollowUp()
     QString err;
     QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
     QVERIFY2(err.contains(QStringLiteral("bogus-garbage")), qPrintable(err));
+}
+
+// 畸形的 `OK@` 长度（`OK@0xZZ`）：上游 `int(tmp[2:],16)` 会当场 ValueError 崩掉；本层 fail-closed + 文案
+void TestMtkXmlSession::readCommandResultRejectsMalformedOkAtLength()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK@0xZZ"));
+    mtkbrom::XmlSession s(&m);
+    mtkbrom::XmlSession::Result r;
+    QString err;
+    QVERIFY(!s.readCommandResult(r, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("0xZZ")), qPrintable(err));
+}
+
+// 审查 #3 精确形态（XL:210-211）：上游 get_command_result 返回 `("", "")` → send_command 返回假值 = 失败。
+// 我们的 Result 无真假值 → sendCommand 必须显式拦"三空"。本用例用 `OK@0x0`（0 长度数据帧）钉它：
+// 数据路径会**成功地**返回一个全空 Result（宣布长度 0、循环不跑、长度校验 0==0），没有这道闸就会报成功。
+void TestMtkXmlSession::sendCommandFailsOnEmptyResult()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"))            // 命令被接受
+            << textReads(QStringLiteral("OK@0x0"))        // 宣布 0 字节的数据帧 → 全空 Result
+            << textReads(QStringLiteral("OK"));           // 数据路径的确认
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
+    QVERIFY2(err.contains(QStringLiteral("空结果")), qPrintable(err));
 }
 
 // 窄化的边界：**具名但未列举**的命令（如扩展命令 CMD:CUSTOM*）不算"不可解析" ——
