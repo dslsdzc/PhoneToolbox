@@ -2186,6 +2186,7 @@ git commit -m "feat(mtk): XFlash 载荷③（WRITE/READ_DATA：48B 参数 + 分�
 
 **Files:**
 - Modify: `src/core/mtk_flash_plan.{h,cpp}`
+- Modify: `src/ui/flash_panel.cpp`（**接线**：scatter 过滤器加 `*.xml` + 调用换成 `parseScatterAnyDialect` + log 逐条 emit）
 - Modify: `tests/test_mtk_flash_plan.cpp`
 - Modify: `CMakeLists.txt`（`test_mtk_flash_plan` 追加 `mtk_gpt.cpp`）
 
@@ -2204,8 +2205,19 @@ git commit -m "feat(mtk): XFlash 载荷③（WRITE/READ_DATA：48B 参数 + 分�
                        QString *error = nullptr);
   // GPT 表 → 参照表（名字 + 字节大小；写入判据仍以**设备实读**为准，这里只用于预览）
   QList<PartitionRef> toPartitionRefs(const QList<mtkgpt::Partition> &parts, quint32 sectorSize);
+
+  // **方言识别 + 双副本调和**（可测；UI 只调这一个）：文本方言 → D1 的 parseScatter；XML 方言 → 两份副本都解析，
+  // 名字→大小**完全一致**才采信，不一致 → 用 EMMC 那份 + 往 log 写告警（**不猜**：预览是咨询性的，
+  // 写入判据永远以设备实读的分区表为准）
+  bool parseScatterAnyDialect(const QString &text, QList<PartitionRef> &out,
+                              QStringList *log = nullptr, QString *error = nullptr);
   }
   ```
+
+  > ⚠️ **计划期更正（T7 预核对）**：原稿只造了 `parseScatterXml` 却**没有任何生产调用者**（全计划里只有它自己的用例）——
+  > 那是"实现+测试齐全但生产里到不了"的死 API。D1 的文本方言是被 `src/ui/flash_panel.cpp:729` 真正调用的，
+  > 所以本任务必须**接线**：`flash_panel.cpp` 的 scatter 选择处（① 文件过滤器加 `*.xml`；② 把 `mtkplan::parseScatter(...)`
+  > 换成 `mtkplan::parseScatterAnyDialect(...)` 并把 log 逐条 emit）—— **不新增入口**，仍是原来那一个按钮/对话框。
 
 - [ ] **Step 1: 写失败用例**（追加到 `tests/test_mtk_flash_plan.cpp`）
 
@@ -2243,6 +2255,41 @@ void TestMtkFlashPlan::parsesXmlScatterFilteringStorage()
     QVERIFY(sizeOf(ufs, QStringLiteral("preloader")) > 0);      // UFS 副本也在（同一名字、不同 storage）
 }
 
+// 方言识别 + 双副本调和：XML 两份一致 → 采信且**不翻倍**；不一致 → 采 EMMC + 告警（不猜）；文本方言走原路
+void TestMtkFlashPlan::scatterAnyDialectReconcilesXmlCopies()
+{
+    const QString same = QStringLiteral(
+        "<storage_type name=\"EMMC\"><partition_index name=\"SYS0\">"
+        "<partition_name>preloader</partition_name><partition_size>0x100000</partition_size>"
+        "<storage>HW_STORAGE_EMMC</storage></partition_index></storage_type>"
+        "<storage_type name=\"UFS\"><partition_index name=\"SYS0\">"
+        "<partition_name>preloader</partition_name><partition_size>0x100000</partition_size>"
+        "<storage>HW_STORAGE_UFS</storage></partition_index></storage_type>");
+    QList<mtkplan::PartitionRef> refs;
+    QStringList log;
+    QString err;
+    QVERIFY2(mtkplan::parseScatterAnyDialect(same, refs, &log, &err), qPrintable(err));
+    QCOMPARE(refs.size(), 1);                                  // 两份副本 → **不翻倍**
+    QCOMPARE(refs.at(0).name, QStringLiteral("preloader"));
+    QCOMPARE(refs.at(0).sizeBytes, quint64(0x100000));
+
+    // 不一致：UFS 副本大小不同 → 采信 EMMC + 日志说明分歧
+    QString diff = same;
+    diff.replace(QStringLiteral("0x100000</partition_size><storage>HW_STORAGE_UFS"),
+                 QStringLiteral("0x200000</partition_size><storage>HW_STORAGE_UFS"));
+    QList<mtkplan::PartitionRef> refs2;
+    QStringList log2;
+    QVERIFY2(mtkplan::parseScatterAnyDialect(diff, refs2, &log2, &err), qPrintable(err));
+    QCOMPARE(refs2.at(0).sizeBytes, quint64(0x100000));        // EMMC 那份
+    QVERIFY2(log2.join(QLatin1Char('\n')).contains(QStringLiteral("UFS")), qPrintable(log2.join(QLatin1Char('\n'))));
+
+    // 文本方言仍走原路（同一入口两种方言）
+    QList<mtkplan::PartitionRef> refs3;
+    QVERIFY2(mtkplan::parseScatterAnyDialect(QStringLiteral("preloader 0x100000\n"), refs3, nullptr, &err),
+             qPrintable(err));
+    QCOMPARE(refs3.size(), 1);
+}
+
 // XML 方言：坏输入 / 空结果 → 明确失败
 void TestMtkFlashPlan::xmlScatterRejectsGarbage()
 {
@@ -2273,6 +2320,37 @@ void TestMtkFlashPlan::gptToPartitionRefs()
 - [ ] **Step 3: 实现**（`mtk_flash_plan.{h,cpp}` 追加；`#include "core/modes/mtk_gpt.h"`）
 
 ```cpp
+bool parseScatterAnyDialect(const QString &text, QList<PartitionRef> &out, QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+    if (!text.contains(QStringLiteral("<partition_index")))
+        return parseScatter(text, out, error);            // 文本方言：D1 既有实现原样
+    QList<PartitionRef> emmc, ufs;
+    QString emmcErr, ufsErr;
+    const bool okE = parseScatterXml(text, ScatterStorage::Emmc, emmc, &emmcErr);
+    const bool okU = parseScatterXml(text, ScatterStorage::Ufs, ufs, &ufsErr);
+    if (!okE && !okU) {
+        if (error) *error = QStringLiteral("XML scatter 两份副本都解析失败：EMMC（%1）；UFS（%2）").arg(emmcErr, ufsErr);
+        return false;
+    }
+    if (!okE || !okU) {                                   // 只有一份可用 → 用它，并说明另一份为何不可用
+        say(QStringLiteral("XML scatter：只有 %1 副本可用（另一份：%2）")
+                .arg(okE ? QStringLiteral("EMMC") : QStringLiteral("UFS")).arg(okE ? ufsErr : emmcErr));
+        out = okE ? emmc : ufs;
+        return true;
+    }
+    if (emmc.size() == ufs.size()) {                      // 两份都成功 → 名字→大小完全一致才采信
+        bool same = true;
+        for (int i = 0; i < emmc.size() && same; ++i)
+            same = (emmc.at(i).name == ufs.at(i).name && emmc.at(i).sizeBytes == ufs.at(i).sizeBytes);
+        if (same) { out = emmc; return true; }
+    }
+    say(QStringLiteral("XML scatter：EMMC 与 UFS 两份副本不一致（%1 vs %2 条）—— 预览采用 EMMC 副本，"
+                       "**写入判据仍以设备实读的分区表为准**").arg(emmc.size()).arg(ufs.size()));
+    out = emmc;
+    return true;
+}
+
 bool parseScatterXml(const QString &text, ScatterStorage want, QList<PartitionRef> &out, QString *error)
 {
     out.clear();
