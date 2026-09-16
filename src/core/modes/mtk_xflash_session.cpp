@@ -22,6 +22,15 @@ quint32 leToU32(const QByteArray &b, int off)
          | (quint32(quint8(b.at(off + 2))) << 16) | (quint32(quint8(b.at(off + 3))) << 24);
 }
 
+// 错误码统一以**大写**十六进制出现（`0xC0040050` 等按字面可诊断 —— 用例按字面断言）
+QString hexCode(quint32 v)
+{
+    QString hex = QString::number(v, 16).toUpper();
+    while (hex.size() < 8)
+        hex.prepend(QLatin1Char('0'));
+    return QStringLiteral("0x") + hex;
+}
+
 // 通道未设置（构造时传 nullptr）—— 唯一文案来源；所有接触 m_usb 的入口都先过这里
 bool noUsb(QString *error)
 {
@@ -32,11 +41,11 @@ bool noUsb(QString *error)
 } // namespace
 
 // 铁律 3：帧头 pack("<III", magic, datatype, length)，头一次写、载荷第二次写（XFL:112-115）
-bool XFlashSession::xsendHeader(quint32 payloadLength, QString *error)
+bool XFlashSession::xsendHeader(quint32 length, QString *error)
 {
     if (!m_usb)
         return noUsb(error);
-    return m_usb->write(le32(kXMagic) + le32(kXDataProtocolFlow) + le32(payloadLength), error);
+    return m_usb->write(le32(kXMagic) + le32(kXDataProtocolFlow) + le32(length), error);
 }
 
 bool XFlashSession::xsend(const QByteArray &payload, QString *error)
@@ -101,6 +110,10 @@ bool XFlashSession::readStatus(quint32 &code, QString *error)
     return true;
 }
 
+// 0 = 成功；其余一律失败。0xC0040050（EMI 版本不匹配）有**独立**文案分支（三条分支各自可判别）：
+// 上游 XFL:180-188 对该码只跳过错误打印与 sys.exit，**仍 `return False`**；显式 preloader 路径
+// XFL:1147-1149 的 `if not self.send_emi(...): return False` 据此中止整链（自动搜索路径
+// XFL:1131-1136 才是换候选继续）。本实现与之同判，仅补一条中文诊断（上游此处不打印）。
 bool XFlashSession::checkStatus(QString *error)
 {
     quint32 code = 0;
@@ -108,11 +121,11 @@ bool XFlashSession::checkStatus(QString *error)
         return false;
     if (code == 0)
         return true;
-    if (code == kXEmitVersionMismatch) {         // 铁律 5：容忍（XFL:180）：EMI 版本不匹配
-        return true;
+    if (error) {
+        *error = (code == kXEmitVersionMismatch)
+                     ? QStringLiteral("XFlash：EMI 版本不匹配（%1）—— 按上游判失败").arg(hexCode(code))
+                     : QStringLiteral("XFlash：设备返回错误码 %1").arg(hexCode(code));
     }
-    if (error)
-        *error = QStringLiteral("XFlash：设备返回错误码 0x%1").arg(code, 8, 16, QLatin1Char('0'));
     return false;
 }
 
@@ -128,7 +141,9 @@ bool XFlashSession::ack(QString *error)
     return xsendInt(0, error);                   // 其余芯片：两次写（XFL:90-94）
 }
 
-// 铁律 5：每个参数一个独立帧，载荷按 0x200 分块（XFL:167-176），全部写完读一次 status（XFL:177-188）
+// 铁律 5：每个参数一个独立帧，载荷按 0x200 分块（XFL:163-177 —— 帧头 `usbwrite(pkt)` 一次，
+// 随后 `while length > 0: dsize = min(length, 0x200)` 循环写，**从不整段写**），
+// 全部写完读一次 status（XFL:177-188）
 bool XFlashSession::sendParam(const QList<QByteArray> &params, QString *error)
 {
     for (const QByteArray &p : params) {
@@ -143,7 +158,8 @@ bool XFlashSession::sendParam(const QList<QByteArray> &params, QString *error)
     return checkStatus(error);                   // 全部写完读一次 status
 }
 
-// XFL:272-286：帧头一次写 → 载荷按 EP_OUT.wMaxPacketSize 分块 → 读一次 status
+// XFL:273-281：帧头一次写 → 载荷按 EP_OUT.wMaxPacketSize 循环分块（同样**不整段写**）→ 读一次 status
+// （status 处理见 :282-285）
 bool XFlashSession::sendData(const QByteArray &data, QString *error)
 {
     if (!xsendHeader(quint32(data.size()), error))

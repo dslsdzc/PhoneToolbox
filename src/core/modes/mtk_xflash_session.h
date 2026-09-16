@@ -13,9 +13,12 @@
 //   铁律 4 —— ack()：dacode == 0x6781 **一次写 16 字节**（头 12B + 载荷 4B 合并），
 //              其余芯片**两次写**；**不存在"4 字节短帧"**（XFL:85-100）。
 //   铁律 5 —— send_param：载荷按 **0x200** 分块、每个参数一个独立帧、全部写完**读一次 status**；
-//              status == 0xC0040050（EMI 版本不匹配）**容忍、不算错误**（XFL:163-188，判定见 :180）；
+//              **帧头一次写 + 载荷分块循环写**（不整段写，XFL:163-177 / :273-281）；
+//              status == 0xC0040050（EMI 版本不匹配）→ **判失败**（上游 XFL:180-188 只是跳过错误打印
+//              与 sys.exit，仍 `return False`；显式 preloader 路径 XFL:1147-1149 据此中止整链）；
 //              0xC0020053（anti-rollback）/ 0xC0020004（DL forbidden）→ 明确报错
 //              （上游这两条直接 sys.exit(1)；本实现改为返回 false + 中文文案）。
+//              （2026-09-16 控制方裁决：本条原写作"0xC0040050 容忍、不算错误"，已按上游更正为失败。）
 //   铁律 6 —— status 判据（XFL:138-158）：读 12B 头（magic 必须 0xFEEEEEEF）→ 读 length 字节 →
 //              length==2 取 <H、**为 0 才成功**；length==4 取 <I、**0 或 0xFEEEEEEF 都算成功**；
 //              其它长度取载荷首个 u32（XFL:157）。
@@ -47,7 +50,7 @@ constexpr quint32 kXMagic = 0xFEEEEEEF;         // XFP:2
 constexpr quint32 kXSync = 0x434E5953;          // "SYNC"（XFP:3 SYNC_SIGNAL；小端帧里即 ASCII SYNC）
 constexpr quint32 kXDataProtocolFlow = 1;       // DT_PROTOCOL_FLOW（XFP:89）
 constexpr quint32 kXDataMessage = 2;            // DT_MESSAGE（XFP:90）
-constexpr quint32 kXEmitVersionMismatch = 0xC0040050;   // EMI 版本不匹配：**容忍**（XFL:180）
+constexpr quint32 kXEmitVersionMismatch = 0xC0040050;   // EMI 版本不匹配：**判失败**（XFL:180-188）
 
 // XFlash 12B 帧层（跑在 D1 的 IBromUsb 上；不持有通道所有权）
 class XFlashSession {
@@ -70,10 +73,9 @@ public:
     bool sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteArray *reply, QString *error = nullptr);
 
 private:
-    // 只写 12B 帧头（长度 = 载荷字节数）。sendParam/sendData 需要"头一次写 + 载荷自行分块"，
-    // 而 xsend 是"头 + 整段载荷"——两者共用此函数（铁律 5 的 0x200 分块与 XFL:273-281 的
-    // wMaxPacketSize 分块都不是整段写）。
-    bool xsendHeader(quint32 payloadLength, QString *error);
+    // 只写 12B 帧头（长度 = 载荷字节数）。sendParam/sendData 需要"头一次写 + 载荷自行分块"
+    // （XFL:163-177 / :273-281），而 xsend 是"头 + 整段载荷"——两者共用此函数。
+    bool xsendHeader(quint32 length, QString *error = nullptr);
 
     IBromUsb *m_usb;
     quint16 m_dacode;

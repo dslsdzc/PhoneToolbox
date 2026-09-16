@@ -60,7 +60,7 @@ private slots:
     void ackUsesSixteenByteWriteFor6781Only();
     void statusParsesByLength();
     void statusTreatsMagicAsSuccess();
-    void sendParamChunksAt0x200AndToleratesEmiVersionMismatch();
+    void sendParamChunksAt0x200AndFailsOnEmiVersionMismatch();
     void sendParamRejectsHardErrorCodes();
     void sendDataChunksByMaxPacketSize();
 };
@@ -121,6 +121,16 @@ void TestMtkXflashSession::statusParsesByLength()
         QVERIFY(s.readStatus(code, nullptr));
         QCOMPARE(code, quint32(0x0050));                    // 非 0 = 错误码（由 checkStatus 查表）
     }
+    {
+        // 4 字节载荷：readStatus 只回**原始码值**（不归一化、不判定）—— 判定是 checkStatus 的职责。
+        // 0 / 0xC0040050 / 其它码 三条分支必须各自可判别，此条钉住"原始码值不被提前吞掉"。
+        MockUsbChannel m;
+        m.reads << statusReads(mtkbrom::kXEmitVersionMismatch);
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        quint32 code = 0;
+        QVERIFY(s.readStatus(code, nullptr));
+        QCOMPARE(code, mtkbrom::kXEmitVersionMismatch);
+    }
 }
 
 // length==4 且值 == magic 视为成功（铁律 6）
@@ -135,8 +145,10 @@ void TestMtkXflashSession::statusTreatsMagicAsSuccess()
     QCOMPARE(code, quint32(0));
 }
 
-// send_param：0x200 分块 + 最后读一次 status；0xC0040050 容忍（铁律 5；xflash_lib.py:163-188）
-void TestMtkXflashSession::sendParamChunksAt0x200AndToleratesEmiVersionMismatch()
+// send_param：0x200 分块 + 最后读一次 status；0xC0040050 **判失败**
+// （上游 XFL:180-188 只跳过错误打印与 sys.exit，仍 `return False`；显式 preloader 路径
+//   XFL:1147-1149 据此中止整链 —— 控制方裁决 2026-09-16 更正原"容忍"读法）
+void TestMtkXflashSession::sendParamChunksAt0x200AndFailsOnEmiVersionMismatch()
 {
     {
         MockUsbChannel m;
@@ -144,8 +156,9 @@ void TestMtkXflashSession::sendParamChunksAt0x200AndToleratesEmiVersionMismatch(
         mtkbrom::XFlashSession s(&m, 0x6765);
         const QByteArray big(0x300, '\x5A');                // 0x200 + 0x100 两块
         QString err;
-        QVERIFY2(s.sendParam({big}, &err), qPrintable(err));   // 版本不匹配**不算错误**
-        QCOMPARE(m.writeFrames.size(), 3);                  // 帧头 + 块1 + 块2
+        QVERIFY2(!s.sendParam({big}, &err), "0xC0040050 必须判为失败");
+        QVERIFY(err.contains(QStringLiteral("0xC0040050")));   // 文案可诊断（上游此处不打印）
+        QCOMPARE(m.writeFrames.size(), 3);                  // 帧头 + 块1 + 块2（先写完帧再读 status）
         QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(0x300));
         QCOMPARE(m.writeFrames.at(1).size(), 0x200);
         QCOMPARE(m.writeFrames.at(2).size(), 0x100);
@@ -160,15 +173,36 @@ void TestMtkXflashSession::sendParamChunksAt0x200AndToleratesEmiVersionMismatch(
     }
 }
 
-// send_param：硬错误码（0xC0020053 anti-rollback / 0xC0020004 DL forbidden）→ 明确失败
+// send_param：硬错误码（0xC0020053 anti-rollback / 0xC0020004 DL forbidden）→ 明确失败 +
+// **各自带自己的文案**（与 0xC0040050 那条分支可判别；上游这两条是 sys.exit(1)，我们不改上层语义）
 void TestMtkXflashSession::sendParamRejectsHardErrorCodes()
 {
-    MockUsbChannel m;
-    m.reads << statusReads(0xC0020053);
-    mtkbrom::XFlashSession s(&m, 0x6765);
-    QString err;
-    QVERIFY(!s.sendParam({le32(0)}, &err));
-    QVERIFY(!err.isEmpty());
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0xC0020053);
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        QString err;
+        QVERIFY(!s.sendParam({le32(0)}, &err));
+        QVERIFY(err.contains(QStringLiteral("0xC0020053")));
+    }
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0xC0020004);
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        QString err;
+        QVERIFY(!s.sendParam({le32(0)}, &err));
+        QVERIFY(err.contains(QStringLiteral("0xC0020004")));
+    }
+    {
+        // 判别力：0xC0040050 有**独立**分支，不能被通用文案吞掉（反之亦然）
+        MockUsbChannel m;
+        m.reads << statusReads(mtkbrom::kXEmitVersionMismatch);
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        QString err;
+        QVERIFY(!s.sendParam({le32(0)}, &err));
+        QVERIFY(err.contains(QStringLiteral("0xC0040050")));
+        QVERIFY(!err.contains(QStringLiteral("0xC0020053")));
+    }
 }
 
 // send_data：帧头 + 按 maxPacketSize 分块 + 读一次 status（xflash_lib.py:272-286）
