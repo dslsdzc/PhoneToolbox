@@ -1240,8 +1240,14 @@ void TestMtkPreloaderEmi::xflashAndLegacySlicesFromSyntheticFixture()
     QVERIFY2(mtkbrom::extractEmiLegacy(pre, legacy, &err), qPrintable(err));
     err.clear();
     QVERIFY2(mtkbrom::extractEmiXflash(pre, xflash, &err), qPrintable(err));
+    // ⚠️ 实施期更正（T3 审查 M3）：原稿只断言 endsWith —— 那在"xflash = window、legacy = window.mid(bin+0xC)"下
+    //    恒真（等于只断言"两者不同"）。改成**判别性**判据：XFlash 切片从 MTK_BIN+0xC 起必须与 LEGACY 逐字节相同，
+    //    且 XFlash 长度必须等于窗口长度（即"整块"）。
+    const int bin = pre.indexOf(QByteArray("MTK_BIN"));
+    QVERIFY(bin != -1);
     QVERIFY(xflash.bytes.size() > legacy.bytes.size());
-    QVERIFY(xflash.bytes.endsWith(legacy.bytes));
+    QCOMPARE(xflash.bytes.mid(bin + 0xC), legacy.bytes);
+    QCOMPARE(xflash.bytes.size(), pre.size());        // 整块 = 整个窗口（合成夹具无 MMM → 窗口 = 整个输入）
 }
 ```
 
@@ -1303,7 +1309,9 @@ bool extractEmiXflash(const QByteArray &preloader, EmiData &out, QString *error)
 
 ```bash
 cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_mtk_preloader_emi
-./build/image_engine_tests_test_mtk_preloader_emi     # 预期 12 passed / 0 skipped（D1 的 10 条 + 新 2 条）
+./build/image_engine_tests_test_mtk_preloader_emi     # 预期 13 passed / 0 skipped
+# ⚠️ 实施期更正（T3 审查）：D1 的测试类只有 **8** 个 slot（不是 10）→ 8 + 新 3 = 11 个用例，加 init/cleanup = 13。
+#    原稿"12 passed"是错的，**不得当验收门**；判据是"0 skipped 且失败数为 0"。
 ```
 
 - [ ] **Step 5: 832 样本两代对拍（一次性验证脚本，不进仓库）**
@@ -1340,11 +1348,14 @@ git commit -m "feat(mtk): EMI 提取扩 XFlash 整块切片（与 LEGACY 800B �
       X_CTRL_GET_CHIP_ID         = 0x04000D,   // 5×u16 = (hw_code, hw_sub_code, hw_version, sw_version, chip_evolution)
       X_CTRL_GET_PACKET_LENGTH   = 0x040007,   // <II = (write_packet_length, read_packet_length)
       X_CTRL_GET_CONNECTION_AGENT= 0x04000A,   // 字符串（b"brom" / b"preloader"）
-      X_CTRL_GET_PARTITION_CATA  = 0x040009,   // <I：0x64=GPT / 0x65=PMT
+      X_CTRL_GET_PARTITION_CATA  = 0x040009,   // <I：0x64=GPT / 0x65=PMT（上游名 GET_PARTITION_TBL_CATA，XFP:55）
       X_CTRL_GET_RAM_INFO        = 0x04000C,   // 24B(32 位) / 48B(64 位)：3 元组 ×2 = (sram, dram)
-      X_CTRL_SET_CHECKSUM_LEVEL  = 0x020003,   // <I（PLAIN=0/CRC32=1/MD5=2）；mtkclient 恒设 0（XFL:1106）
-      X_CTRL_SET_RESET_KEY       = 0x020005,   // <I（上游传 0x68，XFL:1104）
-      X_CTRL_GET_EXPIRE_DATE     = 0x040002,   // 见 XFL:1103 调用点（实现时对照该函数本体核对参数与回包）
+      X_CTRL_SET_CHECKSUM_LEVEL  = 0x020003,   // <I（PLAIN=0/CRC32=1/MD5=2）；mtkclient 恒设 0（XFL:1106 / XFP:62）
+      // ⚠️ 计划期更正（控制方对照 `xflash_param.py:57-66` 整表核过，2026-09-16）：
+      //   · SET_RESET_KEY 是 **0x020004**，原稿写的 0x020005 其实是 **SET_HOST_INFO**（会发错命令！）
+      //   · GET_EXPIRE_DATE 是 **0x040011**，原稿写的 0x040002 其实是 **GET_NAND_INFO**（同上）
+      X_CTRL_SET_RESET_KEY       = 0x020004,   // <I（上游传 0x68，XFL:1104 / XFP:63）
+      X_CTRL_GET_EXPIRE_DATE     = 0x040011,   // 无参数；回包见 get_expire_date() 本体（XFL:571-579 / XFP:74）
   };
   struct XPacketLength { quint32 writeLength = 0; quint32 readLength = 0; };
   struct XChipId { quint16 hwCode = 0, hwSubCode = 0, hwVersion = 0, swVersion = 0, chipEvolution = 0; };
@@ -1702,7 +1713,10 @@ bool xflashGetRamInfo(XFlashSession &x, QByteArray *raw, QString *error)
 } // namespace mtkbrom
 ```
 
-> **实现者注意（须报告结论）**：`X_CTRL_GET_EXPIRE_DATE` 的**子命令号与回包形态**我只按调用点（`XFL:1103`）推定，**未逐行核 `get_expire_date()` 本体**。请打开上游该函数核一遍（子命令号、是否有参数、回包是文本还是结构），**以它为准**并把你核到的行号写进代码注释与报告；若与本计划不符（例如它是 `0x04000F` 或需要参数），**按上游改**并记录偏差。
+> ✅ **已核（计划期，控制方亲自读上游）**：`get_expire_date()` 本体在 `xflash_lib.py:571-579` —— **无参数**、`send_devctrl(GET_EXPIRE_DATE)` 后读回包（`res != b""` 且 `status == 0` 才返回 res），子命令号 **0x040011**（`xflash_param.py:74` 的 `GET_EXPIRE_DATE`）。
+> 其余同类细节一并核过：`set_reset_key` = `send_devctrl(SET_RESET_KEY, pack("<I", 0x68))`（`XFL:206-209`）、`set_checksum_level` = `pack("<I", 0)`（`XFL:241-244`）、
+> `get_connection_agent` = 无参数 + 回包字符串（`XFL:330-338`）、`setup_env` 载荷 = `pack("<IIIII", uartloglevel, log_channel, system_os, ufs_provision, 0)` = **20B**（`XFL:909-922`）、
+> `setup_hw_init` 载荷 = `pack("<I", 0)` = **4B**（`XFL:926-931`）。原稿两处子命令号错的证据：`0x020005` = `SET_HOST_INFO`、`0x040002` = `GET_NAND_INFO`（`xflash_param.py:57-66`）。
 
 - [ ] **Step 4: 跑测试，确认通过**
 
