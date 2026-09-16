@@ -35,8 +35,11 @@
 11. **GPT**：头部 `signature`（8B，偏移 0）、`revision`（0x08，必须 `0x10000`）、`header_size`（0x0C）、**`crc32`（0x10）**、`current_lba`（0x18）、`backup_lba`（0x20）、`first/last_usable_lba`（0x28/0x30）、`part_entry_start_lba`（0x48）、`num_part_entries`（0x50）、`part_entry_size`（0x54）；条目 = type GUID(16) + unique GUID(16) + first_lba(u64) + last_lba(u64) + flags(u64) + **name（UTF-16LE，`\x00\x00` 终止）**。**头部 CRC 必须"把 crc 字段清零后再算"**、条目表 CRC 直接整表算——**两者都校验，不符即 fail-closed**（上游从不校验）。空条目判据 = **type GUID 全 0**（UEFI 规范；上游用 unique GUID，**不复刻**）。
 12. **LBA↔字节换算在调用方**（协议层只发字节地址）：`offsetBytes = firstLba * sectorSize`、`sizeBytes = (lastLba - firstLba + 1) * sectorSize`（`realtime.py:117-121`）。
 13. **扇区大小**：eMMC=512、UFS=4096；**以 512→4096 探测兜底**（真样本 `PGPT.img` 就是 **4096**、LBA1@4096 才是 `EFI PART`）。上游 eMMC 恒 512 是缺陷，**不复刻**。
-14. **XFlash 写数据流**（`XFL:852-882`）：`GET_PACKET_LENGTH` 拿 `write_packet_length`（**无回退，失败即报错**）→ `cmd_write_data(48B 参数)` → 每块：`dsize=min(packet,剩余)` → **补零到 512 的整数倍** → `checksum = sum(data) & 0xFFFF` → `send_param([<I 0>, <I checksum>, data])`。
-15. **48B 写参数** = `pack("<IIQQ", storage, parttype, addr, length)` + 8×u32 NandExtension（全 0；上游类里有 10 个属性但只打包 8 个，照抄这一事实）。
+14. **XFlash 写数据流**（`XFL:852-899`）：`GET_PACKET_LENGTH` 拿 `write_packet_length`（**无回退，失败即报错**）→ `cmd_write_data(56B 参数)` → 每块：`dsize=min(packet,剩余)` → **补零到 512 的整数倍** → `checksum = sum(data) & 0xFFFF` → `send_param([<I 0>, <I checksum>, data])`
+    → **循环结束后还要读一次 status**（为 0 才算写成功，`XFL:876-882`）→ 成功后发一次 `CC_OPTIONAL_DOWNLOAD_ACT`（`XFL:883`，返回值上游不检查）。
+15. **56B 写参数** = `pack("<IIQQ", storage, parttype, addr, length)`（**24B**）+ `pack("<IIIIIIII", …)`（8×u32 = **32B**）→ **共 56B**。
+    ⚠️ 计划期更正（T6 预核对）：本计划与事实报告原写"48B"是**算错**（把 8×u32 记成 24B）；上游 `NandExtension` 类有 9 个属性（`cellusage/addr_type/bin_type/region/operation_type/format_level/sys_slc_percent/usr_slc_percent/phy_max_size`），
+    pack 里**跳过 `operation_type`** 只打包 8 个（`XFL:679-680`）。少 8 字节会让设备把后 8 字节读成垃圾。
 16. **XML 不发 EMI**（`initialize_dram=YES` 交给 DA 自己）：代码事实是 XML 库**零 `emi` 引用**（`xml_cmd.py:100-128` 只有该参数、`XL:185` 传 True）——**D3 不实现 EMI 发送**。
 17. **XML 信封**（`XC:18-27`，**单行、无空格**）：`<?xml version="1.0" encoding="utf-8"?><da><version>1.0</version><command>CMD:<NAME></command><arg>…</arg></da>`；`str` 载荷 `length = len+1` 且**带 NUL 结尾**（`XL:146-153`）。
 18. **XML 应答**：`OK`；错误含 `ERR!`；带长度 `OK@0x<hexlen>\0`；**完成永远两步** `CMD:END` → `CMD:START`（`XL:195-209`）；写的数据流 = `CMD:DOWNLOAD-FILE` 回包里的 `packet_length`（`XL:419-424`），读 = `CMD:UPLOAD-FILE`（`XL:425-431`）。
@@ -1369,7 +1372,9 @@ git commit -m "feat(mtk): EMI 提取扩 XFlash 整块切片（与 LEGACY 800B �
       //   · SET_RESET_KEY 是 **0x020004**，原稿写的 0x020005 其实是 **SET_HOST_INFO**（会发错命令！）
       //   · GET_EXPIRE_DATE 是 **0x040011**，原稿写的 0x040002 其实是 **GET_NAND_INFO**（同上）
       X_CTRL_SET_RESET_KEY       = 0x020004,   // <I（上游传 0x68，XFL:1104 / XFP:63）
-      X_CTRL_GET_EXPIRE_DATE     = 0x040011,   // 无参数；回包见 get_expire_date() 本体（XFL:571-579 / XFP:74）
+      X_CTRL_GET_EXPIRE_DATE     = 0x040011,   // 无参数；回包见 get_expire_date() 本体（XFL:571-579 / XFP:57）
+      // ⚠️ 上游这个值是 **0x800005**（比同段 0x0800xx 少一个 0，是上游自己的写法）—— **照发**，不要"修正"成 0x080005
+      X_CTRL_CC_OPTIONAL_DOWNLOAD_ACT = 0x800005,   // 写完一个分区后的可选下载动作（XFL:883 / XFP:50 段）
   };
   struct XPacketLength { quint32 writeLength = 0; quint32 readLength = 0; };
   struct XChipId { quint16 hwCode = 0, hwSubCode = 0, hwVersion = 0, swVersion = 0, chipEvolution = 0; };
@@ -1784,6 +1789,8 @@ git commit -m "feat(mtk): XFlash 引导①（七步握手 + bring-up 四步 + �
   bool xflashSendEmi(XFlashSession &x, const QByteArray &emi, QString *error = nullptr);
   // boot_to（XFL:288-328）：BOOT_TO → status 0 → xsend(<QQ addr,len) → send_data(da2) → sleep(500ms) → status ∈ {0, SYNC}
   // da2 必须**已剥尾部签名**（调用方给；见 D1 的 DaSelection.da2Bytes 与 m_sig_len）
+  // ⚠️ **true 只表示最终 status 字匹配（0 或 0x434E5953），不证明 DA2 已在跑** —— 上游证明"DA2 活着"靠
+  //    后面那串 reinit 查询（事实报告 §7.4），我们**不跑**（T7 的日志只能写"已上传"，不得写"已就绪/已验证"）
   bool xflashBootTo(XFlashSession &x, quint64 addr, const QByteArray &da2, QString *error = nullptr);
   // SHUTDOWN（XFL:813-833）：32B 参数 pack("<IIIIIIII", hasflags, enablewdt, async_mode, bootmode, dl_bit, dont_resetrtc, leaveusb, 0)
   bool xflashShutdown(XFlashSession &x, quint32 bootmode = 0, QString *error = nullptr);
@@ -1819,10 +1826,13 @@ void TestMtkXflashPayload::bootToAcceptsZeroOrSyncStatus()
     const QByteArray da2(0x300, '\x11');         // 已剥签名的 DA2
     for (quint32 st : {0u, 0x434E5953u}) {
         MockUsbChannel m;
-        m.reads << statusReads(0) << statusReads(st);
+        // ⚠️ 计划期更正（T5 实施期实测）：boot_to 共读 **3** 个 status —— BOOT_TO 自己（XFL:290）、
+        //    send_data 内部那个（:295 → :282）、以及最终 status（:307/:315）。原稿只排 2 个会把**正确实现判红**。
+        m.reads << statusReads(0) << statusReads(0) << statusReads(st);
         mtkbrom::XFlashSession x(&m, 0x6765);
         QString err;
         QVERIFY2(mtkbrom::xflashBootTo(x, 0x40000000ull, da2, &err), qPrintable(err));
+        QCOMPARE(m.reads.size(), 0);                              // 精确排空（读多/读少都要判红）
         QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));    // BOOT_TO 帧头
         QCOMPARE(m.writeFrames.at(1), le32(0x010008));                         // 命令值
         QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(16));   // 参数帧头（16B）
@@ -1834,7 +1844,7 @@ void TestMtkXflashPayload::bootToAcceptsZeroOrSyncStatus()
 void TestMtkXflashPayload::bootToRejectsBadStatus()
 {
     MockUsbChannel m;
-    m.reads << statusReads(0) << statusReads(0xDEAD);
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0xDEAD);   // 三段 status（见上）
     mtkbrom::XFlashSession x(&m, 0x6765);
     QString err;
     QVERIFY(!mtkbrom::xflashBootTo(x, 0x40000000ull, QByteArray(16, '\x11'), &err));
@@ -1954,7 +1964,7 @@ git commit -m "feat(mtk): XFlash 载荷②（INIT_EXT_RAM EMI + boot_to 剥签�
 
 ---
 
-### Task 6: XFlash 载荷 ③（WRITE_DATA / READ_DATA：48B 参数 + 分块校验和 + 读数据路径）
+### Task 6: XFlash 载荷 ③（WRITE_DATA / READ_DATA：56B 参数 + 分块校验和 + 读数据路径）
 
 **Files:**
 - Modify: `src/core/modes/mtk_xflash_payload.{h,cpp}`
@@ -1965,9 +1975,9 @@ git commit -m "feat(mtk): XFlash 载荷②（INIT_EXT_RAM EMI + boot_to 剥签�
 - Produces:
   ```cpp
   namespace mtkbrom {
-  // 48B 存储参数（铁律 15）：pack("<IIQQ", storage, partType, addr, length) + 8×u32 NandExtension(全 0)
+  // 56B 存储参数（铁律 15）：pack("<IIQQ", …)=24B + 8×u32 NandExtension(全 0)=32B
   QByteArray xflashStorageParam(quint32 storage, quint32 partType, quint64 addr, quint64 length);
-  // 写（XFL:670-685 + 852-882）：xsend(WRITE_DATA) → status 0 → 48B 参数帧 → 按 writePacketLength 分块：
+  // 写（XFL:670-685 + 852-899）：xsend(WRITE_DATA) → status 0 → 56B 参数帧 → 按 writePacketLength 分块：
   //   每块 data（**补零到 512 的整数倍**）→ checksum = sum(data) & 0xFFFF → send_param([<I 0>, <I checksum>, data])
   bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
                        quint32 storage, quint32 partType, quint32 writePacketLength,
@@ -1981,16 +1991,16 @@ git commit -m "feat(mtk): XFlash 载荷②（INIT_EXT_RAM EMI + boot_to 剥签�
 - [ ] **Step 1: 写失败用例**（追加到 `tests/test_mtk_xflash_payload.cpp`）
 
 ```cpp
-// 48B 参数布局：<IIQQ + 8×u32（全 0）
+// 56B 参数布局：<IIQQ(24B) + 8×u32(32B，全 0)
 void TestMtkXflashPayload::storageParamLayout()
 {
     const QByteArray p = mtkbrom::xflashStorageParam(0x1, 0x8, 0x100000, 0x2000);
-    QCOMPARE(p.size(), 48);
+    QCOMPARE(p.size(), 56);                                     // ⚠️ 原稿 48 是算错（见铁律 15）
     QCOMPARE(p.mid(0, 4), le32(0x1));            // storage = EMMC
     QCOMPARE(p.mid(4, 4), le32(0x8));            // partType = USER
     QCOMPARE(p.mid(8, 8), le32(0x100000) + le32(0));            // addr（<Q 小端）
     QCOMPARE(p.mid(16, 8), le32(0x2000) + le32(0));             // length
-    QCOMPARE(p.mid(24, 24), QByteArray(24, '\0'));              // NandExtension 8×u32
+    QCOMPARE(p.mid(24, 32), QByteArray(32, '\0'));              // NandExtension 8×u32 = 32B
 }
 
 // 写：WRITE_DATA → status → 48B → 每块补零到 512 + 校验和 + 三段参数
@@ -1998,8 +2008,10 @@ void TestMtkXflashPayload::writeDataChunkingAndChecksum()
 {
     MockUsbChannel m;
     // 第一块（0x300 → 补零到 0x400）：三段参数各自读… 注意 send_param 只在**全部**参数写完读一次 status
-    m.reads << statusReads(0) << statusReads(0)      // WRITE_DATA 命令 status + 48B 参数帧的 status
-            << statusReads(0) << statusReads(0);     // 两块各一次 send_param 的 status
+    m.reads << statusReads(0) << statusReads(0)      // WRITE_DATA 命令 status + 56B 参数帧的 status
+            << statusReads(0) << statusReads(0)      // 两块各一次 send_param 的 status
+            << statusReads(0)                        // **循环后的最终 status**（XFL:876）
+            << statusReads(0) << statusReads(0) << frameReads(1, QByteArray());   // CC_OPTIONAL_DOWNLOAD_ACT 的 devctrl 二连 + 空回包
     mtkbrom::XFlashSession x(&m, 0x6765);
     const QByteArray data(0x300, '\x01');            // 0x300 → 两块：0x300（补到 0x400）
     QStringList log;
@@ -2009,8 +2021,8 @@ void TestMtkXflashPayload::writeDataChunkingAndChecksum()
     // 找到 48B 参数帧（在命令帧之后）
     QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));
     QCOMPARE(m.writeFrames.at(1), le32(0x010004));                       // WRITE_DATA
-    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(48));   // 参数帧头
-    QCOMPARE(m.writeFrames.at(3).size(), 48);
+    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(56));   // 参数帧头
+    QCOMPARE(m.writeFrames.at(3).size(), 56);
     // 第一块的三段：<I 0>、<I checksum>、数据（补零后 0x400）
     QCOMPARE(m.writeFrames.at(4), le32(0xFEEEEEEF) + le32(1) + le32(4));    // 段1 帧头
     QCOMPARE(m.writeFrames.at(5), le32(0));                                 // 段1 值 0
@@ -2028,7 +2040,7 @@ void TestMtkXflashPayload::readDataCollectsFramesAndAcks()
 {
     MockUsbChannel m;
     const QByteArray blk1(0x100, '\xAB'), blk2(0x80, '\xCD');
-    m.reads << statusReads(0) << statusReads(0)                  // 命令 status + 48B 参数 status
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)   // 命令 status + 参数 status + **参数后的第二个 status**
             << frameReads(1, blk1)                                    // 数据帧 1
             << frameReads(1, le32(0))                                 // flag 帧（slength==4，值 0 = 正常）
             << frameReads(1, blk2)                                    // 数据帧 2
@@ -2050,7 +2062,7 @@ void TestMtkXflashPayload::readDataCollectsFramesAndAcks()
 void TestMtkXflashPayload::readDataRejectsNonZeroFlag()
 {
     MockUsbChannel m;
-    m.reads << statusReads(0) << statusReads(0)
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
             << frameReads(1, le32(0x1234))                            // flag 非 0 = 读失败
             ;
     mtkbrom::XFlashSession x(&m, 0x6765);
@@ -2073,8 +2085,8 @@ QByteArray xflashStorageParam(quint32 storage, quint32 partType, quint64 addr, q
     p += le32(partType);
     p += le64(addr);
     p += le64(length);
-    p += QByteArray(24, '\0');       // NandExtension 8×u32（上游类有 10 属性但只打包 8 个，XFL:679-680）
-    return p;                        // 恒 48 字节
+    p += QByteArray(32, '\0');       // NandExtension **8×u32 = 32B**（上游类 9 属性，pack 里跳过 operation_type，XFL:679-680）
+    return p;                        // 恒 **56** 字节（24 + 32；⚠️ 原稿写 48 是算错，见铁律 15）
 }
 
 bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
@@ -2108,6 +2120,15 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
         }
         pos += quint64(dsize);
     }
+    // 循环**之后**的最终 status（XFL:876-882）：非 0 → 写失败（上游在此报 "Error on writeflash"）
+    if (!x.checkStatus(error)) {
+        if (error) *error = QStringLiteral("XFlash 写：addr 0x%1 收尾 status 非 0（%2）").arg(addr, 0, 16).arg(*error);
+        return false;
+    }
+    // 成功后发一次 CC_OPTIONAL_DOWNLOAD_ACT（XFL:883；上游不检查返回值 → 我们也只告警）
+    QString ccErr;
+    if (!x.sendDevCtrl(X_CTRL_CC_OPTIONAL_DOWNLOAD_ACT, QByteArray(), nullptr, &ccErr))
+        warn(QStringLiteral("XFlash 写：CC_OPTIONAL_DOWNLOAD_ACT 未确认（%1）—— 数据已写入").arg(ccErr));
     say(QStringLiteral("XFlash 写：addr 0x%1 共 %2 字节完成").arg(addr, 0, 16).arg(data.size()));
     return true;
 }
@@ -2120,6 +2141,8 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
     if (!x.checkStatus(error))
         return false;
     if (!x.sendParam({xflashStorageParam(storage, partType, addr, quint64(length))}, error))
+        return false;
+    if (!x.checkStatus(error))                   // ⚠️ 计划期更正（T6）：**参数帧之后还有第二个 status**（XFL:698-702），漏读会让数据帧错位
         return false;
 
     out.clear();
