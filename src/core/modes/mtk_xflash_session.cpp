@@ -111,9 +111,9 @@ bool XFlashSession::readStatus(quint32 &code, QString *error)
 }
 
 // 0 = 成功；其余一律失败。0xC0040050（EMI 版本不匹配）有**独立**文案分支（三条分支各自可判别）：
-// 上游 XFL:180-188 对该码只跳过错误打印与 sys.exit，**仍 `return False`**；显式 preloader 路径
-// XFL:1147-1149 的 `if not self.send_emi(...): return False` 据此中止整链（自动搜索路径
-// XFL:1131-1136 才是换候选继续）。本实现与之同判，仅补一条中文诊断（上游此处不打印）。
+// 上游 XFL:180-188 对该码只跳过错误打印与 sys.exit，但**仍以失败返回**；显式 preloader 路径
+// XFL:1147-1149 对这个失败直接中止整链（自动搜索路径 XFL:1131-1136 才是换候选继续）。
+// 本实现与之同判，仅补一条中文诊断（上游此处不打印）。
 bool XFlashSession::checkStatus(QString *error)
 {
     quint32 code = 0;
@@ -141,8 +141,8 @@ bool XFlashSession::ack(QString *error)
     return xsendInt(0, error);                   // 其余芯片：两次写（XFL:90-94）
 }
 
-// 铁律 5：每个参数一个独立帧，载荷按 0x200 分块（XFL:163-177 —— 帧头 `usbwrite(pkt)` 一次，
-// 随后 `while length > 0: dsize = min(length, 0x200)` 循环写，**从不整段写**），
+// 铁律 5：每个参数一个独立帧，载荷按 0x200 分块（XFL:163-177 —— 上游先单独写一次 12B 帧头，
+// 再把载荷按 0x200 逐块循环写出，**从不整段写**），
 // 全部写完读一次 status（XFL:177-188）
 bool XFlashSession::sendParam(const QList<QByteArray> &params, QString *error)
 {

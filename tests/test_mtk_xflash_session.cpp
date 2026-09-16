@@ -63,6 +63,7 @@ private slots:
     void sendParamChunksAt0x200AndFailsOnEmiVersionMismatch();
     void sendParamRejectsHardErrorCodes();
     void sendDataChunksByMaxPacketSize();
+    void readStatusRejectsShortPayloadAndBadMagic();
 };
 
 // 帧头一次写、载荷第二次写（铁律 3；xflash_lib.py:112-115）
@@ -146,7 +147,7 @@ void TestMtkXflashSession::statusTreatsMagicAsSuccess()
 }
 
 // send_param：0x200 分块 + 最后读一次 status；0xC0040050 **判失败**
-// （上游 XFL:180-188 只跳过错误打印与 sys.exit，仍 `return False`；显式 preloader 路径
+// （上游 XFL:180-188 只跳过错误打印与 sys.exit，但**仍以失败返回**；显式 preloader 路径
 //   XFL:1147-1149 据此中止整链 —— 控制方裁决 2026-09-16 更正原"容忍"读法）
 void TestMtkXflashSession::sendParamChunksAt0x200AndFailsOnEmiVersionMismatch()
 {
@@ -158,6 +159,7 @@ void TestMtkXflashSession::sendParamChunksAt0x200AndFailsOnEmiVersionMismatch()
         QString err;
         QVERIFY2(!s.sendParam({big}, &err), "0xC0040050 必须判为失败");
         QVERIFY(err.contains(QStringLiteral("0xC0040050")));   // 文案可诊断（上游此处不打印）
+        QVERIFY(err.contains(QStringLiteral("EMI 版本不匹配")));   // 只属于本分支的措辞 token（见硬错误码用例注释）
         QCOMPARE(m.writeFrames.size(), 3);                  // 帧头 + 块1 + 块2（先写完帧再读 status）
         QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(0x300));
         QCOMPARE(m.writeFrames.at(1).size(), 0x200);
@@ -167,9 +169,17 @@ void TestMtkXflashSession::sendParamChunksAt0x200AndFailsOnEmiVersionMismatch()
         MockUsbChannel m;
         m.reads << statusReads(0);
         mtkbrom::XFlashSession s(&m, 0x6765);
+        // 两个参数**尺寸不同**：帧头长度必须各取自本参数 —— 若某变异用第一个参数的长度写所有帧
+        // （或只写一帧头），下面逐帧比对就会红
+        const QByteArray p1 = le32(0);                      // 4B
+        const QByteArray p2(6, '\x22');                     // 6B
         QString err;
-        QVERIFY2(s.sendParam({le32(0), le32(0x1234)}, &err), qPrintable(err));   // 两个参数 = 两个帧
+        QVERIFY2(s.sendParam({p1, p2}, &err), qPrintable(err));   // 两个参数 = 两个帧
         QCOMPARE(m.writeFrames.size(), 4);                  // 帧1头 + 帧1载荷 + 帧2头 + 帧2载荷
+        QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));
+        QCOMPARE(m.writeFrames.at(1), p1);
+        QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(6));
+        QCOMPARE(m.writeFrames.at(3), p2);
     }
 }
 
@@ -194,13 +204,16 @@ void TestMtkXflashSession::sendParamRejectsHardErrorCodes()
         QVERIFY(err.contains(QStringLiteral("0xC0020004")));
     }
     {
-        // 判别力：0xC0040050 有**独立**分支，不能被通用文案吞掉（反之亦然）
+        // 判别力：0xC0040050 的**判定**（失败）与**措辞**各自钉住 ——
+        //   判定：!sendParam；措辞：通用文案也会插值码值，故仅 contains("0xC0040050") **分不出**
+        //   "独立分支"与"并入通用文案"，靠只属于该分支的 token "EMI 版本不匹配" 才能钉住措辞。
         MockUsbChannel m;
         m.reads << statusReads(mtkbrom::kXEmitVersionMismatch);
         mtkbrom::XFlashSession s(&m, 0x6765);
         QString err;
         QVERIFY(!s.sendParam({le32(0)}, &err));
         QVERIFY(err.contains(QStringLiteral("0xC0040050")));
+        QVERIFY(err.contains(QStringLiteral("EMI 版本不匹配")));
         QVERIFY(!err.contains(QStringLiteral("0xC0020053")));
     }
 }
@@ -219,6 +232,32 @@ void TestMtkXflashSession::sendDataChunksByMaxPacketSize()
     QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(0x250));
     QCOMPARE(m.writeFrames.at(1).size(), 0x100);
     QCOMPARE(m.writeFrames.at(3).size(), 0x50);
+}
+
+// 设备输入面的两条负向路径 —— 缺任一条都会把畸形帧当成功：
+//   ① 载荷长度 3（既非 2 也非 4）→ 必须拒绝，否则 `leToU32(payload, 0)` 会越界读 payload.at(3)
+//   ② 头 magic 不符 → 必须拒绝（上游 xread 也是 magic 不符即错，XFL:124-126）
+void TestMtkXflashSession::readStatusRejectsShortPayloadAndBadMagic()
+{
+    {
+        MockUsbChannel m;
+        m.reads << frameReads(1, QByteArray("\x11\x22\x33", 3));   // length=3
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        quint32 code = 0xDEAD;
+        QString err;
+        QVERIFY(!s.readStatus(code, &err));
+        QVERIFY(err.contains(QStringLiteral("状态帧长度异常")));
+    }
+    {
+        MockUsbChannel m;
+        const QByteArray badHeader = le32(0xDEADBEEF) + le32(1) + le32(4);   // magic 错、长度 4
+        m.reads << badHeader << le32(0);                     // 载荷项不会被读（magic 即拒）
+        mtkbrom::XFlashSession s(&m, 0x6765);
+        quint32 code = 0xDEAD;
+        QString err;
+        QVERIFY(!s.readStatus(code, &err));
+        QVERIFY(err.contains(QStringLiteral("magic 不符")));
+    }
 }
 QTEST_APPLESS_MAIN(TestMtkXflashSession)
 #include "test_mtk_xflash_session.moc"
