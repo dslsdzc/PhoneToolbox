@@ -2105,7 +2105,10 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
         return false;
     if (!x.checkStatus(error))
         return false;
-    if (!x.sendParam({xflashStorageParam(storage, partType, addr, quint64(data.size()))}, error))
+    // ⚠️ 计划期更正（T6 实施期实测，上游 `writeflash` `XFL:847-849 → :860-861`）：上游**先把总长补零到 512 的整数倍**
+    //    再 `cmd_write_data(addr, length, …)` —— 所以宣布的是**补零后**的长度，不是原始 `data.size()`。
+    const QByteArray padded = padTo512(data);
+    if (!x.sendParam({xflashStorageParam(storage, partType, addr, quint64(padded.size()))}, error))
         return false;
 
     quint64 pos = 0;
@@ -2139,38 +2142,58 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
 bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
                     quint32 storage, quint32 partType, QByteArray &out, QString *error)
 {
-    if (!x.xsendInt(X_CMD_READ_DATA, error))      // 0x010005
+    if (!x.xsendInt(X_CMD_READ_DATA, error))             // 0x010005
         return false;
     if (!x.checkStatus(error))
         return false;
     if (!x.sendParam({xflashStorageParam(storage, partType, addr, quint64(length))}, error))
         return false;
-    if (!x.checkStatus(error))                   // ⚠️ 计划期更正（T6）：**参数帧之后还有第二个 status**（XFL:698-702），漏读会让数据帧错位
+    // 参数帧之后的**第二个** status（XFL:698-702）：上游在这里再读一次并据此判成败。
+    // 漏读会让之后每个数据帧整体错位一帧（把 status 帧当成数据收下）。
+    if (!x.checkStatus(error))
         return false;
 
     out.clear();
-    for (;;) {
+    quint32 remaining = length;
+    // 循环以**字节数**收尾（上游 bytestoread，XFL:730/:757）：不是"见到 flag 就停" ——
+    // 中途出现的 flag==0 帧照上游继续读，读满 length 字节后才去读收尾帧。
+    while (remaining > 0) {
         QByteArray payload;
         if (!x.xread(payload, nullptr, error))
             return false;
-        if (payload.size() > 4) {                 // 数据块：收下 + ack(rstatus=False)（XFL:751-757）
+        if (payload.size() > 4) {                        // 数据帧：收下 + ack(rstatus=False)（XFL:750-757）
             out += payload;
             if (!x.ack(error))
                 return false;
+            remaining = (quint32(payload.size()) >= remaining) ? 0u : remaining - quint32(payload.size());
             continue;
         }
-        // flag 帧（slength == 4，值为 0 = 正常结束；非 0 = 出错，XFL:761-765 / :770-776）
-        if (payload.size() != 4) {
-            if (error) *error = QStringLiteral("XFlash 读：收到未知长度的帧（%1）").arg(payload.size());
-            return false;
+        if (payload.size() == 4) {                       // flag 帧：0 = 继续，非 0 = 设备报错（XFL:761-765）
+            const quint32 flag = le32At(payload, 0);
+            if (flag != 0) {
+                if (error) *error = QStringLiteral("XFlash 读：设备报错（flag = %1）").arg(hexCode(flag));
+                return false;
+            }
+            continue;
         }
-        const quint32 flag = le32At(payload, 0);
-        if (flag != 0) {
-            if (error) *error = QStringLiteral("XFlash 读：设备报错（flag = 0x%1）").arg(flag, 8, 16, QLatin1Char('0'));
-            return false;
-        }
-        return true;
+        // 其它长度（含 0）：上游只打印 "Invalid slength" 就 break（XFL:766-768），本层明确报错
+        if (error) *error = QStringLiteral("XFlash 读：收到未知长度的帧（%1 字节）").arg(payload.size());
+        return false;
     }
+    // 收尾帧（XFL:770-776）：上游**只在 slength == 4 时**解析并判 flag，其它长度既不解析也不报错。
+    // 本层照做（"上游 wins"）：这是本次操作的**最后一帧**，不存在"留在设备侧让后续读错位"的风险
+    // （与 devCtrlQuery 尾部 status 的取舍不同），此处更严只会让真机能用、上游能过的场景反而失败。
+    QByteArray fin;
+    if (!x.xread(fin, nullptr, error))
+        return false;
+    if (fin.size() == 4) {
+        const quint32 flag = le32At(fin, 0);
+        if (flag != 0) {
+            if (error) *error = QStringLiteral("XFlash 读：收尾帧报错（flag = %1）").arg(hexCode(flag));
+            return false;
+        }
+    }
+    return true;
 }
 ```
 
