@@ -230,6 +230,27 @@ private slots:
         QVERIFY(!mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), QByteArray(0x200, '\x11'), nullptr, &err));
         QVERIFY2(err.contains(QStringLiteral("CMD:END")), qPrintable(err));      // 报出**实收**命令
         QVERIFY(!err.contains(QStringLiteral("(空)")));                          // 不是"收到空"
+        QCOMPARE(m.reads.size(), 0);                                            // 应答链精确耗尽（与同族用例一致）
+    }
+
+    // 设备回声可以补零/大写（审查 Minor 7 的本意）：只要**数字**一致就必须放行 —— 逐字节比较是错的
+    void writePartitionAcceptsReformattedDeviceEcho()
+    {
+        MockUsbChannel m;
+        // 手写 FileSysOp：file_path 补零 + 大写十六进制；长度是 0x600
+        m.reads << textReads(QStringLiteral("OK"))
+                << textReads(QStringLiteral("<host><command>CMD:FILE-SYS-OPERATION</command><arg>"
+                                            "<key>FILE-SIZE</key><file_path>MEM://0x08000000:0x00000600</file_path></arg></host>"))
+                << dwnFileReads(0x600, 0x600)
+                << textReads(QStringLiteral("OK"))       // 第二次 ackValue(length)
+                << textReads(QStringLiteral("OK"))       // 单包 ack(0)
+                << textReads(QStringLiteral("OK"))       // 单包数据后
+                << writeTailReads();
+        mtkbrom::XmlSession x(&m);
+        QString err;
+        QVERIFY2(mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), QByteArray(0x600, '\x44'), nullptr, &err),
+                 qPrintable(err));                        // **必须放行**
+        QCOMPARE(m.reads.size(), 0);
     }
 
     // 补零分支：0x500 → 补到 0x600，**宣布长度必须是补零后的值**（审查 Minor 6）

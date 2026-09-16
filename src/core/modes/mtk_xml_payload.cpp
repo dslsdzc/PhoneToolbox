@@ -175,11 +175,19 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
                                 .arg(fs.command.isEmpty() ? QStringLiteral("(空)") : fs.command, fs.info);
         return false;
     }
-    // 设备索要的 file_path 应当**就是我们发去的描述符**（审查 Minor 7）：不符 = 双方对"写哪个区间的多少字节"理解不一致 → fail-closed
-    if (!fs.file.isEmpty() && fs.file != memDescriptor(length)) {
-        if (error) *error = QStringLiteral("XML：WRITE-FLASH 设备索要的 file_path（%1）与本层描述符（%2）不符 —— 拒绝")
-                                .arg(fs.file, memDescriptor(length));
-        return false;
+    // 设备索要的 file_path 应当指同一段区间（审查 Minor 7）：**只比数字，不比字面** ——
+    // 上游压根不比对 file_path（只比对 key，`XL:967-968`），且设备完全可以补零/大写十六进制；
+    // 逐字节比较会拒掉上游能正常写的请求。解析不出（或字段缺失）则跳过（同 DwnFile / 读路径的 OK@ 解析姿态）。
+    if (!fs.file.isEmpty()) {
+        const QString tail = fs.file.section(QLatin1Char(':'), 2);
+        bool okLen = false;
+        const quint32 asked = tail.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
+                                  ? tail.mid(2).toUInt(&okLen, 16) : tail.toUInt(&okLen, 16);
+        if (okLen && asked != length) {
+            if (error) *error = QStringLiteral("XML：WRITE-FLASH 设备索要的区间长度 0x%1 与宣布的 0x%2 不符 —— 拒绝")
+                                    .arg(asked, 0, 16).arg(length, 0, 16);
+            return false;
+        }
     }
 
     // ③ ackValue(**length**) → ④ 设备回 DwnFile（带 packet_length）
