@@ -69,6 +69,9 @@ public:
     };
     // XL:369-449 的 C++ 形态：读响应 → 解析 <command> → 分派（含 PROGRESS-REPORT 的 OK!EOT 保活）
     bool readCommandResult(Result &out, QStringList *log = nullptr, QString *error = nullptr);
+    // ⚠️ **调用方契约**：`command` 为空的 `Result` 可能是"无名帧"（已被 sendCommand 拦成失败），也可能是
+    //    **具名但未列举**的命令（如 `CMD:CUSTOM*`，上游 `get_command_result` 返回 `(cmd,"")` 交调用方判，`XL:449`）。
+    //    因此**调用方必须自己查 `out.command`**，不能只看返回值。
     // XL:188-219：xsend → 响应必须 "OK" → （非 noack）readCommandResult → CMD:END/CMD:START 收尾
     bool sendCommand(const QString &xml, Result *out, bool noack = false, QString *error = nullptr);
 

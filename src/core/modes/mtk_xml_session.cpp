@@ -202,9 +202,9 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
         if (!ack(error))                                       // XL:376
             return false;
         QString done;
-        if (!getResponse(done, error))                         // XL:378
+        if (!getResponse(done, error))                         // XL:377
             return false;
-        if (!done.contains(QStringLiteral("OK"))) {            // XL:379
+        if (!done.contains(QStringLiteral("OK"))) {            // XL:378
             if (error) *error = QStringLiteral("XML：数据路径的确认响应不是 OK（%1）").arg(done);
             return false;
         }
@@ -320,7 +320,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
     if (cmd == QStringLiteral("CMD:END")) {                    // XL:444-448：**不** ack（由 sendCommand 收尾）
         out.text = field(data, QStringLiteral("result"));
         if (out.text != QStringLiteral("OK")) {
-            // XL:445 判据是 `"message" in data`（空 <message></message> 也会命中，结果为 ""）；
+            // XL:446 判据是 `"message" in data`（空 <message></message> 也会命中，结果为 ""）；
             // 本实现只在 message **非空**时替换 —— 空 message 时保留 <result> 原文，信息量更大
             const QString msg = field(data, QStringLiteral("message"));
             if (!msg.isEmpty())
