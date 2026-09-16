@@ -6,10 +6,10 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 
 | 功能 | 支持模式 | 说明 |
 |------|----------|------|
-| 设备检测 | ADB / Fastboot / Fastbootd / EDL / MTK DA | 自动轮询检测设备连接状态和当前模式 |
+| 设备检测 | ADB / Fastboot / Fastbootd / EDL / MTK DA / MTK BROM | 自动轮询检测设备连接状态和当前模式 |
 | 设备信息 | ADB / Fastboot | 型号、Android 版本、SDK、安全补丁级别、Bootloader 锁定状态等 |
-| 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
-| 死砖恢复 | EDL / MTK DA | 自动匹配分区文件、校验镜像大小、备份关键分区、支持失败重试 |
+| 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA / **MTK BROM（LEGACY）直刷** | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
+| 死砖恢复 | EDL / MTK DA / MTK BROM | 自动匹配分区文件、校验镜像大小、备份关键分区、支持失败重试 |
 | **镜像处理** | 本地 | **29 种格式拖放识别、17 格式解包、sparse 转换、打包、文件系统浏览** |
 | **Root 修补** | 本地 | **8 个方案入口全覆盖（Magisk 系 / KernelSU 系 / APatch），boot/init_boot 修补** |
 | 系统工具 | ADB | 性能监控（CPU/GPU/内存/温度）、界面定制、分区管理、应用管理、安全隐私、开发调试、**维修诊断** |
@@ -44,6 +44,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 - **Fastbootd** — Android 10+ 用户空间 Fastboot
 - **EDL (9008)** — Qualcomm 紧急下载模式
 - **MTK DA** — MediaTek Download Agent 模式
+- **MTK BROM（LEGACY）** — 无 DA 依赖的 BROM 直刷：DA 文件解析与选择、DA1/DA2 两阶段、EMI/DRAM 初始化（preloader 显式/自动导入/默认关闭的网络获取）、按设备分区表的刷写计划与预览；离线验证（真 DA/preloader 样本 + mock 逐帧），**真机全链未验证**
 - **三星 Odin** — Odin 下载模式（VID 0x04E8 + CDC_DATA 接口类）→ 按 PIT 刷写 BL/AP/CP/CSC 的 .tar.md5（Phase C 代码就绪，真机未验证）
 
 ## 快速开始
@@ -158,7 +159,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 44 个测试源文件；ctest 目标共 45 个）
+├── tests/                      # 单元测试（Qt Test, 50 个测试源文件；ctest 目标共 51 个）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
@@ -171,7 +172,10 @@ PhoneToolbox/
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build    # 45 个测试目标, 全绿
+ctest --test-dir build    # 51 个测试目标, 全绿
+
+# MTK 真样本用例（reference/mtk-samples/ 缺失时默认 SKIP；开启后缺失即 FAIL）
+cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build
 ```
 
 ## ADB 获取策略
@@ -234,7 +238,7 @@ PhoneToolbox 自动检测 ADB 工具，无需手动安装：
 > **注意**：
 > - ADB 和 Fastboot 工具由 Google 提供，PhoneToolbox **不内置分发**其二进制，而是在运行时自动检测系统环境或从 Google 官方下载。
 > - **bkerler/edl**：EDL Sahara/Firehose 协议代码源自 [bkerler/edl](https://github.com/bkerler/edl)（GPLv3），对应许可证文件见 `edl/LICENSE`。
-> - **bkerler/mtkclient**：MTK DA 通讯功能基于 [bkerler/mtkclient](https://github.com/bkerler/mtkclient)（GPLv3），包含 `third_party/mtk_bridge/` 预编译二进制及完整源码树（`mtkclient/`），对应许可证文件见 `mtkclient/LICENSE`。
+> - **bkerler/mtkclient**：MTK DA 通讯功能基于 [bkerler/mtkclient](https://github.com/bkerler/mtkclient)（GPLv3），包含 `third_party/mtk_bridge/` 预编译二进制及完整源码树（`mtkclient/`），对应许可证文件见 `mtkclient/LICENSE`。其中**芯片代际表（hw_code → damode，89 条）为整表转写**——GPL-3.0 与本项目 GPLv3 兼容，转写只取静态事实；生成脚本 `tools/gen_mtk_chip_table.py`，来源 URL 与 commit 见生成物 `src/core/modes/mtk_chip_table.cpp` 头部注释。
 > - **MobileModels-csv** 数据仅在运行时从 GitHub 拉取，不内置分发，使用 CC BY-NC-SA 4.0 许可证（非商业用途）。
 
 ### 许可证兼容性

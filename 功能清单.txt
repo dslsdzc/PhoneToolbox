@@ -44,6 +44,13 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] SEND_DA 上传 (16-bit XOR 校验 + 分块 + ZLP) + 跳转 DA
 [√] SBC 修补 (preloader 字节模式, 参照 mtkclient 五模式)
 [√] 刷写路由骨架 (runBromFlash: 枚举 → 会话 → 逐分区)
+[√] DA 文件解析与选择: AllInOne 头/条目/region 5 字段 (真样本 6 文件 161 条目硬断言 + 独立 Python 解析器对拍)
+[√] DA 两阶段: DA1 (region[1] 地址/长度/签名长度) → 0xC0 就绪 → 存储信息交换 → EMI/DRAM → DA2 (保留尾部签名) → read_flash_info
+[√] EMI/DRAM 初始化: LEGACY 逐版本档位 (0x00/0x0A/0x0B/0x0C/0x0D/0x0F/0x10/0x11/0x14/0x15) + M_EXT_RAM_* 回包判定
+[√] preloader 两路径: 显式指定 / 固件目录自动导入 (唯一命中才用) / 网络获取 (**默认关闭**, 来源清单 + sha256 校验, fail-closed)
+[√] 刷写计划: 镜像 ↔ 分区匹配 (精确/前缀 preloader) + 大小校验 (镜像 > 分区 = 跳过不写) + 预览 (复用通用预览控件)
+[√] 逐分区写入 + FINISH (0xD9) 收尾; 失败即停、不复位
+[√] 代际判定: 内置芯片表 (转写自 bkerler/mtkclient, GPL-3.0, 89 条全表); 表外/非 LEGACY 代 → 明确报错 (XFlash/XML 为 D2/D3)
 [√] 诚实边界: SLA/DAA 检测返回明确错误 (RSA 响应生成标后续)
 
 --- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---
@@ -244,7 +251,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 分派路由: 按设备模式自动分派 (FlashTool::flashFullPackage)
 [√] 模式感知 UI: 刷写按钮自动启用 + 文件参数对话框 (update.app/pac+FDL/DA)
 [√] 多设备防护: 同厂商多设备警告 (刷写首个枚举设备提示)
-[√] 诚实边界: MTK BROM 分区刷写待接线; VID 通配双列表已知行为
+[√] 诚实边界: MTK BROM(LEGACY) 分区刷写**离线验证**(真 DA/preloader 样本 + mock 逐帧); 真机全链未验证; 0xD8 老格式/PMTv1/v3/MMM-EMI 分支无真实样本; SLA/DAA 与 BROM 漏洞利用不做; VID 通配双列表已知行为 (展锐 0x1782)
 
 
 十七、UI 框架
@@ -308,6 +315,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 ------------------------
 [√] OPPO/一加/realme EDL 刷写链 (Phase B 代码就绪: 计划层/协议层/会话/通道/UI, mock 验证; **真机验证待持机人**)
 [√] OPPO 固件解包引擎 (Phase A 已交付: OFP QC/MTK + OPS, 离线验证)
+[√] MTK BROM Phase D1 (LEGACY 完整化, 2026-09-15): DA 解析/选择 + 两阶段引导 + EMI 两路径 + 计划层与预览 + 逐分区写入; 真样本硬断言, 真机留给持机人
 [ ] MTK 华为后续: SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷支持
 [√] 三星 Heimdall 集成 (Odin 协议开源实现) —— Phase C 代码就绪: PIT 解析/计划层/协议/会话/通道/UI, mock 验证; **真机验证待持机人**
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)

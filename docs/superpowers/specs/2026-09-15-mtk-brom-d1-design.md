@@ -54,7 +54,7 @@
 - **832 个真实 preloader 实测**：只有 **3 个**含 MMM 魔术；**829 个**的 `MTK_BLOADER_INFO_v` 在**偏移 0**；832/832 含 `MTK_BIN` → 现实几乎全走"偏移 0"路径。
 - 样例实测：同一 preloader，**XFlash 切片 912B / LEGACY 切片 800B**（起点 `MTK_BIN+0xC`）。
 - 自动匹配（LEGACY）：按 preloader 回报的 **DRAM info 16 字节**双字节序匹配（`DLL:295-318`）。
-- **可跳过 EMI 的条件**：`preloader` 连接来源（该设备已初始化过 DRAM）—— 但 `GET_CONNECTION_AGENT(0x04000A)` 是 **XFlash 专有**；LEGACY 侧的触发与判定需在实现时对照 `DLL:333` 的调用点核实（见 §8 诚实边界）。
+- **可跳过 EMI 的条件**：`preloader` 连接来源（该设备已初始化过 DRAM）—— 但 `GET_CONNECTION_AGENT(0x04000A)` 是 **XFlash 专有**；LEGACY 侧**已核实**为 request-driven：仅 `errorcode == 0xBC3` 才索取 DRAM 配置，此时缺 EMI 上游**中止**（`dalegacy_lib.py:294-297`、`:399-402`；见 §5 更正与 §8 诚实边界）。
 
 ## 3. 架构与模块
 
@@ -99,7 +99,13 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 2. parseDaFile + selectDaEntry（hwCode 来自 TargetConfig；判不出 → 明确报错）
 3. SEND_DA(da1.startAddr, da1.len, da1.sigLen, da1 切片) → JUMP_DA(da1.startAddr)
 4. DA1 起来：读单字节 == 0xC0（否则报错）
-5. EMI（若需要）：ENABLE_DRAM 0xE8 + emiver 分档 + 大端 + checksum + M_EXT_RAM_* 回包
+4a. **存储信息交换**（dalegacy_lib.py:607-634）：读 NAND_INFO(4B) + id 数(2B) + id 表 + EMMC_INFO(4B)
+    + 4×4B → 写 1B ACK → 读 3×1B；顺带定出存储类型（nand/emmc/nor，判定 :623-628）。**spec 初版漏写**
+4b. **stage2 配置**（dalegacy_lib.py:228-296）：写 11 笔配置（bromver/blver/nor 片选模式+片选号/nand_acccon/
+    bmtflag/bmtpartsize/force_charge/resetkeys/ext_clock/msdc_boot_ch）+ 按 hwcode 追加 → sleep(0.35)
+    → 读 4B errorcode
+5. EMI（**仅当 errorcode == 0xBC3**；0x0 = 不需要 DRAM 配置）：先读 4B + 16B draminfo + 回执 0xBC4
+   + nand id 表，再 ENABLE_DRAM 0xE8 + emiver 分档 + 大端 + checksum + M_EXT_RAM_* 回包
    EMI 数据 = 用户提供的 preloader / 固件目录自动导入 / （默认关闭的）网络获取
 6. boot_to(DA2)：>I addr → >I size → >I 0x1000 → ACK → 分块写（每块 ACK）→ sleep → ACK → ACK
    注意：**LEGACY 保留 DA2 尾部签名**
@@ -120,9 +126,15 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 
 | 路径 | 行为 |
 |---|---|
-| ① 用户提供/自动导入 | 显式 `preloaderPath` 优先；否则在所选固件目录内找 `preloader_*.bin`（唯一命中才用，多个 → 让用户选/告警） |
+| ① 用户提供/自动导入 | 显式 `preloaderPath` 优先；否则在所选固件目录内找 `preloader*.bin`（大小写不敏感）——**唯一命中才用**；多个候选 → **不猜**，列候选并告警后跳过（D1 不做交互选择） |
 | ② 网络获取 | **默认关闭**；显式开启（UI 勾选或参数）→ 按内置**来源清单**（含 URL + 期望 sha256）下载 → 校验 → 缓存到本地；**日志写清来源与风险**（错误的 preloader 有砖机风险）；清单可配置 |
-| 都不可用 | 走"跳过 EMI"路径（**如实 warning**："未做 DRAM 初始化，DA2 可能起不来"），不中止（与 mtkclient 同姿态） |
+| 都不可用 | **分两分支**（见下）：`errorcode == 0` → 确实不中止（info 级日志，因为 DA1 根本没要 DRAM 配置）；`errorcode == 0xBC3`（DA1 明确索取 DRAM 配置）→ **没有 EMI 必须中止** |
+
+> **更正（初版错）**：初版把"都不可用"写成一律不中止。上游是 request-driven：
+> 只有 `errorcode == 0xBC3` 才进 EMI 段（`dalegacy_lib.py:294-297`），**此时若 `daconfig.emi is None`
+> 上游直接中止**——`self.error("Preloader needed due to dram config.")` + `port.close(reset=True)`
+> + `return False`（`dalegacy_lib.py:399-402`）。继续只会让 DA2 起不来（无 DRAM 配置），
+> 所以这里**必须中止**，不能"如实 warning 后继续"。
 
 ## 8. 验证策略与诚实边界
 
@@ -138,7 +150,12 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 - **真机全链未验证**（USB 时序、真机 ACK、DA2 是否接受、EMI 分档的真机行为）。
 - **0xD8 老格式无任何真实样本**（6 文件全 0xDC）→ 只合成夹具，**不得标"已验证"**。
 - **PMTv1/PMTv3 解析无真实样本**（公开仓库不存；分区名靠设备实读的 `listPartitions`，不走本地 PMT 解析）。
-- **EMI 的 MMM 分支只有 3/832 真实命中**；**LEGACY 的 EMI 触发条件**（是否 request-driven）实现时须对照 `DLL:333` 调用点核实。
+- **EMI 的 MMM 分支只有 3/832 真实命中**；**LEGACY 的 EMI 触发条件已核实 = request-driven**：
+  仅 `errorcode == 0xBC3` 时进 EMI 段（`dalegacy_lib.py:294-297`），本层按**同一顺序**发
+  （0xBC3 后的 4B/16B draminfo/0xBC4 回执/nand id 表 → `ENABLE_DRAM 0xE8` → emiver 分档 → EMI →
+  checksum → `>I 0x80000001` → `M_EXT_RAM_RET/TYPE/CHIP_SELECT/SIZE`）。
+- **存储信息交换 / stage2 配置写入 / `read_flash_info` 全段读 真机未验证**（mock 逐帧已验证）。
+- **NAND/NOR 存储类型明确拒绝**（D1 只支持 eMMC；BMT 的 nand 分支未实现）。
 - **SLA/DAA 签名不做**（仍明确报错）；**BROM 漏洞利用（kamakiri/carbonara 等）不做**；DA 二进制**提取/生成**不做。
 - 内置芯片表的覆盖度 = 转写时 mtkclient 的版本；表外芯片 → **明确报错**（不猜代际）。
 
@@ -155,11 +172,15 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 
 ## 11. 交付清单
 
-- [ ] `mtk_da_file.{h,cpp}` + `test_mtk_da_file`（真样本 + 对拍 + 合成边界）
-- [ ] `mtk_chip_table.{h,cpp}` + `tools/gen_mtk_chip_table.py`（含出处声明）
-- [ ] `mtk_preloader_emi.{h,cpp}` + `test_mtk_preloader_emi`（真 preloader）
-- [ ] `mtk_preloader_fetch.{h,cpp}`（默认关闭 + 校验 + 日志）
-- [ ] `mtk_flash_plan.{h,cpp}` + `test_mtk_flash_plan`
-- [ ] `mtk_payload` 改造（DA1 正确上传 + `0xC0` + EMI + `boot_to`）+ `test_mtk_payload` 扩
-- [ ] `flash_tool` mtk-brom 通道 + `flash_panel` 入口（DA/镜像/preloader 选择）+ 预览复用
-- [ ] 文档：功能清单（"待接线"→已交付 + 诚实边界）、README、配套事实报告归档
+- [x] `mtk_da_file.{h,cpp}` + `test_mtk_da_file`（真样本 + 对拍 + 合成边界）
+- [x] `mtk_chip_table.{h,cpp}` + `tools/gen_mtk_chip_table.py`（含出处声明）
+- [x] `mtk_preloader_emi.{h,cpp}` + `test_mtk_preloader_emi`（真 preloader）
+- [x] `mtk_preloader_fetch.{h,cpp}`（默认关闭 + 校验 + 日志）
+- [x] `mtk_flash_plan.{h,cpp}` + `test_mtk_flash_plan`
+- [x] `mtk_payload` 改造（DA1 正确上传 + `0xC0` + EMI + `boot_to`）+ `test_mtk_payload` 扩
+- [x] `flash_tool` mtk-brom 通道 + `flash_panel` 入口（DA/镜像/preloader 选择）+ 预览复用
+- [x] 文档：功能清单（"待接线"→已交付 + 诚实边界）、README、配套事实报告归档
+
+**无遗留 `[ ]` 项**：XFlash / XML 两代归 **D2/D3**（另写 spec），不在本清单内。
+交付时的离线证据与未验证边界见 `docs/superpowers/specs/mtk-brom-facts.md` §10。
+"真机全链未验证"不是遗留项，是**本期的验收口径**（真机归持机人）。
