@@ -746,8 +746,8 @@ bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel
                         .arg(emi.bytes.size()).arg(emi.ver));
             }
         } else {
-            for (const QString &line : std::as_const(pre.log))
-                say(line);
+            // 注：pre.log **不在这里落** —— 调用方（bromFlashOnSession）已经落过一次（D1 T9 审查 M1 的不变量，
+            //     与 bromBringUpDa 同姿态）。T11 审查抓到本分支曾重复落 → LEGACY 一次、XFLASH 两次。
             say(QStringLiteral("XFlash：无 preloader —— 未做 DRAM 初始化，操作可能失败（上游同姿态）：%1")
                     .arg(pre.skipReason));
         }

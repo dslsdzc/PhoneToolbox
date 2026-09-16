@@ -98,7 +98,9 @@ struct XChipId {
 enum class PartitionCata {
     Gpt,
     Pmt,
-    Unknown,   // 回包其它值：调用方按"两者都试"处理（上游 XFL:616-621 同样返回 0）
+    Unknown,   // 回包其它值（上游 XFL:613-621 同样返回 0）
+               // ⚠️ 契约（T11 审查更正）：**不得**被调用方"两者都试" —— 集成层（bromFlashOnSession）对 PMT 与 Unknown
+               //    都是**明确拒绝**（不猜读法）。本注释原写"调用方按两者都试处理"与实现矛盾，已改。
 };
 
 // ① 七步握手（XFL:979-995，入口在 `0xC0` 已校验之后）：sync(0x434E5953) → SETUP_ENV(20B)
