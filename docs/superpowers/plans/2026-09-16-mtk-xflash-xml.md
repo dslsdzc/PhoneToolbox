@@ -199,7 +199,9 @@ void TestMtkGpt::parsesRealFourKSectorPrimaryGpt()
     QCOMPARE(t.partitions.at(0).firstLba, quint64(8));
     QCOMPARE(t.partitions.at(1).name, QStringLiteral("para"));
     QCOMPARE(t.partitions.at(2).name, QStringLiteral("expdb"));
-    QVERIFY(anyName(t, QStringLiteral("preloader")));
+    // ⚠️ 实施期更正（oracle 实证，sgdisk_print.txt:75）：PGPT.img 里**没有** preloader 分区
+    //（preloader 在 scatter 的裸区，不在 GPT 表内）——末条是 flashinfo。用末条断言"名字解码正确 + 整表走完"。
+    QVERIFY(anyName(t, QStringLiteral("flashinfo")));
     QCOMPARE(mtkgpt::offsetBytes(t.partitions.at(0), 4096), quint64(8 * 4096));
     QCOMPARE(mtkgpt::sizeBytes(t.partitions.at(0), 4096), quint64((135 - 8 + 1) * 4096));
     QVERIFY2(log.join('\n').contains(QStringLiteral("4096")), qPrintable(log.join('\n')));
@@ -391,7 +393,10 @@ QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount);
 namespace mtkgpt {
 namespace {
 
-constexpr quint64 kBackupWindowSectors = 34;   // UEFI：备份 GPT 占磁盘末尾 34 个扇区
+// 备份窗口**上限**（不是固定值）：真样本 SGPT.img 的窗口 = 8 扇区（= 条目起点 → 磁盘末尾）。
+// ⚠️ 实施期更正：上游/文档常说"末尾 34 扇区"，但那是**最大**布局；写死 34 会在真样本上取错起点
+//（窗口第一扇区 LBA 必须正好等于头里的 part_entry_start_lba）。正确做法见 readTable 的备份段。
+constexpr quint64 kBackupWindowSectors = 34;
 
 quint32 rdU32(const QByteArray &b, int off)
 {
@@ -575,10 +580,37 @@ bool readTable(const ReadFn &read, quint64 diskSectors, Table &out, QStringList 
     auto say = [log](const QString &m) { if (log) *log << m; };
     auto fail = [error](const QString &m) { if (error) *error = m; return false; };
 
-    // 1) 主 GPT：扇区大小按 512 → 4096 探测（真样本就是 4096）
+    if (!read)
+        return fail(QStringLiteral("GPT 读取失败：读回调为空"));
+
+    // 1) 主 GPT：扇区大小按 512 → 4096 探测（顺序同上游 gpt.py:219，真样本就是 4096）
+    //    ⚠️ 实施期更正：**不能**一上来就 read(0, 0x22*4096) —— 文件型读回调（PGPT.img 只有 32768 B =
+    //    8×4096）会因越界直接失败，两条真样本用例全挂。先读"能覆盖两种布局的 LBA1 头"的少量字节，
+    //    再按头部字段（条目起始 LBA + 条数 + 条目大小）算准需要多少字节、按扇区上取整补读一次。
     QByteArray head;
-    if (!read || !read(0, 0x22 * 4096, &head, error) || head.size() < 0x22 * 512)
+    if (!read(0, kProbeLen, &head, error) || head.size() < 0x5C + 512)
         return fail(QStringLiteral("GPT 头部读取失败（读回调返回不足）"));
+    quint32 sectorSize = 0;
+    for (quint32 ss : {512u, 4096u}) {
+        if (head.size() >= int(ss) + 8 && head.mid(int(ss), 8) == QByteArray("EFI PART", 8)) {
+            sectorSize = ss;
+            break;
+        }
+    }
+    if (sectorSize == 0)
+        return fail(QStringLiteral("未找到 GPT 签名（LBA1 的 512 与 4096 偏移都不是 EFI PART）"));
+    say(QStringLiteral("GPT：扇区大小探测为 %1 字节").arg(sectorSize));
+
+    // parsePrimary 的契约 = "头 + 整张条目表在同一个缓冲里"：按头字段算准范围后补读一次
+    //（上限 kPrimaryAreaMax = 0x22 扇区；头字段不可用/超上限则不补读，交给 parsePrimary 报精确原因）
+    quint64 needBytes = 0;
+    if (primaryExtent(head, sectorSize, &needBytes) && needBytes > quint64(head.size())
+        && needBytes <= kPrimaryAreaMax) {
+        QByteArray bigger;
+        if (read(0, int((needBytes + sectorSize - 1) / sectorSize * sectorSize), &bigger, nullptr)
+            && bigger.size() > head.size())
+            head = bigger;
+    }
     quint32 sectorSize = 0;
     for (quint32 ss : {512u, 4096u}) {
         if (head.size() >= int(2 * ss) + 8 && head.mid(int(ss), 8) == QByteArray("EFI PART", 8)) {
@@ -597,18 +629,29 @@ bool readTable(const ReadFn &read, quint64 diskSectors, Table &out, QStringList 
     }
     say(QStringLiteral("主 GPT 不可用（%1）").arg(primaryErr));
 
-    // 2) 备份兜底：读磁盘末尾 34 扇区（上游这段实际不生效，我们实现正确）
+    // 2) 备份兜底（上游这段实际不生效：partition.py:45 的 seek 被 gpt.py:161 的绝对 seek 覆盖）
+    //    ⚠️ 实施期更正：窗口起点 = 备份头里的 part_entry_start_lba（读磁盘**末扇区**得到），
+    //    终点 = 磁盘末尾；写死"末尾 34 扇区"在真样本（8 扇区窗口）上会把请求整体落到窗口之外。
     if (diskSectors < kBackupWindowSectors)
         return fail(QStringLiteral("主 GPT 不可用且磁盘扇区数未知/过小（%1）—— 无法读备份 GPT").arg(diskSectors));
-    const quint64 windowFirstLba = diskSectors - kBackupWindowSectors;
+    const quint64 headerLba = diskSectors - 1;
+    QByteArray backHdr;
+    if (!read(headerLba * sectorSize, int(sectorSize), &backHdr, nullptr) || backHdr.size() < 0x5C
+        || backHdr.left(8) != QByteArray("EFI PART", 8))
+        return fail(QStringLiteral("主 GPT 与备份 GPT 都不可用：主（%1）；备（末扇区 LBA %2 无 EFI PART）")
+                        .arg(primaryErr).arg(headerLba));
+    const quint64 windowFirstLba = rdU64(backHdr, 0x48);       // 备份条目区起点 = 窗口起始 LBA
+    if (windowFirstLba >= diskSectors || diskSectors - windowFirstLba > kBackupWindowSectors)
+        return fail(QStringLiteral("备份 GPT 条目区起点异常（LBA %1，磁盘 %2 扇区）").arg(windowFirstLba).arg(diskSectors));
+    const quint64 windowSectors = diskSectors - windowFirstLba;
     QByteArray tail;
-    if (!read(windowFirstLba * sectorSize, int(kBackupWindowSectors * sectorSize), &tail, error))
-        return fail(QStringLiteral("备份 GPT 读取失败（LBA %1 起 %2 扇区）").arg(windowFirstLba).arg(kBackupWindowSectors));
+    if (!read(windowFirstLba * sectorSize, int(windowSectors * sectorSize), &tail, error))
+        return fail(QStringLiteral("备份 GPT 读取失败（LBA %1 起 %2 扇区）").arg(windowFirstLba).arg(windowSectors));
     QString backupErr;
     if (!parseBackup(tail, sectorSize, windowFirstLba, out, &backupErr))
         return fail(QStringLiteral("主 GPT 与备份 GPT 都不可用：主（%1）；备（%2）").arg(primaryErr, backupErr));
     out.diskSectors = diskSectors;
-    say(QStringLiteral("已使用**备份** GPT（窗口 LBA %1 起 %2 扇区）").arg(windowFirstLba).arg(kBackupWindowSectors));
+    say(QStringLiteral("已使用**备份** GPT（窗口 LBA %1 起 %2 扇区）").arg(windowFirstLba).arg(windowSectors));
     return true;
 }
 
