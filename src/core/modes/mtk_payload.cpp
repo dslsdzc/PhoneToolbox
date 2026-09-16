@@ -677,8 +677,7 @@ bool decideGeneration(const ChipInfo *chip, bool daIsV6, MtkGeneration &out, QSt
         return false;
     }
     if (chip->iot) {
-        if (error) *error = QStringLiteral("IoT 芯片（hw_code=0x%1）：三代映射均未实现，明确拒绝")
-                                .arg(chip->hwCode, 4, 16, QLatin1Char('0'));
+        if (error) *error = QStringLiteral("IoT 芯片：三代映射均未实现，明确拒绝");   // hw_code 由调用方包装层给出（避免文案重复值）
         return false;
     }
     if (daIsV6 || chip->damode == DaMode::Xml) {   // v6 **强制** XML（DC:216），优先于表

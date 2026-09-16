@@ -1585,7 +1585,7 @@ void TestMtkXflashPayload::getPartitionCataMapsGptAndPmt()
         mtkbrom::XFlashSession x(&m, 0x6765);
         mtkbrom::PartitionCata c = mtkbrom::PartitionCata::Gpt;
         QVERIFY(mtkbrom::xflashGetPartitionCata(x, c, nullptr));
-        QCOMPARE(c, mtkbrom::PartitionCata::Unknown);      // 其它值 → Unknown（调用方按"两者都试"处理）
+    Unknown,   // 回包其它值（上游 XFL:613-621 同样返回 0）—— **契约：调用方明确拒绝，不得"两者都试"**（T11 审查更正）
     }
 }
 QTEST_APPLESS_MAIN(TestMtkXflashPayload)
