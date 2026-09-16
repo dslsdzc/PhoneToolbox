@@ -761,7 +761,6 @@ git commit -m "feat(mtk): GPT 解析纯函数（真 4096 扇区样本 + 双 CRC 
       XFlashSession(IBromUsb *usb, quint16 dacode)
           : m_usb(usb), m_dacode(dacode) {}
 
-      bool xsendHeader(quint32 length, QString *error = nullptr);                 // **只写 12B 帧头**（sendParam/sendData 用）
       bool xsend(const QByteArray &payload, QString *error = nullptr);            // 帧头+载荷两次写
       bool xsendInt(quint32 v, QString *error = nullptr);                         // pack("<I", v)
       bool xsendInt64(quint64 v, QString *error = nullptr);                       // pack("<Q", v)
@@ -775,6 +774,8 @@ git commit -m "feat(mtk): GPT 解析纯函数（真 4096 扇区样本 + 双 CRC 
       bool sendData(const QByteArray &data, QString *error = nullptr);            // 帧头 + wMaxPacketSize 分块 + 一次 status
       bool sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteArray *reply, QString *error = nullptr);
   private:
+      // **只写 12B 帧头**（sendParam/sendData 用；无生产消费者 → T2 审查后定为 private，YAGNI）
+      bool xsendHeader(quint32 length, QString *error = nullptr);
       IBromUsb *m_usb;
       quint16 m_dacode;
   };
@@ -1148,8 +1149,10 @@ bool XFlashSession::sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteAr
 } // namespace mtkbrom
 ```
 
-> ⚠️ **两处待实现者按上游复核（写进报告）**：① `send_param` 的"0x200 分块"是**载荷内的分块**（`XFL:172`），而 `xsend` 已经把载荷**整段**写了一次——上游 `send_param` 直接用 `usbwrite(payload[...])` 循环而**不写帧头之外的整段**。**实现时按上游逐行核一遍**：若上游是"帧头一次写 + 载荷按 0x200 循环写"，则把 `xsend` 拆成 `xsendHeader(len)` + 分块写载荷两用（`sendParam` 用后者；`xsend` 保留整段写）。本条以上游为准，**结论与判据写进报告**。
-> ② `sendData` 的分块同理（`XFL:272-286`）——同样对照上游核一遍。
+> ✅ **已裁决（T2 实施期，见本任务 brief 尾部的控制方裁决）**：上游 `xflash_lib.py:163-177`（`send_param`）与 `:273-281`（`send_data`）
+> 都是 **"帧头写一次 + 载荷按 0x200 / wMaxPacketSize 循环写"**，**没有**"整段载荷写一次"这回事 —— 本计划原稿"整帧 `xsend` + 再分块"
+> 会把载荷**写两遍**（T2 实施者实证抓出）。现状：`xsendHeader(len)`（private）+ 分块写载荷；`xsend` 仍保留"头 + 整段载荷"供
+> 16B 参数帧之类的整帧场景使用。测试以**每笔 write 的次数与大小**为判据（拼接字节流不作为判据，否则"总字节相同"骗得过）。
 
 - [ ] **Step 4: 跑测试，确认通过**
 
