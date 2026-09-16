@@ -85,7 +85,10 @@ bool XmlSession::xsendText(const QString &text, QString *error)
     return m_usb->write(body, error);
 }
 
-// XL:151-153 的 bytes 分支：length = len(data)，**不追加 NUL**
+// XL:151-153 的 bytes 分支：length = len(data)，**不追加 NUL**。
+// 注（**与上游的分歧**，Minor 6a）：空载荷时本实现**跳过**第二次写，而上游 `xsend` 的 bytes 分支是
+// **无条件** `usbwrite(data)`（0 长度也会走一次传输层）。与同族 `XFlashSession::xsend` 的姿态保持一致；
+// 帧头照发（length=0），线上的帧序列差异仅"空载荷时少一次 0 长度写"。
 bool XmlSession::xsendBytes(const QByteArray &data, quint32 datatype, QString *error)
 {
     if (!m_usb)
@@ -139,6 +142,9 @@ bool XmlSession::readPayload(quint32 length, QByteArray &out, QString *error)
 // XL:221-232 get_response + XL:107-132 xread：xread 是**循环** —— DT_MESSAGE（DA 日志）帧的载荷被
 // 读掉、追加进 UART log，然后**继续读下一帧**；只有 DT_PROTOCOL_FLOW 才返回给调用方。
 // 本层同样跳过日志帧（文本交给 logSink），但限定连续跳过次数（上游无上限）。
+// 注（**与上游的分歧**，Minor 6b）：**除协议流/日志帧以外**的 datatype，本层也统按"日志"收下交给
+// logSink（失败文案里叫"DA 日志刷屏"），而上游 xread 对它们是**静默丢弃**（既不返回也不记录）——
+// 这是本层的选择（让未知内容在上层可见），**不是**上游忠实行为。
 bool XmlSession::getResponse(QString &text, QString *error)
 {
     text.clear();
@@ -193,7 +199,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             if (error) *error = QStringLiteral("XML：OK@ 长度解析失败（%1）").arg(data.mid(at + 1));
             return false;
         }
-        if (!ack(error))                                       // XL:377
+        if (!ack(error))                                       // XL:376
             return false;
         QString done;
         if (!getResponse(done, error))                         // XL:378
@@ -202,7 +208,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             if (error) *error = QStringLiteral("XML：数据路径的确认响应不是 OK（%1）").arg(done);
             return false;
         }
-        if (!ack(error))                                       // XL:380
+        if (!ack(error))                                       // XL:379
             return false;
         // XL:381-385：按宣布长度**逐帧**收数据，收满后才 ack **一次**。
         // （上游 `download_raw`（XL:508-589，T10 的读路径）是"每帧 ack → 读 OK → 再 ack"的逐帧节奏；
@@ -247,7 +253,7 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
             got += quint32(chunk.size());
             consecutiveLogs = 0;                               // 有进展 → 连击清零
         }
-        if (!ack(error))                                       // XL:386
+        if (!ack(error))                                       // XL:388
             return false;
         if (bytes.size() != int(len)) {                        // 宣布长度与实际不符 → 失败（比上游严格）
             if (error) *error = QStringLiteral("XML：数据长度不符（要 %1，得 %2）").arg(len).arg(bytes.size());
@@ -261,16 +267,16 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
     // 保活：PROGRESS-REPORT 直到 "OK!EOT"（XL:390-407）
     if (cmd == QStringLiteral("CMD:PROGRESS-REPORT")) {
         say(QStringLiteral("XML：DA 上报进度（保活）"));
-        if (!ack(error))                                       // XL:399
+        if (!ack(error))                                       // XL:398
             return false;
         QString line;
         do {
-            if (!getResponse(line, error))                     // XL:402
+            if (!getResponse(line, error))                     // XL:401
                 return false;
-            if (!ack(error))                                   // XL:403（末次 ack 也不可省）
+            if (!ack(error))                                   // XL:402（末次 ack 也不可省）
                 return false;
         } while (line != QStringLiteral("OK!EOT"));
-        if (!getResponse(data, error))                         // XL:404：**不** ack，直接读下一条命令
+        if (!getResponse(data, error))                         // XL:403：**不** ack，直接读下一条命令
             return false;
         cmd = field(data, QStringLiteral("command"));
     }
@@ -373,6 +379,13 @@ bool XmlSession::sendCommand(const QString &xml, Result *out, bool noack, QStrin
     Result r;
     if (!readCommandResult(r, nullptr, error))                 // XL:194
         return false;
+    // 审查 #3 的**精确形态**（XL:210-211）：上游 `get_command_result` 对不可解析帧返回 `("", "")`，
+    // `send_command` 原样把它返回 —— 那是**假值**，调用方看到的是失败。我们的 `Result` 没有"假值/真值"，
+    // 故显式判"三空"：绝不能让调用方拿到"成功 + 空结果"。这也是 `OK@0x0`（0 长度数据帧）的唯一拦截点。
+    if (r.command.isEmpty() && r.bytes.isEmpty() && r.text.isEmpty()) {
+        if (error) *error = QStringLiteral("XML：命令响应为空结果（既非 CMD:END/CMD:START、也非具名命令或数据帧）");
+        return false;
+    }
     if (r.command == QStringLiteral("CMD:END")) {              // XL:195
         if (r.text != QStringLiteral("OK")) {                  // XL:196-198
             if (error) *error = QStringLiteral("XML：命令以 CMD:END 结束但结果非 OK（%1）").arg(r.text);
