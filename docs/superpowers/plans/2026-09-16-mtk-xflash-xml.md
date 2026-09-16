@@ -2823,20 +2823,35 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
         }
         if (!ack(error))
             return false;
+        // ⚠️ 计划期更正（T10 预核对，上游 `download_raw` `xml_lib.py:508-589`）：数据是**逐帧**收的 ——
+        //    每收一帧：收帧 → ack() → 读一个 "OK"（不是 OK 就停）→ **再 ack()**。原稿"按长度收完所有帧
+        //    再 ack 一次"会让设备在等不到逐帧 ack 的情况下不再发下一帧（真机上卡死/超时）。
         QByteArray bytes;
-        for (quint32 got = 0; got < len;) {                 // 按长度收数据帧
+        for (quint32 got = 0; got < len;) {
+            quint32 dt = 0, flen = 0;
+            if (!xreadHeader(dt, flen, error))             // 数据帧 = 12B 头 + 载荷
+                return false;
             QByteArray chunk;
-            if (!readPayload(qMin<quint32>(len - got, 1u << 20), chunk, error))
+            if (!readPayload(flen, chunk, error))
                 return false;
             bytes += chunk;
             got += quint32(chunk.size());
+            if (!ack(error))
+                return false;
+            QString okr;
+            if (!getResponse(okr, error))
+                return false;
+            if (!okr.contains(QStringLiteral("OK"))) {
+                if (error) *error = QStringLiteral("XML：逐帧确认不是 OK（收到 %1，已收 %2/%3 字节）").arg(okr).arg(got).arg(len);
+                return false;
+            }
+            if (!ack(error))
+                return false;
         }
         if (bytes.size() != int(len)) {
             if (error) *error = QStringLiteral("XML：数据长度不符（要 %1，得 %2）").arg(len).arg(bytes.size());
             return false;
         }
-        if (!ack(error))
-            return false;
         out.command = QString();
         out.bytes = bytes;
         return true;
@@ -3194,10 +3209,11 @@ git commit -m "feat(mtk): XML 载荷①（CMD:START 握手 + setup_env/setup_hw_
 - Produces:
   ```cpp
   namespace mtkbrom {
-  // 写一个分区（XL:943-980 逐句）：
-  //   ① WRITE-FLASH（noack）→ ② FileSysOp(key 必须 "FILE-SIZE"）→ ③ ackValue(**length**)
-  //   → ④ DwnFile（拿 packet_length）→ ⑤ 数据补零到 512 → ⑥ upload 循环（ackValue(0) → xsend(块) → 各期望 OK）
-  //   → ⑦ ack() → CMD:END(OK) → ack() → CMD:START
+  // 写一个分区（XL:943-980 + upload `:451-506` 逐句）：
+  //   ① WRITE-FLASH（noack）→ ② FileSysOp(key 必须 "FILE-SIZE"）→ ③ ackValue(**length**) → ④ 读 DwnFile（拿 packet_length）
+  //   → ⑤ **再 ackValue(length) 一次 + 读 "OK"**（`upload()` 内部自己又发一次长度 ack，见 `:459-461`；**漏掉它会整体错位**）
+  //   → ⑥ 数据补零到 512 → ⑦ 逐包：ackValue(0) → 读 "OK" → xsend(块) → 读 "OK"
+  //   → ⑧ ack() → 读 CMD:END(OK) → ack() → 读 CMD:START
   // mem_offset 恒 0x8000000（`XFL` 无关；`XC:461` 的默认值），source_file = MEM://0x<mem_offset>:0x<length>
   bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
                          QStringList *log = nullptr, QString *error = nullptr);
@@ -3219,12 +3235,13 @@ void TestMtkXmlPayload::writePartitionSequence()
     m.reads << textReads(QStringLiteral("OK"))                                     // ① WRITE-FLASH 被接受（noack）
             << textReads(QStringLiteral("<host><command>CMD:FILE-SYS-OPERATION</command><arg>"
                                         "<key>FILE-SIZE</key><file_path>MEM://0x8000000:0x600</file_path></arg></host>"))
-            << textReads(QStringLiteral("OK"))                                     // ③ ack value 的响应
+            // ⚠️ 顺序（T10 预核对更正）：③ ack(length) 的应答就是 **DwnFile**；⑤ 再 ack(length) 的应答才是 "OK"
             << textReads(QStringLiteral("<host><command>CMD:DOWNLOAD-FILE</command><arg>"
                                         "<checksum>CHK_NO</checksum><info>2nd-DA</info>"
                                         "<source_file>MEM://0x8000000:0x600</source_file>"
                                         "<packet_length>0x400</packet_length></arg></host>"))
-            << textReads(QStringLiteral("OK"))                                     // ⑤ 第一包前的 ack(0) 响应
+            << textReads(QStringLiteral("OK"))                                     // ⑤ 第二次 ack(length) 的应答
+            << textReads(QStringLiteral("OK"))                                     // ⑥ 第一包前的 ack(0) 响应
             << textReads(QStringLiteral("OK"))                                     // 第一包数据后的响应
             << textReads(QStringLiteral("OK"))                                     // 第二包前的 ack(0) 响应
             << textReads(QStringLiteral("OK"))                                     // 第二包数据后的响应
@@ -3270,13 +3287,16 @@ void TestMtkXmlPayload::readPartitionSequence()
 {
     MockUsbChannel m;
     const QByteArray payload(0x200, '\x77');
+    // ⚠️ 逐帧形状（T10 预核对更正，上游 download_raw `XL:508-589`）：收一帧 → ack → 读 "OK" → **再 ack**
     m.reads << textReads(QStringLiteral("OK"))                                     // READ-FLASH 被接受（noack）
             << textReads(QStringLiteral("<host><command>CMD:UPLOAD-FILE</command><arg>"
                                         "<checksum>CHK_NO</checksum><info>ROM_0</info>"
                                         "<target_file>ROM_0</target_file></arg></host>"))
             << textReads(QStringLiteral("OK@0x200"))                               // 裸数据路径：长度
-            << textReads(QStringLiteral("OK"))                                     // 长度确认
+            << textReads(QStringLiteral("OK"))                                     // 长度确认（首个 ack 的应答）
             << frameReads(1, payload)                                              // 数据帧（头、载荷两笔）
+            << textReads(QStringLiteral("OK"))                                     // 逐帧确认（该帧第一个 ack 的应答）
+            // 该帧第二个 ack 之后循环结束 → 收尾读 CMD:START（由 readCommandResult 消费）
             << textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
     mtkbrom::XmlSession x(&m);
     QByteArray got;
@@ -3345,7 +3365,18 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
         if (error) *error = QStringLiteral("XML 写：期待 CMD:DOWNLOAD-FILE（收到 %1）").arg(dwn.command);
         return false;
     }
-    // ⑤⑥ 数据包循环（XL:472-489）：每包先 ackValue(0) 期望 OK，再发原始帧块期望 OK
+    // ⑤ **再确认一次长度**：上游 `upload()` 自己又发一次 `ack_value(length)` 并等一个 "OK"（`XL:459-461`）——
+    //    漏掉这一发一读，后面每一帧都会错位（计划期预核对抓到的差异）。
+    if (!x.ackValue(length, error))
+        return false;
+    QString dwnOk;
+    if (!x.getResponse(dwnOk, error))
+        return false;
+    if (!dwnOk.contains(QStringLiteral("OK"))) {
+        if (error) *error = QStringLiteral("XML 写：DOWNLOAD-FILE 之后未获 OK（收到 %1）").arg(dwnOk);
+        return false;
+    }
+    // ⑥⑦ 数据包循环（XL:472-489）：每包先 ackValue(0) 期望 OK，再发原始帧块期望 OK
     const QByteArray padded = padTo512(data);
     for (int pos = 0; pos < padded.size(); pos += int(dwn.packetLength)) {
         const QByteArray block = padded.mid(pos, int(dwn.packetLength));
