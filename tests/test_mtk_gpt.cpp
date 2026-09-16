@@ -181,7 +181,7 @@ void TestMtkGpt::rejectsGarbageSignatureAndBadRevision()
     QVERIFY2(err.contains(QStringLiteral("revision")) || err.contains(QStringLiteral("版本")), qPrintable(err));
 }
 
-// —— 合成负向：头部 CRC 改坏 → 拒绝（fail-closed）——
+// —— 合成负向：头部 CRC 改坏 / 条目表 CRC 改坏 → 各自拒绝（fail-closed）——
 void TestMtkGpt::rejectsBadCrc()
 {
     const QByteArray good = mtkgpt::testBuildSyntheticGpt(512, 64);
@@ -193,6 +193,15 @@ void TestMtkGpt::rejectsBadCrc()
     err.clear();
     QVERIFY(!mtkgpt::parsePrimary(bad, 512, t, &err));
     QVERIFY2(err.contains(QStringLiteral("CRC")), qPrintable(err));
+
+    // ② 条目表内容改坏（首条名字的一个字节；头与头部 CRC 字段都不动）→ 必须由**条目表 CRC** 拦下。
+    //    只翻头部 CRC 字段的①挡不住"条目表校验被删"：计划要求两个 CRC 都 fail-closed，
+    //    后半段必须有自己的回归钉子。
+    QByteArray badEntries = good;
+    badEntries[2 * 512 + 56] = char(quint8(badEntries.at(2 * 512 + 56)) ^ 0xFF);
+    err.clear();
+    QVERIFY(!mtkgpt::parsePrimary(badEntries, 512, t, &err));
+    QVERIFY2(err.contains(QStringLiteral("条目表 CRC")), qPrintable(err));
 }
 
 // —— 合成正向：1 个分区的合法 GPT（正确双 CRC）——
