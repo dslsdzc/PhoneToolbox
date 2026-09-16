@@ -110,7 +110,11 @@ class TestMtkXmlPayload : public QObject
 private slots:
     void handshakeSequence();
     void handshakeRejectsUnexpectedFirstCommand();
+    void handshakeRejectsUnlistedFirstCommand();
     void handshakeFailsWhenSetupEnvRejected();
+    void handshakeFailsWhenHostSupportedCommandsRejected();
+    void handshakeFailsWhenNotifyInitHwRejected();
+    void handshakeFailsWhenSetHostInfoRejected();
     void handshakeSurvivesDaLogFramesInCommandStream();
     void setupEnvPayloadFields();
 };
@@ -183,8 +187,24 @@ void TestMtkXmlPayload::handshakeRejectsUnexpectedFirstCommand()
     QCOMPARE(sentXml(m).size(), 0);     // 首条不是 CMD:START → 一条命令都不许发
 }
 
+// T8 契约的**字面形态**（`mtk_xml_session.h`）：**具名但未列举**的命令（如扩展命令 CMD:CUSTOMX）
+// 让 readCommandResult 返回 true 而只置 out.command —— 题面风险 3 的原形。首条即这种帧时，
+// 握手必须靠"核对 out.command"拒掉（去掉核对就会把它当同步信号放行、继续发 setup_env）。
+void TestMtkXmlPayload::handshakeRejectsUnlistedFirstCommand()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("<host><command>CMD:CUSTOMX</command></host>"));
+    mtkbrom::XmlSession x(&m);
+    QString err;
+    QVERIFY(!mtkbrom::xmlDa1Handshake(x, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("CMD:START")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("CMD:CUSTOMX")), qPrintable(err));   // 文案须报出实收命令
+    QCOMPARE(sentXml(m).size(), 0);     // 同样一条命令都不许发
+}
+
 // 铁律 18 的姿态：上游 upload_da1 对三步的返回值**一概不检查**（XL:311-313），本层任一失败即
-// 中止 —— 本用例钉 setup_env 被设备拒绝时整个握手失败（若退回"忽略返回值"则会假绿）
+// 中止 —— 本用例钉 setup_env 被设备拒绝时整个握手失败（若退回"忽略返回值"则会假绿）。
+// 同时钉失败文案**点名到本步**（单前缀 + 具体命令，reviewer Minor 2）。
 void TestMtkXmlPayload::handshakeFailsWhenSetupEnvRejected()
 {
     MockUsbChannel m;
@@ -193,8 +213,60 @@ void TestMtkXmlPayload::handshakeFailsWhenSetupEnvRejected()
     mtkbrom::XmlSession x(&m);
     QString err;
     QVERIFY(!mtkbrom::xmlDa1Handshake(x, nullptr, &err));
-    QVERIFY2(err.contains(QStringLiteral("ERR!INVALID-PARAM")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("setup_env")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("SET-RUNTIME-PARAMETER")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("ERR!INVALID-PARAM")), qPrintable(err));   // 内层措辞保留
     QCOMPARE(sentXml(m).size(), 1);     // 只发了 setup_env 的命令就中止（不再发后两条）
+}
+
+// 第 2 步 setup_hw_init 的**第一条**命令被拒 → 中止，且文案点名到它（不是笼统的"设备返回错误"；
+// 去掉该处返回值检查、或只报通用文案，本用例都会红）
+void TestMtkXmlPayload::handshakeFailsWhenHostSupportedCommandsRejected()
+{
+    MockUsbChannel m;
+    m.reads << deviceStartReads()
+            << commandReads()                                     // SET-RUNTIME-PARAMETER 成功
+            << textReads(QStringLiteral("ERR!NO-CAP"));           // HOST-SUPPORTED-COMMANDS 被拒
+    mtkbrom::XmlSession x(&m);
+    QString err;
+    QVERIFY(!mtkbrom::xmlDa1Handshake(x, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("HOST-SUPPORTED-COMMANDS")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("ERR!NO-CAP")), qPrintable(err));
+    QCOMPARE(sentXml(m).size(), 2);     // NOTIFY-INIT-HW 不许发（第一条就失败）
+}
+
+// 第 2 步的**第二条**命令（NOTIFY-INIT-HW）被拒 → 中止（两条命令的返回值都要看，只检查第一条不够）
+void TestMtkXmlPayload::handshakeFailsWhenNotifyInitHwRejected()
+{
+    MockUsbChannel m;
+    m.reads << deviceStartReads()
+            << commandReads()                                     // SET-RUNTIME-PARAMETER
+            << commandReads()                                     // HOST-SUPPORTED-COMMANDS 成功
+            << textReads(QStringLiteral("ERR!NO-HW"));            // NOTIFY-INIT-HW 被拒
+    mtkbrom::XmlSession x(&m);
+    QString err;
+    QVERIFY(!mtkbrom::xmlDa1Handshake(x, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("NOTIFY-INIT-HW")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("ERR!NO-HW")), qPrintable(err));
+    QCOMPARE(sentXml(m).size(), 3);     // 走到第三条就中止（set_host_info 不许发）
+}
+
+// 第 3 步 SET-HOST-INFO 被拒 → 整条握手失败（上游此处**不看返回值**，退回上游姿态就会假绿）
+void TestMtkXmlPayload::handshakeFailsWhenSetHostInfoRejected()
+{
+    MockUsbChannel m;
+    m.reads << deviceStartReads()
+            << commandReads()                                     // SET-RUNTIME-PARAMETER
+            << commandReads()                                     // HOST-SUPPORTED-COMMANDS
+            << commandReads()                                     // NOTIFY-INIT-HW
+            << textReads(QStringLiteral("ERR!NO-INFO"));          // SET-HOST-INFO 被拒
+    mtkbrom::XmlSession x(&m);
+    QString err;
+    QVERIFY(!mtkbrom::xmlDa1Handshake(x, nullptr, &err));
+    QVERIFY2(err.contains(QStringLiteral("set_host_info")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("SET-HOST-INFO")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("ERR!NO-INFO")), qPrintable(err));
+    QCOMPARE(sentXml(m).size(), 4);
 }
 
 // DA 日志帧（DT_MESSAGE）夹在命令响应流里（DA 起环境时日志最密）→ 必须**跳过**并把文本交给
