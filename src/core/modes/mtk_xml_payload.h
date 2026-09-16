@@ -34,6 +34,40 @@
 // —— `XmlSession` 文案自带的 "XML：" 层名前缀先剥掉再套（不成双前缀）；点名到具体命令
 // （`setup_hw_init` 的两条命令可分），内层措辞（实收内容 / `ERR!` 码值）逐字保留。
 
+// MTK XML（D3）载荷 ②（Phase D2+D3 Task 10）：WRITE-FLASH / READ-FLASH 的数据通路
+//
+// 协议细节对照 mtkclient v2.1.4-20-g71b0175（GPL-3.0，**只读参照，代码文本不进仓库**）：
+//   • XL = mtkclient/Library/DA/xmlflash/xml_lib.py
+//   • XC = mtkclient/Library/DA/xmlflash/xml_cmd.py（命令信封构造器）
+//
+// **两条数据通路的节拍不同，不要互抄**（计划期预核对 + 本任务与上游逐句核对）：
+//   • 写（`writeflash` XL:943-983 + `upload` XL:451-506，后者以 raw=True 调用）：
+//     ① WRITE-FLASH（noack）→ ② 设备发 FileSysOp（key 必须 FILE-SIZE，XL:967-968）
+//     → ③ ackValue(**length**)（XL:969）→ ④ 设备发 DwnFile（带 packet_length，XL:970-971）
+//     → ⑤ **再** ackValue(length) + 读 "OK"（`upload()` 自己又发一次长度 ack，`XL:463-464`；
+//       漏掉这一发一读，后面每一帧都错位）→ ⑥ 逐包 {ackValue(0) → 读 "OK" → 发块 → 读 "OK"}
+//     （XL:468-486）→ ⑦ ack（`XL:487-488` 的 raw 分支）→ CMD:END(OK) → ack → CMD:START。
+//     ⚠️ ⑦ 里 **CMD:END 与 CMD:START 之间没有独立的 "OK" 应答帧** —— `ack()` 是写，它的"回应"
+//     就是下一条命令。同形状见 `check_lifecycle`（XL:987-1003：`download()` 的尾 ack `XL:583`
+//     之后直接读 CMD:END）。简令的写夹具在两者之间多排了一帧 "OK"，以上游为准（测试文件订正 #3）。
+//   • 读（`readflash` XL:918-941 → `download_raw` XL:508-559）：READ-FLASH（noack）→ 设备发
+//     UpFile → 裸 `OK@0x<len>` → ack → 读 "OK" → ack → **逐帧** {收一帧 → ack → 读 "OK" → ack}
+//     → CMD:START。这个**逐帧 ack** 与 `get_command_result` 的裸 OK@ 分支（`XL:373-388`，单次
+//     尾 ack，即 `XmlSession::readCommandResult`）**不是**一回事，故 `xmlReadDataFrames` 独立实现，
+//     不得改走 `readCommandResult`（T8 实施期实测 + 控制方核对）。
+//
+// **与上游的分歧（有意，写在 .cpp 各入口注释里）**：
+//   ① 读路径要求"设备宣布的长度 == 请求长度"（上游 `XL:517-518` 直接用宣布值覆盖请求值，
+//      调用方拿到短包也发现不了；本层与 T8 的"数据长度不符"检查同姿态，fail-closed）；
+//   ② 数据帧途中的 DT_MESSAGE（DA 日志）帧：上游 `xread` 会把内容追加进 UART log，本层**读掉
+//      但丢弃** —— `XmlSession` 只提供 `setLogSink` 没有 getter，载荷层拿不到 sink（见 .cpp）。
+//
+// 诚实边界：
+//   • **不发 EMI**、**不判代际**（同 T9）
+//   • **不做分区表读取/代际路由**：分区名与长度由调用方给（T12 的链式集成）
+//   • 写偏移恒 0x0（XC:452-462 的 `<offset>`；上游 writeflash 的 addr 由调用方传，本接口未暴露）
+
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 
@@ -60,5 +94,25 @@ bool xmlSetupHwInit(XmlSession &x, QString *error = nullptr);
 
 // SET-HOST-INFO（XL:329-331 + XC:600-612）：`<info>%Y%m%dT%H%M%S</info>`，本地时间戳。
 bool xmlSetHostInfo(XmlSession &x, QString *error = nullptr);
+
+// 写一个分区（XL:943-983 + XL:451-506）：数据不足 512 整数倍时**补零**到整数倍（XL:974-976），
+// 宣布长度 = 补零后的字节数，descriptor = `MEM://0x8000000:<length>`（XC:452-462 的默认 mem_offset
+// 0x8000000 + offset 0x0）。log 非空时追加一条中文完成行。空数据直接失败。
+bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
+                       QStringList *log = nullptr, QString *error = nullptr);
+
+// 收 length 字节数据帧（**上游 `download_raw` 形状**，XL:508-559）：读裸 `OK@0x<len>` → ack →
+// 读 "OK" → ack → 循环{ 收一帧 → ack → 读 "OK" → ack }。**不要**复用
+// `XmlSession::readCommandResult` 的裸 OK@ 路径（那条是 `get_command_result` 的单次尾 ack，节奏不同）。
+bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *error = nullptr);
+
+// 读一个分区（XL:918-941）：READ-FLASH（noack）→ 设备发 UpFile → xmlReadDataFrames（逐帧 ack）
+// → 收尾 CMD:START。
+bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, quint32 length,
+                      QByteArray &out, QString *error = nullptr);
+
+// 收尾复位（XL:1038-1046 的 shutdown → XC:429-440 cmd_reboot）：action = DISCONNECT（默认）/
+// IMMEDIATE；走 send_command 的**默认**节奏（OK → CMD:END → CMD:START）。
+bool xmlReboot(XmlSession &x, bool disconnect = true, QString *error = nullptr);
 
 } // namespace mtkbrom
