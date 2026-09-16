@@ -313,7 +313,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_flash_plan.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_fetch.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_plan_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_gpt.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_gpt.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xflash_session.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -555,6 +556,14 @@ if(ENABLE_IMAGE_TESTS)
                     # MTK_SAMPLES_REQUIRED）已在下方按名命中本 stem，无需重复。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_xflash_session")
+                    # Phase D2 Task 2：XFlash 12B 帧层。除被测源外还要 mtk_brom.cpp ——
+                    # 夹具只实现 IBromUsb 的纯虚函数，readExact 用的是**默认实现**
+                    # （单次读 + 严格长度，mtk_brom.cpp:219-231），不补会链接期炸（undef）。
+                    # mtk_brom.cpp 拖 libusb，故本目标进下方 libusb 链接名单。不用真样本。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xflash_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -602,6 +611,7 @@ if(ENABLE_IMAGE_TESTS)
                 if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
                    OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline"
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
+                   OR _test_stem STREQUAL "test_mtk_xflash_session"
                    OR _test_stem STREQUAL "test_odin_libusb_transport")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
