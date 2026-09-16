@@ -367,7 +367,11 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
                         # D2 T7：计划层新增 GPT→参照表适配（mtkgpt::sizeBytes）→ 本目标也必须链 mtk_gpt.cpp（纯 Qt Core），否则链接期 undef。
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp
+                        # D2 T11：bromFlashOnSession 新增 XFlash 代际分派（xflashBringUpDa / GPT 读表 /
+                        # xflashWriteData / SHUTDOWN）→ 必须链 XFlash 帧层与引导层（纯 Qt Core + 注入式通道）。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xflash_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xflash_payload.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
@@ -402,6 +406,10 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
                         # D2 T7：计划层新增 GPT→参照表适配（mtkgpt::sizeBytes）→ 本目标也必须链 mtk_gpt.cpp（纯 Qt Core），否则链接期 undef。
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp
+                        # D2 T11：mtk_payload.cpp 的 bromFlashOnSession 新增 XFlash 代际分派 →
+                        # 本目标同样必须链 XFlash 帧层与引导层，否则链接期 undef（同 T7 的教训）。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xflash_session.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xflash_payload.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp

@@ -6,10 +6,14 @@
 #include <utility>
 
 #include "core/modes/mtk_brom.h"
+#include "core/modes/mtk_chip_table.h"   // ChipInfo / DaMode（decideGeneration 用例直接用）
 #include "core/modes/mtk_da_file.h"
 #include "core/modes/mtk_emmc.h"
+#include "core/modes/mtk_gpt.h"
 #include "core/modes/mtk_payload.h"
 #include "core/modes/mtk_preloader_fetch.h"
+#include "core/modes/mtk_xflash_payload.h"
+#include "core/modes/mtk_xflash_session.h"
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
@@ -49,6 +53,26 @@ public:
 };
 
 namespace {
+
+// ---- D2/D3：XFlash 应答帧夹具（**一帧 = 两笔队列项**）----
+// 默认 `IBromUsb::readExact` 是"单次读 + 严格长度"（mtk_brom.cpp:219-231）：XFlash 层先读 12B 帧头、
+// 再读载荷，每次 readExact 消耗**一笔**队列项。把整帧塞成一笔会让"读头"吃掉载荷、后续读全部错位。
+// 本文件 D1 的 LEGACY 夹具（逐字节 read）不受此约束，保持原样。
+QByteArray le32(quint32 v)
+{
+    QByteArray b(4, '\0');
+    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
+    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
+    return b;
+}
+// 12B 帧头（小端：magic + datatype + length）+ 载荷 = 两笔。**载荷为空时只有一笔**（xread 的
+// `len > 0` 前置判断不发第二次读）—— 需要"空回包"时别用本函数（那会留下一笔不被消耗的队列项）。
+QList<QByteArray> frameReads(quint32 dt, const QByteArray &payload)
+{
+    return {le32(0xFEEEEEEF) + le32(dt) + le32(quint32(payload.size())), payload};
+}
+// status 帧（datatype 1 + 4B 载荷）：既是一条 status 应答，也是读数据路径里"flag = 0"的收尾帧。
+QList<QByteArray> statusReads(quint32 code) { return frameReads(1, le32(code)); }
 
 // read_flash_info 的公共读序列（NOR info + NAND info(0x11) + info2 + EMMC + SDC + flashconfig）
 // —— 4 条 read_flash_info 用例共用，避免逐字重复。
@@ -266,12 +290,17 @@ private slots:
     void bromFlashOnSessionWritesPlanAndFinishes();
     void bromFlashOnSessionRejectsEmptyPlanBeforeAnyWrite();
     void bromFlashOnSessionRejectsUnknownHwCode();
-    void bromFlashOnSessionRejectsNonLegacyDamode();
+    void bromFlashOnSessionRoutesXflashEndToEnd();
     void bromFlashOnSessionRejectsIotChip();
     void bromFlashOnSessionRejectsV6DaFile();
     void bromFlashOnSessionContinuesWhenHwSwVerUnavailable();
     void bromFlashOnSessionWarnsButSucceedsWhenFinishFails();
     void bromFlashOnSessionLooksUpDaByDacode();
+    // ---- D2-T11: 三代路由（decideGeneration）+ XFlash 引导链 ----
+    void decideGenerationMatrix();
+    void xflashChainOrderWithEmi();
+    void xflashChainSkipsEmiForPreloaderAgent();
+    void xflashChainWarnsButContinuesWithoutPreloader();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -1226,22 +1255,69 @@ void TestMtkPayload::bromFlashOnSessionRejectsUnknownHwCode()
     QVERIFY2(err.contains(QStringLiteral("芯片表未收录")), qPrintable(err));
 }
 
-// 代际拒绝 ②：表内但**不是 LEGACY 代**（0x0766 = XFLASH）→ 明确报错（D2/D3 另做）
-void TestMtkPayload::bromFlashOnSessionRejectsNonLegacyDamode()
+// 代际路由 ②：表内 **XFLASH 代**（0x0766，dacode 0x6765）现在**不再被拒**，整条 XFlash 链走到底。
+// （本用例取代 D1 的 `bromFlashOnSessionRejectsNonLegacyDamode` —— 那条断言的"非 LEGACY 一律拒绝"
+// 正是本任务要拆掉的门。）
+// 设备 0x0766 → DA1 上传 → 0xC0 → 七步握手 → bring-up 四步（agent=brom，无 preloader → 不发 EMI）
+// → boot_to（剥签名）→ GET_PACKET_LENGTH / GET_CHIP_ID / GET_PARTITION_TBL_CATA → GPT 读（READ_DATA）
+// → 逐分区 xflashWriteData → SHUTDOWN 收尾。
+// 判别力：**写地址必须来自 GPT 的分区偏移**（0x4400 = LBA 34 × 512）、storage/parttype = eMMC/user(1/8)
+// —— 地址算错就是往别的分区里写；把 XFlash 当 LEGACY 处理则会在第一条 BROM 级帧就错位。
+void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
 {
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));   // 条目 hw_code == dacode
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    // GPT 夹具：16 扇区 × 512 = 8192 = readTable 的探测长度（kProbeLen）→ 一笔读满足，不触发补读；
+    // 单分区 "boot" = LBA 34..35（1024 字节 > 2 字节镜像）。
+    const QByteArray gpt = mtkgpt::testBuildSyntheticGpt(512, 16);
+
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
-    m->reads << prologueReads(0x0766);
+    m->reads << prologueReads(0x0766)                                     // 设备报的 hw_code（条目键是 dacode）
+             << da1UploadReads(sel) << QByteArray("\xC0", 1)
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))              // 握手 3 帧
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)                               // reset_key（2+参数）
+             << statusReads(0) << statusReads(0) << statusReads(0)                               // checksum_level
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)                               // boot_to（无 EMI）
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x200) + le32(0x400)) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray(10, '\0')) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x64))                     // CATA（唯一无尾部 status）
+             << statusReads(0) << statusReads(0) << statusReads(0) << frameReads(1, gpt) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0) << statusReads(0)              // 写：命令/参数/块/收尾
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0))                        // CC devctrl + 回包
+             << statusReads(0) << statusReads(0);                                                 // SHUTDOWN
 
     mtkbrom::BromFlashRequest req;
-    req.daFile = daBytesForHw(kFlashHwCode);
-    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    req.daFile = daBytesForHw(0x6765);            // 文件里条目的 hw_code 就等于 dacode
+    req.daLabel = QStringLiteral("合成 DA（XFlash 代）");
+    req.imagePaths << imgPath;
+
     SessionCapture cap;
-    QString err;
-    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
-    QVERIFY2(err.contains(QStringLiteral("XFLASH")), qPrintable(err));
-    QVERIFY2(err.contains(QStringLiteral("LEGACY")), qPrintable(err));
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);                 // 读队列必须正好清空（devctrl 尾部 status 漏读必错位）
+    QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XFLASH")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("GPT 读出 1 个分区")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("SHUTDOWN 收尾完成")), qPrintable(cap.joined()));
+
+    // 写参数必须点名 **GPT 给的分区偏移** + eMMC/user（56B = <IIQQ + 32B NandExtension，全 0）
+    const QByteArray expectedParam = le32(1) + le32(8) + le32(0x4400) + le32(0) + le32(0x200) + le32(0)
+                                     + QByteArray(32, '\0');
+    QVERIFY2(m->writes.contains(expectedParam), "WRITE_DATA 参数里的地址必须来自 GPT（LBA 34 × 512）");
+    QVERIFY2(m->writes.contains(image + QByteArray(510, '\0')), "镜像必须补零到 512 的整数倍写出");
+    QCOMPARE(cap.progress.size(), 1);
+    QCOMPARE(cap.progress.at(0).first, quint64(2));
+    QCOMPARE(cap.progress.at(0).second, quint64(2));
 }
 
 // 代际拒绝 ③：**IoT 芯片**（0x6226 = LEGACY + iot）→ 明确报错（上游 IoT 走另一套 region 映射）
@@ -1261,13 +1337,15 @@ void TestMtkPayload::bromFlashOnSessionRejectsIotChip()
     QVERIFY2(err.contains(QStringLiteral("IoT")), qPrintable(err));
 }
 
-// 代际拒绝 ④：**DA 文件是 v6**（XML 代；即使芯片是 LEGACY 也不能按 LEGACY 流程刷）
+// 代际拒绝 ④：**DA 文件是 v6**（强制 XML 代；即使芯片是 LEGACY 也不能按 LEGACY 流程刷）
+// T11 起 v6 由 decideGeneration 判成 XML → 走 XML 分支：链在 Task 12 接线，本任务**明确拒绝**
+// （不假装支持）。判别力：v6 若被漏判成 LEGACY，这里会走进 bromBringUpDa 并发出 BROM 级帧。
 void TestMtkPayload::bromFlashOnSessionRejectsV6DaFile()
 {
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
-    m->reads << prologueReads(kFlashHwCode);          // 芯片这四道门都过，才轮到 DA 文件
+    m->reads << prologueReads(kFlashHwCode);          // 芯片这几道门都过，才轮到 DA 文件
 
     mtkbrom::BromFlashRequest req;
     req.daFile = daBytesForHw(kFlashHwCode, /*v6=*/true);
@@ -1275,7 +1353,16 @@ void TestMtkPayload::bromFlashOnSessionRejectsV6DaFile()
     SessionCapture cap;
     QString err;
     QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
-    QVERIFY2(err.contains(QStringLiteral("v6")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("Task 12")), qPrintable(err));
+    QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XML")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("v6")), "日志必须点名 DA 是 v6（判定依据）");
+    // XML 链未接线 → **一个 DA 级字节都不许发**（前导段的 echo 命令字节不计）：
+    // 既不得出现 XFlash 帧（代际判成 XFlash 才会发），也不得出现 BROM 级 DA 上传
+    QVERIFY2(!m->writes.contains(le32(0xFEEEEEEF)), "XML 代不得发 XFlash 帧");
+    QVERIFY2(!m->writes.contains(QByteArray(1, char(0xD7))), "XML 代不得发 SEND_DA(0xD7)");
+    QVERIFY2(!m->writes.contains(QByteArray(1, char(0xD5))), "XML 代不得发 JUMP_DA(0xD5)");
+    QVERIFY2(!m->writes.contains(QByteArray(32, '\x02')), "XML 代不得发 DA1 载荷");
+    QCOMPARE(m->reads.size(), 0);
 }
 
 // **0xFC 降级**：设备不答 0xFC → 告警 + 按 0/0 继续（上游口径：不清零继续 → 版本过滤维旁路），
@@ -1372,6 +1459,158 @@ void TestMtkPayload::bromFlashOnSessionLooksUpDaByDacode()
     QVERIFY2(cap.joined().contains(QStringLiteral("DA 条目")), qPrintable(cap.joined()));
     QVERIFY2(cap.joined().contains(QStringLiteral("FINISH（0xD9）收尾完成")), qPrintable(cap.joined()));
     QVERIFY2(m->writes.contains(image), "镜像字节必须真的写出去");
+}
+
+// ---- D2-T11: 三代路由 + XFlash 引导链 ----
+
+// 代际判定（纯函数）：表外 / IoT / damode 与 v6 的优先关系（上游 daconfig.py:216 `DC:216`）
+void TestMtkPayload::decideGenerationMatrix()
+{
+    mtkbrom::ChipInfo legacy;
+    legacy.hwCode = 0x6752; legacy.damode = mtkbrom::DaMode::Legacy; legacy.iot = false;
+    mtkbrom::ChipInfo iot = legacy; iot.hwCode = 0x6226; iot.iot = true;
+    mtkbrom::ChipInfo xf = legacy; xf.hwCode = 0x6765; xf.damode = mtkbrom::DaMode::XFlash;
+    mtkbrom::ChipInfo xml = legacy; xml.hwCode = 0x0907; xml.damode = mtkbrom::DaMode::Xml;
+
+    mtkbrom::MtkGeneration g = mtkbrom::MtkGeneration::Xml;
+    QString err;
+    QVERIFY(mtkbrom::decideGeneration(&legacy, false, g, &err));
+    QCOMPARE(g, mtkbrom::MtkGeneration::Legacy);
+    QVERIFY(mtkbrom::decideGeneration(&xf, false, g, &err));
+    QCOMPARE(g, mtkbrom::MtkGeneration::XFlash);
+    QVERIFY(mtkbrom::decideGeneration(&xml, false, g, &err));
+    QCOMPARE(g, mtkbrom::MtkGeneration::Xml);
+    QVERIFY(mtkbrom::decideGeneration(&legacy, /*v6=*/true, g, &err));      // **v6 强制 XML**
+    QCOMPARE(g, mtkbrom::MtkGeneration::Xml);
+    err.clear();
+    QVERIFY(!mtkbrom::decideGeneration(nullptr, false, g, &err));           // 表外
+    QVERIFY(!err.isEmpty());
+    err.clear();
+    QVERIFY(!mtkbrom::decideGeneration(&iot, false, g, &err));              // IoT 明确拒绝
+    QVERIFY2(err.contains(QStringLiteral("IoT")), qPrintable(err));
+}
+
+// XFlash 全链（常规路径 agent=brom 且有 preloader）：0xC0 → 七步握手 → 四步 bring-up
+//   → INIT_EXT_RAM + EMI → boot_to（**已剥签名**的 DA2）
+void TestMtkPayload::xflashChainOrderWithEmi()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+
+    // preloader 夹具：extractEmiXflash 的切片 = **整个窗口**（不是 MTK_BIN+0xC），期望原样出现在写流里
+    const QByteArray preBytes = mtktest::buildEmiPreloader("38", QByteArray(0x340, '\xA5'));
+    mtkbrom::PreloaderResult pre;
+    pre.origin = mtkbrom::PreloaderOrigin::Explicit;
+    pre.path = QStringLiteral("/tmp/preloader_6765.bin");
+    pre.bytes = preBytes;
+
+    // 读队列：D1 的 DA1 上传（9 笔，含 SEND_DA + JUMP_DA）→ 0xC0 → 握手（**2×status** + SYNC 回读）
+    //        → bring-up 四步（**12×status + 2 回包**）→ EMI 两笔 → boot_to 三笔。**一帧 = 两笔**
+    // （SYNC 只发不读；四个查询的尾部 status 见 T4 的逐查询表 —— GET_PARTITION_TBL_CATA 是唯一例外）
+    m->reads = da1UploadReads(sel);
+    m->reads << QByteArray("\xC0", 1)
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)                // set_reset_key（2 + 参数 status）
+             << statusReads(0) << statusReads(0) << statusReads(0)                // set_checksum_level（同上）
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
+             << statusReads(0) << statusReads(0)                                  // INIT_EXT_RAM / EMI 数据
+             << statusReads(0) << statusReads(0) << statusReads(0);               // BOOT_TO / 数据 / 最终 status
+
+    mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::XFlashSession x(m, 0x6765);
+    QStringList log;
+    QVERIFY2(mtkbrom::xflashBringUpDa(brom, x, sel, pre, &log, &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);      // 读队列必须**正好**清空（漏读/多读都是后续错位的根源）
+
+    // 顺序断言：在**字节流**上比首次出现下标（0x434E5953 / 0x010100 / 0x010101 / 0x01000A / 0x010008 都是本链独占值）
+    const QByteArray &stream = m->writes;
+    const int iSync = stream.indexOf(le32(0x434E5953));
+    const int iEnv  = stream.indexOf(le32(mtkbrom::X_CMD_SETUP_ENV));
+    const int iHw   = stream.indexOf(le32(mtkbrom::X_CMD_SETUP_HW_INIT));
+    const int iEmi  = stream.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM));
+    const int iBoot = stream.indexOf(le32(mtkbrom::X_CMD_BOOT_TO));
+    QVERIFY2(iSync >= 0, "缺 XFlash SYNC 帧 —— 七步握手没跑");
+    QVERIFY2(iSync < iEnv && iEnv < iHw, "七步握手顺序：SYNC → SETUP_ENV → SETUP_HW_INIT");
+    QVERIFY2(iEmi > iHw, "INIT_EXT_RAM 必须在七步握手之后");
+    QVERIFY2(iBoot > iEmi, "BOOT_TO 必须在 EMI 之后");
+    QVERIFY2(stream.contains(preBytes), "EMI 必须原样发出（XFlash 整块切片）");
+    QVERIFY2(m->writeFrames.contains(le32(0x68)), "bring-up 第二步必须发 set_reset_key(0x68)");
+
+    // DA2 剥签名：写流里**有** da2NoSig、**没有**完整 da2Bytes
+    // （夹具按 region 填 0x01/0x02/0x03，两串在本链里都唯一 → "contains" 判据有判别力）
+    const QByteArray da2NoSig = sel.da2Bytes.left(sel.da2Bytes.size() - int(sel.da2.sigLen));
+    QCOMPARE(sel.da2.sigLen, 16u);
+    QVERIFY2(stream.contains(da2NoSig), "剥签名后的 DA2 必须发出");
+    QVERIFY2(!stream.contains(sel.da2Bytes), "完整 DA2（含签名）出现在写流里 —— 签名没剥掉");
+    QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("剥签名")),
+             qPrintable(log.join(QLatin1Char('\n'))));
+}
+
+// connection_agent = "preloader" → **不发 EMI**（铁律 9）；此时**不需要** preloader（origin=None 也不告警）
+void TestMtkPayload::xflashChainSkipsEmiForPreloaderAgent()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+
+    const mtkbrom::PreloaderResult pre;                     // origin = None
+    m->reads = da1UploadReads(sel);
+    m->reads << QByteArray("\xC0", 1)
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("preloader")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0);
+
+    mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::XFlashSession x(m, 0x6765);
+    QStringList log;
+    QVERIFY2(mtkbrom::xflashBringUpDa(brom, x, sel, pre, &log, &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);
+    QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM)) == -1,
+             "preloader agent 下不得发 INIT_EXT_RAM");
+    QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_BOOT_TO)) >= 0, "boot_to 仍必须执行");
+    QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("跳过 EMI")),
+             qPrintable(log.join(QLatin1Char('\n'))));
+}
+
+// agent = "brom" 但**没有** preloader → 只告警、继续（上游同姿态），**不发 EMI**
+void TestMtkPayload::xflashChainWarnsButContinuesWithoutPreloader()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x6765, sel, &err), qPrintable(err));
+
+    mtkbrom::PreloaderResult pre;                           // origin = None + skipReason
+    pre.skipReason = QStringLiteral("未提供 preloader 路径");
+    m->reads = da1UploadReads(sel);
+    m->reads << QByteArray("\xC0", 1)
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(0x434E5953))
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0)
+             << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
+             << statusReads(0) << statusReads(0) << statusReads(0);
+
+    mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::XFlashSession x(m, 0x6765);
+    QStringList log;
+    QVERIFY2(mtkbrom::xflashBringUpDa(brom, x, sel, pre, &log, &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);
+    QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM)) == -1, "无 preloader → 无 EMI 可发");
+    QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("无 preloader")),
+             qPrintable(log.join(QLatin1Char('\n'))));
+    QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("未提供 preloader 路径")),
+             "skipReason 必须转述进日志");
 }
 
 QTEST_APPLESS_MAIN(TestMtkPayload)

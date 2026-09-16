@@ -20,8 +20,9 @@
 //   • SLA（0x1D0D）检测到返回明确错误；RSA 响应生成（规格 §2.5）为后续任务
 //   • V6 新平台 BROM 已修补（规格 §1.2），无专用检测 —— 以 SEND_DA/JUMP_DA 失败
 //     形式传播，V6 检测标后续
-//   • 本文件只做 **LEGACY** 通道（XFlash/XML 的 DA 帧属 D2）；DA2 起来后的
-//     存储详情（NOR/NAND/EMMC 各表字段）**只读走不解析** —— 那是 D2/D3 的范围
+//   • 本文件含 **LEGACY 全链 + XFlash 引导链/刷写链**（D2-T11：按 decideGeneration 分派）；
+//     **XML 链在 T12 接线** —— 判到 XML 代时逐段明确拒绝（不假装支持、不发任何字节）；
+//     DA2 起来后的存储详情（NOR/NAND/EMMC 各表字段）**只读走不解析** —— 那是 D3/D4 的范围
 //   • D1 的存储路径只有 eMMC（PMT/分区表）→ NAND/NOR 的 BMT 分支不实现，
 //     sendStage2Config 对非 eMMC 明确拒绝（不瞎写上游 nand 分支的值）
 //   • nandcount 两级都为 0 时上游走 usbread(-4)（读到没有为止），本实现有界化 —— 真机未验证
@@ -33,10 +34,13 @@
 #include <QtGlobal>
 
 #include "core/modes/mtk_brom.h"
+#include "core/modes/mtk_chip_table.h"
 #include "core/modes/mtk_da_file.h"
 #include "core/modes/mtk_emmc.h"
+#include "core/modes/mtk_gpt.h"
 #include "core/modes/mtk_preloader_emi.h"
 #include "core/modes/mtk_preloader_fetch.h"
+#include "core/modes/mtk_xflash_session.h"
 
 namespace mtkbrom {
 
@@ -121,13 +125,47 @@ bool bromBringUpDa(BromSession &s, const DaSelection &sel, quint16 hwCode,
                    quint8 bromVer, quint8 blVer, const PreloaderResult &pre,
                    QStringList *log, QString *error = nullptr);
 
+// ---- 三代路由（D2-T11）----
+
+// "本次刷写走哪条链"的判定结果。与芯片表的 DaMode 分开：它多一个输入（DA 文件是否 v6），
+// 且 v6 会**盖过**表（daconfig.py:216 `damode = DAmodes.XML` 在 `da_is_v6` 时被强制）。
+enum class MtkGeneration { Legacy, XFlash, Xml };
+
+// 纯函数：芯片表条目 + "DA 文件是否 v6" → 代际。优先级（上游 `DC:216` 的 `if/elif` 序）：
+//   ① chip == nullptr（表外）→ false + 明确 error（**不得**默认 LEGACY：按错代刷就是砖）
+//   ② chip->iot → false + 明确 error（IoT 的 region 映射未实现，见 mtk_chip_table.h 铁律 2）
+//   ③ daIsV6 || chip->damode == Xml → **XML**（v6 优先于表）
+//   ④ 其余按 damode：XFlash → XFlash；Legacy → Legacy
+// error 可空。成功返回 true 且 out 被填。
+bool decideGeneration(const ChipInfo *chip, bool daIsV6, MtkGeneration &out, QString *error = nullptr);
+
+// 日志用名（"LEGACY" / "XFLASH" / "XML"）—— 纯函数
+QString generationName(MtkGeneration g);
+
+// XFlash 引导链（D2/T4-T6 的帧层串起来；**不含**枚举/打开 USB —— 故可用 mock 逐帧测）：
+//   sendDa1(region[1]) → 读 1B == 0xC0 → xflashDa1Handshake（七步）→ xflashBringUpSteps（四步）
+//   → connection_agent 判定（preloader = 跳过 EMI ／ brom = 需要 ／ 其它 = 失败）
+//   → [需要 EMI:] extractEmiXflash + xflashSendEmi（缺 preloader → **告警不中止**，上游同姿态）
+//   → xflashBootTo(region[2].m_start_addr, **剥掉尾部签名的 da2**)
+// 与 LEGACY **相反**：XFlash 的 boot_to 传的是剥过签名的切片（上游 XFL:1164）。
+// log 可空；error 可空。成功返回 true —— ⚠️ **成功 ≠ DA2 已在跑**（见 xflashBootTo 的注释），
+// 调用方日志只能写"已上传"。
+bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel,
+                     const PreloaderResult &pre, QStringList *log, QString *error = nullptr);
+
+// GPT 读回调适配器：把 mtkgpt::ReadFn 的 (byteOffset, len) 映射成 XFlash READ_DATA。
+// storage/partType 默认 eMMC(0x1) / user 区(0x8)（ST:16-49）—— 调用方按设备实际存储改。
+mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage = 0x1, quint32 partType = 0x8);
+
 // ---- 刷写集成（F1-3）----
 
 // 刷写主体（D1-T9 审查 I1 抽出）：在**已建立**的会话上跑完整条刷写流程，**不含**
 // 枚举/打开 USB/握手 —— 故可用 MockUsbChannel 离线测（尤其"写之前必须先验证"的四道门）。
-//   代际判定（表外/非 LEGACY/IoT）→ DA 解析与条目选择 → v6 拒绝 → 版本口径（0xFC）
-//   → resolvePreloader → bromBringUpDa → listPartitions → buildMtkPlan → 逐分区写
-//   → FINISH(0xD9) 收尾（失败**只告警**）
+//   代际判定（decideGeneration：表外/IoT → 明确拒绝；v6 → 强制 XML）→ DA 解析与条目选择
+//   → 版本口径（0xFC）→ resolvePreloader → **按代际引导**（bromBringUpDa / xflashBringUpDa /
+//   XML 明确拒绝）→ **按代际取设备分区表**（LEGACY = PMT；XFlash = GPT，PMT 明确拒绝）
+//   → buildMtkPlan → 逐分区写（flashPartition / xflashWriteData）
+//   → 收尾（LEGACY = FINISH 0xD9；XFlash = SHUTDOWN；失败**只告警**）
 // 请求级前置（DA 为空 / 无镜像）在本函数入口检查（runBromFlash 不再重复）。
 // log/progress 可空；error 可空。成功返回 true。
 bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
