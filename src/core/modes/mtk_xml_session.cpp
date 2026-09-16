@@ -163,14 +163,16 @@ bool XmlSession::getResponse(QString &text, QString *error)
     return false;
 }
 
-// XL:158-159 ack()。上游字面量是 Python str `"OK\0"`（其内嵌 NUL + xsend 追加的 NUL = 4 字节、宣布 4）；
-// 本层走 xsendText("OK") = "OK\0"（3 字节、宣布 3）—— 同为 NUL 结尾的 "OK"，少一个填充 NUL，语义等价。
-bool XmlSession::ack(QString *error) { return xsendText(QStringLiteral("OK"), error); }
+// XL:158-159 ack()。**逐字节复刻上游**（2026-09-17 控制方裁决）：上游字面量是 Python str `"OK\0"` ——
+// 该 str **自带**一个 NUL（`len() == 3`），xsend 的 str 分支再追加一个 → 实写 `4F 4B 00 00`、宣布 4 字节。
+// 故本层传 `"OK\0"`（QStringLiteral 保留内嵌 NUL），由 xsendText 追加第二个 NUL。
+bool XmlSession::ack(QString *error) { return xsendText(QStringLiteral("OK\0"), error); }
 
-// XL:161-163 ack_value：`f"OK@{hex(length)}\0"` —— **小写十六进制、0x 前缀、不补零**
+// XL:161-163 ack_value：`f"OK@{hex(length)}\0"` —— **小写十六进制、0x 前缀、不补零**；
+// 同样自带 NUL + xsend 追加的 NUL → 实写 `OK@0x<hex>\0\0`（9+2 = 11 字节 @ 0x1000）、宣布 = 字符数 + 2
 bool XmlSession::ackValue(quint32 length, QString *error)
 {
-    return xsendText(QStringLiteral("OK@0x%1").arg(length, 0, 16), error);
+    return xsendText(QStringLiteral("OK@0x%1\0").arg(length, 0, 16), error);
 }
 
 // XL:369-449 get_command_result 的 C++ 形态

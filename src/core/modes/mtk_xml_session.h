@@ -56,8 +56,8 @@ public:
     using LogSink = std::function<void(const QString &)>;
     void setLogSink(LogSink sink) { m_logSink = std::move(sink); }
     bool getResponse(QString &text, QString *error = nullptr);
-    bool ack(QString *error = nullptr);                        // xsend("OK")（XL:158-159）
-    bool ackValue(quint32 length, QString *error = nullptr);   // xsend("OK@0x<hex>")（XL:161-163）
+    bool ack(QString *error = nullptr);                        // xsend("OK\0") → 实写 4 字节（XL:158-159）
+    bool ackValue(quint32 length, QString *error = nullptr);   // xsend("OK@0x<hex>\0") → 字符数+2（XL:161-163）
 
     struct Result {
         QString command;            // "CMD:START" / "CMD:END" / "CMD:DOWNLOAD-FILE" / ""（裸 OK@ 数据路径）

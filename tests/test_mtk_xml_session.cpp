@@ -80,6 +80,7 @@ private slots:
     void envelopeAndFieldHelpers();
     void xsendTextAddsNulAndLengthPlusOne();
     void ackValueSendsLowercaseHexWith0xPrefix();
+    void ackWritesFourByteDoubleNulFrame();
     void getResponseStripsNulAndDecodes();
     void getResponseSkipsDaLogFrames();
     void sendCommandRequiresOkAndEndsWithEndThenStart();
@@ -117,8 +118,9 @@ void TestMtkXmlSession::xsendTextAddsNulAndLengthPlusOne()
     QCOMPARE(m.writeFrames.at(1), QByteArray("OK\0", 3));
 }
 
-// XL:161-163 `f"OK@{hex(length)}\0"`：Python hex() = **小写、0x 前缀、不补零**。
-// （本用例由简令的实现者注记要求补上。）
+// XL:161-163 `f"OK@{hex(length)}\0"`：Python hex() = **小写、0x 前缀、不补零**；
+// **逐字节复刻上游**（2026-09-17 控制方裁决）：该 str 自带 NUL + xsend 追加 NUL → 实写 `<text>\0\0`，
+// 宣布长度 = 字符数 + 2（不是 +1）。（本用例由简令的实现者注记要求补上。）
 void TestMtkXmlSession::ackValueSendsLowercaseHexWith0xPrefix()
 {
     MockUsbChannel m;
@@ -126,11 +128,25 @@ void TestMtkXmlSession::ackValueSendsLowercaseHexWith0xPrefix()
     QString err;
     QVERIFY2(s.ackValue(0x1000, &err), qPrintable(err));
     QCOMPARE(m.writeFrames.size(), 2);
-    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(10));
-    QCOMPARE(m.writeFrames.at(1), QByteArray("OK@0x1000\0", 10));
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(11));   // "OK@0x1000" 9 字符 + 2 NUL
+    QCOMPARE(m.writeFrames.at(1), QByteArray("OK@0x1000\0\0", 11));
     QString err2;
     QVERIFY2(s.ackValue(0xFF, &err2), qPrintable(err2));                    // 不补零：0xff 而非 0x00ff
-    QCOMPARE(m.writeFrames.at(3), QByteArray("OK@0xff\0", 8));
+    QCOMPARE(m.writeFrames.at(2), le32(0xFEEEEEEF) + le32(1) + le32(9));    // "OK@0xff" 7 字符 + 2 NUL
+    QCOMPARE(m.writeFrames.at(3), QByteArray("OK@0xff\0\0", 9));
+}
+
+// ack() 的**线上的字节**（控制方 2026-09-17 裁决）：上游 str "OK\0" 自带 NUL + xsend 追加 NUL
+// = `4F 4B 00 00`、宣布 4 字节（不是 3）。这条是本次裁决的**主判别器**。
+void TestMtkXmlSession::ackWritesFourByteDoubleNulFrame()
+{
+    MockUsbChannel m;
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY2(s.ack(&err), qPrintable(err));
+    QCOMPARE(m.writeFrames.size(), 2);
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(4));
+    QCOMPARE(m.writeFrames.at(1), QByteArray("OK\0\0", 4));
 }
 
 // XL:221-232 get_response：读一帧 → rstrip NUL → utf-8
@@ -229,9 +245,10 @@ void TestMtkXmlSession::readCommandResultHandlesProgressReportKeepAlive()
     QString err;
     QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
     QCOMPARE(r.command, QStringLiteral("CMD:START"));
+    // ack() 实写 **4 字节** `OK\0\0`（上游 str 自带 NUL + xsend 追加；XL:158-159，控制方 2026-09-17 裁决）
     int acks = 0;
     for (const QByteArray &f : std::as_const(m.writeFrames))
-        if (f == QByteArray("OK\0", 3)) ++acks;
+        if (f == QByteArray("OK\0\0", 4)) ++acks;
     QVERIFY2(acks >= 2, "PROGRESS-REPORT 期间必须持续 ack");
 }
 
