@@ -520,8 +520,9 @@ void TestMtkXflashPayload::shutdownRejectsNonZeroTrailingStatus()
     mtkbrom::XFlashSession x(&m, 0x6765);
     QString err;
     QVERIFY(!mtkbrom::xflashShutdown(x, /*bootmode=*/0, &err));
-    QVERIFY2(err.contains(QStringLiteral("0xDEADBEEF")), qPrintable(err));   // session 层码值原样保留
-    QVERIFY2(err.contains(QStringLiteral("SHUTDOWN")), qPrintable(err));     // 且点出是哪条命令
+    // 整串按字面断言：单前缀（`XFlash：` 只出现一次）+ 点名 SHUTDOWN + session 措辞与码值原样
+    // —— 双前缀、漏点名、码值大小写不符都当场红
+    QCOMPARE(err, QStringLiteral("XFlash：SHUTDOWN 收尾失败（设备返回错误码 0xDEADBEEF）"));
     QCOMPARE(m.writeFrames.size(), 4);      // 命令帧与参数帧都已发出（失败不早于第二处 status）
     QCOMPARE(m.reads.size(), 0);            // 两帧 status 都读满，不留给下一次读
 }

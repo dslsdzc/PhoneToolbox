@@ -289,7 +289,13 @@ bool xflashShutdown(XFlashSession &x, quint32 bootmode, QString *error)
     // 命令后那一处 status 仍按 send_emi/boot_to 的写法直通 session 文案（失败在更早的位置）。
     QString stErr;
     if (!x.checkStatus(&stErr)) {
-        if (error) *error = QStringLiteral("XFlash SHUTDOWN：%1").arg(stErr);
+        // session 文案自带 "XFlash：" 层名前缀，本层再套一层会成双前缀 —— 先剥掉它，
+        // 再按 "XFlash：<操作> 收尾失败（<session 原文>）" 组句：单前缀、点名是哪条命令，
+        // 且 session 的措辞（含其中的码值）除该前缀外**一字未动**。
+        const QString layer = QStringLiteral("XFlash：");
+        if (stErr.startsWith(layer))
+            stErr.remove(0, layer.size());
+        if (error) *error = QStringLiteral("XFlash：SHUTDOWN 收尾失败（%1）").arg(stErr);
         return false;
     }
     return true;
