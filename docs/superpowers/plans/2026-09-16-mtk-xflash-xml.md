@@ -19,9 +19,14 @@
 **跨代铁律（违反即真机错帧或静默读错数据；逐条出处见 spec §2）**
 1. **三代握手是三套**：LEGACY 只有 `0xC0`（D1 已实现）；XFlash = `0xC0` → `SYNC` → `SETUP_ENVIRONMENT` → `SETUP_HW_INIT_PARAMS` → 读回 `SYNC`（`XFL:979-995`）；XML = `CMD:START` 文本消息（`XL:271-321`）。**不得把三者合并成一条路径**。
 2. **端序按代分**：LEGACY 协议参数**大端**（D1 已实现）；**XFlash 与 XML 的 12B 帧头与所有参数全小端**（`XFL:112`、`XL:150`）。
-3. **12B 帧头** = `pack("<III", 0xFEEEEEEF, datatype, length)`；`datatype`：`1`=协议流、`2`=DA 日志（`XFP:88-90`）。**头一次写、载荷第二次写**。
+3. **12B 帧头** = `pack("<III", 0xFEEEEEEF, datatype, length)`；`datatype`：`1`=协议流、`2`=DA 日志（`XFP:89-90`；**`XFP` = `mtkclient/Library/DA/xflash/xflash_param.py`**）。**头一次写、载荷第二次写**。
 4. **`ack()` 的 0x6781 特例**：该 dacode **一次写 16 字节**（`pack("<IIII", MAGIC, DT_PROTOCOL_FLOW, 4, 0)`），其余芯片**两次写**（12B 头 + 4B 载荷）——**不存在"4 字节短帧"**（`XFL:85-100`）。
-5. **`send_param` 分块 = 0x200**，每个参数一个独立帧，全部写完后**读一次 status**；**`status == 0xC0040050`（EMI 版本不匹配）容忍、不算错误**；`0xC0020053`/`0xC0020004` → 明确报错（上游 `sys.exit(1)`，我们返回 false + 中文）。
+5. **`send_param` 分块 = 0x200**，每个参数一个独立帧，全部写完后**读一次 status**；`0xC0020053`/`0xC0020004` → 明确报错（上游 `sys.exit(1)`，我们返回 false + 中文）。
+   ⚠️ **实施期更正（T2，上游实证）**：`0xC0040050`（EMI 版本不匹配）上游是 **"静默返回 False"**，**不是"容忍/当成功"** ——
+   `xflash_lib.py:181-186` 只是**跳过错误打印与 `sys.exit`**，函数仍然 `return False`；而**显式 preloader** 的调用点
+   `xflash_lib.py:1147-1149` 是 `if not self.send_emi(...): return False` → **EMI 送失败即整链中止**（自动搜索路径 `:1131-1136`
+   才是"换个候选 preloader 继续"）。本仓照做：`checkStatus` 对 `0xC0040050` 返回 **false**（沿用 D1"更严但不改判据"的纪律，
+   只是补一条可诊断的中文错误文案，上游此处不打印）。
 6. **`status()` 的判据**：读 12B 头（magic 必须 `0xFEEEEEEF`）→ 读 `length` 字节 → `length==2` 取 `<H`、**为 0 才成功**；`length==4` 取 `<I`、**0 或 `0xFEEEEEEF` 都算成功**；其它长度取载荷首个 u32（`XFL:138-158`）。
 7. **XFlash 的 EMI**：`INIT_EXT_RAM(0x01000A)` → status 0 → `sleep(10ms)` → `xsend(pack("<I", len(emi)))`（**长度单独一帧**）→ `send_param(emi)`。**无地址、无 emiver、无校验和、无回包链**（`XFL:251-270`）。
 8. **EMI 切片两代不同**：XFlash = **整块**（真样本 912 B）；LEGACY = `MTK_BIN+0xC` 起（真样本 800 B）。**同一 preloader 两个函数**，互不替代。
@@ -744,17 +749,19 @@ git commit -m "feat(mtk): GPT 解析纯函数（真 4096 扇区样本 + 双 CRC 
       X_CMD_SHUTDOWN = 0x010007, X_CMD_BOOT_TO = 0x010008, X_CMD_DEVICE_CTRL = 0x010009,
       X_CMD_INIT_EXT_RAM = 0x01000A, X_CMD_SETUP_ENV = 0x010100, X_CMD_SETUP_HW_INIT = 0x010101,
   };
-  constexpr quint32 kXMagic = 0xFEEEEEEF;         // XFP:2
+  constexpr quint32 kXMagic = 0xFEEEEEEF;         // XFP:2（xflash_param.py 的 MAGIC）
   constexpr quint32 kXSync = 0x434E5953;          // "SYNC"（小端帧里即 ASCII SYNC）
-  constexpr quint32 kXDataProtocolFlow = 1;       // DT_PROTOCOL_FLOW（XFP:88）
-  constexpr quint32 kXDataMessage = 2;            // DT_MESSAGE（XFP:88-90）
-  constexpr quint32 kXEmitVersionMismatch = 0xC0040050;   // EMI 版本不匹配：**容忍**（XFL:180）
+  constexpr quint32 kXDataProtocolFlow = 1;       // DT_PROTOCOL_FLOW（XFP:89）
+  constexpr quint32 kXDataMessage = 2;            // DT_MESSAGE（XFP:89-90）
+  constexpr quint32 kXEmitVersionMismatch = 0xC0040050;   // EMI 版本不匹配：上游**静默 return False**（XFL:181-186）
+                                                          // —— 不是"容忍"；显式 preloader 路径据此整链中止（XFL:1147-1149）
 
   class XFlashSession {
   public:
       XFlashSession(IBromUsb *usb, quint16 dacode)
           : m_usb(usb), m_dacode(dacode) {}
 
+      bool xsendHeader(quint32 length, QString *error = nullptr);                 // **只写 12B 帧头**（sendParam/sendData 用）
       bool xsend(const QByteArray &payload, QString *error = nullptr);            // 帧头+载荷两次写
       bool xsendInt(quint32 v, QString *error = nullptr);                         // pack("<I", v)
       bool xsendInt64(quint64 v, QString *error = nullptr);                       // pack("<Q", v)
@@ -763,8 +770,9 @@ git commit -m "feat(mtk): GPT 解析纯函数（真 4096 扇区样本 + 双 CRC 
       bool readStatus(quint32 &code, QString *error = nullptr);
       bool checkStatus(QString *error = nullptr);                                 // readStatus + 错误文案
       bool ack(QString *error = nullptr);                                         // 0x6781 一次 16B；其余两次
+      // ⚠️ 实施期更正（T2）：**帧头一次 + 载荷分块**（上游 XFL:163-177 / :273-281）——不是"整帧 xsend 再分块"（会写两遍载荷）
       bool sendParam(const QList<QByteArray> &params, QString *error = nullptr);  // 0x200 分块 + 一次 status
-      bool sendData(const QByteArray &data, QString *error = nullptr);            // 帧 + wMaxPacketSize 分块 + 一次 status
+      bool sendData(const QByteArray &data, QString *error = nullptr);            // 帧头 + wMaxPacketSize 分块 + 一次 status
       bool sendDevCtrl(quint32 subcmd, const QByteArray &param, QByteArray *reply, QString *error = nullptr);
   private:
       IBromUsb *m_usb;
@@ -831,7 +839,7 @@ private slots:
     void ackUsesSixteenByteWriteFor6781Only();
     void statusParsesByLength();
     void statusTreatsMagicAsSuccess();
-    void sendParamChunksAt0x200AndToleratesEmiVersionMismatch();
+    void sendParamChunksAt0x200AndFailsOnEmiVersionMismatch();
     void sendParamRejectsHardErrorCodes();
     void sendDataChunksByMaxPacketSize();
 };
@@ -905,8 +913,8 @@ void TestMtkXflashSession::statusTreatsMagicAsSuccess()
     QCOMPARE(code, quint32(0));
 }
 
-// send_param：0x200 分块 + 最后读一次 status；0xC0040050 容忍（铁律 5）
-void TestMtkXflashSession::sendParamChunksAt0x200AndToleratesEmiVersionMismatch()
+// send_param：0x200 分块 + 最后读一次 status；0xC0040050 **失败但不报硬错**（上游 XFL:181-186）
+void TestMtkXflashSession::sendParamChunksAt0x200AndFailsOnEmiVersionMismatch()
 {
     {
         MockUsbChannel m;
@@ -914,8 +922,9 @@ void TestMtkXflashSession::sendParamChunksAt0x200AndToleratesEmiVersionMismatch(
         mtkbrom::XFlashSession s(&m, 0x6765);
         const QByteArray big(0x300, '\x5A');                // 0x200 + 0x100 两块
         QString err;
-        QVERIFY2(s.sendParam({big}, &err), qPrintable(err));   // 版本不匹配**不算错误**
-        QCOMPARE(m.writeFrames.size(), 3);                  // 帧头 + 块1 + 块2
+        QVERIFY(!s.sendParam({big}, &err));                 // **失败**（上游 return False）
+        QVERIFY2(err.contains(QStringLiteral("0xC0040050")), qPrintable(err));   // 但文案说清是"版本不匹配"
+        QCOMPARE(m.writeFrames.size(), 3);                  // 分块照发：帧头 + 块1 + 块2
         QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(0x300));
         QCOMPARE(m.writeFrames.at(1).size(), 0x200);
         QCOMPARE(m.writeFrames.at(2).size(), 0x100);
@@ -993,16 +1002,21 @@ quint32 leToU32(const QByteArray &b, int off)
 }
 } // namespace
 
-bool XFlashSession::xsend(const QByteArray &payload, QString *error)
+// 只写帧头（sendParam/sendData 用；它们自己分块写载荷，避免"整帧 + 分块"把载荷写两遍）
+bool XFlashSession::xsendHeader(quint32 length, QString *error)
 {
     if (!m_usb) {
         if (error) *error = QStringLiteral("XFlash：USB 通道未设置");
         return false;
     }
-    const QByteArray header = le32(kXMagic) + le32(kXDataProtocolFlow) + le32(quint32(payload.size()));
-    if (!m_usb->write(header, error))            // 头一次写
+    return m_usb->write(le32(kXMagic) + le32(kXDataProtocolFlow) + le32(length), error);
+}
+
+bool XFlashSession::xsend(const QByteArray &payload, QString *error)
+{
+    if (!xsendHeader(quint32(payload.size()), error))            // 头一次写
         return false;
-    if (!payload.isEmpty() && !m_usb->write(payload, error))   // 载荷第二次写
+    if (!payload.isEmpty() && !m_usb->write(payload, error))     // 载荷第二次写
         return false;
     return true;
 }
@@ -1064,8 +1078,9 @@ bool XFlashSession::checkStatus(QString *error)
         return false;
     if (code == 0)
         return true;
-    if (code == kXEmitVersionMismatch) {         // 容忍（XFL:180）：EMI 版本不匹配
-        return true;
+    if (code == kXEmitVersionMismatch) {         // EMI 版本不匹配：上游静默 False（XFL:181-186）——**失败**，只是不打错误
+        if (error) *error = QStringLiteral("XFlash：EMI 版本不匹配（0xC0040050）—— 上游在此静默返回失败（XFL:181-186）");
+        return false;
     }
     if (error)
         *error = QStringLiteral("XFlash：设备返回错误码 0x%1").arg(code, 8, 16, QLatin1Char('0'));
@@ -1083,8 +1098,10 @@ bool XFlashSession::ack(QString *error)
 
 bool XFlashSession::sendParam(const QList<QByteArray> &params, QString *error)
 {
+    // ⚠️ 实施期更正（T2，上游 `xflash_lib.py:163-177`）：**帧头写一次、载荷按 0x200 分块**（不是"整帧 xsend"再分块
+    // ——那会把载荷写两遍）。每块都是一次独立 write（xsend 的"头/载荷两次写"在这里退化为"头一次 + N 次分块"）。
     for (const QByteArray &p : params) {
-        if (!xsend(p, error))                    // 每个参数独立帧
+        if (!xsendHeader(quint32(p.size()), error))
             return false;
         for (int off = 0; off < p.size(); off += kParamChunk) {
             const QByteArray chunk = p.mid(off, kParamChunk);
@@ -1092,12 +1109,13 @@ bool XFlashSession::sendParam(const QList<QByteArray> &params, QString *error)
                 return false;
         }
     }
-    return checkStatus(error);                   // 全部写完读一次 status
+    return checkStatus(error);                   // 全部写完读一次 status（XFL:178）
 }
 
 bool XFlashSession::sendData(const QByteArray &data, QString *error)
 {
-    if (!xsend(data, error))                     // 头 + 载荷（xsend 内部就是两次写）
+    // 同 sendParam（上游 `xflash_lib.py:273-281`）：头一次 + 载荷按 maxPacketSize 分块；**不整写一遍**
+    if (!xsendHeader(quint32(data.size()), error))
         return false;
     const int chunk = m_usb->maxPacketSize() > 0 ? m_usb->maxPacketSize() : 0x400;
     for (int off = 0; off < data.size(); off += chunk) {
@@ -4041,7 +4059,7 @@ MTK BROM 段追加（照 D1 的写法，逐条带实测/出处粒度）：
 - [ ] **Step 4: 新建 `docs/superpowers/specs/mtk-xflash-facts.md`**
 
 必备条目（逐条带 `file:line`，从 `.superpowers/sdd/mtk-d2d3-facts-report.md` 与本次实测提炼）：
-① 三代握手差异（`XFL:979-995` / `XL:271-321` / D1 的 `0xC0`）；② 12B 帧与 `ack` 的 0x6781 特例（`XFL:85-100/112`）；③ `status()` 三态判据（`XFL:138-158`）；④ `send_param` 0x200 + `0xC0040050` 容忍（`XFL:163-188`）；⑤ XFlash EMI（`XFL:251-270`）；⑥ `boot_to` 剥签名（`XFL:970-978/288-328`）；⑦ 写数据流（`XFL:852-882`）；⑧ XML 信封/应答/`OK!EOT`（`XC:18-27`、`XL:146-163/188-232/369-449`）；⑨ XML 无 EMI（`xml_cmd.py:100-128`）；⑩ GPT 布局 + 双 CRC + 备份窗口 + 真样本实测（本计划 T1）；⑪ 上游 GPT 4 处缺陷；⑫ 代际判定三方投票与 `plcap` 死代码；⑬ **真样本清单**（PGPT/SGPT/sgdisk/scatter.xml 的 URL、sha256、实测值）；⑭ scatter XML 的 EMMC/UFS 双副本。
+① 三代握手差异（`XFL:979-995` / `XL:271-321` / D1 的 `0xC0`）；② 12B 帧与 `ack` 的 0x6781 特例（`XFL:85-100/112`）；③ `status()` 三态判据（`XFL:138-158`）；④ `send_param` 0x200 分块 + 帧头一次/载荷分块（`XFL:163-177`）+ `0xC0040050` **静默 False**、显式 preloader 路径据此中止（`XFL:181-186`、`:1147-1149`）；⑤ XFlash EMI（`XFL:251-270`）；⑥ `boot_to` 剥签名（`XFL:970-978/288-328`）；⑦ 写数据流（`XFL:852-882`）；⑧ XML 信封/应答/`OK!EOT`（`XC:18-27`、`XL:146-163/188-232/369-449`）；⑨ XML 无 EMI（`xml_cmd.py:100-128`）；⑩ GPT 布局 + 双 CRC + 备份窗口 + 真样本实测（本计划 T1）；⑪ 上游 GPT 4 处缺陷；⑫ 代际判定三方投票与 `plcap` 死代码；⑬ **真样本清单**（PGPT/SGPT/sgdisk/scatter.xml 的 URL、sha256、实测值）；⑭ scatter XML 的 EMMC/UFS 双副本。
 
 **诚实边界小节**（逐条如实，不粉饰）：真机全链未验证（三代）；XML 无真实设备样本（帧与命令全部来自上游代码）；
 **spec §9 的三条"实现时核实"到此结案**——① XML 分区表读取路径：设计期已核实（`CMD:READ-FLASH` + 同一 GPT，`xml_cmd.py:474-483`、`mtk_daloader.py:296-302`）；② `UFSPartitionType` 文本表示：XML 用字符串 `"EMMC-USER"`（`ST:216`、`XC:452-461`），非整数的 `UFSPartitionType` 枚举值（BOOT1=1/BOOT2=2/USER=3/RPMB=4）只在 XFlash 侧用；③ `max_address_length = 9`：**全仓库只被 import 无消费点**（`USBLIB:21`、`seriallib.py:9`；`XP:2` 定义）→ 与 plcap/blver 同类，属**死常量，本实现不实现**（不猜语义）。
