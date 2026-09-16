@@ -42,7 +42,9 @@
     pack 里**跳过 `operation_type`** 只打包 8 个（`XFL:679-680`）。少 8 字节会让设备把后 8 字节读成垃圾。
 16. **XML 不发 EMI**（`initialize_dram=YES` 交给 DA 自己）：代码事实是 XML 库**零 `emi` 引用**（`xml_cmd.py:100-128` 只有该参数、`XL:185` 传 True）——**D3 不实现 EMI 发送**。
 17. **XML 信封**（`XC:18-27`，**单行、无空格**）：`<?xml version="1.0" encoding="utf-8"?><da><version>1.0</version><command>CMD:<NAME></command><arg>…</arg></da>`；`str` 载荷 `length = len+1` 且**带 NUL 结尾**（`XL:146-153`）。
-18. **XML 应答**：`OK`；错误含 `ERR!`；带长度 `OK@0x<hexlen>\0`；**完成永远两步** `CMD:END` → `CMD:START`（`XL:195-209`）；写的数据流 = `CMD:DOWNLOAD-FILE` 回包里的 `packet_length`（`XL:419-424`），读 = `CMD:UPLOAD-FILE`（`XL:425-431`）。
+18. **XML 应答**：`OK`；错误含 `ERR!`；带长度 `OK@0x<hexlen>\0`（⚠️ 实施期更正：上游 `ack()` = `xsend("OK\0")`，
+    而 `xsend` 对 str 是 `length = len(data)+1` 且再追加一个 NUL → **载荷 4 字节 `OK\0\0`、头里 length=4**；
+    `ack_value(n)` 同理 = `OK@0x<hex>\0\0`（**10 字节**）。**按上游逐字节发**（T8 实施者按原稿发了 3 字节并被钉在用例里，已按上游改）；**完成永远两步** `CMD:END` → `CMD:START`（`XL:195-209`）；写的数据流 = `CMD:DOWNLOAD-FILE` 回包里的 `packet_length`（`XL:419-424`），读 = `CMD:UPLOAD-FILE`（`XL:425-431`）。
     ⚠️ **两处上游缺陷不复刻**（计划期预核对补记）：① 上游 `send_command` 对 `"ERR!" in result` 是 `return result` —— 返回的是**非空字符串**，
     调用方 `if not res:` 会把它当**成功**（`xml_lib.py:218-219`）；我们**返回 false + 中文**（fail-closed）。② 上游 `DT_MESSAGE` 日志帧是**跳过并继续**的
     （`xread()` 内循环，`xml_lib.py:107-132`）—— 我们的 `getResponse` 同样跳过（有上限 `kMaxLogFramesToSkip`）而不是报错。
@@ -2856,35 +2858,31 @@ bool XmlSession::readCommandResult(Result &out, QStringList *log, QString *error
         }
         if (!ack(error))
             return false;
-        // ⚠️ 计划期更正（T10 预核对，上游 `download_raw` `xml_lib.py:508-589`）：数据是**逐帧**收的 ——
-        //    每收一帧：收帧 → ack() → 读一个 "OK"（不是 OK 就停）→ **再 ack()**。原稿"按长度收完所有帧
-        //    再 ack 一次"会让设备在等不到逐帧 ack 的情况下不再发下一帧（真机上卡死/超时）。
+        // ⚠️ **两条数据路径的 ack 节奏不同，别混**（T8 实施期实测，控制方逐行核对上游）：
+        //   · 本函数对应上游 `get_command_result`（`XL:373-387`）：ack → 读 "OK" → ack → **收完数据（不逐帧 ack）** → **尾部一次 ack**。
+        //   · 上游 `download_raw`（`XL:508-589`，**T10 的 READ-FLASH 读路径**）才是"每帧 ack → 读 OK → 再 ack"。
+        //   我此前把后者错按到本函数上（会把设备等不到的多余 ack 发出去、并多吃一帧），已按上游改回。
         QByteArray bytes;
         for (quint32 got = 0; got < len;) {
             quint32 dt = 0, flen = 0;
             if (!xreadHeader(dt, flen, error))             // 数据帧 = 12B 头 + 载荷
                 return false;
+            if (dt != kDtProtocolFlow) {                   // 中途的日志帧不跳（上游 get_response_data 同姿态，`XL:221-233`）
+                if (error) *error = QStringLiteral("XML：数据路径收到非协议流帧（datatype=%1）").arg(dt);
+                return false;
+            }
             QByteArray chunk;
             if (!readPayload(flen, chunk, error))
                 return false;
             bytes += chunk;
             got += quint32(chunk.size());
-            if (!ack(error))
-                return false;
-            QString okr;
-            if (!getResponse(okr, error))
-                return false;
-            if (!okr.contains(QStringLiteral("OK"))) {
-                if (error) *error = QStringLiteral("XML：逐帧确认不是 OK（收到 %1，已收 %2/%3 字节）").arg(okr).arg(got).arg(len);
-                return false;
-            }
-            if (!ack(error))
-                return false;
         }
         if (bytes.size() != int(len)) {
             if (error) *error = QStringLiteral("XML：数据长度不符（要 %1，得 %2）").arg(len).arg(bytes.size());
             return false;
         }
+        if (!ack(error))                                   // **尾部一次** ack（`XL:386`）
+            return false;
         out.command = QString();
         out.bytes = bytes;
         return true;
@@ -3250,7 +3248,11 @@ git commit -m "feat(mtk): XML 载荷①（CMD:START 握手 + setup_env/setup_hw_
   // mem_offset 恒 0x8000000（`XFL` 无关；`XC:461` 的默认值），source_file = MEM://0x<mem_offset>:0x<length>
   bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
                          QStringList *log = nullptr, QString *error = nullptr);
-  // 读一个分区（XL:918-941）：READ-FLASH（noack）→ UpFile → 裸 OK@ 数据路径 → 收尾 CMD:START
+  // 数据帧读取（**上游 download_raw 形状**，`XL:508-589`）：读 "OK@0x<len>" → ack → 读 "OK" → ack
+  //   → 循环{ 收一帧 → ack → 读 "OK" → ack } → 返回数据。**不要**复用 `XmlSession::readCommandResult` 的裸 OK@ 路径
+  //   —— 那条对应 `get_command_result`（单次尾 ack），节奏不同（T8 实施期实测 + 控制方核对）。
+  bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *error = nullptr);
+  // 读一个分区（XL:918-941）：READ-FLASH（noack）→ UpFile → **xmlReadDataFrames（逐帧 ack）** → 收尾 CMD:START
   bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, quint32 length,
                         QByteArray &out, QString *error = nullptr);
   // 收尾复位（XC:439 REBOOT；IMMEDIATE / DISCONNECT）
