@@ -127,7 +127,7 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 | 路径 | 行为 |
 |---|---|
 | ① 用户提供/自动导入 | 显式 `preloaderPath` 优先；否则在所选固件目录内找 `preloader*.bin`（大小写不敏感）——**唯一命中才用**；多个候选 → **不猜**，列候选并告警后跳过（D1 不做交互选择） |
-| ② 网络获取 | **默认关闭**；显式开启（UI 勾选或参数）→ 按内置**来源清单**（含 URL + 期望 sha256）下载 → 校验 → 缓存到本地；**日志写清来源与风险**（错误的 preloader 有砖机风险）；清单可配置 |
+| ② 网络获取 | **默认关闭**；显式开启（UI 勾选或参数）→ 按**用户配置**的来源清单（`mtk_preloader_sources.json`，**默认不内置**；含 URL + 期望 sha256）下载 → 校验 → 缓存到本地；**日志写清来源与风险**（错误的 preloader 有砖机风险） |
 | 都不可用 | **分两分支**（见下）：`errorcode == 0` → 确实不中止（info 级日志，因为 DA1 根本没要 DRAM 配置）；`errorcode == 0xBC3`（DA1 明确索取 DRAM 配置）→ **没有 EMI 必须中止** |
 
 > **更正（初版错）**：初版把"都不可用"写成一律不中止。上游是 request-driven：

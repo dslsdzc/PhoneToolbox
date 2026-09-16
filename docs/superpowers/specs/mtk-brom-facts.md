@@ -238,7 +238,7 @@ XFlash（`xflash/xflash_lib.py:903/909/926/989-990`）与 XML（`xmlflash/xml_li
 | 样本 | 实测 |
 |---|---|
 | `MTK_AllInOne_DA_{2625,7687,iot,mt6590}.bin` + `MTK_DA_V5.bin` + `MTK_DA_V6.bin` | 6 文件 / **161 条目**；`magic == 0xDADA` 161/161；`MT6765_Android_scatter.txt` = **50 分区**（SYS0..SYS49） |
-| `preloader.bin` | MMM 魔术 @**0**；`MTK_BLOADER_INFO_v` 标记 @**254392**、版本字节 `"35"`；`MTK_BIN` @**254492**；MMM 头字段 `mlen=0x3EBB8` / `siglen=0x66C` / `dramsize=912`（dramsize 窗口 = [254392, 255304) = 912B）；**LEGACY 切片 800B**（窗口内 `MTK_BIN+0xC` 起，块内相对偏移 112）**vs XFlash 整块 912B** |
+| `preloader.bin` | MMM 魔术 @**0**；`MTK_BLOADER_INFO_v` 标记 @**254392**、版本字节 `"35"`；`MTK_BIN` @**254492**；MMM 头字段 `mlen=0x3EBB8` / `siglen=0x66C` / `dramsize=912`；**三个字段都是小端 u32**（`unpack("<I", …)`，DC:124/125/127 —— 按大端读会得 2416115712，只有小端才是 912，与本文自洽）；dramsize 窗口 = [254392, 255304) = 912B；**LEGACY 切片 800B**（窗口内 `MTK_BIN+0xC` 起，块内相对偏移 112）**vs XFlash 整块 912B** |
 | `MTK_DA_V5.bin` / `MTK_DA_V6.bin` | V6 的 `region[0]` 与 `region[1]` **逐字节相同**且全文无 EMI 数据；V5 带 50 个 `MMM\x01\x38` 块（`region[0]`，`len` 恒 `0x270`） |
 | 全库 preloader 统计（832 个） | 含 MMM 魔术 **仅 3 个**；`MTK_BLOADER_INFO_v` 在**偏移 0** 的 **829 个**；含 `MTK_BIN` **832/832** |
 
@@ -253,6 +253,8 @@ XFlash（`xflash/xflash_lib.py:903/909/926/989-990`）与 XML（`xmlflash/xml_li
 | 不实现"按 draminfo 在目录里猜 preloader" | 上游 DLL:305-318 的补救路径**不做**：那要求本层先拿到 16B draminfo 才能找文件，而"没有 EMI"正是要在那之前决策 |
 | 网络获取 | **默认关闭**；来源清单由**用户提供**（`mtk_preloader_sources.json`），**不内置任何第三方 URL/sha256**；fail-closed（不可判定的期望哈希在发请求前即拒） |
 | 逐分区写入 | 按设备实读分区表（`listPartitions`）排序；`镜像 > 分区` 逐条告警并**跳过不写**；末尾单次 `FINISH(0)`，失败**只告警**（数据已落盘） |
+| **超分区镜像无强写出口**（如实限制） | 计划期裁决 2 曾写"用户要强写走既有单分区入口"——**该出口在 BROM 模式不存在**：BROM 下 `onFlashClicked` 先在协议通道分支处理并走 `flashFullPackage`（`flash_panel.cpp:675-853`），分区刷写段（`mtkWritePartition` 的调用点 `:907`）**在其后**，且 `:359-368` 已把分区表清空 ⇒ BROM 下 `mtkWritePartition` 不可达 ⇒ **超分区镜像只能跳过**（`mtk_flash_plan` 也不提供覆盖开关） |
+| 死砖恢复不适用于 BROM（如实限制） | 「死砖修复」按钮只在 `MODE_MTK_DA` 且已连接时 enable（`flash_panel.cpp:341`，BROM 在 `:359-368` 已 return），且 handler `:1898-1906` 只认 EDL/MTK DA → BROM 用户点它只会得到"当前模式不支持" ⇒ BROM 侧**不含**备份关键分区与失败重试 |
 | 零长度 region | **显式跳过**（不得"上传 0 字节后静默成功"）；`region[1]`/`region[2]` 任一为空 → 该条目不可用（`mtk_da_file.cpp:39-53`） |
 
 ## 10. 诚实边界（**不得写成"已验证"**）

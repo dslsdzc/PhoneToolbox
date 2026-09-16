@@ -383,7 +383,7 @@ bool readFlashInfoDa2(BromSession &s, quint16 hwCode, QStringList *log, QString 
         // Legacy_NandInfo32（:170-179）：dword(4)+bytes(1)+short(2)+dword(4)+short(2) → count 在偏移 11
         nandcount = be16At(nand, 11);
         if (nandcount > 2) {
-            // 上游 :535 `nc = data[-4:] + self.usbread(nandcount * 2 - 4)` —— 复用 NAND info 尾部 4B
+            // 上游 :534 `nc = data[-4:] + self.usbread(nandcount * 2 - 4)` —— 复用 NAND info 尾部 4B
             if (!readExactBytes(u, nandcount * 2 - 4,
                                 QStringLiteral("read_flash_info：NAND id 表"), nullptr, error)) {
                 return false;
