@@ -5,7 +5,10 @@
 //   832 个真实 preloader 中只有 3 个含 MMM 魔术、829 个的标记在偏移 0；
 //   同一 preloader 两代取不同切片。reference/mtk-samples/preloader.bin 实测：
 //   MMM@0、标记@254392、MTK_BIN@254492、mlen=0x3EBB8、siglen=0x66C、dramsize=912
-//   → LEGACY 切片 800B（XFlash 的整块取法是 912B）。
+//   → LEGACY 切片 800B、XFlash 切片 912B（整块）。
+// 832 样本对拍补充（D2 Task 3，/tmp 一次性脚本，统计只作注释证据）：**832/832** 的标记都在
+//   **窗口**偏移 0、MTK_BIN 都在窗口偏移 100（⇒ XFlash 切片恒 = LEGACY 切片 + 112B）；含 MMM
+//   的 3 个样本裁剪后同样落在窗口偏移 0 —— 两代切片差异与 MMM 分支无关，是取法不同（112B = 头部）。
 //
 // 与上游 Python 的**有意偏差**（本实现一律 fail-closed 并给出诊断文本；上游靠 extract_emi 的
 // try/except 把异常吞成 emi=None、或靠 Python 切片静默 clamp —— 结果同为"不该用这份 EMI"）：
@@ -14,6 +17,9 @@
 //   3. dramsize==0 且裁剪后 ≤0x800：上游 data[-4:] 抛异常 → 本实现报错（同结果，另有诊断）。
 //   4. MTK_BIN+0xC 越过末尾：上游返回**空** EMI 但算成功 → 本实现报错，
 //      不把"空 EMI"当提取成功交给发送端。
+//   6. XFlash 整块分支要求标记在窗口偏移 0（上游 DC:137 的 `idx == 0`）；标记不在起点时上游
+//      静默改取 **MTK_BIN+0xC** 切片（DC:141-144，即另一代的切片）→ 本实现报错并指名替代调用，
+//      不发出上游在此情形不会发的字节（见 extractEmiXflash）。832 样本全部满足该条件。
 //   另（判据差异）：版本字节**只去尾部 NUL**（上游 `rstrip(b"\x00")` 语义；内嵌 NUL 上游
 //   `int(b"\x005")` 会抛异常 → 不得当数字收），去尾后须为 1-2 位 ASCII 数字。上游 int() 还会
 //   trim 两侧空白（" 5" 上游接受、本实现拒绝）—— 真实 preloader 该字段恒为 "35"/"38" 这类 2 位。
@@ -49,7 +55,13 @@ void setErr(QString *error, const QString &msg) { if (error) *error = msg; }
 
 } // namespace
 
-bool extractEmiLegacy(const QByteArray &preloader, EmiData &out, QString *error)
+// 公共前缀（两代共用）—— D1 的 extractEmiLegacy 前段**原样提取**：判据、分支顺序、失败文案
+// **逐字未改**（D1 的既有用例就是这次重构的回归网）。上游把这段写在一个函数里、最后按
+// `damode`/`idx` 分叉；本实现把它拆成"公共前缀 + 两个各自取切片的公开函数"，让**调用方**按代选择。
+// 成功返回时：out 已重置并填好 branch（D1 语义）；window = 裁到 dramsize 的窗口（未命中 MMM
+// 时即整块输入）；version = 已校验的 1-2 位 ASCII 数字（落在各自的切片函数里 toUInt()）。
+bool emiCommon(const QByteArray &preloader, EmiData &out, QByteArray &window, QString &version,
+               QString *error)
 {
     out = EmiData{};                       // fail-closed：失败路径不留上一次的半份结果
     if (preloader.isEmpty()) {
@@ -135,22 +147,62 @@ bool extractEmiLegacy(const QByteArray &preloader, EmiData &out, QString *error)
                           .arg(QString::fromLatin1(verBytes)));
         return false;
     }
-    out.ver = quint32(digits.toUInt());
+    // digits 已校验为 1-2 位 ASCII 数字，"QString::toUInt()" 与 D1 原本的 "QByteArray::toUInt()"
+    // 在该取值域等价（两者都只接受数字/前导空白/正负号，取值域内无差别）—— 版本号留在调用方落盘，
+    // 使两代各自的赋值点都停在各自的切片函数里。
+    version = QString::fromLatin1(digits);
+    window = data;
+    return true;
+}
 
-    // DC:137-139 的 `idx == 0 且 damode == XFLASH` 整块分支属 XFlash —— D1 不实现，
-    // 本函数恒走 LEGACY：EMI = data[find("MTK_BIN")+0xC:]
-    const int bin = data.indexOf(QByteArray(kMtkBin, kMtkBinLen));
+bool extractEmiLegacy(const QByteArray &preloader, EmiData &out, QString *error)
+{
+    QByteArray window;
+    QString version;
+    if (!emiCommon(preloader, out, window, version, error))
+        return false;
+    out.ver = version.toUInt();                                 // 与 D1 同序：仍在 MTK_BIN 搜索**之前**
+
+    // 本函数恒走 LEGACY（DC:140-144）：EMI = data[find("MTK_BIN")+0xC:]
+    const int bin = window.indexOf(QByteArray(kMtkBin, kMtkBinLen));
     if (bin == -1) {                                            // DC:141
         setErr(error, QStringLiteral("未找到 MTK_BIN（LEGACY 切片起点未知）"));
         return false;
     }
-    out.bytes = data.mid(bin + kMtkBinSkip);                    // DC:142
+    out.bytes = window.mid(bin + kMtkBinSkip);                  // DC:142
     // mid() 会 clamp：起点越界 ⇔ 切片为空（偏差 5）
     if (out.bytes.isEmpty()) {
         setErr(error, QStringLiteral("MTK_BIN+0xC(%1) 越过数据末尾（%2 字节），EMI 切片为空")
-                          .arg(bin + kMtkBinSkip).arg(data.size()));
+                          .arg(bin + kMtkBinSkip).arg(window.size()));
         return false;
     }
+    return true;
+}
+
+bool extractEmiXflash(const QByteArray &preloader, EmiData &out, QString *error)
+{
+    QByteArray window;
+    QString version;
+    if (!emiCommon(preloader, out, window, version, error))
+        return false;
+
+    // 上游 DC:137 把"整块返回"系于 `idx == 0`（标记正在窗口起点）。标记不在起点时上游落 else
+    // 分支、静默改取 `MTK_BIN+0xC` 切片（DC:141-144）—— 那是**另一代的切片**。本实现不静默换
+    // 切片（否则发出的字节上游在此情形不会发），改明确失败并指名替代调用（偏差 6）。
+    // emiCommon 成功 ⇒ 窗口内必有标记 ⇒ 此处 info != -1，只判"是否在偏移 0"。
+    const int info = window.indexOf(QByteArray(kBloaderInfo, kBloaderInfoLen));
+    if (info != 0) {
+        setErr(error, QStringLiteral("XFlash 切片要求标记在 dramsize 窗口偏移 0（实测 %1）："
+                                     "上游此情形改取 MTK_BIN+0xC 切片，本实现不静默换切片 —— "
+                                     "需要该切片请改调 extractEmiLegacy").arg(info));
+        return false;
+    }
+
+    out.ver = version.toUInt();
+    // **整块窗口**（真样本 912B）—— 不找 MTK_BIN、不做任何切片。此处不另判空：窗口内已含标记
+    // （≥18B）恒非空，空切片分支在 XFlash 路径不可达（与 LEGACY 的 MTK_BIN+0xC 越界不同）。
+    out.bytes = window;
+    out.branch = QStringLiteral("XFLASH");
     return true;
 }
 

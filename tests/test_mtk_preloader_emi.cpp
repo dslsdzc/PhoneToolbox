@@ -25,6 +25,10 @@ private slots:
     void rejectsNonNumericVersion();
     // 真样本（reference/mtk-samples/，缺失时 SKIP；验证跑带 -DMTK_SAMPLES_REQUIRED=ON）
     void realPreloaderExtracts();
+    // XFlash 代（整块切片；与 LEGACY 在同一 preloader 上并存）
+    void xflashSliceIsWholeWindow();
+    void xflashAndLegacySlicesFromSyntheticFixture();
+    void xflashRejectsMarkerNotAtWindowOrigin();
 };
 
 using namespace mtktest;
@@ -294,6 +298,71 @@ void TestMtkPreloaderEmi::realPreloaderExtracts()
     QCOMPARE(emi.bytes.left(4), pre.mid(254492 + 0xC, 4));
     // 反向锚点：LEGACY 切片必须与 XFlash 整块不同（防"退回整块"的静默错法）
     QVERIFY(emi.bytes != pre.mid(254392, 912));
+}
+
+// XFlash：整块切片（真样本 912 B），与 LEGACY 的 800 B 在同一 preloader 上并存
+void TestMtkPreloaderEmi::xflashSliceIsWholeWindow()
+{
+    const QString path = mtktest::samplesDir() + QStringLiteral("/preloader.bin");
+    if (!QFile::exists(path)) {
+#if MTK_SAMPLES_REQUIRED
+        QFAIL("真样本缺失：preloader.bin（MTK_SAMPLES_REQUIRED=ON）");
+#else
+        QSKIP("真样本缺失（reference/mtk-samples/，gitignored）");
+#endif
+    }
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QByteArray pre = f.readAll();
+
+    mtkbrom::EmiData legacy, xflash;
+    QString err;
+    QVERIFY2(mtkbrom::extractEmiLegacy(pre, legacy, &err), qPrintable(err));
+    err.clear();
+    QVERIFY2(mtkbrom::extractEmiXflash(pre, xflash, &err), qPrintable(err));
+
+    QCOMPARE(legacy.ver, quint32(35));
+    QCOMPARE(xflash.ver, quint32(35));
+    QCOMPARE(legacy.bytes.size(), 800);       // MTK_BIN+0xC 起
+    QCOMPARE(xflash.bytes.size(), 912);       // **整块**（dramsize 窗口）
+    QCOMPARE(legacy.bytes.size() + 112, xflash.bytes.size());
+    QVERIFY(xflash.bytes.mid(112) == legacy.bytes);      // LEGACY 切片 = XFlash 切片去掉前 112 字节
+}
+
+// 合成：两种切片在同一夹具上的关系（不依赖真样本）
+void TestMtkPreloaderEmi::xflashAndLegacySlicesFromSyntheticFixture()
+{
+    const QByteArray pre = buildPreloader(64);            // 既有夹具（含标记 + MTK_BIN + 尾部 EMI）
+    mtkbrom::EmiData legacy, xflash;
+    QString err;
+    QVERIFY2(mtkbrom::extractEmiLegacy(pre, legacy, &err), qPrintable(err));
+    err.clear();
+    QVERIFY2(mtkbrom::extractEmiXflash(pre, xflash, &err), qPrintable(err));
+    QVERIFY(xflash.bytes.size() > legacy.bytes.size());
+    QVERIFY(xflash.bytes.endsWith(legacy.bytes));
+}
+
+// XFlash 的整块取法**不是无条件的**：上游 DC:137 把整块返回系于 `idx == 0`（标记正在窗口起点），
+// 标记不在起点时落 else 分支、改取 MTK_BIN+0xC 切片（DC:141-144）—— 即**换成另一代的切片**。
+// 本实现不静默换切片（否则发出的是上游在此情形不会发的字节）：明确失败，并把替代调用写进 error。
+// 832 个真实 preloader **全部**满足标记在窗口偏移 0（见 task-3 报告的对拍统计），故该分支只有合成夹具能钉。
+void TestMtkPreloaderEmi::xflashRejectsMarkerNotAtWindowOrigin()
+{
+    const QByteArray pre = QByteArray(0x10, '\x5A') + buildPreloader(16);   // 标记被推到窗口偏移 0x10
+    QCOMPARE(pre.indexOf(QByteArray("MTK_BLOADER_INFO_v")), 0x10);          // 夹具自检：确实不在 0
+
+    mtkbrom::EmiData legacy, xflash;
+    QString err;
+    // LEGACY 不受此条件约束（上游 LEGACY 分支只查 MTK_BIN 在不在）
+    QVERIFY2(mtkbrom::extractEmiLegacy(pre, legacy, &err), qPrintable(err));
+    QVERIFY(!legacy.bytes.isEmpty());
+
+    err.clear();
+    QVERIFY(!mtkbrom::extractEmiXflash(pre, xflash, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY2(err.contains(QStringLiteral("extractEmiLegacy")), qPrintable(err));   // 诊断须给出替代调用
+    QVERIFY(xflash.bytes.isEmpty());      // fail-closed：失败不留半份结果
+    QVERIFY(xflash.ver == 0);
 }
 
 QTEST_APPLESS_MAIN(TestMtkPreloaderEmi)
