@@ -311,7 +311,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_table.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_emi.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_flash_plan.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_fetch.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_preloader_fetch.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_plan_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -540,6 +541,13 @@ if(ENABLE_IMAGE_TESTS)
                     # （Qt Network）不进本目标，由主程序 GLOB 编译。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_plan_dialog")
+                    # Phase D1 Task 11：MTK 计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
+                    # + 计划层（只依赖 Qt Core）。Qt6::Widgets 与 offscreen 见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/mtk_plan_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/plan_preview_widget.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
@@ -575,7 +583,8 @@ if(ENABLE_IMAGE_TESTS)
                 # 直接退出（实测 exit 1，QtTest 还没跑），主题与"勾选框门控"断言无关 —— 置空
                 # 让本用例与环境无关（ENVIRONMENT 是**追加**到环境，不能只靠不设置）。
                 # Phase C Task 9：三星计划对话框共用同一套 Widgets + offscreen 配置。
-                if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog")
+                if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog"
+                   OR _test_stem STREQUAL "test_mtk_plan_dialog")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
                     set_tests_properties(${_test_target} PROPERTIES
                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")

@@ -1,8 +1,11 @@
 #include "flash_panel.h"
 #include "flash_plan_dialog.h"          // Phase B Task 8：EDL 刷写计划预览
 #include "samsung_plan_dialog.h"        // Phase C Task 9：三星 Odin 刷写计划预览
+#include "mtk_plan_dialog.h"            // Phase D1 Task 11：MTK BROM 刷写计划预览
 #include "core/filename_parser.h"
+#include "core/mtk_flash_plan.h"        // D1 Task 11：MTK 入口的计划构建（scatter 参照表 + 镜像）
 #include "core/restart_tool.h"
+#include <QFile>                        // D1 Task 11：MTK 入口读 scatter
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -349,7 +352,7 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     }
 
     // F5: 协议通道模式（MTK BROM / 华为 USB Update / 展锐 / 三星 Odin）——整包刷写通道。
-    // 分区列表不适用：MTK BROM 分区镜像选择待接线（F1 runBromFlash 分区结构），
+    // 分区列表不适用：MTK BROM 的镜像与 DA 在「刷入」入口里选择（含计划预览），
     // 华为/展锐为整包通道，三星侧分区来自包内 PIT（刷写入口里弹预览）；
     // 跳过 onRefreshPartitions，避免对协议设备(如 usb-1-2)发 ADB 查询。
     // 「刷入」按所选设备模式走协议通道文件参数对话框。
@@ -360,7 +363,7 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_partitionList->clear();
         m_partitions.clear();
         m_flashBtn->setEnabled(true);
-        m_flashBtn->setToolTip(QStringLiteral("协议通道整包刷写（按模式选择 update.app / pac+FDL / DA / 三星 tar.md5）"));
+        m_flashBtn->setToolTip(QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
         return;
     }
 
@@ -693,14 +696,94 @@ void FlashPanel::onFlashClicked()
             params.insert(QStringLiteral("fdl1Path"), fdl1);
             params.insert(QStringLiteral("fdl2Path"), fdl2);
         } else if (channel == QStringLiteral("mtk-brom")) {
+            // 文件入口顺序即用户心智：DA → 镜像 → scatter(可选) → preloader(可选) → 预览 → 确认
             const QString daPath = QFileDialog::getOpenFileName(
-                this, QStringLiteral("选择 DA 二进制"));
+                this, QStringLiteral("选择 DA 二进制（MTK_AllInOne_DA_*.bin）"), QString(),
+                QStringLiteral("MTK DA (*.bin);;所有文件 (*)"));
             if (daPath.isEmpty()) return;
+            const QStringList images = QFileDialog::getOpenFileNames(
+                this, QStringLiteral("选择要刷入的镜像（可多选：boot.img / super.img / preloader.bin…）"),
+                QString(), QStringLiteral("镜像 (*.img *.bin);;所有文件 (*)"));
+            if (images.isEmpty()) return;
+
+            // 分区参照表（可选）：有 scatter 就能提前看到分区名与大小，并对"放不下"提前告警；
+            // 没有则目标分区名由镜像文件名推导 —— **写入判据始终以设备实读分区表为准**。
+            QList<mtkplan::PartitionRef> refs;
+            const QMessageBox::StandardButton wantScatter = QMessageBox::question(
+                this, QStringLiteral("分区参照表"),
+                QStringLiteral("是否提供 scatter 文件（Android_scatter.txt）？\n\n"
+                               "提供 → 预览可见分区名与分区大小（提前发现「放不下」）；\n"
+                               "不提供 → 分区名由镜像文件名推导，刷写时按设备分区表校验。"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (wantScatter == QMessageBox::Yes) {
+                const QString scatter = QFileDialog::getOpenFileName(
+                    this, QStringLiteral("选择 scatter 文件"), QString(),
+                    QStringLiteral("scatter (*.txt);;所有文件 (*)"));
+                if (scatter.isEmpty()) return;
+                QFile sf(scatter);
+                if (!sf.open(QIODevice::ReadOnly)) {
+                    emit outputMessage(QStringLiteral("无法读取 scatter：%1").arg(scatter), true);
+                    return;
+                }
+                QString parseErr;
+                if (!mtkplan::parseScatter(QString::fromUtf8(sf.readAll()), refs, &parseErr)) {
+                    emit outputMessage(QStringLiteral("scatter 解析失败：%1").arg(parseErr), true);
+                    return;
+                }
+            }
+
+            // preloader（EMI/DRAM 初始化用）：显式选择优先；否则在镜像目录里自动找（唯一命中才用）
+            QString preloaderPath;
+            QStringList firmwareDirs;
+            const QMessageBox::StandardButton wantPre = QMessageBox::question(
+                this, QStringLiteral("preloader"),
+                QStringLiteral("是否指定 preloader？（用于 DRAM/EMI 初始化）\n\n"
+                               "选「是」→ 手动选择文件；\n"
+                               "选「否」→ 自动在镜像所在目录查找 preloader*.bin（唯一命中才用）。"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+            if (wantPre == QMessageBox::Yes) {
+                preloaderPath = QFileDialog::getOpenFileName(
+                    this, QStringLiteral("选择 preloader"), QString(),
+                    QStringLiteral("preloader (*.bin);;所有文件 (*)"));
+                if (preloaderPath.isEmpty()) return;
+            } else {
+                firmwareDirs << QFileInfo(images.first()).absolutePath();
+            }
+            // 网络获取：**默认关闭**（默认按钮就是 No）—— 显式 opt-in 才带上参数
+            bool allowNetwork = false;
+            if (preloaderPath.isEmpty()) {
+                const QMessageBox::StandardButton net = QMessageBox::question(
+                    this, QStringLiteral("网络获取 preloader"),
+                    QStringLiteral("是否允许从网络获取 preloader？\n\n"
+                                   "默认关闭。开启后按本机来源清单（mtk_preloader_sources.json，"
+                                   "含 URL 与 sha256）下载并校验；\n"
+                                   "注意：错误的 preloader 有砖机风险，请自行确认来源可信。"),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                allowNetwork = (net == QMessageBox::Yes);
+            }
+
+            // 预览：镜像文件名 → 目标分区（scatter 是参照表，不是判据）→ 计划不可用/用户取消都在这里收口
+            mtkplan::MtkFlashPlan plan;
+            QString planErr;
+            if (!mtkplan::buildMtkPlan(refs, images, plan, &planErr)) {
+                emit outputMessage(QStringLiteral("MTK 刷写计划构建失败：%1").arg(planErr), true);
+                return;
+            }
+            if (!MtkPlanDialog::buildAndShow(plan, this, &planErr)) {
+                if (!planErr.isEmpty())
+                    emit outputMessage(QStringLiteral("MTK 刷写计划不可用：%1").arg(planErr), true);
+                return;                      // *error 空 = 用户取消（静默返回，与 EDL/三星入口同口径）
+            }
+            // 键名与 FlashTool::parseBromParams 一一对应（flash_tool.h 的通道参数表）：
+            // 缺 daPath/imagePaths = 通道侧响亮失败；preloaderCacheDir 本入口不设（空 = 只留内存）
             params.insert(QStringLiteral("daPath"), daPath);
-            // 分区镜像选择（诚实边界）：当前先整包/单分区待接线——按 F1
-            // runBromFlash 分区结构适配，未适配前标注"分区选择待接线"。
-            emit outputMessage(QStringLiteral(
-                "MTK BROM 通道：分区镜像选择待接线，本次仅执行 DA 协议握手"), false);
+            params.insert(QStringLiteral("imagePaths"), images);
+            if (!preloaderPath.isEmpty())
+                params.insert(QStringLiteral("preloaderPath"), preloaderPath);
+            if (!firmwareDirs.isEmpty())
+                params.insert(QStringLiteral("firmwareDirs"), firmwareDirs);
+            if (allowNetwork)
+                params.insert(QStringLiteral("allowNetworkPreloader"), true);
         } else if (channel == QStringLiteral("samsung-odin")) {
             // Phase C：选包 → 计划预览（含两类不匹配告警 + 未验证勾选）→ 确认后把**文件列表**
             // 交给通道（通道内自行解析 PIT 并重建计划 —— 与 oppo-edl 通道传 planDir 同款口径）
@@ -747,14 +830,23 @@ void FlashPanel::onFlashClicked()
         m_progressBar->setValue(0);
         m_flashBtn->setEnabled(false);
 
+        // 通道刷写是同步一整趟（DA 握手 → 逐分区写 → reset），不泵事件则进度条与日志
+        // **全程不重绘**（进度只在返回后跳变）。与 EDL 计划路径同款：ExcludeUserInputEvents
+        // 只放行重绘/定时器，把"刷写途中用户再点按钮"的重入从队列层面排除；连接是本段专有，
+        // 退出即断开（EDL 计划路径见 onEdlPlanFlash）。
+        const QMetaObject::Connection pump = connect(
+            m_flashTool, &FlashTool::flashProgress, this, [](int) {
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            });
+
         QString error;
-        if (!m_flashTool->flashFullPackage(deviceId,
+        const bool ok = m_flashTool->flashFullPackage(deviceId,
                 static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode),
-                params, &error))
+                params, &error);
+        disconnect(pump);
+
+        if (!ok)
             emit outputMessage(QStringLiteral("刷写失败: %1").arg(error), true);
-        else if (channel == QStringLiteral("mtk-brom"))
-            // MTK BROM 通道当前仅 DA 握手（分区刷写待接线，见 F5-3 诚实边界标注）
-            emit outputMessage(QStringLiteral("握手完成（分区刷写待接线）"), false);
         else
             emit outputMessage(QStringLiteral("刷写完成"), false);
 

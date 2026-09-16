@@ -1270,11 +1270,14 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         req.preloader.allowNetwork = allowNetwork;
         req.preloader.cacheDir = params.value(QStringLiteral("preloaderCacheDir")).toString();
 
-        QStringList sourceLog;
-        req.preloaderSources = mtkbrom::loadConfiguredSources(&sourceLog);
-        for (const QString &line : std::as_const(sourceLog))
-            emit outputMessage(line, false);
+        // 来源清单**只在网络开启时才读**（T10 审查交接）：关网时 resolvePreloader 根本不会看一眼
+        // sources（mtk_preloader_fetch.cpp 的 `if (!opt.allowNetwork)` 短路在前），这份清单的
+        // 加载日志（"缺清单 → 走 skip 分支"之类）对不需要 preloader 的用户纯属误导性噪音。
         if (allowNetwork) {
+            QStringList sourceLog;
+            req.preloaderSources = mtkbrom::loadConfiguredSources(&sourceLog);
+            for (const QString &line : std::as_const(sourceLog))
+                emit outputMessage(line, false);
             req.downloader = mtkbrom::makeQtPreloaderDownloader();
             emit outputMessage(QStringLiteral("已按用户选择开启 preloader 网络获取（默认关闭项）"), false);
         }
