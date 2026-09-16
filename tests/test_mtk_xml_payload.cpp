@@ -217,6 +217,72 @@ private slots:
     void setupEnvPayloadFields();
     // ── T10 ──
     void writePartitionSequence();
+    // 补零分支：0x500 → 补到 0x600，**宣布长度必须是补零后的值**（审查 Minor 6）
+    void writePartitionAnnouncesPaddedLength()
+    {
+        MockUsbChannel m;
+        QByteArray data(0x500, '\x33');                       // 非 512 整数倍
+        m.reads << textReads(QStringLiteral("OK"))
+                << fileSysOpReads(QStringLiteral("FILE-SIZE"), 0x600)   // 设备按**补零后**的长度索要
+                << dwnFileReads(0x400, 0x600)
+                << textReads(QStringLiteral("OK"))                      // 第二次 ackValue(length)
+                << textReads(QStringLiteral("OK"))                      // 第一包 ack(0)
+                << textReads(QStringLiteral("OK"))
+                << textReads(QStringLiteral("OK"))                      // 第二包 ack(0)
+                << textReads(QStringLiteral("OK"))
+                << writeTailReads();
+        mtkbrom::XmlSession x(&m);
+        QString err;
+        QVERIFY2(mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), data, nullptr, &err), qPrintable(err));
+        QCOMPARE(m.reads.size(), 0);
+        QList<QByteArray> blocks;
+        for (const QByteArray &f : std::as_const(m.writeFrames))
+            if (f.size() == 0x400 || f.size() == 0x200)
+                blocks << f;
+        QCOMPARE(blocks.size(), 2);
+        QCOMPARE(blocks.at(0).size(), 0x400);
+        QCOMPARE(blocks.at(1).size(), 0x200);
+        QCOMPARE(blocks.at(0).left(0x400), data.mid(0, 0x400));          // 前段原样
+        QCOMPARE(blocks.at(1).left(0x100), data.mid(0x400, 0x100));      // 余下 0x100 原样
+        QCOMPARE(blocks.at(1).mid(0x100), QByteArray(0x100, '\0'));     // **尾部补零**
+    }
+
+    // 设备给出**超大** packet_length（0x80000000，≥2^31）→ 必须夹取到数据长度后**单块**写完
+    // （审查 Important：不夹取时 int(packet) 为负 → 步进不前进 = 刷写线程挂死）
+    void writePartitionClampsOversizedPacketLength()
+    {
+        MockUsbChannel m;
+        const QByteArray data(0x400, '\x21');
+        m.reads << textReads(QStringLiteral("OK"))
+                << fileSysOpReads(QStringLiteral("FILE-SIZE"), 0x400)
+                << dwnFileReads(0x80000000u, 0x400)      // 荒谬的 packet_length
+                << textReads(QStringLiteral("OK"))       // 第二次 ackValue(length)
+                << textReads(QStringLiteral("OK"))       // 单包：ack(0) 的应答
+                << textReads(QStringLiteral("OK"))       // 单包：数据后的应答
+                << writeTailReads();
+        mtkbrom::XmlSession x(&m);
+        QString err;
+        QVERIFY2(mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), data, nullptr, &err), qPrintable(err));
+        QCOMPARE(m.reads.size(), 0);
+        int dataBlocks = 0;
+        for (const QByteArray &f : std::as_const(m.writeFrames))
+            if (f.size() == 0x400)
+                ++dataBlocks;
+        QCOMPARE(dataBlocks, 1);                     // **单块**（夹取后 packet == 数据长度）
+    }
+
+    // 空数据：任何写之前就失败（审查 Minor 6）
+    void writePartitionRejectsEmptyData()
+    {
+        MockUsbChannel m;
+        mtkbrom::XmlSession x(&m);
+        QString err;
+        QVERIFY(!mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), QByteArray(), nullptr, &err));
+        QVERIFY(!err.isEmpty());
+        QCOMPARE(m.writeFrames.size(), 0);        // 一个字节都没发
+        QCOMPARE(m.reads.size(), 0);              // 也没读
+    }
+
     void writePartitionRejectsWrongFileSysOpKey();
     void writePartitionFailsWhenPacketRejected();
     void readPartitionSequence();

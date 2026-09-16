@@ -151,7 +151,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
 {
     auto say = [log](const QString &m) { if (log) *log << m; };
     if (data.isEmpty()) {
-        if (error) *error = QStringLiteral("XML 写：分区 %1 的数据为空").arg(partition);
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 分区 %1 的数据为空").arg(partition);
         return false;
     }
     const QByteArray padded = padTo512(data);          // 补齐后再宣布长度（XL:974-976 的 length += fill）
@@ -171,7 +171,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
     if (!x.readCommandResult(fs, nullptr, error))
         return false;
     if (fs.command != QStringLiteral("CMD:FILE-SYS-OPERATION") || fs.info != QStringLiteral("FILE-SIZE")) {
-        if (error) *error = QStringLiteral("XML 写：期待 FILE-SYS-OPERATION 且 key=FILE-SIZE（收到 %1/%2）")
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 期待 FILE-SYS-OPERATION 且 key=FILE-SIZE（收到 %1/%2）")
                                 .arg(fs.command.isEmpty() ? QStringLiteral("(空)") : fs.command, fs.info);
         return false;
     }
@@ -183,11 +183,28 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
     if (!x.readCommandResult(dwn, nullptr, error))
         return false;
     if (dwn.command != QStringLiteral("CMD:DOWNLOAD-FILE") || !dwn.hasPacketLength) {
-        if (error) *error = QStringLiteral("XML 写：期待 CMD:DOWNLOAD-FILE（收到 %1）")
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 期待 CMD:DOWNLOAD-FILE（收到 %1）")
                                 .arg(dwn.command.isEmpty() ? QStringLiteral("(空)") : dwn.command);
         return false;
     }
-    const quint32 packet = dwn.packetLength > 0 ? dwn.packetLength : length;
+    // ⚠️ 审查 Important（rev-t10）：`packet_length` 是**设备给的 quint32** —— 直接 `int(packet)` 在 ≥2^31 时变负数，
+    //    步进为负 = 循环不前进（同"无进展守卫"的动机，另含有符号溢出 UB）。先**夹取到数据长度**再用。
+    //    另：`packet_length == 0` 上游 `upload()` 会真死循环（`bytestowrite -= packet_length` 恒不减），
+    //    而会话层已把 0 判失败（`mtk_xml_session.cpp:296-299`）→ 这里**不需要**兜底（原稿的三元是死代码，已删）。
+    const quint32 packet = qMin<quint32>(dwn.packetLength, quint32(padded.size()));
+    // 写路径的对称检查（审查 Minor 3）：上游从 DwnFile 的 `source_file` 回显里取长度（`XL:456-459`）。
+    // 正常情况下它就是我们发去的 `MEM://0x8000000:0x<length>`；若回显不符（或压根没有），说明双方对"要写什么"理解不一致 → fail-closed。
+    if (!dwn.file.isEmpty()) {
+        const QString tail = dwn.file.section(QLatin1Char(':'), 2);        // "0x<len>"
+        bool okLen = false;
+        const quint32 echoed = tail.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
+                                   ? tail.mid(2).toUInt(&okLen, 16) : tail.toUInt(&okLen, 16);
+        if (okLen && echoed != length) {
+            if (error) *error = QStringLiteral("XML：WRITE-FLASH 设备回显的 source_file 长度 0x%1 与宣布的 0x%2 不符 —— 拒绝")
+                                    .arg(echoed, 0, 16).arg(length, 0, 16);
+            return false;
+        }
+    }
 
     // ⑤ `upload()` 内部**再**发一次长度 ack 并等一个 "OK"（XL:463-464）——漏掉这一发一读，后面每帧错位
     if (!x.ackValue(length, error))
@@ -197,7 +214,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
         if (!x.getResponse(ackResp, error))
             return false;
         if (!ackResp.contains(QStringLiteral("OK"))) {
-            if (error) *error = QStringLiteral("XML 写：第二次长度 ack 未获 OK（收到 %1）").arg(ackResp);
+            if (error) *error = QStringLiteral("XML：WRITE-FLASH 第二次长度 ack 未获 OK（收到 %1）").arg(ackResp);
             return false;
         }
     }
@@ -211,7 +228,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
         if (!x.getResponse(resp, error))
             return false;
         if (!resp.contains(QStringLiteral("OK"))) {
-            if (error) *error = QStringLiteral("XML 写：偏移 0x%1 处的 ack(0) 未获 OK（%2）").arg(pos, 0, 16).arg(resp);
+            if (error) *error = QStringLiteral("XML：WRITE-FLASH 偏移 0x%1 处的 ack(0) 未获 OK（%2）").arg(pos, 0, 16).arg(resp);
             return false;
         }
         if (!x.xsendBytes(block, 1, error))
@@ -219,7 +236,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
         if (!x.getResponse(resp, error))
             return false;
         if (!resp.contains(QStringLiteral("OK"))) {
-            if (error) *error = QStringLiteral("XML 写：偏移 0x%1 处的数据未被接受（%2）").arg(pos, 0, 16).arg(resp);
+            if (error) *error = QStringLiteral("XML：WRITE-FLASH 偏移 0x%1 处的数据未被接受（%2）").arg(pos, 0, 16).arg(resp);
             return false;
         }
     }
@@ -232,7 +249,7 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
     if (!x.readCommandResult(end, nullptr, error))
         return false;
     if (end.command != QStringLiteral("CMD:END") || end.text != QStringLiteral("OK")) {
-        if (error) *error = QStringLiteral("XML 写：收尾期待 CMD:END(OK)（收到 %1/%2）")
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 收尾期待 CMD:END(OK)（收到 %1/%2）")
                                 .arg(end.command.isEmpty() ? QStringLiteral("(空)") : end.command, end.text);
         return false;
     }
@@ -242,11 +259,11 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
     if (!x.readCommandResult(start, nullptr, error))
         return false;
     if (start.command != QStringLiteral("CMD:START")) {
-        if (error) *error = QStringLiteral("XML 写：收尾后未收到 CMD:START（收到 %1）")
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 收尾后未收到 CMD:START（收到 %1）")
                                 .arg(start.command.isEmpty() ? QStringLiteral("(空)") : start.command);
         return false;
     }
-    say(QStringLiteral("XML 写：分区 %1 共 %2 字节完成（packet_length = 0x%3）")
+    say(QStringLiteral("XML：WRITE-FLASH 分区 %1 共 %2 字节完成（packet_length = 0x%3）")
             .arg(partition).arg(padded.size()).arg(packet, 0, 16));
     return true;
 }
@@ -258,7 +275,7 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
     if (!x.getResponse(head, error))
         return false;
     if (!head.startsWith(QStringLiteral("OK@"))) {
-        if (error) *error = QStringLiteral("XML 读：期待裸 OK@ 长度帧（收到 %1）").arg(head);
+        if (error) *error = QStringLiteral("XML：READ-FLASH 期待裸 OK@ 长度帧（收到 %1）").arg(head);
         return false;
     }
     const QString after = head.section(QLatin1Char('@'), 1).trimmed();
@@ -266,12 +283,12 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
     const quint32 announced = after.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)
                                   ? after.mid(2).toUInt(&ok, 16) : after.toUInt(&ok, 16);
     if (!ok) {
-        if (error) *error = QStringLiteral("XML 读：OK@ 长度解析失败（%1）").arg(after);
+        if (error) *error = QStringLiteral("XML：READ-FLASH OK@ 长度解析失败（%1）").arg(after);
         return false;
     }
     // 分歧①（有意）：设备宣布长度必须等于请求长度（上游会静默接受短包）
     if (announced != length) {
-        if (error) *error = QStringLiteral("XML 读：设备宣布 0x%1 字节、请求 0x%2 字节 —— 不符（拒绝）")
+        if (error) *error = QStringLiteral("XML：READ-FLASH 设备宣布 0x%1 字节、请求 0x%2 字节 —— 不符（拒绝）")
                                 .arg(announced, 0, 16).arg(length, 0, 16);
         return false;
     }
@@ -281,13 +298,14 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
     if (!x.getResponse(ok1, error))
         return false;
     if (!ok1.contains(QStringLiteral("OK"))) {
-        if (error) *error = QStringLiteral("XML 读：长度 ack 未获 OK（收到 %1）").arg(ok1);
+        if (error) *error = QStringLiteral("XML：READ-FLASH 长度 ack 未获 OK（收到 %1）").arg(ok1);
         return false;
     }
     if (!x.ack(error))
         return false;
 
     out.clear();
+    int skippedLogs = 0;                                // 连续日志帧上限（审查 Minor 4：与 kMaxLogFramesToSkip 同姿态，防日志刷屏死循环）
     while (quint32(out.size()) < length) {
         quint32 dt = 0, flen = 0;
         if (!x.xreadHeader(dt, flen, error))
@@ -296,10 +314,15 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
         if (!x.readPayload(flen, chunk, error))
             return false;
         if (dt == 2) {                                  // DT_MESSAGE：读掉但丢弃（分歧②）
+            if (++skippedLogs > 64) {
+                if (error) *error = QStringLiteral("XML：READ-FLASH 连续收到超过 64 帧 DA 日志仍未推进数据 —— 中止");
+                return false;
+            }
             continue;
         }
+        skippedLogs = 0;                                // 有数据进展即清零（连续计数，非累计）
         if (dt != 1) {
-            if (error) *error = QStringLiteral("XML 读：数据帧 datatype 异常（%1）").arg(dt);
+            if (error) *error = QStringLiteral("XML：READ-FLASH 数据帧 datatype 异常（%1）").arg(dt);
             return false;
         }
         out += chunk;
@@ -309,7 +332,7 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
         if (!x.getResponse(okN, error))
             return false;
         if (!okN.contains(QStringLiteral("OK"))) {
-            if (error) *error = QStringLiteral("XML 读：逐帧 ack 未获 OK（收到 %1，已收 %2/%3 字节）")
+            if (error) *error = QStringLiteral("XML：READ-FLASH 逐帧 ack 未获 OK（收到 %1，已收 %2/%3 字节）")
                                     .arg(okN).arg(out.size()).arg(length);
             return false;
         }
@@ -317,7 +340,7 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
             return false;
     }
     if (quint32(out.size()) != length) {
-        if (error) *error = QStringLiteral("XML 读：数据长度不符（要 %1，得 %2）").arg(length).arg(out.size());
+        if (error) *error = QStringLiteral("XML：READ-FLASH 数据长度不符（要 %1，得 %2）").arg(length).arg(out.size());
         return false;
     }
     return true;
@@ -338,7 +361,7 @@ bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, q
     if (!x.readCommandResult(up, nullptr, error))                  // 消费 UPLOAD-FILE（内部会 ack，XL:430）
         return false;
     if (up.command != QStringLiteral("CMD:UPLOAD-FILE")) {
-        if (error) *error = QStringLiteral("XML 读：期待 CMD:UPLOAD-FILE（收到 %1）")
+        if (error) *error = QStringLiteral("XML：READ-FLASH 期待 CMD:UPLOAD-FILE（收到 %1）")
                                 .arg(up.command.isEmpty() ? QStringLiteral("(空)") : up.command);
         return false;
     }
@@ -348,7 +371,7 @@ bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, q
     if (!x.readCommandResult(start, nullptr, error))
         return false;
     if (start.command != QStringLiteral("CMD:START")) {
-        if (error) *error = QStringLiteral("XML 读：收尾未收到 CMD:START（收到 %1）")
+        if (error) *error = QStringLiteral("XML：READ-FLASH 收尾未收到 CMD:START（收到 %1）")
                                 .arg(start.command.isEmpty() ? QStringLiteral("(空)") : start.command);
         return false;
     }
