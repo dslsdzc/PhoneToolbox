@@ -34,6 +34,8 @@
 // **订正 #4（写用例第 2 条断言不可用）**：简令的 `QVERIFY(cmds.at(1).startsWith("OK@0x600"))` ——
 // `cmds` 只收以 `<?xml` 开头的写帧，而写路径上**只有 WRITE-FLASH 一条 XML 命令**，故 `cmds.at(1)`
 // 越界。此处改为对**每一笔 write()** 取形态签名（writeSignature()），逐笔计数 + 逐笔大小：
+// ⚠️ 本助手**按前缀分类**：若将来某条用例的数据块恰好是 12 字节、或以 "OK"/"<?xml" 开头，会被误判成 ack/命令帧
+//    （当前载荷用 `i & 0xFF` 递增，不会触发）。新增用例时请避开这三种载荷形状，或改用显式类型标注。
 // 拼接字节流断言分不清"某块载荷写了两遍"和"只写了一遍"。
 //
 // **订正 #5（WRITE-FLASH 少一项 `<offset>`）**：上游 `cmd_write_flash`（XC:452-462）的 `<arg>` 是
@@ -217,6 +219,19 @@ private slots:
     void setupEnvPayloadFields();
     // ── T10 ──
     void writePartitionSequence();
+    // 设备对 WRITE-FLASH 答非所问（直接 CMD:END，既非 FileSysOp 也非 DwnFile）→ 失败且文案点名实收命令（审查 Minor 9）
+    void writePartitionRejectsUnexpectedDeviceReply()
+    {
+        MockUsbChannel m;
+        m.reads << textReads(QStringLiteral("OK"))                       // WRITE-FLASH 被接受
+                << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"));
+        mtkbrom::XmlSession x(&m);
+        QString err;
+        QVERIFY(!mtkbrom::xmlWritePartition(x, QStringLiteral("EMMC-USER"), QByteArray(0x200, '\x11'), nullptr, &err));
+        QVERIFY2(err.contains(QStringLiteral("CMD:END")), qPrintable(err));      // 报出**实收**命令
+        QVERIFY(!err.contains(QStringLiteral("(空)")));                          // 不是"收到空"
+    }
+
     // 补零分支：0x500 → 补到 0x600，**宣布长度必须是补零后的值**（审查 Minor 6）
     void writePartitionAnnouncesPaddedLength()
     {

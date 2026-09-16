@@ -175,6 +175,12 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
                                 .arg(fs.command.isEmpty() ? QStringLiteral("(空)") : fs.command, fs.info);
         return false;
     }
+    // 设备索要的 file_path 应当**就是我们发去的描述符**（审查 Minor 7）：不符 = 双方对"写哪个区间的多少字节"理解不一致 → fail-closed
+    if (!fs.file.isEmpty() && fs.file != memDescriptor(length)) {
+        if (error) *error = QStringLiteral("XML：WRITE-FLASH 设备索要的 file_path（%1）与本层描述符（%2）不符 —— 拒绝")
+                                .arg(fs.file, memDescriptor(length));
+        return false;
+    }
 
     // ③ ackValue(**length**) → ④ 设备回 DwnFile（带 packet_length）
     if (!x.ackValue(length, error))
