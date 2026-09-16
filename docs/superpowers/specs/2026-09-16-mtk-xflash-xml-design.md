@@ -147,7 +147,7 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 | 层 | 内容 |
 |---|---|
 | **真实 GPT 样本** | `reference/mtk-samples/PGPT.img`/`SGPT.img`（**4096 字节扇区**，来源 `https://github.com/ReCoreShift/mtk-gpt-tool` `tests/fixtures/`，MPL-2.0 仓库，**非我们自己的设备**；sha256 `1124d035…`/`45495fd5…`）：硬断言 61 条目、`EFI PART`@4096、**头部 CRC（字段清零后）= 0x25c45852**、**条目 CRC = 0xac89a396**、前几条分区名（`misc`/`para`/`expdb`/`frp`/`nvcfg`/`nvdata`）；与 `sgdisk_print.txt` 独立对拍 |
-| **真实 scatter（新方言）** | `MT6789_Android_scatter.xml`（同源，真样本）：XML 方言解析出 130 个 `partition_name`，`preloader`/`pgpt`/`misc`… 与 GPT 条目交叉对照 |
+| **真实 scatter（新方言）** | `MT6789_Android_scatter.xml`（同源，真样本）：**130 个 `<partition_index>` 块 = EMMC 与 UFS 两份完整副本**（同一个 `SYS0` 标签，一份 `<region>EMMC_BOOT1</region>/<storage>HW_STORAGE_EMMC</storage>`、一份 `<region>UFS_LU0</region>/<storage>HW_STORAGE_UFS</storage>`）→ **解析必须按 storage 过滤**（每份 65 个分区：`preloader`/`preloader_backup`/`pgpt`/`misc`/`para`/`expdb`…），不过滤会让每个分区翻倍且大小对不上；解析结果与 GPT 条目交叉对照 |
 | **真 DA 样本** | V5/V6：`region[1]`=DA1、`region[2]` 地址逐条目（`0x40000000`）、**剥签名**（XFlash）与**保留签名**（LEGACY）双向断言 |
 | **832 preloader** | 两代 EMI 切片与上游逐字移植对拍（沿用 D1 的方法） |
 | **mock 逐帧** | 12B 帧与 `datatype`、0x200 分块边界、**0x6781 的 16B 合并写**、`WRITE_DATA` 48B 参数、`boot_to` 16B+数据+sleep+status 判据、`SHUTDOWN` 32B、XML 文本握手序列（`OK`/`OK@0x…`/`OK!EOT`/`CMD:END`+`CMD:START`） |
@@ -156,7 +156,10 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 
 **诚实边界（写进交付物）**
 - **真机全链未验证**（三代皆是）；枚举/打开/握手/EMI/DA2/分区表/写入/收尾全段只有代码级保证。
-- **XML 代无真实设备样本**：帧格式与命令序列全部来自上游代码；`UFSPartitionType` 文本表示、`max_address_length` 语义两点**实现时核实、结论如实披露**（**XML 的分区表读取路径已在设计期核实**：`CMD:READ-FLASH` + 同一个 GPT 解析器）。
+- **XML 代无真实设备样本**：帧格式与命令序列全部来自上游代码；`UFSPartitionType` 文本表示、`max_address_length` 语义两点**已于计划期结案**（**XML 的分区表读取路径已在设计期核实**：`CMD:READ-FLASH` + 同一个 GPT 解析器）：
+  - `UFSPartitionType` 在 XML 下是**字符串** `"EMMC-USER"` 一类（`ST:216` 起、`XC:452-461`）；整数枚举（BOOT1=1/BOOT2=2/USER=3/RPMB=4）只用于 XFlash。**已核实**（事实报告 §5.3/§6）。
+  - `max_address_length = 9`（`XP:2`）：**全仓库只被 import、无任何消费点**（`USBLIB:21`、`seriallib.py:9`）→ 与 plcap/blver 同类的**死常量**，本实现**不实现、不猜语义**。
+  - 非真机可证的部分（`0x6781` 的 16 字节 ack、DRAM 时序）只按上游实现，边界如实披露。
 - **GPT 样本来自第三方仓库**（非我们自己的设备，MPL-2.0 仓库的测试夹具）；`reference/` gitignored，不随仓库分发。
 - **mock 看不见"读了多少字节"**（D1 已记录）：读侧判据靠"逐条对上游读长度"+ probe。
 - **"0 warning" 只是编译器默认档**（`CMakeLists.txt` 未开 `-Wall/-Wextra`）。
