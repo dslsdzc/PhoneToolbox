@@ -41,6 +41,22 @@
 //     `hasflags = (async_mode || dl_bit || bootmode != NORMAL) ? 1 : 0`（XFL:817-825）；
 //     上游两条路径都 `port.close(reset=True)`（XFL:828/:832）—— 关端口是**调用方**的事
 //     （本层不持有通道所有权，同 XFlashSession 头注）。
+//
+// T6 三函数（写/读数据路径，每条同样在 XFL 核过）：
+//   • 56B 存储参数（XFL:677-680）：`pack("<IIQQ", storage, parttype, addr, len)` = 24B +
+//     `NandExtension` 的 **8 个** u32 = 32B（该类有 9 个属性，pack 里**跳过** `operation_type`）。
+//     ⚠️ 计划/事实报告原写"48B"是算错 —— 少 8 字节设备会把后 8 字节读成垃圾。
+//   • 写（XFL:670-685 + :835-901）：WRITE_DATA → status 0 → 56B 参数（**length 取 512 对齐后的总长**）→
+//     每块 `dsize = min(write_packet_length, 剩余)` → 补零到 512 的整数倍 → `checksum = sum(data) & 0xFFFF`
+//     → `send_param([<I 0>, <I checksum>, data])`（**一次 status**）→ **循环之后再读一次 status**
+//     （XFL:883-893，非 0 即 "Error on writeflash"）→ 成功才发 CC_OPTIONAL_DOWNLOAD_ACT
+//     （XFL:885；上游不检查其返回值，本层失败只告警 —— 数据此时已写入）。
+//   • 读（XFL:687-704 + :706-806）：READ_DATA → status 0 → 56B 参数 → **参数帧之后的第二个 status**
+//     （XFL:698-702；漏读会让之后每个数据帧整体错位一帧）→ 帧循环：slength **> 4** 是数据帧
+//     （收下 + `ack(rstatus=False)`，XFL:750-757）、**== 4** 是 flag 帧（非 0 即报错；0 只是继续）、
+//     其它长度是协议错误 → **收尾帧**（XFL:770-776，slength==4 时判 flag）。
+//     **循环以字节数收尾**（上游 `bytestoread`，XFL:730/:757），不是"见到 flag 就停"：
+//     中途的 flag==0 帧照上游继续读。字节读满后才读收尾帧。
 
 #include <QByteArray>
 #include <QString>
@@ -61,6 +77,9 @@ enum XDevCtrl : quint32 {
     X_CTRL_SET_CHECKSUM_LEVEL   = 0x020003,   // XFP:27；<I（PLAIN=0/CRC32=1/MD5=2）；上游恒设 0（XFL:1106）
     X_CTRL_SET_RESET_KEY        = 0x020004,   // XFP:28；<I（上游传 0x68，XFL:1104 / :206-209）
     X_CTRL_GET_EXPIRE_DATE      = 0x040011,   // XFP:57；无参数，回包文本（XFL:571-578）
+    // ⚠️ 这个值上游就是 **0x800005**（同段邻居都是 0x0800xx，是上游自己的写法，XFP:64-69）——
+    // **照发**，不要"修正"成 0x080005：设备按字面收，改一个 0 就是另一条命令。
+    X_CTRL_CC_OPTIONAL_DOWNLOAD_ACT = 0x800005,   // 写完一个分区后的可选下载动作（XFL:885，无参 devctrl）
 };
 
 struct XPacketLength {
@@ -111,5 +130,19 @@ bool xflashBootTo(XFlashSession &x, quint64 addr, const QByteArray &da2, QString
 // dl_bit, dont_resetrtc, leaveusb, 0)；hasflags 由 async_mode/dl_bit/bootmode 推导（XFL:817-825）。
 // 只发命令、不关端口（上游 XFL:828/:832 的 port.close 由调用方负责）。
 bool xflashShutdown(XFlashSession &x, quint32 bootmode = 0, QString *error = nullptr);
+
+// ⑤ 写/读数据路径（T6）
+// 56B 存储参数（铁律 15，见文件头）：24B 包头 + 32B NandExtension（全 0）。恒 56 字节。
+QByteArray xflashStorageParam(quint32 storage, quint32 partType, quint64 addr, quint64 length);
+// 写一个区间（XFL:670-685 + :835-901）。`writePacketLength` 取 GET_PACKET_LENGTH 的
+// write_packet_length，**为 0 即拒绝（无回退，铁律 14）**。读帧数：2 + 块数 + 1（收尾）+ 2（CC devctrl）
+// + 1（CC 回包）。CC_OPTIONAL_DOWNLOAD_ACT 失败**只告警不判失败**（数据已写入，上游也不检查）。
+bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
+                     quint32 storage, quint32 partType, quint32 writePacketLength,
+                     QStringList *log = nullptr, QString *error = nullptr);
+// 读一个区间到内存（XFL:687-704 + :706-806）。`out` 只收**数据帧**（flag 帧不进）；
+// 读满 `length` 字节后再读一帧收尾。flag 非 0 即失败。
+bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
+                    quint32 storage, quint32 partType, QByteArray &out, QString *error = nullptr);
 
 } // namespace mtkbrom

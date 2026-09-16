@@ -1,6 +1,7 @@
 #include "core/modes/mtk_xflash_payload.h"
 
 #include <QThread>
+#include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 // 事实与行号出处见头文件注释（mtkclient GPL-3.0，只读参照，代码文本不进仓库）。
 
@@ -20,7 +21,8 @@ QByteArray le64(quint64 v) { return le32(quint32(v & 0xFFFFFFFFu)) + le32(quint3
 
 // 错误码统一以**大写**零填充十六进制出现（同 session.cpp:26-32 的 hexCode；同样是各留一份）。
 // 与 session 层的 checkStatus 文案同一拼法 —— 用户按码值 grep 时全仓只有一种写法
-// （上游 error.py 的 hex() 是小写，本仓不跟）。本层只有 boot_to 的终判状态字用到它。
+// （上游 error.py 的 hex() 是小写，本仓不跟）。本层用到它的是 boot_to 的终判状态字
+// 与读数据路径的 flag 值（T6；后者的码值同样要能按字面 grep）。
 QString hexCode(quint32 v)
 {
     QString hex = QString::number(v, 16).toUpper();
@@ -297,6 +299,160 @@ bool xflashShutdown(XFlashSession &x, quint32 bootmode, QString *error)
             stErr.remove(0, layer.size());
         if (error) *error = QStringLiteral("XFlash：SHUTDOWN 收尾失败（%1）").arg(stErr);
         return false;
+    }
+    return true;
+}
+
+// ---- ⑤ 写/读数据路径（T6）----
+
+// 56B 存储参数（XFL:677-680）：`pack("<IIQQ", storage, parttype, addr, len)` = 24B +
+// `NandExtension` 的 **8×u32 = 32B**（该类有 9 个属性，打包时**跳过** `operation_type`）。
+// 恒 56 字节；⚠️ 计划/事实报告原写 48B 是算错（少 8 字节设备会把后 8 字节读成垃圾，铁律 15）。
+QByteArray xflashStorageParam(quint32 storage, quint32 partType, quint64 addr, quint64 length)
+{
+    QByteArray p;
+    p += le32(storage);       // emmc=1 / slc / nand / nor / ufs
+    p += le32(partType);      // EMMC 的 boot(8)/user 与 LU1/LU2
+    p += le64(addr);
+    p += le64(length);
+    // NandExtension 全 0（cellusage/addr_type/bin_type/region/format_level/sys_slc_percent/
+    // usr_slc_percent/phy_max_size —— 8 个字段，operation_type 被上游跳过）
+    p += QByteArray(32, '\0');
+    return p;
+}
+
+// 写一个区间（XFL:670-685 + :835-901）。帧序：WRITE_DATA(2 笔) → status → 56B 参数(2 笔) → status
+// → 每块 sendParam([<I 0>, <I checksum>, data])（帧头 + 每 0x200 块一笔）→ status → …… → 收尾 status
+// → CC_OPTIONAL_DOWNLOAD_ACT（devctrl 二连 + 回包）。读帧数 = 2 + 块数 + 1 + 2 + 1。
+bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
+                     quint32 storage, quint32 partType, quint32 writePacketLength,
+                     QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+
+    // 铁律 14：write_packet_length 拿不到（GET_PACKET_LENGTH 失败/为 0）**无回退** —— 拿不到就不写。
+    // （上游此处是 `plen.write_packet_length` 直接取属性，plen 为 None 时抛异常；本层给出可诊断文案。）
+    if (writePacketLength == 0) {
+        if (error) *error = QStringLiteral("XFlash 写：write_packet_length 为 0（GET_PACKET_LENGTH 未取到）");
+        return false;
+    }
+    if (!x.xsendInt(X_CMD_WRITE_DATA, error))            // 0x010004
+        return false;
+    if (!x.checkStatus(error))                           // status 必须 0（XFL:673-674）
+        return false;
+
+    // 总长先补到 512 的整数倍，**再**告诉设备：上游在 cmd_write_data 之前就 `length += fill`（XFL:847-849），
+    // 该调用拿到的已是补齐后的长度（XFL:861），随后的 bytestowrite 也用它（XFL:860）。
+    // 参数里的 length 与实发字节数必须一致 —— 报原始长度却发补齐后的字节数，设备侧对不上账。
+    const quint64 total = (quint64(data.size()) + 511u) & ~quint64(511u);
+    if (!x.sendParam({xflashStorageParam(storage, partType, addr, total)}, error))   // 56B + 一次 status
+        return false;
+
+    quint64 pos = 0;
+    while (pos < total) {
+        const int dsize = int(qMin<quint64>(writePacketLength, total - pos));       // min(packet, 剩余)（XFL:865）
+        QByteArray chunk = data.mid(int(pos), dsize);    // 尾部不足 dsize 时是短切片（上游同样切片后再补齐，XFL:871-874）
+        if (chunk.size() % 512 != 0)                     // **补零到 512 的整数倍**（XFL:872-874）
+            chunk.append(QByteArray(512 - (chunk.size() % 512), '\0'));
+        quint32 checksum = 0;
+        for (const char c : std::as_const(chunk))
+            checksum = (checksum + quint8(c)) & 0xFFFF;  // sum(data) & 0xFFFF（XFL:877；补的零不进和）
+        QString pErr;
+        if (!x.sendParam({le32(0), le32(checksum), chunk}, &pErr)) {   // 三段参数，一次 status（XFL:878）
+            if (error) {
+                // 单前缀 + 点名本操作：session 文案自带 "XFlash：" 层名前缀，先剥掉再套（同 SHUTDOWN 的写法）
+                const QString layer = QStringLiteral("XFlash：");
+                if (pErr.startsWith(layer))
+                    pErr.remove(0, layer.size());
+                *error = QStringLiteral("XFlash 写：addr 0x%1 偏移 0x%2 块失败（%3）")
+                             .arg(addr, 0, 16).arg(pos, 0, 16).arg(pErr);
+            }
+            return false;
+        }
+        pos += quint64(dsize);
+    }
+
+    // 循环**之后**的收尾 status（XFL:883-893）：非 0 → 写失败（上游在此报 "Error on writeflash"）。
+    // 这一帧必须读掉：漏读会把它留在设备侧，让**下一个**操作的每次读整体错位一帧。
+    QString stErr;
+    if (!x.checkStatus(&stErr)) {
+        if (error) {
+            const QString layer = QStringLiteral("XFlash：");
+            if (stErr.startsWith(layer))
+                stErr.remove(0, layer.size());
+            *error = QStringLiteral("XFlash 写：addr 0x%1 收尾失败（%2）").arg(addr, 0, 16).arg(stErr);
+        }
+        return false;
+    }
+
+    // 成功后发一次 CC_OPTIONAL_DOWNLOAD_ACT（XFL:885）：上游不检查它的返回值（"可选"动作，数据此时已写入）
+    // —— 本层同样不判失败，但不静默：失败写进日志。
+    QString ccErr;
+    if (!x.sendDevCtrl(X_CTRL_CC_OPTIONAL_DOWNLOAD_ACT, QByteArray(), nullptr, &ccErr)) {
+        const QString layer = QStringLiteral("XFlash：");   // 剥掉 session 文案的层名前缀（写法同 SHUTDOWN，避免双前缀）
+        if (ccErr.startsWith(layer))
+            ccErr.remove(0, layer.size());
+        say(QStringLiteral("XFlash 写：CC_OPTIONAL_DOWNLOAD_ACT 未确认（%1）—— 数据已写入").arg(ccErr));
+    }
+    say(QStringLiteral("XFlash 写：addr 0x%1 共 %2 字节完成").arg(addr, 0, 16).arg(data.size()));
+    return true;
+}
+
+// 读一个区间到内存（XFL:687-704 + :706-806）。帧序：READ_DATA(2 笔) → status → 56B 参数(2 笔) → status
+// → **第二个 status** → 数据帧/flag 帧循环 → 收尾帧。读帧数 = 3 + 循环内帧数 + 1。
+bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
+                    quint32 storage, quint32 partType, QByteArray &out, QString *error)
+{
+    if (!x.xsendInt(X_CMD_READ_DATA, error))             // 0x010005
+        return false;
+    if (!x.checkStatus(error))
+        return false;
+    if (!x.sendParam({xflashStorageParam(storage, partType, addr, quint64(length))}, error))
+        return false;
+    // 参数帧之后的**第二个** status（XFL:698-702）：上游在这里再读一次并据此判成败。
+    // 漏读会让之后每个数据帧整体错位一帧（把 status 帧当成数据收下）。
+    if (!x.checkStatus(error))
+        return false;
+
+    out.clear();
+    quint32 remaining = length;
+    // 循环以**字节数**收尾（上游 bytestoread，XFL:730/:757）：不是"见到 flag 就停" ——
+    // 中途出现的 flag==0 帧照上游继续读，读满 length 字节后才去读收尾帧。
+    while (remaining > 0) {
+        QByteArray payload;
+        if (!x.xread(payload, nullptr, error))
+            return false;
+        if (payload.size() > 4) {                        // 数据帧：收下 + ack(rstatus=False)（XFL:750-757）
+            out += payload;
+            if (!x.ack(error))
+                return false;
+            remaining = (quint32(payload.size()) >= remaining) ? 0u : remaining - quint32(payload.size());
+            continue;
+        }
+        if (payload.size() == 4) {                       // flag 帧：0 = 继续，非 0 = 设备报错（XFL:761-765）
+            const quint32 flag = le32At(payload, 0);
+            if (flag != 0) {
+                if (error) *error = QStringLiteral("XFlash 读：设备报错（flag = %1）").arg(hexCode(flag));
+                return false;
+            }
+            continue;
+        }
+        // 其它长度（含 0）：上游只打印 "Invalid slength" 就 break（XFL:766-768），本层明确报错
+        if (error) *error = QStringLiteral("XFlash 读：收到未知长度的帧（%1 字节）").arg(payload.size());
+        return false;
+    }
+    // 收尾帧（XFL:770-776）：上游**只在 slength == 4 时**解析并判 flag，其它长度既不解析也不报错。
+    // 本层照做（"上游 wins"）：这是本次操作的**最后一帧**，不存在"留在设备侧让后续读错位"的风险
+    // （与 devCtrlQuery 尾部 status 的取舍不同），此处更严只会让真机能用、上游能过的场景反而失败。
+    QByteArray fin;
+    if (!x.xread(fin, nullptr, error))
+        return false;
+    if (fin.size() == 4) {
+        const quint32 flag = le32At(fin, 0);
+        if (flag != 0) {
+            if (error) *error = QStringLiteral("XFlash 读：收尾帧报错（flag = %1）").arg(hexCode(flag));
+            return false;
+        }
     }
     return true;
 }
