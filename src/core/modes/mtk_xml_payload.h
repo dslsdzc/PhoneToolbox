@@ -29,10 +29,10 @@
 //
 // 运行期前提：调用方已完成 DA1 上传与跳转（本层从"等 CMD:START"开始，不自己触发跳转）。
 //
-// 失败文案约定（写法同 T5 的 SHUTDOWN）：每个入口的失败文案都是**单前缀 + 点名本步**
-//     `XML：<本步> 失败（<session 原文>）`
-// —— `XmlSession` 文案自带的 "XML：" 层名前缀先剥掉再套（不成双前缀）；点名到具体命令
-// （`setup_hw_init` 的两条命令可分），内层措辞（实收内容 / `ERR!` 码值）逐字保留。
+// 失败文案约定（写法同 T5 的 SHUTDOWN）：**单前缀 + 点名本步**是硬约定，具体句式两族并存 ——
+//   • 握手/setup：`XML：<本步> 失败（<session 原文>）`
+//   • 数据通路：`XML：WRITE-FLASH <细节>` / `XML：READ-FLASH <细节>`
+// —— `XmlSession` 文案自带的 "XML：" 层名前缀先剥掉再套（不成双前缀）；内层措辞（实收内容 / `ERR!` 码值）逐字保留。
 
 // MTK XML（D3）载荷 ②（Phase D2+D3 Task 10）：WRITE-FLASH / READ-FLASH 的数据通路
 //

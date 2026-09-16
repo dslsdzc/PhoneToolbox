@@ -260,6 +260,9 @@ private slots:
         QCOMPARE(blocks.at(0).left(0x400), data.mid(0, 0x400));          // 前段原样
         QCOMPARE(blocks.at(1).left(0x100), data.mid(0x400, 0x100));      // 余下 0x100 原样
         QCOMPARE(blocks.at(1).mid(0x100), QByteArray(0x100, '\0'));     // **尾部补零**
+        // 线上描述符也必须用**补零后**的长度（审查 Minor 9 的建议：只证块不够，还要钉宣布值）
+        QVERIFY2(m.writeFrames.at(1).contains("MEM://0x8000000:0x600"),
+                 m.writeFrames.at(1).toHex(' ').constData());
     }
 
     // 设备给出**超大** packet_length（0x80000000，≥2^31）→ 必须夹取到数据长度后**单块**写完
