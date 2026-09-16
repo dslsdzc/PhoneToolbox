@@ -177,7 +177,6 @@ private slots:
         QVERIFY2(anyContains(plan.warnings, QStringLiteral("重复")), qPrintable(plan.warnings.join('\n')));
     }
 
-    // scatter 解析：坏输入明确失败
     // —— T7：XML 方言（真样本 130 块 = EMMC/UFS 两份，按 storage 过滤后各 65）——
     void xmlScatterFiltersByStorage()
     {
@@ -261,6 +260,40 @@ private slots:
         QCOMPARE(refs3.at(0).name, QStringLiteral("boot"));
     }
 
+    // 调和分支 3：XML 里**只有一份副本**可用 → 必须用它并说明另一份为何不可用（**不得返回 false**）
+    void scatterAnyDialectUsesSingleCopyWhenOtherFails()
+    {
+        // 只有 UFS 块：对 EMMC 而言"没有匹配分区"（parseScatterXml(Emmc) 失败）→ UFS 那份必须被采用
+        const QString onlyUfs = QStringLiteral(
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size><storage>HW_STORAGE_UFS</storage></partition_index>"
+            "<partition_index name=\"SYS1\"><partition_name>boot</partition_name>"
+            "<partition_size>0x800000</partition_size><storage>HW_STORAGE_UFS</storage></partition_index>");
+        QList<PartitionRef> refs;
+        QStringList log;
+        QString err;
+        QVERIFY2(mtkplan::parseScatterAnyDialect(onlyUfs, refs, &log, &err), qPrintable(err));   // **必须 true**
+        QCOMPARE(refs.size(), 2);
+        QCOMPARE(refs.at(0).name, QStringLiteral("preloader"));
+        QCOMPARE(refs.at(0).sizeBytes, quint64(0x100000));
+        const QString joined = log.join(QLatin1Char('\n'));
+        QVERIFY2(joined.contains(QStringLiteral("UFS")) && joined.contains(QStringLiteral("EMMC")),
+                 qPrintable(joined));      // 说清"只有 UFS 可用"+"EMMC 那份为何失败"
+    }
+
+    // 调和分支 4：是 XML 但**两份都解析不出分区** → 明确失败（不得静默返回空表）
+    void scatterAnyDialectFailsWhenNeitherCopyParses()
+    {
+        const QString noStorage = QStringLiteral(
+            "<partition_index name=\"SYS0\"><partition_name>preloader</partition_name>"
+            "<partition_size>0x100000</partition_size></partition_index>");       // 缺 <storage> → 两份都不认
+        QList<PartitionRef> refs;
+        QString err;
+        QVERIFY(!mtkplan::parseScatterAnyDialect(noStorage, refs, nullptr, &err));
+        QVERIFY(!err.isEmpty());
+        QVERIFY(refs.isEmpty());          // 失败路径不留半截表
+    }
+
     // GPT → 参照表（用 T1 的合成 GPT，避免真样本依赖）
     void gptToPartitionRefsUsesSectorSize()
     {
@@ -274,6 +307,7 @@ private slots:
         QCOMPARE(refs.at(0).sizeBytes, quint64(2 * 512));   // (last-first+1) × sectorSize
     }
 
+    // scatter 解析：坏输入明确失败
     void scatterParseRejectsGarbage()
     {
         QList<PartitionRef> parts; QString err;

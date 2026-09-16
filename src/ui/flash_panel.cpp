@@ -712,7 +712,7 @@ void FlashPanel::onFlashClicked()
             QList<mtkplan::PartitionRef> refs;
             const QMessageBox::StandardButton wantScatter = QMessageBox::question(
                 this, QStringLiteral("分区参照表"),
-                QStringLiteral("是否提供 scatter 文件（Android_scatter.txt）？\n\n"
+                QStringLiteral("是否提供 scatter 文件（Android_scatter.txt 或 MTK 的 *.xml）？\n\n"
                                "提供 → 预览可见分区名与分区大小（提前发现「放不下」）；\n"
                                "不提供 → 分区名由镜像文件名推导，刷写时按设备分区表校验。"),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);

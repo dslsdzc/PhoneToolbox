@@ -312,6 +312,7 @@ bool parseScatterXml(const QString &text, ScatterStorage want, QList<PartitionRe
 bool parseScatterAnyDialect(const QString &text, QList<PartitionRef> &out, QStringList *log, QString *error)
 {
     auto say = [log](const QString &m) { if (log) *log << m; };
+    out.clear();                                    // 与 parseScatter / parseScatterXml 一致（失败路径不留半截表）
     if (!text.contains(QStringLiteral("<partition_index")))
         return parseScatter(text, out, error);            // 文本方言：D1 既有实现原样
     QList<PartitionRef> emmc, ufs;
