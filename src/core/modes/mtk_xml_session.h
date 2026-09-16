@@ -17,7 +17,7 @@
 //   ① **不复刻**上游 `send_command` 对含 "ERR!" 的响应 `return result`（非空字符串，XL:218-219）——
 //      上游调用方普遍按"非 False 即成功"判断，本层改为返回 false + 中文文案；
 //   ② 日志帧（DT_MESSAGE）：上游 `xread` 是**循环**跳过、只把 DT_PROTOCOL_FLOW 返回给调用方
-//      （XL:107-132）。本层同样跳过（文本交给 logSink）—— **不复刻**的是"收到日志帧即失败"；
+//      （XL:112-135）。本层同样跳过（文本交给 logSink）—— **不复刻**的是"收到日志帧即失败"；
 //      另加跳过次数上限（kMaxLogFramesToSkip）防设备刷屏，上游无此上限。
 //
 // 诚实边界：
@@ -51,7 +51,7 @@ public:
     // （XL:112-135：上游 xread 不消费 DT_PROTOCOL_FLOW 的载荷，由调用方读）
     bool xreadHeader(quint32 &datatype, quint32 &length, QString *error = nullptr);
     bool readPayload(quint32 length, QByteArray &out, QString *error = nullptr);
-    // 读一条**文本**响应（DT_PROTOCOL_FLOW → 去 NUL → utf8）（XL:221-232）。
+    // 读一条**文本**响应（DT_PROTOCOL_FLOW → 去 NUL → utf8）（XL:222-232）。
     // 途中的 DA 日志帧（DT_MESSAGE）被**跳过**并交给 logSink（上游同姿态：日志帧不打断协议，只记 UART log）
     using LogSink = std::function<void(const QString &)>;
     void setLogSink(LogSink sink) { m_logSink = std::move(sink); }

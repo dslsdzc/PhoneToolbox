@@ -365,7 +365,9 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
+                        # D2 T7：计划层新增 GPT→参照表适配（mtkgpt::sizeBytes）→ 本目标也必须链 mtk_gpt.cpp（纯 Qt Core），否则链接期 undef。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
@@ -398,6 +400,8 @@ if(ENABLE_IMAGE_TESTS)
                         # allowNetworkPreloader 时构造）——不补此源同样链接期 undef。
                         # Qt6::Network 在循环后补链给本目标（见 add_subdirectory(src/plugins) 之后）。
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
+                        # D2 T7：计划层新增 GPT→参照表适配（mtkgpt::sizeBytes）→ 本目标也必须链 mtk_gpt.cpp（纯 Qt Core），否则链接期 undef。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_emi.cpp
@@ -554,7 +558,9 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/mtk_plan_dialog.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/plan_preview_widget.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/mtk_flash_plan.cpp
+                        # D2 T7：计划层新增 GPT→参照表适配（mtkgpt::sizeBytes）→ 本目标也必须链 mtk_gpt.cpp（纯 Qt Core），否则链接期 undef。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_gpt.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_gpt")
                     # Phase D2 Task 1：GPT 解析纯函数（只依赖 Qt Core；src/core/modes 已 GLOB
                     # 编入主程序，不属任何静态库）。真样本宏（MTK_SAMPLES_DIR /

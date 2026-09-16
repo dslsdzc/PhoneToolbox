@@ -3056,13 +3056,16 @@ git commit -m "feat(mtk): XML 帧层（文本帧/OK/OK@0x<len>/OK!EOT 保活/get
   ```cpp
   namespace mtkbrom {
   // DA1 后握手（XL:271-321）：**等设备发 CMD:START 文本消息**（不是 XFlash 的 0xC0 单字节），
-  // 随后 setup_env → setup_hw_init → set_host_info。三步的返回值上游不检查（`XL:315-317`）——我们检查。
+  // 随后 setup_env → setup_hw_init → set_host_info。三步的返回值上游不检查（`XL:311-313`）——我们检查。
   bool xmlDa1Handshake(XmlSession &x, QStringList *log, QString *error = nullptr);
   // SET-RUNTIME-PARAMETER（XL:167-186 + XC:120-135）：version="1.1"、battery_exist=AUTO-DETECT、
   //   initialize_dram=YES（**XML 的 DRAM 初始化就这一句，不发 EMI**）、checksum_level=NONE、
   //   da_log_level 字符串（TRACE..ERROR）、log_channel（UART/USB/BOTH）、system_os=LINUX
   bool xmlSetupEnv(XmlSession &x, QString *error = nullptr);
-  // setup_hw_init（XL:323-327）：HOST-SUPPORTED-COMMANDS（能力串）+ NOTIFY-INIT-HW（空 arg），都要 OK
+  // setup_hw_init（XL:323-327）：HOST-SUPPORTED-COMMANDS（能力串）+ NOTIFY-INIT-HW，都要 OK。
+  // ⚠️ **实施期更正（T9，读实现而非 docstring）**：`NOTIFY-INIT-HW` **没有 `<arg>`** —— 上游 `cmd_notify_init_hw` 调
+  //    `create_cmd("NOTIFY-INIT-HW")` 时 content=None，`create_cmd` 的 `if content is not None` 直接跳过（`XC:18-25`/`:32-42`）。
+  //    该函数的 **docstring 画的 `<arg></arg>` 与实现不符**（我预核对时只读了 docstring，判定错）。本层 `envelope(cmd)` 对空列表**不写** `<arg>` ✓ 与上游同形。
   bool xmlSetupHwInit(XmlSession &x, QString *error = nullptr);
   // SET-HOST-INFO（XL:329-331 + XC:614）：<info>%Y%m%dT%H%M%S</info>
   bool xmlSetHostInfo(XmlSession &x, QString *error = nullptr);
@@ -3076,11 +3079,21 @@ git commit -m "feat(mtk): XML 帧层（文本帧/OK/OK@0x<len>/OK!EOT 保活/get
 void TestMtkXmlPayload::handshakeSequence()
 {
     MockUsbChannel m;
+    // ⚠️ **实施期更正（T9）**：`sendCommand(noack=false)` 每条命令消费 **3 帧**（首个 "OK" + CMD:END(OK) + CMD:START），
+    //    四命令 = 12 帧，加上设备先发的 CMD:START = **13 帧**（原稿只排 5 帧，会当场错位）。
     m.reads << textReads(QStringLiteral("<host><command>CMD:START</command></host>"))   // 设备先发
-            << textReads(QStringLiteral("OK"))                                          // SET-RUNTIME-PARAMETER
-            << textReads(QStringLiteral("OK"))                                          // HOST-SUPPORTED-COMMANDS
-            << textReads(QStringLiteral("OK"))                                          // NOTIFY-INIT-HW
-            << textReads(QStringLiteral("OK"));                                         // SET-HOST-INFO
+            << textReads(QStringLiteral("OK"))                                          // SET-RUNTIME-PARAMETER：接受
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"))
+            << textReads(QStringLiteral("OK"))                                          // HOST-SUPPORTED-COMMANDS：接受
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"))
+            << textReads(QStringLiteral("OK"))                                          // NOTIFY-INIT-HW：接受
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"))
+            << textReads(QStringLiteral("OK"))                                          // SET-HOST-INFO：接受
+            << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"))
     mtkbrom::XmlSession x(&m);
     QStringList log;
     QString err;

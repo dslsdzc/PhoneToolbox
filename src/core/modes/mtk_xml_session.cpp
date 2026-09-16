@@ -139,7 +139,7 @@ bool XmlSession::readPayload(quint32 length, QByteArray &out, QString *error)
     return m_usb->readExact(out, int(length), kTimeoutMs, error);
 }
 
-// XL:221-232 get_response + XL:107-132 xread：xread 是**循环** —— DT_MESSAGE（DA 日志）帧的载荷被
+// XL:222-232 get_response + XL:112-135 xread：xread 是**循环** —— DT_MESSAGE（DA 日志）帧的载荷被
 // 读掉、追加进 UART log，然后**继续读下一帧**；只有 DT_PROTOCOL_FLOW 才返回给调用方。
 // 本层同样跳过日志帧（文本交给 logSink），但限定连续跳过次数（上游无上限）。
 // 注（**与上游的分歧**，Minor 6b）：**除协议流/日志帧以外**的 datatype，本层也统按"日志"收下交给

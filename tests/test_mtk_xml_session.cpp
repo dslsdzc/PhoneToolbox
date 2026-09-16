@@ -157,7 +157,7 @@ void TestMtkXmlSession::ackWritesFourByteDoubleNulFrame()
     QCOMPARE(m.writeFrames.at(1), QByteArray("OK\0\0", 4));
 }
 
-// XL:221-232 get_response：读一帧 → rstrip NUL → utf-8
+// XL:222-232 get_response：读一帧 → rstrip NUL → utf-8
 void TestMtkXmlSession::getResponseStripsNulAndDecodes()
 {
     MockUsbChannel m;
@@ -169,7 +169,7 @@ void TestMtkXmlSession::getResponseStripsNulAndDecodes()
     QCOMPARE(text, QStringLiteral("OK"));
 }
 
-// 计划期更正（控制方预核对 XL:107-132）：上游 xread() 是**循环** —— DT_MESSAGE（DA 日志帧）的载荷被读掉、
+// 计划期更正（控制方预核对 XL:112-135）：上游 xread() 是**循环** —— DT_MESSAGE（DA 日志帧）的载荷被读掉、
 // 追加进 UART log，然后**继续读下一帧**；只有 DT_PROTOCOL_FLOW 才返回给调用方。
 // 故日志帧**不打断协议**（本层把文本交给 logSink），且不能被当成"响应"。
 void TestMtkXmlSession::getResponseSkipsDaLogFrames()
