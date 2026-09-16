@@ -103,6 +103,9 @@ bool xflashGetRamInfo(XFlashSession &x, QByteArray *raw, QString *error = nullpt
 bool xflashSendEmi(XFlashSession &x, const QByteArray &emi, QString *error = nullptr);
 // boot_to（跳 DA2，XFL:288-328）：DA2 必须**已剥尾部签名**（调用方给；见 D1 的 DaSelection.da2Bytes
 // 与 m_sig_len）。读 3 帧 status，终判接受 0x0 / 0x434E5953 两个值。
+// ⚠️ **返回 true 只表示终判状态字匹配，不等于 DA2 已在跑**：上游靠随后的 reinit 查询组合
+// （GET_RAM_INFO / GET_CHIP_ID / GET_DA_VERSION … 能应答）才判"DA2 存活"（facts report §7.4），
+// 本层**不跑**那组查询。故调用方日志只能写"已上传"，别写"已就绪 / 已验证"。
 bool xflashBootTo(XFlashSession &x, quint64 addr, const QByteArray &da2, QString *error = nullptr);
 // SHUTDOWN（XFL:813-833）：32B 参数 pack("<IIIIIIII", hasflags, enablewdt, async_mode, bootmode,
 // dl_bit, dont_resetrtc, leaveusb, 0)；hasflags 由 async_mode/dl_bit/bootmode 推导（XFL:817-825）。

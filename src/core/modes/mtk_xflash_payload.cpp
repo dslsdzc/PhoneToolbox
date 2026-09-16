@@ -18,6 +18,17 @@ QByteArray le32(quint32 v)
 // 与 session.cpp 的实现同款（跨文件不共享匿名命名空间，各留一份）
 QByteArray le64(quint64 v) { return le32(quint32(v & 0xFFFFFFFFu)) + le32(quint32(v >> 32)); }
 
+// 错误码统一以**大写**零填充十六进制出现（同 session.cpp:26-32 的 hexCode；同样是各留一份）。
+// 与 session 层的 checkStatus 文案同一拼法 —— 用户按码值 grep 时全仓只有一种写法
+// （上游 error.py 的 hex() 是小写，本仓不跟）。本层只有 boot_to 的终判状态字用到它。
+QString hexCode(quint32 v)
+{
+    QString hex = QString::number(v, 16).toUpper();
+    while (hex.size() < 8)
+        hex.prepend(QLatin1Char('0'));
+    return QStringLiteral("0x") + hex;
+}
+
 quint16 le16At(const QByteArray &b, int off)
 {
     return quint16(quint8(b.at(off))) | (quint16(quint8(b.at(off + 1))) << 8);
@@ -242,8 +253,7 @@ bool xflashBootTo(XFlashSession &x, quint64 addr, const QByteArray &da2, QString
     if (!x.readStatus(st, error))
         return false;
     if (st != 0 && st != kXSync) {                    // XFL:315：0 或 SYNC 都算成功
-        if (error) *error = QStringLiteral("XFlash boot_to：DA2 未就绪（status = 0x%1）")
-                                .arg(st, 8, 16, QLatin1Char('0'));
+        if (error) *error = QStringLiteral("XFlash boot_to：DA2 未就绪（status = %1）").arg(hexCode(st));
         return false;
     }
     return true;

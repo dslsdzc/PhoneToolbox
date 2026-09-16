@@ -447,7 +447,9 @@ void TestMtkXflashPayload::bootToRejectsBadStatus()
     QString err;
     QVERIFY(!mtkbrom::xflashBootTo(x, 0x40000000ull, QByteArray(16, '\x11'), &err));
     QVERIFY2(err.contains(QStringLiteral("boot_to")), qPrintable(err));
-    QVERIFY2(err.contains(QStringLiteral("dead"), Qt::CaseInsensitive), qPrintable(err));   // 文案带码值
+    // 文案带码值，且**大小写与 session 层一致**（hexCode 的大写零填充；按字面断言，
+    // 换回小写 arg(...,16,...) 会当场红 —— 用户按码值 grep 时全仓只有一种拼法）
+    QVERIFY2(err.contains(QStringLiteral("0x0000DEAD")), qPrintable(err));
     QCOMPARE(m.reads.size(), 0);                                           // 终判那帧也读掉了，不留给下一次读
 }
 
