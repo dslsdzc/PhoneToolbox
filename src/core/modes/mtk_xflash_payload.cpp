@@ -25,7 +25,9 @@ quint32 le32At(const QByteArray &b, int off)
 }
 
 // 无参 devctrl 查询的统一形状：DEVICE_CTRL → status → 子命令 → status → 读回包
-// →（回包非空时）**再读一次 status**。尾部这一读是上游每条"有回包"的查询都做的
+// →（**回包非空时**才）再读一次 status。空回包不读（上游同样按 `回包非空` 前置判断跳过，XFL:573）；
+// 这条分支若多读一帧就会把下一个命令的 status 吃掉、后续全部后移。
+// 尾部这一读是上游每条"有回包"的查询都做的
 // （XFL:571-578 / :330-338 / :396-418 / :623-636 / :421-436），漏读会让该帧留在设备侧，
 // 把之后每次读整体错位一帧 —— 所以**先读尾部 status、再校验回包内容**（判据同上游：非 0 即失败，
 // 上游只把它当"取不到值"继续走，本层中止并给出文案）。
@@ -60,7 +62,7 @@ bool xflashDa1Handshake(XFlashSession &x, QStringList *log, QString *error)
     env += le32(0);            // ufs_provision
     env += le32(0);            // 第 5 个字段（上游恒 0）
     if (env.size() != 20) {    // 载荷长度是线协议契约：字段增删时在此失败，别把错长帧发出去
-        if (error) *error = QStringLiteral("内部错误：SETUP_ENVIRONMENT 载荷 %1 字节（应为 20）").arg(env.size());
+        if (error) *error = QStringLiteral("XFlash：内部错误：SETUP_ENVIRONMENT 载荷 %1 字节（应为 20）").arg(env.size());
         return false;
     }
     if (!x.xsendInt(X_CMD_SETUP_ENV, error))
@@ -116,8 +118,10 @@ bool xflashBringUpSteps(XFlashSession &x, QByteArray *connectionAgent, QStringLi
     return true;
 }
 
-// GET_CHIP_ID：5×u16（XFL:396-418，解析前的尾部 status 见 devCtrlQuery）
-bool xflashGetChipId(XFlashSession &x, XChipId &out, QString *error)
+// GET_CHIP_ID：5×u16（XFL:396-418，解析前的尾部 status 见 devCtrlQuery）。
+// 回包长于 10 字节**照上游截断**（只取前 5×u16，不判失败 —— 未知硬件可能多带填充），
+// 但把截断写进 log（截断不再是静默行为）。
+bool xflashGetChipId(XFlashSession &x, XChipId &out, QString *error, QStringList *log)
 {
     QByteArray r;
     if (!devCtrlQuery(x, X_CTRL_GET_CHIP_ID, r, error))
@@ -126,6 +130,8 @@ bool xflashGetChipId(XFlashSession &x, XChipId &out, QString *error)
         if (error) *error = QStringLiteral("XFlash：GET_CHIP_ID 回包长度不符（%1 字节，应 ≥ 10）").arg(r.size());
         return false;
     }
+    if (r.size() != 10 && log)
+        *log << QStringLiteral("XFlash：GET_CHIP_ID 回包 %1 字节（超出 10 字节的部分按上游忽略）").arg(r.size());
     out.hwCode = le16At(r, 0);
     out.hwSubCode = le16At(r, 2);
     out.hwVersion = le16At(r, 4);

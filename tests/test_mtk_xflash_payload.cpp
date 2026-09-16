@@ -17,6 +17,7 @@
 //   • GET_PARTITION_TBL_CATA 是**唯一例外**：上游不读尾部 status（XFL:612-621），本层同样不读。
 #include <QtTest>
 #include <QByteArray>
+#include <QStringList>
 
 #include "core/modes/mtk_xflash_payload.h"
 #include "core/modes/mtk_xflash_session.h"
@@ -59,6 +60,15 @@ QList<QByteArray> frameReads(quint32 dt, const QByteArray &payload)
     return {le32(0xFEEEEEEF) + le32(dt) + le32(quint32(payload.size())), payload};
 }
 QList<QByteArray> statusReads(quint32 code) { return frameReads(1, le32(code)); }   // length==4 → <I
+// 日志断言：存在**同一行**同时含两个 token 的行（避免"只打标签不打值"也算过）
+bool logHas(const QStringList &log, const QString &a, const QString &b)
+{
+    for (const QString &line : log) {
+        if (line.contains(a) && line.contains(b))
+            return true;
+    }
+    return false;
+}
 } // namespace
 
 class TestMtkXflashPayload : public QObject
@@ -73,6 +83,9 @@ private slots:
     void getPacketLengthParsesTwoU32();
     void getPartitionCataMapsGptAndPmt();
     void getRamInfoAccepts24And48Bytes();
+    void queryRejectsNonZeroTrailingStatus();
+    void devCtrlQuerySkipsTrailingStatusWhenReplyEmpty();
+    void chipIdWarnsOnOverlongReply();
 };
 
 // 七步握手：SYNC 帧 → SETUP_ENV（命令帧 + 20B）→ SETUP_HW_INIT（命令帧 + 4B）→ 读回 "SYNC"
@@ -161,6 +174,12 @@ void TestMtkXflashPayload::bringUpStepsOrder()
     QString err;
     QVERIFY2(mtkbrom::xflashBringUpSteps(x, &agent, &log, &err), qPrintable(err));
     QCOMPARE(agent, QByteArray("brom"));
+    QCOMPARE(m.reads.size(), 0);                                 // 读帧数与上游逐帧对齐（多一帧/少一帧都红）
+    // 日志断言：两条都必须带**解析出的值**（"只打标签不打值"或整行丢失都会红）
+    QVERIFY2(logHas(log, QStringLiteral("expire_date"), QStringLiteral("0x20240101")),
+             qPrintable(log.join(QLatin1Char('|'))));
+    QVERIFY2(logHas(log, QStringLiteral("connection_agent"), QStringLiteral("brom")),
+             qPrintable(log.join(QLatin1Char('|'))));
 
     // 顺序断言：四步的子命令号都是本链独占值 —— 记**首次出现的下标**再比大小（顺序错即红）
     int iExpire = -1, iResetKey = -1, iChecksum = -1, iAgent = -1, iResetKeyParam = -1;
@@ -286,6 +305,83 @@ void TestMtkXflashPayload::getRamInfoAccepts24And48Bytes()
         QVERIFY2(err.contains(QStringLiteral("24")), qPrintable(err));   // 文案给出期望长度
         QCOMPARE(m.reads.size(), 0);                             // 长度不符也要先把尾部 status 读掉（先对齐、后校验）
     }
+}
+// 尾部 status 是**判据**，不只是"排空一帧"：非 0 必须让查询失败并给出可诊断文案
+// （契约见 devCtrlQuery 注释；上游拿到非 0 只是"取不到值"继续走，本层中止 —— 比上游更严）
+void TestMtkXflashPayload::queryRejectsNonZeroTrailingStatus()
+{
+    {
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0)
+                << frameReads(1, le16(0x6765) + le16(0x8A00) + le16(0xCA00) + le16(0x0000) + le16(1))
+                << statusReads(0xDEADBEEF);                       // 回包之后的 status 非 0
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        mtkbrom::XChipId id;
+        QString err;
+        QVERIFY(!mtkbrom::xflashGetChipId(x, id, &err));
+        QVERIFY2(err.contains(QStringLiteral("0xDEADBEEF")), qPrintable(err));   // 文案带码值
+        QCOMPARE(m.reads.size(), 0);                              // 错帧仍被排空，不留给下一次读
+    }
+    {
+        // bring-up：expire_date 的尾部 status 非 0 → 整链中止（后续三步一帧都不发）
+        MockUsbChannel m;
+        m.reads << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("0x20240101"))
+                << statusReads(0xDEADBEEF);
+        mtkbrom::XFlashSession x(&m, 0x6765);
+        QByteArray agent;
+        QString err;
+        QVERIFY(!mtkbrom::xflashBringUpSteps(x, &agent, nullptr, &err));
+        QVERIFY2(err.contains(QStringLiteral("0xDEADBEEF")), qPrintable(err));
+        QVERIFY(agent.isEmpty());                                 // 连 agent 都没解析出来
+        int resetKeyFrames = 0;
+        for (const QByteArray &f : std::as_const(m.writeFrames)) {
+            if (f == le32(quint32(mtkbrom::X_CTRL_SET_RESET_KEY)))
+                ++resetKeyFrames;
+        }
+        QCOMPARE(resetKeyFrames, 0);                              // 中止后没再发任何子命令
+    }
+}
+
+// 空回包**不读**尾部 status（上游同样按 `回包非空` 前置判断跳过，XFL:573）：
+// 若多读一帧，就会把下一步的 status 吃掉、后续全部后移一帧 —— 本用例用"后三步仍逐帧对齐"钉住
+void TestMtkXflashPayload::devCtrlQuerySkipsTrailingStatusWhenReplyEmpty()
+{
+    MockUsbChannel m;
+    // 0 长度回包帧 = **只有帧头一笔**：T2 的 xread 在 len==0 时不读载荷（mtk_xflash_session.cpp:83），
+    // 故这里不能用 frameReads(1, QByteArray())（那会多留一笔空载荷，末行的队列断言会当场红）
+    m.reads << statusReads(0) << statusReads(0)                          // DEVICE_CTRL / 子命令的 status
+            << QList<QByteArray>{le32(0xFEEEEEEF) + le32(1) + le32(0)}   // expire 的 0 长度回包（只一笔）
+            << statusReads(0) << statusReads(0) << statusReads(0)            // set_reset_key
+            << statusReads(0) << statusReads(0) << statusReads(0)            // set_checksum_level
+            << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0);
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray agent;
+    QStringList log;
+    QString err;
+    QVERIFY2(mtkbrom::xflashBringUpSteps(x, &agent, &log, &err), qPrintable(err));
+    QCOMPARE(agent, QByteArray("brom"));
+    QCOMPARE(m.reads.size(), 0);                                 // 一帧不多、一帧不少
+}
+
+// GET_CHIP_ID 回包 **> 10 字节**：照上游截断（只取前 5×u16、**不判失败** —— 未知硬件可能多带填充），
+// 但截断要落到日志里，不再静默（T4 审查 Minor 7 的处置：改判据会误伤未知硬件，改"可见性"不会）
+void TestMtkXflashPayload::chipIdWarnsOnOverlongReply()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0)
+            << frameReads(1, le16(0x6765) + le16(0x8A00) + le16(0xCA00) + le16(0x0000) + le16(1)
+                            + QByteArray("\xAA\xBB", 2))         // 12B：多出 2 字节
+            << statusReads(0);
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    mtkbrom::XChipId id;
+    QStringList log;
+    QString err;
+    QVERIFY2(mtkbrom::xflashGetChipId(x, id, &err, &log), qPrintable(err));
+    QCOMPARE(id.hwCode, quint16(0x6765));                        // 前 10 字节照常解析
+    QCOMPARE(id.chipEvolution, quint16(1));
+    QVERIFY2(logHas(log, QStringLiteral("GET_CHIP_ID"), QStringLiteral("12")),
+             qPrintable(log.join(QLatin1Char('|'))));            // 截断不再静默
+    QCOMPARE(m.reads.size(), 0);
 }
 QTEST_APPLESS_MAIN(TestMtkXflashPayload)
 #include "test_mtk_xflash_payload.moc"

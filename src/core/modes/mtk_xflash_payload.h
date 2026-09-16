@@ -74,7 +74,9 @@ bool xflashDa1Handshake(XFlashSession &x, QStringList *log, QString *error = nul
 bool xflashBringUpSteps(XFlashSession &x, QByteArray *connectionAgent, QStringList *log, QString *error = nullptr);
 
 // ③ 只读查询（均含上游的尾部 status 读；GET_PARTITION_TBL_CATA 例外见实现注释）
-bool xflashGetChipId(XFlashSession &x, XChipId &out, QString *error = nullptr);
+// GET_CHIP_ID 回包**长于** 10 字节时只取前 5×u16（照上游截断，不判失败 —— 未知硬件可能带填充），
+// 但截断会写进 log（可空），不再静默。log 追加在 error 之后，既有 3 参调用点不受影响。
+bool xflashGetChipId(XFlashSession &x, XChipId &out, QString *error = nullptr, QStringList *log = nullptr);
 bool xflashGetPacketLength(XFlashSession &x, XPacketLength &out, QString *error = nullptr);
 bool xflashGetPartitionCata(XFlashSession &x, PartitionCata &out, QString *error = nullptr);
 bool xflashGetRamInfo(XFlashSession &x, QByteArray *raw, QString *error = nullptr);   // 原始 24/48B（解析留给 D4/诊断）
