@@ -259,7 +259,6 @@ public:
 `revolvePollMs`）而非墙钟，`sleepFn` 可注入 → 用例确定、不等真实时间。载荷的 sha1 对照由 UI 层
 在 `identify()` 之后自行计算与展示（`EubLoadout::sbootSha1` 对 `sha1Hex(bytes)`），故 `EubRequest`
 结构不再需要。
-```
 
 ---
 
