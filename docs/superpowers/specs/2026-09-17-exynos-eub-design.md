@@ -1,7 +1,8 @@
 # 三星 Exynos EUB 救援链（EUB → Download 模式）设计 spec
 
 > **事实依据**：`docs/superpowers/specs/exynos-eub-facts.md`（下文所有 `§X#` 均指该文件条目）。
-> **状态**：待用户评审（评审通过后再写实施计划）。
+> **状态**：已评审通过（用户 2026-09-17 批准）；实施见 `docs/superpowers/plans/2026-09-17-exynos-eub-recovery.md`。
+> **同步记录**：§5.5 接口与 §7 取消语义已按 T6 落地实现回填（2026-09-18）。
 > **一句话**：检测 EUB 态的 Exynos 设备 → 用**用户自备的原厂 BL**（`sboot.bin`）按公开布局表切段 →
 > 逐段下载进设备 RAM → 设备引导进 Download 模式 → 交给**已交付的 Odin 链**正常刷写。
 
