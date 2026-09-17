@@ -467,8 +467,6 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
     // ⚠️ **本层比上游更严（有意）**：上游在收尾段 magic 不符时**静默通过**（只 `if magic == 0xFEEEEEEF` 才解析）；
     //    本层走 `xread`，magic 不符会**显式报错**。这里更严是安全的 —— 收尾帧是本次操作最后一帧，
     //    不存在"留在设备侧让后续读错位"的风险（与 `xflashGetPartitionCata` 不读尾 status 的取舍同理）。
-    // 本层照做（"上游 wins"）：这是本次操作的**最后一帧**，不存在"留在设备侧让后续读错位"的风险
-    // （与 devCtrlQuery 尾部 status 的取舍不同），此处更严只会让真机能用、上游能过的场景反而失败。
     QByteArray fin;
     if (!x.xread(fin, nullptr, error))
         return false;
