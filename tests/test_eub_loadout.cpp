@@ -66,7 +66,7 @@ static const QRegularExpression kRefCitation(
 
 static QString hex0x(quint64 v) { return QStringLiteral("0x") + QString::number(v, 16); }
 
-// 合成夹具（facts §F1：本线无真样本）。图案必须**非周期**：若用 `i & 0xFF` 这类 256 周期图案，
+// 合成夹具（本线无真机；真样本核对见文件末尾的 gated 槽，facts §H）。图案必须**非周期**：若用 `i & 0xFF` 这类 256 周期图案，
 // "切到第 N 段" 的内容比对只能钉住 `offset mod 256` —— offset 错 0x100 也会全绿。
 // 这里用 xorshift32 做 i 的确定性散列，任意错位都会在内容比对上现形。
 static QByteArray patternedImage(qsizetype size)
