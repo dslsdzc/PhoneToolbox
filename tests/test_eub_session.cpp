@@ -6,6 +6,9 @@
 #include <QtTest>
 
 #include "core/eub/eub_session.h"
+// 只为常量锚点：本头**只前向声明** libusb 类型（不含 libusb.h、不拖链接），故不破坏
+// "test_eub_session 无 libusb 依赖"的契约（CMakeLists.txt:567-576）；本文件也不构造其对象。
+#include "core/eub/eub_libusb_transport.h"
 #include "mock_eub_transport.h"
 
 namespace {
@@ -53,6 +56,16 @@ QString callSequenceDiff(const eub::MockEubTransport &t, int segmentCount,
         return QString();
     return QStringLiteral("调用序列不符\n  期望：%1\n  实际：%2")
         .arg(expect.join(QStringLiteral(",")), t.calls.join(QStringLiteral(",")));
+}
+
+// details 里含 needle 的条数（notes 转发的**次数**要用它：contains 只回答"转没转过"）。
+int countDetails(const QStringList &details, const QString &needle)
+{
+    int n = 0;
+    for (const QString &d : details)
+        if (d.contains(needle))
+            ++n;
+    return n;
 }
 
 } // namespace
@@ -162,6 +175,10 @@ private slots:
         QCOMPARE(t.writes.size(), 1);           // 出错即停，不再发后续段
         QVERIFY(err.contains(QStringLiteral("epbl")));
         QVERIFY(err.contains(QStringLiteral("0x2000")));       // 偏移可复盘
+        QVERIFY(err.contains(QStringLiteral("0x13000")));      // 长度也要在（9610 epbl = (0x2000, 0x13000)）
+        // 加固：两个 contains 单独都**管不住 .arg 互换**（互换后是 "0x13000/0x2000"，两个串都在）
+        // —— 再钉一次**顺序**（偏移在前、长度在后，格式见 eub_session.cpp）。
+        QVERIFY2(err.contains(QStringLiteral("0x2000/0x13000")), qPrintable(err));
         QVERIFY(err.contains(QStringLiteral("第 2 段")));       // 段序号（文案格式见 eub_session.h）
         QVERIFY(err.contains(QStringLiteral("注入的写失败")));   // 末位必须是**失败原因**（%5），不能吞掉
         QCOMPARE(t.calls.last(), QStringLiteral("close"));     // 句柄收干净
@@ -240,6 +257,97 @@ private slots:
         QCOMPARE(t.calls.last(), QStringLiteral("close"));     // identify 也不留句柄
     }
 
+    void identifyFailsWhenDeviceInfoUnreadable()
+    {
+        // readDeviceInfo 的失败分支。实现者原报告称"mock 无法注入"—— **不准确**：能注入
+        // （mock_eub_transport.h 的 infoResult，:26/:43）；真正无法注入的只有 readBulk 的失败
+        // （:63-67 恒返回 response，没有失败注入点）。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.infoResult = false;
+        eub::EubSession s(t, fastOptions());
+        eub::EubLoadout lo = loadout9610();     // 预置非空：失败后必须被清掉（fail-closed）
+        QString err;
+        QVERIFY(!s.identify(lo, &err));
+        QVERIFY2(err.contains(QStringLiteral("读取设备自述失败")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("注入的信息读取失败")), qPrintable(err));  // 原因不能吞掉
+        QVERIFY2(lo.soc.isEmpty(), qPrintable(QStringLiteral("自述读失败后出参未清空：%1").arg(lo.soc)));
+        QCOMPARE(t.writes.size(), 0);                                   // 识别阶段一个字节不发
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));              // 句柄照关（identify 不持有）
+    }
+
+    void runFailsWhenFirstSegmentDeviceInfoUnreadable()
+    {
+        // run 的第 1 段核对 SoC 之前的那次 readDeviceInfo 失败：**零写入** + 收干净句柄
+        // （eub_session.cpp 的 close 在两个早退分支之前）。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.infoResult = false;
+        eub::EubSession s(t, fastOptions());
+        QString err;
+        QVERIFY(!s.run(loadout9610(), syntheticSboot(), &err));
+        QVERIFY2(err.contains(QStringLiteral("第 1 段")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("注入的信息读取失败")), qPrintable(err));
+        QCOMPARE(t.writes.size(), 0);
+        QCOMPARE(t.calls, QStringList({QStringLiteral("open"), QStringLiteral("info"),
+                                       QStringLiteral("close")}));      // 只碰了第 1 段就收手
+    }
+
+    void identifyClearsOutOnFailurePaths()
+    {
+        // fail-closed（与 eub_loadout.h:44-46 同一约定）：identify 的**三条**失败路径
+        //（打开失败 / 自述读失败 / SoC 名为空）都必须清出参 —— 调用方忽略返回值时不能拿到
+        // 上一次的表项，否则"识别失败"会被当成"识别成功"直接进 run（救援工具最坏的假成功）。
+        // 三条路径各预置一张非空表：不清就看得见。失败**收集后一次报出**（QVERIFY2 在槽内即 return：
+        // 写成三个独立断言的话，只有第一条路径的残留会被看见，另外两条永远轮不到报）。
+        QStringList leaked;
+        // 入参是 identify 的**返回值**（成功 = true）；soc 必须由调用点**先调用后取**再传进来
+        // —— 写成 check(..., s.identify(lo,&err), lo.soc) 会踩未定序求值（GCC 自右向左：读到的
+        // 是调用**前**的 lo.soc），那样断言会永远绿。
+        const auto check = [&leaked](const QString &path, bool ok, const QString &soc) {
+            if (ok)
+                leaked << QStringLiteral("%1：identify 竟然成功了").arg(path);
+            else if (!soc.isEmpty())
+                leaked << QStringLiteral("%1：出参残留 %2").arg(path, soc);
+        };
+        {
+            eub::MockEubTransport t; t.info = info9610(); t.openFailures = 99;
+            eub::EubSession s(t, fastOptions());
+            eub::EubLoadout lo = loadout9610();
+            QString err;
+            const bool ok = s.identify(lo, &err);
+            check(QStringLiteral("打开失败"), ok, lo.soc);
+        }
+        {
+            eub::MockEubTransport t; t.info = info9610(); t.infoResult = false;
+            eub::EubSession s(t, fastOptions());
+            eub::EubLoadout lo = loadout9610();
+            QString err;
+            const bool ok = s.identify(lo, &err);
+            check(QStringLiteral("自述读失败"), ok, lo.soc);
+        }
+        {
+            eub::MockEubTransport t; t.info = info9610(); t.info.socName.clear();
+            eub::EubSession s(t, fastOptions());
+            eub::EubLoadout lo = loadout9610();
+            QString err;
+            const bool ok = s.identify(lo, &err);
+            check(QStringLiteral("SoC 名为空"), ok, lo.soc);
+        }
+        QVERIFY2(leaked.isEmpty(), qPrintable(leaked.join(QStringLiteral(" | "))));
+    }
+
+    void readEchoConstantsMatchTransportHint()
+    {
+        // 两处常量靠人同步（本层故意不 include 传输实现：见 eub_session.h 的常量注释）——
+        // 用**字面值**钉住，漂移即红。static constexpr 是常量表达式：本用例只读值、不构造传输
+        // 对象，故不会碰任何 libusb 符号（头只前向声明类型）。
+        // 注：这两个常量在 eub **命名空间**作用域（非 EubSession 成员）。
+        QCOMPARE(eub::kReadEchoTimeoutMs, 50);                          // facts §B2（hubble.py:115）
+        QCOMPARE(eub::LibusbEubTransport::kReadTimeoutMs, 50);          // 与上者同源
+        QCOMPARE(eub::kReadEchoMaxBytes, 512);                          // hubble.py:115 的 read(0x81, 512, 50)
+    }
+
     void identifyFillsLoadoutAndCloses()
     {
         // identify 的**成功路径**：此前只有失败路径被覆盖 —— 出参为空或漏 close 都无人发现。
@@ -296,6 +404,37 @@ private slots:
                     found = true;
             QVERIFY2(found, qPrintable(details.join(QStringLiteral(" | "))));
         }
+    }
+
+    void notesForwardedAgainWhenBatchChangesBetweenIdentifyAndRun()
+    {
+        // notes 的作用域是**单次 open**（传输层每次 open 清空、close 不清，见 eub_session.h）：
+        // 自然用法"先 identify() 再 run()"里，两阶段的 open 属于**不同批次**。会话级"只转一次"
+        // 的标志会让 identify 那次就把开关置位 → run 里 N 次 open 的说明**全部静默丢弃**，
+        // 丢的正是 notes 存在的理由（真机线索：端点回退 / 补设配置）。
+        const QString noteA = QStringLiteral("EUB 端点回退：改用参照实现的常数 0x02/0x81");
+        const QString noteB = QStringLiteral("读活动配置未确认已配置，已显式补设配置 1");
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.noteList = {noteA};
+        QStringList details;
+        eub::EubSession s(t, fastOptions(), [&](const eub::EubProgress &p) { details << p.detail; });
+        eub::EubLoadout lo;
+        QString err;
+        QVERIFY2(s.identify(lo, &err), qPrintable(err));
+        QCOMPARE(countDetails(details, noteA), 1);      // 批次 A 在 identify 转出
+
+        // run 阶段换批次（mock 的 noteList 就是"下一次 open 会报什么"）：B 必须转出
+        t.noteList = {noteB};
+        details.clear();
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(countDetails(details, noteB), 1);      // 变异：只转一次 → 这里是 0
+        QCOMPARE(countDetails(details, noteA), 0);      // 旧批次不跟着刷
+
+        // 反向（防"干脆去掉去重"）：批次**没变**时 run 的 6 次 open 不重复刷
+        details.clear();
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(countDetails(details, noteB), 0);      // 与上次相同 → 一次都不再转
     }
 
     void sleepsBetweenSegmentsButNotAfterLast()

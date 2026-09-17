@@ -38,6 +38,8 @@ public:
 
     // 查找并打开 EUB 设备（VID/PID，facts §A1）；close 后可再 open。
     // **不锁 bus/addr**：段间设备会重枚举，地址会变（facts §B8）。
+    // **open 失败时实现自行清理**：返回 false 后对象状态 = 未打开（半开句柄不留，调用方无需
+    // 补一次 close —— 真机实现见 eub_libusb_transport.cpp:235-236 / :251-253）。
     virtual bool open(QString *error) = 0;
     virtual void close() = 0;                       // 幂等；未打开时 no-op
     virtual bool readDeviceInfo(EubDeviceInfo &out, QString *error) = 0;

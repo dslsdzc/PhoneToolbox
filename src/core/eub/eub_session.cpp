@@ -33,12 +33,15 @@ void EubSession::report(const QString &stage, const QString &detail, int percent
 
 void EubSession::forwardNotes()
 {
-    if (m_notesForwarded)
-        return;
     const QStringList notes = m_t.notes();
-    if (notes.isEmpty())
-        return;                 // 本次没有说明：不置位，后续 open 若产生说明仍能转出
-    m_notesForwarded = true;    // notes 描述的是本次打开环境，一次会话只转一次
+    // 空 = 本次打开没有说明：不动 m_lastNotes，后续 open 若产生说明仍能转出。
+    // 与上次**相同**的批次也不再转（run 有 N 段 ＝ N 次 open，重复刷只会淹日志）。
+    // 用"批次是否变化"而不是会话级"只转一次"：notes 的作用域是**单次 open**（传输层每次
+    // open 清空、close 不清，见 eub_libusb_transport.cpp:153）—— 会话级标志会让 identify
+    // 之后的 run 里出现的说明（端点回退 / 已补设配置 1）全部静默丢弃，丢的正是笔记存在的理由。
+    if (notes.isEmpty() || notes == m_lastNotes)
+        return;
+    m_lastNotes = notes;        // 记的是"已转出过的批次"：与上面转发的内容保持同一份文本
     for (const QString &n : notes)
         report(QStringLiteral("identify"), QStringLiteral("设备说明：%1").arg(n), m_lastPercent);
 }
@@ -72,6 +75,10 @@ bool EubSession::openWithRetry(QString *error)
 bool EubSession::identify(EubLoadout &out, QString *error)
 {
     m_lastPercent = 0;
+    // fail-closed：入口先清出参 —— 打开失败/自述读失败/SoC 名为空这三条早退路径若不在这里清，
+    // 调用方忽略返回值时会拿到**上一次**的表项，把"识别失败"当成"识别成功"直接进 run
+    //（eubLoadoutFor 只在它自己失败时清，见 eub_loadout.h:44-46）。
+    out = EubLoadout{};
     QString err;
     if (!openWithRetry(&err)) {
         // 打开失败的现场说明同样要转（传输层的 close 不清 notes，见其注释）：真机上

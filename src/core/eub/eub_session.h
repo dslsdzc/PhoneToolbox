@@ -8,11 +8,17 @@
 // sleep 1；cfg 注释写作 "Wait Re-Enumeration"）。关闭再打开天然容忍设备重枚举与地址变化
 // （facts §B9 明说重连会失败，故本层带**重试**，比参照脚本更稳）。
 //
+// notes（传输层的非致命说明，如"端点回退到常数 0x02/0x81"）的作用域是**单次 open**：传输层在
+// 每次 open 开头清空、close 不清（eub_libusb_transport.cpp:153）。故本层按**批次变化**转发
+// （见 forwardNotes），**不是**"一次会话只转一次" —— 会话级"只转一次"标志会让 identify 之后的
+// run 里 N 次 open 的说明全部静默丢弃，而真机线索（端点回退）往往正是那时才出现。
+//
 // ⚠️ 真机路径未验证：本机没有任何 Exynos 设备（facts §F1），本层只到"按 spec 编排 + mock 覆盖"
 // 这一层证据；段间时序、重枚举窗口、回显内容留持机人。
 #pragma once
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 #include "eub_loadout.h"
@@ -52,7 +58,8 @@ public:
     // 打开设备 → 读自述 → 查表 → 关闭（不持有句柄：设备可能瞬态消失，facts §A6）。
     // SoC 名为空（极老 SoC 只报 "SEC S5PC210 Test B/D"，facts §A4）→ 失败，
     // 由调用方用 detectSocFromImage(sboot) 兜底后自行查表。
-    // 成功时 out 填好表项；失败时 out 保持调用方传入的空值（eubLoadoutFor 已保证清空）。
+    // 成功时 out 填好表项；**失败时 out 被清空**（fail-closed：入口先清，见 .cpp —— 调用方忽略
+    // 返回值也不会拿到上一次的表项）。
     bool identify(EubLoadout &out, QString *error);
 
     // 完整救援：切段（失败即中止，**不写任何字节**）→ 逐段 open(带重试) → 发送 → 可选读回显 → close。
@@ -64,7 +71,10 @@ private:
     // 最多 m_opt.revolveAttempts 次；每次失败后（除最后一次）等待 m_opt.revolvePollMs。
     // 失败时 error 保留**最后一次**的原因。
     bool openWithRetry(QString *error);
-    // 把 m_t.notes()（端点回退等非致命说明）转进进度回调 —— 每次会话只转一次。
+    // 把 m_t.notes()（端点回退等非致命说明）转进进度回调。notes 是**每次 open** 级的：
+    // 传输层每次 open 清空、close 不清 —— 故本函数按**批次变化**转发：与上次相同的批次不重复
+    // 刷（run 有 N 段 ＝ N 次 open，重复刷会把日志淹掉），批次一变（如 run 阶段才出现的
+    // "已补设配置 1"、或换了端点）立即转出，不漏线索。
     void forwardNotes();
     void sleepMs(int ms) const;
     void report(const QString &stage, const QString &detail, int percent);
@@ -73,7 +83,7 @@ private:
     EubOptions     m_opt;
     EubProgressFn  m_progress;
     int  m_lastPercent = 0;         // 最近一次 report 的 percent（notes 转发沿用它保持单调）
-    bool m_notesForwarded = false;  // notes 是本会话打开环境的事实，只转一次
+    QStringList m_lastNotes;        // 上次已转出的 notes 批次（笔记是**每次 open** 级的：传输层每次 open 清空）
 };
 
 } // namespace eub
