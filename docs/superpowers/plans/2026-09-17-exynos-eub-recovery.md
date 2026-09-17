@@ -198,8 +198,11 @@ public:
 // notes() 里记一笔 —— 因为"硬编码的值在别的机型上是否成立"我们无法离线验证。
 //
 // 配置态：设备可能尚未被配置（bConfigurationValue==0）—— dltool 显式 set_configuration(1)
-// （dltool.c:305）。libusb 在已配置设备上再 set_configuration 会返回 BUSY，故只在"读不到
-// 活动配置"时才补设。
+// （dltool.c:305）。**libusb 官方文档**：设备已处于目标配置时再调用 = 一次**轻量复位**
+// （重发 SET_CONFIGURATION，altsetting/端点 halt/toggle 归零）；而 `LIBUSB_ERROR_BUSY`
+// 的语义是"**接口已被认领**"，且"认领之后不能再改配置"。故补设必须发生在 claim **之前**，
+// 且只在"读不到活动配置"时才补设（否则平白复位一次设备状态）。
+// （初稿注释把 BUSY 误写成"已配置"——T1 实现者按官方文档纠正，见 eub-task-1-report.md 疑虑 1。）
 //
 // 超时：写 50 s（hubble `timeout=50000` hubble.py:110；dltool 50*1000*1000 µs dltool.c:339
 // —— 两家一致）；读 50 ms（hubble.py:115 的 `timeout=50`，仅用于段后回显）。
@@ -304,7 +307,7 @@ CMakeLists 改动（三处，按现有模式）：
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_transport && ./build/image_engine_tests_test_eub_transport`
-Expected: `Totals: 5 passed, 0 failed, 0 skipped`（本任务用例 slots = 5）
+Expected: `Totals: 7 passed, 0 failed, 0 skipped`（QtTest 的 Totals = 用例 slots(5) + initTestCase/cleanupTestCase(2)；仓内既有目标同款：`test_mtk_gpt` 声明 6 slots → Totals 8）
 
 - [ ] **Step 5: 提交**
 
@@ -506,7 +509,7 @@ CMakeLists：`test_eub_samsung_mode` 加进测试源清单；其 extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build && ./build/image_engine_tests_test_eub_samsung_mode && ./build/image_engine_tests_test_eub_transport`
-Expected: 两个目标各自 `Totals: 6 passed, 0 failed`（本任务 slots = 6）/ `5 passed, 0 failed`（T1 的 5）；全项目 build 通过。
+Expected: 两个目标各自 `Totals: 8 passed, 0 failed`（本任务 slots 6 + 2）/ `7 passed, 0 failed`（T1 的 5 + 2）；全项目 build 通过。
 
 - [ ] **Step 5: 提交**
 
@@ -831,7 +834,7 @@ CMakeLists：测试源清单加 `tests/test_eub_protocol.cpp`；extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_protocol && ./build/image_engine_tests_test_eub_protocol`
-Expected: `Totals: 8 passed, 0 failed, 0 skipped`（本任务用例 slots = 8）
+Expected: `Totals: 10 passed, 0 failed, 0 skipped`（本任务用例 slots 8 + 2）
 
 - [ ] **Step 5: 提交**
 
@@ -1128,7 +1131,7 @@ CMakeLists：测试源清单加 `tests/test_eub_loadout.cpp`；extra sources 分
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_loadout && ./build/image_engine_tests_test_eub_loadout`
-Expected: `Totals: 13 passed, 0 failed, 0 skipped`（本任务用例 slots = 13）
+Expected: `Totals: 15 passed, 0 failed, 0 skipped`（本任务用例 slots 13 + 2）
 
 - [ ] **Step 5: 提交**
 
@@ -1368,7 +1371,7 @@ CMakeLists：测试源清单加 `tests/test_eub_payload.cpp`；extra sources 分
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_payload && ./build/image_engine_tests_test_eub_payload`
-Expected: `Totals: 8 passed, 0 failed, 0 skipped`
+Expected: `Totals: 10 passed, 0 failed, 0 skipped`（本任务用例 slots 8 + 2）
 
 - [ ] **Step 5: 提交**
 
@@ -1712,7 +1715,7 @@ CMakeLists：测试源清单加 `tests/test_eub_session.cpp`；extra sources 分
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_session && ./build/image_engine_tests_test_eub_session`
-Expected: `Totals: 10 passed, 0 failed, 0 skipped`
+Expected: `Totals: 12 passed, 0 failed, 0 skipped`（本任务用例 slots 10 + 2）
 
 - [ ] **Step 5: 提交**
 
@@ -1995,7 +1998,7 @@ offscreen ENVIRONMENT 列表（同段）加本 stem。**本目标不需要 libus
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_recovery_dialog && ./build/image_engine_tests_test_eub_recovery_dialog`
-Expected: `Totals: 6 passed, 0 failed, 0 skipped`（无 DISPLAY 环境靠 `QT_QPA_PLATFORM=offscreen`）
+Expected: `Totals: 8 passed, 0 failed, 0 skipped`（本任务用例 slots 6 + 2；无 DISPLAY 环境靠 `QT_QPA_PLATFORM=offscreen`）
 
 - [ ] **Step 5: 提交**
 
