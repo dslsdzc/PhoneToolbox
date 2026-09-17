@@ -79,6 +79,7 @@ bool EubSession::identify(EubLoadout &out, QString *error)
     // 调用方忽略返回值时会拿到**上一次**的表项，把"识别失败"当成"识别成功"直接进 run
     //（eubLoadoutFor 只在它自己失败时清，见 eub_loadout.h:44-46）。
     out = EubLoadout{};
+    m_identifyAttempted = true;      // 供 run 区分"没识别"与"识别了但读不到自述"（见 .h）
     QString err;
     if (!openWithRetry(&err)) {
         // 打开失败的现场说明同样要转（传输层的 close 不清 notes，见其注释）：真机上
@@ -165,8 +166,12 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
             }
             QString idNote;             // 追加到下面那行日志尾部（保持"开始发送"这条锚点只有一行）
             if (!m_haveIdentifyName) {
-                // 本次会话没先 identify（run 是公开 API，可单独调用）→ 没有可比基准，不阻断
-                idNote = QStringLiteral("；未先识别设备，跳过换设备核对");
+                // 没有可比基准 → 不阻断（run 是公开 API，可单独调用）。成因要分开说：
+                // "压根没识别"是调用方顺序，"识别了但读不到设备自述"是设备/连接问题 ——
+                // 混成一句会把后者说成前者，用户会去查自己的操作顺序（T7 复审意见）。
+                idNote = m_identifyAttempted
+                    ? QStringLiteral("；识别时未读到设备自述（无基准），跳过换设备核对")
+                    : QStringLiteral("；未先识别设备，跳过换设备核对");
             } else if (info.socName.compare(m_identifySocName, Qt::CaseInsensitive) != 0) {
                 m_t.close();
                 setErr(error, QStringLiteral(
@@ -180,6 +185,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
                 // 不阻断（挡在这里等于把兜底路径又堵死），但要在日志里点明"表可能不匹配本机"。
                 idNote = QStringLiteral("；注意：设备自报 %1 与布局表 %2 不一致，表可能不匹配本机")
                              .arg(info.socName, lo.soc);
+            } else if (info.socName.isEmpty()) {
+                // 两边都是空串：比较形式上成立、实质上**无可比身份**（facts §A4 的极老 SoC）。
+                // 不点明这一句，对话框那句"发送前仍会核对设备身份"就是空话（T7 复审意见）。
+                idNote = QStringLiteral("；设备未自报 SoC 名，无法核对设备身份");
             }
             report(QStringLiteral("identify"),
                    QStringLiteral("设备自报 %1，开始发送 %2 段%3")

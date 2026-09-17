@@ -247,6 +247,43 @@ private slots:
         QCOMPARE(countDetails(details, QStringLiteral("跳过换设备核对")), 1);
     }
 
+    void emptyNamesAreNotedAsUnverifiableIdentity()
+    {
+        // 空↔空（facts §A4 的极老 SoC）：比较形式上通过、实质上**没有可比的设备身份**。
+        // 不在日志里点明，对话框那句"发送前仍会核对设备身份"就是空话（T7 复审意见）。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName.clear();
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        eub::EubLoadout lo;
+        QString err;
+        QVERIFY(!s.identify(lo, &err));            // 无自报名 → 识别失败（但已记录基准）
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(countDetails(details, QStringLiteral("无法核对设备身份")), 1);
+        QCOMPARE(countDetails(details, QStringLiteral("跳过换设备核对")), 0);   // 基准在，核对跑过
+    }
+
+    void identifyAttemptedButUnreadableIsDistinguishedFromNotIdentifying()
+    {
+        // 两种"无基准"的成因要分开说：没识别（调用方顺序）vs 识别了但读不到自述（设备/连接）。
+        // 混成一句会把后者说成前者，用户会去查自己的操作顺序（T7 复审意见）。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.infoResult = false;                      // identify 时读不到设备自述
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        eub::EubLoadout lo;
+        QString err;
+        QVERIFY(!s.identify(lo, &err));
+        t.infoResult = true;                       // 设备恢复了
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(countDetails(details, QStringLiteral("识别时未读到设备自述")), 1);
+        QCOMPARE(countDetails(details, QStringLiteral("未先识别设备")), 0);
+    }
+
     void warnsWhenDeviceNameDiffersFromFallbackTable()
     {
         // 另一条兜底路径：设备**自报了一个表里没有的名字** → 调用方按镜像反推选表（facts §A4）。

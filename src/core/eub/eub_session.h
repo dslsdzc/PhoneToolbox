@@ -94,6 +94,9 @@ private:
     // 落下这一笔，run 阶段才有可比的设备自报值。
     QString m_identifySocName;
     bool    m_haveIdentifyName = false;
+    // identify() 是否**被调用过**（无论是否读到自述）：run 的"无基准"日志要分清
+    // "压根没识别"与"识别了但读不到设备自述"——两者成因不同，混为一谈会把用户带偏。
+    bool    m_identifyAttempted = false;
 };
 
 } // namespace eub
