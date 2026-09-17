@@ -45,6 +45,11 @@
 7. **提交纪律**：只 `git add` 明确路径，**绝不** `git add -A/-u/commit -a`（`build/` 有 4 个历史
    跟踪文件；`build-h1/`、`build-release/` 是既存未跟踪产物，别碰）。提交信息写清"改了什么/为什么/边界"。
 8. **UI 文案中文**，错误信息给出可行动的信息（哪一段、多少字节、下一步怎么做）。
+9. **brief 里的用例是起点，不是不可质疑的字面**：每个任务的测试槽都经过控制方复核，但**恒真断言**
+   （缺陷存在时仍会通过）是本仓出现过两次的缺陷类型（T1 的 M1 加固即一例：旧顺序下
+   `!writeBulk({}) && !err.isEmpty()` 同样为真）。若你在实现中发现某条断言**无法区分"实现了"与"没实现"**，
+   按 T1 先例**加固它**（加一条只在正确实现下才成立的断言），并在报告里写明"原断言恒真 + 加固方式 +
+   变异证据（改回错误实现 → 该 slot 变红）"。**不要**默默照抄，也**不要**改弱或删除既有断言。
 
 ---
 
@@ -269,8 +274,10 @@ private:
 namespace {
 constexpr quint16 kEubVid = 0x04e8;   // facts §A1
 constexpr quint16 kEubPid = 0x1234;   // facts §A1
-constexpr int kFallbackEpOut = 0x02;  // exynos-usbdl.c:60 / dltool.c:339 / hubble.py:110
-constexpr int kFallbackEpIn  = 0x81;  // exynos-usbdl.c:242 / hubble.py:115
+// ⚠️ 出处必须写全仓库段：reference/ 下有两个同名 exynos-usbdl.c（原版与 VDavid003 fork），
+// 短写会解析到错的那份（T1 审查 M6 的教训）
+constexpr int kFallbackEpOut = 0x02;  // reference/exynos-usbdl/exynos-usbdl.c:60 / reference/exynos9610-usb-emergency-recovery/dltool/dltool.c:339 / reference/hubble/hubble.py:110
+constexpr int kFallbackEpIn  = 0x81;  // reference/exynos-usbdl/exynos-usbdl.c:242 / reference/hubble/hubble.py:115
 
 QString usbErr(int rc) { return QString::fromLatin1(libusb_error_name(rc)); }
 
