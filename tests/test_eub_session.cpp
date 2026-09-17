@@ -1,6 +1,7 @@
 // tests/test_eub_session.cpp
 //
-// 会话编排：段序、每段重开、重试、失败语义、进度单调 —— 全部经 MockEubTransport（无真机，facts §F1）。
+// 会话编排：段序、每段重开、重试、失败语义、进度单调 —— 全部经 MockEubTransport（无真机；
+// 真样本核对在 loadout/payload 两个目标，facts §H）。
 // 断言对象只有 mock 的记录（帧字节 / 调用序列 / 睡眠参数）与错误、进度文案 —— 不碰真设备，
 // 也不依赖真实时间（sleep 一律注入，见 fastOptions）。
 #include <QtTest>
@@ -690,7 +691,7 @@ private slots:
     }
 
     // ---- extraFiles 阶段（backlog Task 1；参照事实 hubble.py:329-341 + ExynosData/Exynos9830.json:3）----
-    // 证据等级**单源**（hubble）：本仓无真机无真样本，"9830 需要这两个文件"来自参照流程的要求，
+    // 证据等级**单源**（hubble）：本仓无真机；真样本已就位（facts §H），"9830 需要这两个文件"来自参照流程的要求，
     // 不是实测结论。断言对象仍是 mock 的记录与文案。
 
     void extraFilesAreSentAfterSegmentsInOrder()
