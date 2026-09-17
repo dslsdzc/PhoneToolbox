@@ -2,6 +2,7 @@
 #include "adb_embedded.h"
 #include "modes/edl_9008.h"
 #include "core/odin/odin_libusb_transport.h"
+#include "core/eub/samsung_mode.h"
 #include "resource_monitor.h"
 #include <libusb.h>
 #include <QProcess>
@@ -567,8 +568,10 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
         if (libusb_get_device_descriptor(list[i], &desc) != LIBUSB_SUCCESS)
             continue;
 
-        // 三星 Odin（Phase C）：判据是**纯函数**（odin_libusb_transport.h 的 isOdinDevice）——
+        // 三星（Phase C/E）：判据是**纯函数**（odin_libusb_transport.h 的 isOdinDevice）——
         // VID 0x04E8 + 接口类 0x0A(CDC_DATA) + 批量 in/out（Thor/odin4 现行做法），老 PID 兜底。
+        // **认领顺序（EUB 先于 Odin）由 eub::samsungModeFor 固化并单测覆盖（core/eub/samsung_mode.h
+        // 头注释 / facts §E2）**——本分支只按三态结论分派，不再自己判优先级。
         // 只对三星 VID 深挖描述符：每 2s 一轮的枚举里，其余厂商不必多读一次配置描述符。
         if (desc.idVendor == 0x04E8) {
             QList<quint8> classes;
@@ -596,24 +599,28 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
                 }
                 libusb_free_config_descriptor(cfg);
             }
-            if (odin::LibusbOdinTransport::isOdinDevice(desc.idVendor, desc.idProduct,
-                                                        classes, hasBulkInOut)) {
+            const eub::SamsungMode sm =
+                eub::samsungModeFor(desc.idVendor, desc.idProduct, classes, hasBulkInOut);
+            if (sm != eub::SamsungMode::NotSamsung) {
+                // 认领顺序（EUB 先于 Odin）由 samsungModeFor 固化并单测覆盖（samsung_mode.h 头注释）
+                const DeviceMode claimed = (sm == eub::SamsungMode::Eub) ? MODE_SAMSUNG_EUB
+                                                                        : MODE_SAMSUNG_ODIN;
                 const QString devId = QStringLiteral("usb-%1-%2")
                                           .arg(libusb_get_bus_number(list[i]))
                                           .arg(libusb_get_device_address(list[i]));
                 DeviceInfo info;
                 info.serialNumber = devId;
-                info.mode = MODE_SAMSUNG_ODIN;
-                info.model = getModeDisplayName(MODE_SAMSUNG_ODIN);
+                info.mode = claimed;
+                info.model = getModeDisplayName(claimed);
                 newDevices[devId] = info;
                 // emit 模式与兄弟分支一致：新设备 → deviceConnected；同 ID 模式变化 → deviceModeChanged
                 if (!m_currentDevices.contains(devId)) {
-                    qDebug() << "Odin device connected:" << devId;
+                    qDebug() << "Samsung protocol device connected:" << devId;
                     emit deviceConnected(info);
-                } else if (m_currentDevices[devId].mode != MODE_SAMSUNG_ODIN) {
-                    emit deviceModeChanged(devId, MODE_SAMSUNG_ODIN);
-                    qDebug() << "Odin device mode changed:" << devId
-                             << "to" << getModeDisplayName(MODE_SAMSUNG_ODIN);
+                } else if (m_currentDevices[devId].mode != claimed) {
+                    emit deviceModeChanged(devId, claimed);
+                    qDebug() << "Samsung protocol device mode changed:" << devId
+                             << "to" << getModeDisplayName(claimed);
                 }
                 continue;                       // 已认领，不再走下面的 PID 表
             }
@@ -758,6 +765,8 @@ QString DeviceDetector::getModeDisplayName(DeviceMode mode) const
         return QStringLiteral("展锐");
     case MODE_SAMSUNG_ODIN:
         return QStringLiteral("三星 (Odin)");
+    case MODE_SAMSUNG_EUB:
+        return QStringLiteral("三星 EUB (Exynos)");
     default: return "未知";
     }
 }
