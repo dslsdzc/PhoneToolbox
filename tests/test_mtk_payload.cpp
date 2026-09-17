@@ -14,6 +14,7 @@
 #include "core/modes/mtk_preloader_fetch.h"
 #include "core/modes/mtk_xflash_payload.h"
 #include "core/modes/mtk_xflash_session.h"
+#include "core/modes/mtk_xml_session.h"   // T12：xmlBringUpDa 的 XmlSession（mock 逐帧测）
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
@@ -131,6 +132,104 @@ QList<QByteArray> da1UploadReads(const mtkbrom::DaSelection &sel)   // SEND_DA/J
     return {QByteArray("\xD7", 1), be32(sel.da1.startAddr), be32(sel.da1.len), be32(sel.da1.sigLen),
             QByteArray("\x00\x00", 2), QByteArray("\x00\x00\x00\x00", 4),
             QByteArray("\xD5", 1), be32(sel.da1.startAddr), QByteArray("\x00\x00", 2)};
+}
+
+// ---- D3-T12：XML 链（引导 + READ-FLASH 读表 + 逐分区写 + REBOOT）的夹具 ----
+// 与 T9/T10 的 XML 用例同款（T9 在 `tests/test_mtk_xml_payload.cpp` 里有逐条对照）：**一帧 = 两笔**
+// （12B 帧头 + 载荷），因为默认 `IBromUsb::readExact` 是"单次读 + 严格长度"（mtk_brom.cpp:219-231）。
+// ⚠️ XML 的 `sendCommand(noack=false)`（**上游默认**，XL:188-219）**一次调用消费三帧**：
+//    `OK` → `CMD:END(result=OK)` → ack → `CMD:START`。按"每条命令一帧 OK"排（简令 Step 1 原稿、
+//    以及 T9 的"订正 #1"）会在第二条命令处读空队列 → 用例假红。
+// ⚠️ 读路径是**逐帧 ack**（`download_raw`，XL:508-559）：数据帧之后还有一发 `ack` 和它的 `OK` 应答
+//    —— 简令 Step 1 的 `xmlSectorReaderRoundTripsDeviceBytes` 原稿漏了这一帧（T10 的
+//    `readPartitionSequence` 夹具同款；漏掉它，收尾的 CMD:START 会被当成 ack 应答 → 假红）。
+
+// 文本帧（DT_PROTOCOL_FLOW）：载荷 = utf8 字节 + NUL（XL:146-153：length = len + 1）
+QList<QByteArray> textReads(const QString &s)
+{
+    const QByteArray body = s.toUtf8() + QByteArray(1, '\0');
+    return {le32(0xFEEEEEEF) + le32(1) + le32(quint32(body.size())), body};
+}
+
+// 设备发来的 CMD:START（DA1 起来的同步信号，XL:309-310 —— **不是** XFlash 的 0xC0）
+QList<QByteArray> xmlDeviceStartReads()
+{
+    return textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+}
+
+// `sendCommand(noack=false)` 一次调用的三帧（XL:188-219）—— XML 的 setup_env / setup_hw_init /
+// set_host_info / REBOOT 全走这条节奏（与 T9 的 commandReads 同款）
+QList<QByteArray> xmlCommandReads()
+{
+    return textReads(QStringLiteral("OK"))
+         + textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+         + textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+}
+
+// 读路径：设备发来的 UPLOAD-FILE（XL:425-431；readCommandResult 消费，**内部 ack**）
+QList<QByteArray> xmlUploadFileReads()
+{
+    return textReads(QStringLiteral("<host><command>CMD:UPLOAD-FILE</command><arg>"
+                                    "<checksum>CHK_NO</checksum><info>ROM_0</info>"
+                                    "<target_file>ROM_0</target_file></arg></host>"));
+}
+
+// 写路径②：FileSysOp（key 必须是 FILE-SIZE，XL:967-968）。file_path 的长度按上游 `hex()` 排（无前缀）
+QList<QByteArray> xmlFileSysOpReads(const QString &key, quint32 length)
+{
+    return textReads(QStringLiteral("<host><command>CMD:FILE-SYS-OPERATION</command><arg>"
+                                    "<key>%1</key><file_path>MEM://0x8000000:0x%2</file_path></arg></host>")
+                         .arg(key, QString::number(length, 16)));
+}
+
+// 写路径④：DwnFile（packet_length 用**十六进制**解析，XL:422）
+QList<QByteArray> xmlDwnFileReads(quint32 packetLength, quint32 length)
+{
+    return textReads(QStringLiteral("<host><command>CMD:DOWNLOAD-FILE</command><arg>"
+                                    "<checksum>CHK_NO</checksum><info>2nd-DA</info>"
+                                    "<source_file>MEM://0x8000000:0x%1</source_file>"
+                                    "<packet_length>0x%2</packet_length></arg></host>")
+                         .arg(QString::number(length, 16), QString::number(packetLength, 16)));
+}
+
+// 写路径⑦收尾：`CMD:END(OK)` → `CMD:START`（**两者之间没有独立 OK 帧**，XL:487-496）
+QList<QByteArray> xmlWriteTailReads()
+{
+    return textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"))
+         + textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+}
+
+// XML 命令的**线上字节**（xsendText：XML + NUL；写帧断言用）
+QByteArray xmlFrame(const QString &xml) { return xml.toUtf8() + QByteArray(1, '\0'); }
+
+// 合法但**零分区**的 GPT（512B 扇区 × 16 扇区 = 0x2000 = readTable 的探测长度）：
+// 把合成 GPT 的条目表清零（type GUID 全 0 → parsePrimary 逐条 continue → 0 个分区）后
+// 重算条目表 CRC 与头部 CRC（头部 CRC 覆盖 0x58 的条目表 CRC 字段 → 必须先改条目 CRC 再算头 CRC）。
+// 用途：钉 XML 分支的**空表显式门**（parsePrimary 对零条目仍成功，空表要靠调用方点名）。
+QByteArray emptyGptFixture()
+{
+    QByteArray raw = mtkgpt::testBuildSyntheticGpt(512, 16, /*firstLba=*/40);
+    const int hdrPos = 512;
+    const int entriesPos = 1024;
+    raw.replace(entriesPos, 512, QByteArray(512, '\0'));
+    auto crc32Ieee = [](const QByteArray &data) {
+        quint32 crc = 0xFFFFFFFFu;                       // 与 mtk_gpt.cpp 的 crc32 同算法（反射 IEEE）
+        for (const char ch : data) {
+            crc ^= quint8(ch);
+            for (int i = 0; i < 8; ++i)
+                crc = (crc >> 1) ^ (0xEDB88320u & (quint32(0) - (crc & 1u)));
+        }
+        return ~crc;
+    };
+    auto wrU32 = [&raw](int off, quint32 v) {
+        raw[off] = char(v & 0xFF); raw[off + 1] = char((v >> 8) & 0xFF);
+        raw[off + 2] = char((v >> 16) & 0xFF); raw[off + 3] = char((v >> 24) & 0xFF);
+    };
+    wrU32(hdrPos + 0x58, crc32Ieee(raw.mid(entriesPos, 512)));
+    QByteArray hdrForCrc = raw.mid(hdrPos, 92);
+    hdrForCrc.replace(0x10, 4, QByteArray(4, '\0'));
+    wrU32(hdrPos + 0x10, crc32Ieee(hdrForCrc));
+    return raw;
 }
 
 // ---- D1-T9 审查 I1：bromFlashOnSession（整会话 + 四道安全门）的夹具 ----
@@ -292,7 +391,6 @@ private slots:
     void bromFlashOnSessionRejectsUnknownHwCode();
     void bromFlashOnSessionRoutesXflashEndToEnd();
     void bromFlashOnSessionRejectsIotChip();
-    void bromFlashOnSessionRejectsV6DaFile();
     void bromFlashOnSessionContinuesWhenHwSwVerUnavailable();
     void bromFlashOnSessionWarnsButSucceedsWhenFinishFails();
     void bromFlashOnSessionLooksUpDaByDacode();
@@ -301,6 +399,12 @@ private slots:
     void xflashChainOrderWithEmi();
     void xflashChainSkipsEmiForPreloaderAgent();
     void xflashChainWarnsButContinuesWithoutPreloader();
+    // ---- D3-T12: XML 链整合（xmlBringUpDa + READ-FLASH 读表 + 逐分区写 + REBOOT） ----
+    void xmlChainSendsCmdStartHandshakeWithoutEmi();
+    void xmlChainRejectsNonStartFirstCommand();
+    void xmlSectorReaderRoundTripsDeviceBytes();
+    void bromFlashOnSessionRoutesXmlEndToEnd();
+    void bromFlashOnSessionRejectsEmptyXmlGptTable();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -1347,31 +1451,140 @@ void TestMtkPayload::bromFlashOnSessionRejectsIotChip()
     QVERIFY2(err.contains(QStringLiteral("IoT")), qPrintable(err));
 }
 
-// 代际拒绝 ④：**DA 文件是 v6**（强制 XML 代；即使芯片是 LEGACY 也不能按 LEGACY 流程刷）
-// T11 起 v6 由 decideGeneration 判成 XML → 走 XML 分支：链在 Task 12 接线，本任务**明确拒绝**
-// （不假装支持）。判别力：v6 若被漏判成 LEGACY，这里会走进 bromBringUpDa 并发出 BROM 级帧。
-void TestMtkPayload::bromFlashOnSessionRejectsV6DaFile()
+// 代际路由 ④：**DA 文件是 v6**（强制 XML 代；芯片是 LEGACY 也走 XML）—— T11 判代际、T12 接线后
+// 走完整条 XML 链：DA1（BROM 级）→ 等 CMD:START → setup_env/hw_init/host_info → READ-FLASH 读 GPT
+// （**同一个 mtkgpt**）→ 逐分区 WRITE-FLASH → REBOOT 收尾。
+// 判别力：① v6 若被漏判成 LEGACY，会走 storageExchange/stage2/boot_to/FINISH 那条读序列 → 与本夹具错位；
+//   ② XML 若被判成 XFlash，会发 0x01000A 等 XFlash 帧并读 status 帧 → 同样错位。
+void TestMtkPayload::bromFlashOnSessionRoutesXmlEndToEnd()
 {
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    // GPT 夹具与 XFlash 用例同款：16 扇区 × 512 = 0x2000 = readTable 的探测长度（一笔读满足，
+    // 不触发补读）；单分区 "boot" = **LBA 40..41**（first_lba 40 ≠ first_usable 34 → 读错字段的
+    // 变异会给出 0x4400 而不是 0x5000）。
+    const QByteArray gpt = mtkgpt::testBuildSyntheticGpt(512, 16, /*firstLba=*/40);
+
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
     mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
-    m->reads << prologueReads(kFlashHwCode);          // 芯片这几道门都过，才轮到 DA 文件
+    m->reads << prologueReads(kFlashHwCode)
+             << da1UploadReads(sel)                                   // DA1：SEND_DA + JUMP_DA（BROM 级）
+             << xmlDeviceStartReads()                                 // 设备发 CMD:START
+             << xmlCommandReads() << xmlCommandReads()
+             << xmlCommandReads() << xmlCommandReads()                // setup_env + 2×hw_init + host_info
+             // 分区表：READ-FLASH（noack）→ UpFile → 裸 OK@0x2000 → ack/OK → 数据帧 → 逐帧 ack/OK → CMD:START
+             << textReads(QStringLiteral("OK"))
+             << xmlUploadFileReads()
+             << textReads(QStringLiteral("OK@0x2000"))
+             << textReads(QStringLiteral("OK"))
+             << frameReads(1, gpt)
+             << textReads(QStringLiteral("OK"))
+             << xmlDeviceStartReads()
+             // 写 boot（镜像 2B → 补零 0x200）：WRITE-FLASH（noack）→ FileSysOp(FILE-SIZE) → DwnFile
+             //   → 第二次长度 ack/OK → 单包 ack(0)/OK + 数据/OK → 收尾 CMD:END/CMD:START
+             << textReads(QStringLiteral("OK"))
+             << xmlFileSysOpReads(QStringLiteral("FILE-SIZE"), 0x200)
+             << xmlDwnFileReads(0x200, 0x200)
+             << textReads(QStringLiteral("OK"))
+             << textReads(QStringLiteral("OK"))
+             << textReads(QStringLiteral("OK"))
+             << xmlWriteTailReads()
+             // REBOOT 收尾
+             << xmlCommandReads();
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode, /*v6=*/true);            // v6 → decideGeneration 强制 XML
+    req.daLabel = QStringLiteral("合成 DA（v6 → XML 代）");
+    req.imagePaths << imgPath;
+
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);                 // 读队列必须**正好**清空（漏读/多读都是错位）
+    QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XML")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("v6")), "日志必须点名 DA 是 v6（判定依据）");
+    QVERIFY2(cap.joined().contains(QStringLiteral("XML：GPT 读出 1 个分区")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("未发 EMI")), qPrintable(cap.joined()));
+    QVERIFY2(cap.joined().contains(QStringLiteral("REBOOT 收尾完成")), qPrintable(cap.joined()));
+    QCOMPARE(cap.progress.size(), 1);
+    QCOMPARE(cap.progress.at(0).first, quint64(2));
+    QCOMPARE(cap.progress.at(0).second, quint64(2));
+
+    // 写入命令：`<partition>` = **存储描述符**（XC:452-462 的 UFSPartitionType 文本，`ST:216`；
+    // 不是分区名）、`<offset>` = **GPT 条目地址**（上游 `writeflash(addr=partition.sector *
+    // pagesize)`：`v6.py:1095-1097`、`mtk_da_handler.py:544-548`）。LBA 40 × 512 = 0x5000；
+    // 误用头里的 first_usable(34) 得 0x4400、漏传地址（恒 0x0）得 0x0。
+    const QString expectWrite = mtkbrom::XmlSession::envelope(
+        QStringLiteral("WRITE-FLASH"),
+        {QStringLiteral("<partition>EMMC-USER</partition>"),
+         QStringLiteral("<offset>0x5000</offset>"),
+         QStringLiteral("<source_file>MEM://0x8000000:0x200</source_file>")});
+    QVERIFY2(m->writes.contains(xmlFrame(expectWrite)), qPrintable(expectWrite));
+    QVERIFY2(m->writes.contains(image + QByteArray(510, '\0')), "镜像必须补零到 512 的整数倍写出");
+    // 先读表、后写（顺序错位 = 往未知地址写）
+    {
+        const QByteArray &stream = m->writes;
+        const int iRead = stream.indexOf(QStringLiteral("CMD:READ-FLASH").toUtf8());
+        const int iWrite = stream.indexOf(QStringLiteral("CMD:WRITE-FLASH").toUtf8());
+        QVERIFY2(iRead >= 0 && iWrite >= 0, "READ-FLASH 与 WRITE-FLASH 都必须出现");
+        QVERIFY2(iWrite > iRead, "WRITE-FLASH 必须在 READ-FLASH 之后（先取表、后写）");
+    }
+    QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM)) == -1, "XML 代不得发 XFlash 的 INIT_EXT_RAM");
+}
+
+// XML 分支的空表显式门（T11 在 XFlash 分支补的同款）：GPT 合法但**零个有效条目** →
+// 在**任何写之前**点名"设备分区表为空"。没有这道门时计划层会走 derived 分支，最终报成
+// "内部错误：分区 X 不在设备表地址映射里" —— 把真因（分区表为空）说成内部错位。
+void TestMtkPayload::bromFlashOnSessionRejectsEmptyXmlGptTable()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    const QByteArray gpt = emptyGptFixture();
+    QCOMPARE(gpt.size(), 0x2000);
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << prologueReads(kFlashHwCode)
+             << da1UploadReads(sel)
+             << xmlDeviceStartReads()
+             << xmlCommandReads() << xmlCommandReads()
+             << xmlCommandReads() << xmlCommandReads()
+             << textReads(QStringLiteral("OK"))
+             << xmlUploadFileReads()
+             << textReads(QStringLiteral("OK@0x2000"))
+             << textReads(QStringLiteral("OK"))
+             << frameReads(1, gpt)
+             << textReads(QStringLiteral("OK"))
+             << xmlDeviceStartReads();
 
     mtkbrom::BromFlashRequest req;
     req.daFile = daBytesForHw(kFlashHwCode, /*v6=*/true);
-    req.imagePaths << QStringLiteral("/nonexistent/x.img");
+    req.imagePaths << imgPath;
+
     SessionCapture cap;
-    QString err;
     QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
-    QVERIFY2(err.contains(QStringLiteral("Task 12")), qPrintable(err));
-    QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XML")), qPrintable(cap.joined()));
-    QVERIFY2(cap.joined().contains(QStringLiteral("v6")), "日志必须点名 DA 是 v6（判定依据）");
-    // XML 链未接线 → **一个 DA 级字节都不许发**（前导段的 echo 命令字节不计）：
-    // 既不得出现 XFlash 帧（代际判成 XFlash 才会发），也不得出现 BROM 级 DA 上传
-    QVERIFY2(!m->writes.contains(le32(0xFEEEEEEF)), "XML 代不得发 XFlash 帧");
-    QVERIFY2(!m->writes.contains(QByteArray(1, char(0xD7))), "XML 代不得发 SEND_DA(0xD7)");
-    QVERIFY2(!m->writes.contains(QByteArray(1, char(0xD5))), "XML 代不得发 JUMP_DA(0xD5)");
-    QVERIFY2(!m->writes.contains(QByteArray(32, '\x02')), "XML 代不得发 DA1 载荷");
+    QVERIFY2(err.contains(QStringLiteral("设备分区表为空")), qPrintable(err));
+    QVERIFY2(cap.joined().contains(QStringLiteral("XML：GPT 读出 0 个分区")), qPrintable(cap.joined()));
+    QVERIFY2(!m->writes.contains(QStringLiteral("CMD:WRITE-FLASH").toUtf8()), "空表不得发写命令");
+    QVERIFY2(!m->writes.contains(QStringLiteral("CMD:REBOOT").toUtf8()), "空表不得发 REBOOT 收尾");
+    QVERIFY2(cap.progress.isEmpty(), "失败时不得报进度");
     QCOMPARE(m->reads.size(), 0);
 }
 
@@ -1621,6 +1834,119 @@ void TestMtkPayload::xflashChainWarnsButContinuesWithoutPreloader()
              qPrintable(log.join(QLatin1Char('\n'))));
     QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("未提供 preloader 路径")),
              "skipReason 必须转述进日志");
+}
+
+// ---- D3-T12: XML 链整合（引导 + 分区表 + 逐分区写 + REBOOT）----
+
+// XML 链的引导段：sendDa1（BROM 级，**含 JUMP_DA**）→ 等 CMD:START → setup_env / hw_init / host_info
+// 四条命令；**全程不发任何 DRAM/EMI 命令**（铁律 16：XML 的 DRAM 初始化是 setup_env 里
+// `<initialize_dram>YES</initialize_dram>` 那一条参数，XL:184 / XC:120-135）。
+// 夹具按 XML 的真实节奏排（**3 帧/命令**，XL:188-219；见本文件 D3-T12 夹具段头的 ⚠️）。
+void TestMtkPayload::xmlChainSendsCmdStartHandshakeWithoutEmi()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x0907, sel, &err), qPrintable(err));   // 表内 XML 芯片（0x0907 = MT6983）
+
+    m->reads = da1UploadReads(sel);                                        // 与 LEGACY/XFlash 同一份 DA1 上传夹具
+    m->reads << xmlDeviceStartReads()
+             << xmlCommandReads()                                          // SET-RUNTIME-PARAMETER
+             << xmlCommandReads()                                          // HOST-SUPPORTED-COMMANDS
+             << xmlCommandReads()                                          // NOTIFY-INIT-HW
+             << xmlCommandReads();                                         // SET-HOST-INFO
+
+    mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::XmlSession x(m);
+    QStringList log;
+    QVERIFY2(mtkbrom::xmlBringUpDa(brom, x, sel, &log, &err), qPrintable(err));
+    QCOMPARE(m->reads.size(), 0);                                          // 读队列正好清空
+
+    QStringList sent;
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        if (f.startsWith("<?xml"))
+            sent << QString::fromUtf8(f).remove(QChar('\0'));
+    QCOMPARE(sent.size(), 4);                                              // 四条命令；CMD:START 不回 ack
+    QVERIFY(sent.at(0).contains(QStringLiteral("CMD:SET-RUNTIME-PARAMETER")));
+    QVERIFY(sent.at(0).contains(QStringLiteral("<initialize_dram>YES</initialize_dram>")));
+    QVERIFY(sent.at(1).contains(QStringLiteral("CMD:HOST-SUPPORTED-COMMANDS")));
+    QVERIFY(sent.at(2).contains(QStringLiteral("CMD:NOTIFY-INIT-HW")));
+    QVERIFY(sent.at(3).contains(QStringLiteral("CMD:SET-HOST-INFO")));
+
+    // DA1 走的是**三代共用的 BROM 级帧**（0xD7/0xD5 必须发出 —— 不是"一个字节都不发"）
+    QVERIFY2(m->writes.contains(QByteArray(1, char(0xD7))), "必须发 SEND_DA(0xD7)");
+    QVERIFY2(m->writes.contains(QByteArray(1, char(0xD5))), "必须发 JUMP_DA(0xD5)");
+    // 不发 EMI：既无 XFlash 的 INIT_EXT_RAM 帧（0x01000A），也无 LEGACY 的 ENABLE_DRAM(0xE8) 帧
+    QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM)) == -1, "XML 不得发 XFlash 的 INIT_EXT_RAM");
+    QVERIFY2(m->writes.indexOf(mtktest::be32(0xE8)) == -1, "XML 不得发 LEGACY 的 ENABLE_DRAM");
+    QVERIFY2(log.join(QLatin1Char('\n')).contains(QStringLiteral("未发 EMI")),
+             qPrintable(log.join(QLatin1Char('\n'))));
+}
+
+// 设备首条命令不是 CMD:START → 明确失败（不猜、不硬着头皮往下走）。
+// 判别力：XmlSession 对"具名但未列举"的命令返回 true 且只置 `out.command`（`mtk_xml_session.h`
+// 的调用方契约）—— 不显式核对 `out.command` 的实现会把这台设备当成已就绪。
+// 夹具用 PROGRESS-REPORT（保活命令，XL:390-407）：它会被 readCommandResult 走完保活循环并把
+// **下一条**命令（CMD:END）作为结果交回 → 判据必须在 CMD:START 上（而不是"有没有读到帧"）。
+void TestMtkPayload::xmlChainRejectsNonStartFirstCommand()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(0x0907, sel, &err), qPrintable(err));
+
+    m->reads = da1UploadReads(sel);
+    m->reads << textReads(QStringLiteral("<host><command>CMD:PROGRESS-REPORT</command></host>"))
+             << textReads(QStringLiteral("OK!EOT"))
+             << textReads(QStringLiteral("<host><command>CMD:END</command><arg><result>OK</result></arg></host>"));
+
+    mtkbrom::BromSession brom(std::move(usb), mtkbrom::BromDevice{});
+    mtkbrom::XmlSession x(m);
+    QString err2;
+    QVERIFY(!mtkbrom::xmlBringUpDa(brom, x, sel, nullptr, &err2));
+    QVERIFY2(err2.contains(QStringLiteral("CMD:START")), qPrintable(err2));
+    // 失败即止：**四条 setup 命令一条都不许发**（写流里只有 DA1 的帧）
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        QVERIFY2(!f.startsWith("<?xml"), "首条命令不是 CMD:START 时不得继续发 setup 命令");
+}
+
+// 分区表读回调适配器：mtkgpt::ReadFn 的 (byteOffset, len) → XML 的 READ-FLASH 区间读（裸 OK@ 数据路径）
+// ——"三代共用同一个 GPT 解析器"的**唯一新缝**就在这个适配器上（解析器本身在 T1 用真样本钉死）。
+// 夹具按读路径的**逐帧 ack**节奏排（XL:508-559，T10 的 readPartitionSequence 同款）：数据帧之后
+// 还有一发 ack 和它的 "OK" 应答 —— 漏掉它，收尾的 CMD:START 会被当成 ack 应答 → 假红。
+void TestMtkPayload::xmlSectorReaderRoundTripsDeviceBytes()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    const QByteArray block(0x200, '\x5C');
+    m->reads << textReads(QStringLiteral("OK"))                            // READ-FLASH 被接受（noack）
+             << xmlUploadFileReads()                                       // CMD:UPLOAD-FILE
+             << textReads(QStringLiteral("OK@0x200"))                      // 裸数据路径：长度
+             << textReads(QStringLiteral("OK"))                            // 长度确认
+             << frameReads(1, block)                                       // 数据帧（头、载荷两笔）
+             << textReads(QStringLiteral("OK"))                            // 逐帧 ack 的应答
+             << xmlDeviceStartReads();                                     // 收尾 CMD:START
+
+    mtkbrom::XmlSession x(m);                    // mock 由 unique_ptr 持有到用例结束（不需要 BromSession）
+    const mtkgpt::ReadFn read = mtkbrom::xmlSectorReader(x);
+    QByteArray got;
+    QString err;
+    QVERIFY2(read(0x1000, 0x200, &got, &err), qPrintable(err));
+    QCOMPARE(got, block);
+    QCOMPARE(m->reads.size(), 0);                                          // 读队列正好清空
+
+    QString sentXml;
+    for (const QByteArray &f : std::as_const(m->writeFrames))
+        if (f.startsWith("<?xml"))
+            sentXml += QString::fromUtf8(f).remove(QChar('\0'));
+    QVERIFY2(sentXml.contains(QStringLiteral("CMD:READ-FLASH")), qPrintable(sentXml));
+    // 适配器的实质：**字节偏移原样进 `<offset>`**、默认存储描述符是 "EMMC-USER"（XC:474-484，
+    // 也是 `ST:216` 起 XML 分支的文本 parttype）—— 只断言"发过 READ-FLASH"抓不到偏移错位
+    QVERIFY2(sentXml.contains(QStringLiteral("<partition>EMMC-USER</partition>")), qPrintable(sentXml));
+    QVERIFY2(sentXml.contains(QStringLiteral("<offset>0x1000</offset>")), qPrintable(sentXml));
+    QVERIFY2(sentXml.contains(QStringLiteral("<length>0x200</length>")), qPrintable(sentXml));
 }
 
 QTEST_APPLESS_MAIN(TestMtkPayload)

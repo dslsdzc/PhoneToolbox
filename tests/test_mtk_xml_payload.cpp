@@ -41,7 +41,8 @@
 // **订正 #5（WRITE-FLASH 少一项 `<offset>`）**：上游 `cmd_write_flash`（XC:452-462）的 `<arg>` 是
 // partition / **offset** / source_file 三项（`<offset>{hex(offset)}</offset>`，writeflash 传
 // `offset=addr`，整分区写时为 0）——简令的信封只有 partition + source_file。以**上游为准**，
-// 本用例按三项逐字节钉死（offset 恒 0x0；本任务接口无 offset 参数，见 .cpp 注释）。
+// 本用例按三项逐字节钉死（offset 恒 0x0：T12 给该接口补了 `addr` 形参（默认 0）——逐分区写传 GPT
+// 条目地址，本用例不传 → 字节与本用例的断言逐字一致，见 mtk_xml_payload.h 的函数注释）。
 //
 // **订正 #6（Step 3 的 `xmlReadPartition` 与自家 Interfaces/Step 1 自相矛盾）**：简令 Step 3 的
 // `xmlReadPartition` 正文走 `readCommandResult` 的裸 `OK@` 分支（T8 = `get_command_result` XL:373-388

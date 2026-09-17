@@ -20,9 +20,8 @@
 //   • SLA（0x1D0D）检测到返回明确错误；RSA 响应生成（规格 §2.5）为后续任务
 //   • V6 新平台 BROM 已修补（规格 §1.2），无专用检测 —— 以 SEND_DA/JUMP_DA 失败
 //     形式传播，V6 检测标后续
-//   • 本文件含 **LEGACY 全链 + XFlash 引导链/刷写链**（D2-T11：按 decideGeneration 分派）；
-//     **XML 链在 T12 接线** —— 判到 XML 代时逐段明确拒绝（不假装支持、不发任何字节）；
-//     DA2 起来后的存储详情（NOR/NAND/EMMC 各表字段）**只读走不解析** —— 那是 D3/D4 的范围
+//   • 本文件含 **LEGACY 全链 + XFlash 链 + XML 链**（D2-T11 路由、D3-T12 接线：按 decideGeneration
+//     分派）；DA2 起来后的存储详情（NOR/NAND/EMMC 各表字段）**只读走不解析** —— 那是 D4 的范围
 //   • D1 的存储路径只有 eMMC（PMT/分区表）→ NAND/NOR 的 BMT 分支不实现，
 //     sendStage2Config 对非 eMMC 明确拒绝（不瞎写上游 nand 分支的值）
 //   • nandcount 两级都为 0 时上游走 usbread(-4)（读到没有为止），本实现有界化 —— 真机未验证
@@ -41,6 +40,7 @@
 #include "core/modes/mtk_preloader_emi.h"
 #include "core/modes/mtk_preloader_fetch.h"
 #include "core/modes/mtk_xflash_session.h"
+#include "core/modes/mtk_xml_session.h"
 
 namespace mtkbrom {
 
@@ -162,15 +162,37 @@ constexpr quint32 kXEmmcPartUser = 0x8;
 mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage = kXStorageEmmc,
                                   quint32 partType = kXEmmcPartUser);
 
+// ---- XML 链（D2+D3/T9-T12）----
+
+// XML 侧的存储描述符（`XC` 的 UFSPartitionType **文本**；`storage.py:234-241` 的 XML 分支映射，
+// 也是 `XC:474/:452/:505` 的默认值）：eMMC 用户区 = "EMMC-USER"。**单一来源**（T11 审查的 magic
+// 收敛口径）：`xmlSectorReader` 的默认值与 bromFlashOnSession 的逐分区写共用同一个串。
+inline const QString kXmlStoreEmmcUser = QStringLiteral("EMMC-USER");
+
+// XML 引导链（D3-T9 的握手层 + BROM 级 DA1 串起来；**不含**枚举/打开 USB —— 故可用 mock 逐帧测）：
+//   sendDa1(region[1]，**含 JUMP_DA**，三代共用）→ xmlDa1Handshake（等设备发 **CMD:START**
+//   → setup_env / setup_hw_init / set_host_info 三步，XL:271-321）。
+// ⚠️ XML **不发 EMI**（铁律 16）：主机的 DRAM 初始化就是 setup_env 里的 `<initialize_dram>YES</initialize_dram>`。
+// ⚠️ 不要再单独调 jumpDa：sendDa1 内部已经做了 SEND_DA + JUMP_DA（二次跳转 = 真机错位）。
+// log 可空；error 可空。成功返回 true。
+bool xmlBringUpDa(BromSession &brom, XmlSession &x, const DaSelection &sel,
+                  QStringList *log, QString *error = nullptr);
+
+// XML 分区表读回调适配器：把 mtkgpt::ReadFn 的 (byteOffset, len) 转成 XML 的 READ-FLASH 区间读
+// （`xmlReadPartition`；**唯一的新缝** —— GPT 解析器本身复用 T1 的 mtkgpt::readTable/parsePrimary）。
+// partition = XML 侧的存储描述符（`kXmlStoreEmmcUser`，见上）。
+mtkgpt::ReadFn xmlSectorReader(XmlSession &x, const QString &partition = kXmlStoreEmmcUser);
+
 // ---- 刷写集成（F1-3）----
 
 // 刷写主体（D1-T9 审查 I1 抽出）：在**已建立**的会话上跑完整条刷写流程，**不含**
 // 枚举/打开 USB/握手 —— 故可用 MockUsbChannel 离线测（尤其"写之前必须先验证"的四道门）。
 //   代际判定（decideGeneration：表外/IoT → 明确拒绝；v6 → 强制 XML）→ DA 解析与条目选择
 //   → 版本口径（0xFC）→ resolvePreloader → **按代际引导**（bromBringUpDa / xflashBringUpDa /
-//   XML 明确拒绝）→ **按代际取设备分区表**（LEGACY = PMT；XFlash = GPT，PMT 明确拒绝）
-//   → buildMtkPlan → 逐分区写（flashPartition / xflashWriteData）
-//   → 收尾（LEGACY = FINISH 0xD9；XFlash = SHUTDOWN；失败**只告警**）
+//   xmlBringUpDa）→ **按代际取设备分区表**（LEGACY = PMT；XFlash/XML = GPT，PMT 明确拒绝；
+//   XML 经 READ-FLASH 读、diskSectors = 0 → 只走主 GPT）
+//   → buildMtkPlan → 逐分区写（flashPartition / xflashWriteData / xmlWritePartition）
+//   → 收尾（LEGACY = FINISH 0xD9；XFlash = SHUTDOWN；XML = REBOOT；失败**只告警**）
 // 请求级前置（DA 为空 / 无镜像）在本函数入口检查（runBromFlash 不再重复）。
 // log/progress 可空；error 可空。成功返回 true。
 bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,

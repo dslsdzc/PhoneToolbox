@@ -147,7 +147,7 @@ bool xmlDa1Handshake(XmlSession &x, QStringList *log, QString *error)
 // 本层**读掉但丢弃**（`XmlSession` 只提供 setLogSink、无 getter，载荷层拿不到 sink）——两者都不影响字节记账。
 
 bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
-                       QStringList *log, QString *error)
+                       QStringList *log, QString *error, quint64 addr)
 {
     auto say = [log](const QString &m) { if (log) *log << m; };
     if (data.isEmpty()) {
@@ -158,10 +158,12 @@ bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray
     const quint32 length = quint32(padded.size());
 
     // ① WRITE-FLASH（noack：只等首个 "OK"，收尾在 ⑦）
+    // `<offset>` = **写入地址**（XC:452-462 的 `offset=addr`）：上游按 GPT 条目地址写分区
+    // （`v6.py:1095-1097`、`mtk_da_handler.py:544-548` 都是 `partition.sector * pagesize`）。
     const QString cmd = XmlSession::envelope(
         QStringLiteral("WRITE-FLASH"),
         {QStringLiteral("<partition>%1</partition>").arg(partition),
-         QStringLiteral("<offset>0x0</offset>"),                       // XC:452-462：offset 恒 0x0
+         QStringLiteral("<offset>0x%1</offset>").arg(addr, 0, 16),
          QStringLiteral("<source_file>%1</source_file>").arg(memDescriptor(length))});
     if (!x.sendCommand(cmd, nullptr, /*noack=*/true, error))
         return false;

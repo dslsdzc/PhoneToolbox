@@ -7,8 +7,9 @@
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 #include "core/modes/mtk_chip_table.h"     // lookupChip / ChipInfo / DaMode（代际判定）
-#include "core/modes/mtk_gpt.h"            // mtkgpt::readTable / ReadFn（XFlash 分区表）
+#include "core/modes/mtk_gpt.h"            // mtkgpt::readTable / ReadFn（XFlash / XML 分区表）
 #include "core/modes/mtk_xflash_payload.h" // 七步握手 / bring-up / EMI / boot_to / 读写 / SHUTDOWN
+#include "core/modes/mtk_xml_payload.h"    // DA1 后 CMD:START 握手 / setup 三步 / READ-FLASH / 写分区 / REBOOT
 #include "core/mtk_flash_plan.h"
 
 namespace mtkbrom {
@@ -706,6 +707,30 @@ mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage, quint32 par
     };
 }
 
+// XML 引导链（D3-T12）：BROM 级 DA1（含 JUMP_DA）→ 等 CMD:START + 三步 setup。
+// **没有** EMI / stage2 / checksum / reset-key —— 那些是 LEGACY/XFlash 的（事实报告 §1.1）。
+bool xmlBringUpDa(BromSession &brom, XmlSession &x, const DaSelection &sel, QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+    // sendDa1 = SEND_DA + JUMP_DA **两步都做**（mtk_payload.cpp:76-78）——不要再单独 jumpDa（会二次跳转）
+    if (!sendDa1(brom, sel, error))            // BROM 级，与另两代共用（XL:271-278）
+        return false;
+    say(QStringLiteral("XML：DA1 已上传并跳转，等待 CMD:START"));
+    if (!xmlDa1Handshake(x, log, error))       // 含 setup_env（initialize_dram=YES）/hw_init/host_info
+        return false;
+    say(QStringLiteral("XML：引导完成（**未发 EMI** —— 主机的 DRAM 初始化就是 setup_env 里的 initialize_dram）"));
+    return true;
+}
+
+// XML 分区表读回调适配器（mtkgpt::ReadFn 的字节偏移 → READ-FLASH 的区间读）。
+// **唯一的新缝**：GPT 解析器（mtkgpt::readTable/parsePrimary/parseBackup）三代共用，不重复实现。
+mtkgpt::ReadFn xmlSectorReader(XmlSession &x, const QString &partition)
+{
+    return [&x, partition](quint64 off, int len, QByteArray *out, QString *e) {
+        return xmlReadPartition(x, partition, off, quint32(len), *out, e);
+    };
+}
+
 // XFlash 引导链（串起 T4-T6；注释与判据见头文件）
 bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel,
                      const PreloaderResult &pre, QStringList *log, QString *error)
@@ -772,7 +797,7 @@ bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel
 }
 
 // 刷写主体（T9 审查 I1 从 runBromFlash 抽出；**D2-T11 起改为三代路由** —— 选完 DA 之后
-// 按 decideGeneration 分派到 LEGACY / XFlash 两条链，XML 代逐段明确拒绝）。
+// 按 decideGeneration 分派到 LEGACY / XFlash / XML 三条链，D3-T12 起 XML 也是真链）。
 // 只把"枚举/打开/握手"留在 mtk_handler.cpp 的 runBromFlash 里，从而让本函数可离线逐帧测。
 bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                         const BromLogFn &log, const BromProgressFn &progress, QString *error)
@@ -876,7 +901,8 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
 
     QStringList bringLog;
     XFlashSession xflash(session.usb(), chip->dacode);   // 通道未打开也能构造（只存指针/码）
-    bool brought = false;                                // （T12 会在这里加 XmlSession xml(session.usb());）
+    XmlSession xml(session.usb());                       // 同上：只存指针（T12 接线）
+    bool brought = false;
     switch (gen) {
     case MtkGeneration::Legacy:
         brought = bromBringUpDa(session, sel, hwCode, bromVer, blVer, pre, &bringLog, error);
@@ -885,8 +911,7 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         brought = xflashBringUpDa(session, xflash, sel, pre, &bringLog, error);
         break;
     case MtkGeneration::Xml:
-        // T12 换成： brought = xmlBringUpDa(session, xml, sel, &bringLog, error);
-        if (error) *error = QStringLiteral("XML 代：链在 Task 12 接线（当前明确拒绝，不假装支持）");
+        brought = xmlBringUpDa(session, xml, sel, &bringLog, error);
         break;
     }
     for (const QString &line : std::as_const(bringLog))
@@ -896,7 +921,7 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
 
     // 设备分区表（**写入判据以设备为准**；预览期的对照表到这里可能对不上）→ 计划参照表
     QList<mtkplan::PartitionRef> refs;
-    QHash<QString, quint64> partAddr;                 // 分区名 → 写入地址（XFlash 用；LEGACY 不用）
+    QHash<QString, quint64> partAddr;                 // 分区名 → 写入地址（XFlash/XML 用；LEGACY 用不上）
     quint32 xWritePacketLength = 0;                   // XFlash 写分块（GET_PACKET_LENGTH）
     std::optional<DaStorage> storage;                 // LEGACY 专用（另两代不构造）
 
@@ -959,10 +984,30 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
             if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
             return false;
         }
-    } else {
-        // T12 在此写入 READ-FLASH 读表 + partAddr 填充（T11 阶段明确拒绝，不假装支持）
-        if (error) *error = QStringLiteral("XML 代：分区表读取在 Task 12 接线（当前明确拒绝）");
-        return false;
+    } else {   // Xml
+        // 分区表：**READ-FLASH + 同一个 mtkgpt**（T1 的解析器；spec §9 已核，`XC:474-484` 的区间读。
+        // 上游 XML 侧没有"先问设备总扇区数"的命令 —— 分区表就是按字节偏移读回来的）
+        mtkgpt::Table tbl;
+        QStringList gptLog;
+        // diskSectors = 0：XML 侧没有磁盘总扇区数的可靠来源（GET-HW-INFO 的分区表字段留 D4 解析）
+        //   → 只走主 GPT；主 GPT 读不出来时 readTable 会明确失败（不静默降级、不假装有备份兜底）
+        if (!mtkgpt::readTable(xmlSectorReader(xml), 0, tbl, &gptLog, error))
+            return false;
+        for (const QString &line : std::as_const(gptLog))
+            say(line);                                     // **失败也落**（同 bringLog 口径）
+        refs = mtkplan::toPartitionRefs(tbl.partitions, tbl.sectorSize);   // T7 的适配器（不重复实现）
+        // 逐分区写的**地址**（`<offset>`）来自 GPT 条目的 first_lba：`mtkgpt::offsetBytes` 就是
+        // firstLba × sectorSize —— 与 XFlash 分支同一个来源（**不是**头里的 first_usable_lba）
+        for (const mtkgpt::Partition &p : std::as_const(tbl.partitions))
+            partAddr.insert(p.name, mtkgpt::offsetBytes(p, tbl.sectorSize));
+        say(QStringLiteral("XML：GPT 读出 %1 个分区（扇区 %2 字节）")
+                .arg(tbl.partitions.size()).arg(tbl.sectorSize));
+        // 空表显式门（与 XFlash 分支同款）：parsePrimary 对"零个有效条目"仍算**成功**，不点名的话
+        // 计划层会走 derived 分支，最终报成"内部错误：分区 X 不在设备表地址映射里"——把真因说成内部错位。
+        if (refs.isEmpty()) {
+            if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
+            return false;
+        }
     }
 
     mtkplan::MtkFlashPlan plan;
@@ -1006,9 +1051,16 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                                  xWritePacketLength, nullptr, error))
                 return false;
         } else {
-            // T12 换成： if (!xmlWritePartition(xml, e.partition, image, nullptr, error)) return false;
-            if (error) *error = QStringLiteral("XML 代：写入在 Task 12 接线（当前明确拒绝）");
-            return false;
+            // XML：`<partition>` = **存储描述符**（不是分区名）、`<offset>` = **GPT 条目地址**
+            // （上游 `writeflash(addr=partition.sector * pagesize)`：`v6.py:1095-1097`；
+            //  `mtk_da_handler.py:544-548`）—— 地址取自查表时填的 partAddr（first_lba × 扇区）
+            const auto it = partAddr.constFind(e.partition);
+            if (it == partAddr.constEnd()) {     // 计划条目名必来自设备表 → 缺 = 内部错位
+                if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
+                return false;
+            }
+            if (!xmlWritePartition(xml, kXmlStoreEmmcUser, image, nullptr, error, it.value()))
+                return false;
         }
         written += quint64(image.size());
         if (progress)
@@ -1029,8 +1081,11 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         else
             warn(QStringLiteral("XFlash SHUTDOWN 收尾失败（数据已写入）：%1").arg(shutErr));
     } else {
-        // T12 换成： QString rbErr; if (xmlReboot(xml, true, &rbErr)) say(...); else warn(...);
-        warn(QStringLiteral("XML 代：REBOOT 收尾在 Task 12 接线"));
+        QString rbErr;
+        if (xmlReboot(xml, true, &rbErr))
+            say(QStringLiteral("XML：REBOOT 收尾完成"));
+        else
+            warn(QStringLiteral("XML REBOOT 收尾失败（数据已写入）：%1").arg(rbErr));
     }
     return true;
 }

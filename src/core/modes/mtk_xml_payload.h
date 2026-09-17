@@ -64,8 +64,9 @@
 //
 // 诚实边界：
 //   • **不发 EMI**、**不判代际**（同 T9）
-//   • **不做分区表读取/代际路由**：分区名与长度由调用方给（T12 的链式集成）
-//   • 写偏移恒 0x0（XC:452-462 的 `<offset>`；上游 writeflash 的 addr 由调用方传，本接口未暴露）
+//   • **不做分区表读取/代际路由**：存储描述符、长度与写地址由调用方给（T12 的链式集成）
+//   • 写地址 `<offset>` 由调用方给（XC:452-462 的 `offset=addr`；T12 起是 `xmlWritePartition`
+//     的 `addr` 形参，默认 0 = 上游 gpt 伪分区/整盘写法的口径，见函数注释）
 
 #include <QByteArray>
 #include <QString>
@@ -97,9 +98,16 @@ bool xmlSetHostInfo(XmlSession &x, QString *error = nullptr);
 
 // 写一个分区（XL:943-983 + XL:451-506）：数据不足 512 整数倍时**补零**到整数倍（XL:974-976），
 // 宣布长度 = 补零后的字节数，descriptor = `MEM://0x8000000:<length>`（XC:452-462 的默认 mem_offset
-// 0x8000000 + offset 0x0）。log 非空时追加一条中文完成行。空数据直接失败。
+// 0x8000000）。log 非空时追加一条中文完成行。空数据直接失败。
+// `partition` = **存储描述符**（`XC` 的 UFSPartitionType 文本，`ST:216` 起 XML 分支用字符串：
+//   eMMC 用户区 = "EMMC-USER"，**不是** GPT 分区名）；`addr` = 写入地址（上游 `writeflash(addr=…)`
+//   → `cmd_write_flash(partition, offset=addr, …)` 的 `<offset>hex(addr)</offset>`，XC:452-462）——
+//   逐分区写时由调用方给 **GPT 条目地址**（`partition.sector * pagesize`：`v6.py:1095-1097`
+//   写 seccfg、`mtk_da_handler.py:544-548` 写任意分区）；0 对应上游对 gpt 伪分区/整盘的写法
+//   （`mtk_da_handler.py:537-541`），也是 T10 各调用点的默认（`addr` 由 T12 补出：逐分区写必须
+//   带 GPT 条目地址，否则会写到描述符的偏移 0 = 分区表区）。
 bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
-                       QStringList *log = nullptr, QString *error = nullptr);
+                       QStringList *log = nullptr, QString *error = nullptr, quint64 addr = 0);
 
 // 收 length 字节数据帧（**上游 `download_raw` 形状**，XL:508-559）：读裸 `OK@0x<len>` → ack →
 // 读 "OK" → ack → 循环{ 收一帧 → ack → 读 "OK" → ack }。**不要**复用
