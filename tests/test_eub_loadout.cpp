@@ -3,17 +3,72 @@
 // 布局表的**数值硬断言**：8 个 SoC、共 41 个段，每段的 name/offset/length 逐值钉死。
 // 数值的唯一来源是设计 spec §5.4（docs/superpowers/specs/2026-09-17-exynos-eub-design.md），
 // spec 的表逐条来自 facts §C3–§C6；每条 sourceNote 必须能落到 reference/ 里的 file:line
-// （reference/ 是 gitignored 的只读参照，故本文件只断言 sourceNote 的**字符串形态**，
+// （reference/ 是 gitignored 的只读参照，故本文件对 sourceNote 只断言**字符串形态**，
 // 不读那些文件 —— 这样用例在只有仓库内容的机器上也能跑）。
-// 本线无真机、也无真样本（sboot.bin 是三星签名二进制，不进仓库，facts §F1/§F8）——
-// 本用例只钉住"表内容 == spec §5.4"，不对任何设备行为做断言。
+// 本线无真机（sboot.bin 是三星签名二进制，本仓不**分发**它，facts §F1/§F8）：本文件只钉住
+// "表内容 == spec §5.4"，不对任何设备行为做断言。
+// 末尾三条"真样本硬断言"读 reference/eub-samples/ 下官方 BL 包解出的 sboot_Exynos*.bin
+//（facts §H 的核对产物，**gitignored**，样本本身绝不进仓库）—— 目录缺失时按 gating 策略
+// QSKIP/FAIL（见文件头 EUB_SKIP_OR_FAIL），只在"手上有官方包"的机器上实跑。
 #include <QtTest>
 
+#include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
 
 #include "core/eub/eub_loadout.h"
 
 using Seg = QPair<QString, QPair<quint64, quint64>>;   // 名字, (offset, length)
+
+// 真样本目录（reference/eub-samples/，gitignored）：CMake 只把**路径**编进来（样本内容绝不进仓库）。
+#ifndef EUB_SAMPLES_DIR
+#define EUB_SAMPLES_DIR ""
+#endif
+// 1 = 真样本缺失时 FAIL 而非 SKIP（CMake 侧 EUB_SAMPLES_REQUIRED=ON 时传入；默认 0 保持离线友好）。
+#ifndef EUB_SAMPLES_REQUIRED
+#define EUB_SAMPLES_REQUIRED 0
+#endif
+
+// 真样本缺失时的统一处置。QSKIP **不改退出码**（ctest 报 pass），故验证跑一律用 REQUIRED=ON
+// 把"没跑"变成"红"—— 否则这些槽会以绿灯的名义静默空转。
+// 用 do{...}while(0) 包住：QFAIL/QSKIP 都展开成"...; return;"两条语句，裸用时漏写花括号会让
+// 那句 return 脱离 if（样本存在时也照样退出）——包起来后调用点必须带分号、语义与单条语句一致。
+#if EUB_SAMPLES_REQUIRED
+#define EUB_SKIP_OR_FAIL(what)                                                                     \
+    do {                                                                                           \
+        QFAIL(qPrintable(QStringLiteral("真样本缺失，但本次构建要求真样本（EUB_SAMPLES_REQUIRED=ON）：") \
+                         + QString(what)));                                                        \
+    } while (0)
+#else
+#define EUB_SKIP_OR_FAIL(what)                                                                     \
+    do {                                                                                           \
+        QSKIP(qPrintable(QStringLiteral("真样本缺失（reference/ 为 gitignored）：") + QString(what))); \
+    } while (0)
+#endif
+
+static QString eubSamplePath(const QString &fileName)
+{
+    return QString::fromLatin1(EUB_SAMPLES_DIR) + QLatin1Char('/') + fileName;
+}
+static bool eubSampleAvailable(const QString &fileName)
+{
+    return QFileInfo::exists(eubSamplePath(fileName));
+}
+static QByteArray readSample(const QString &fileName)
+{
+    QFile f(eubSamplePath(fileName));
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+// 表所需的最小 sboot 尺寸 = max(offset + length)——与 splitSboot 的越界判据同一口径。
+// 真样本槽用它算"富余"：不硬编表数字，表被改宽/改窄时富余断言跟着变红。
+static quint64 tableNeed(const eub::EubLoadout &lo)
+{
+    quint64 need = 0;
+    for (const eub::EubSegment &s : lo.segments)
+        need = qMax(need, s.offset + s.length);
+    return need;
+}
 
 static eub::EubLoadout mustLoad(const QString &soc)
 {
@@ -322,6 +377,102 @@ private slots:
         QByteArray noDigits(0x100, '\0');
         noDigits.replace(0x10, 6, QByteArray("EXYNOS"));
         QCOMPARE(eub::detectSocFromImage(noDigits), QString());
+    }
+
+    // ---- 真样本硬断言（reference/eub-samples/，gitignored；缺失时 QSKIP/FAIL）----
+    // 事实出处：docs/superpowers/specs/exynos-eub-facts.md §H2（5 个官方 BL 包解出的 sboot.bin）。
+    // 只读样本、绝不写回；样本内容不进仓库（CMake 只把**目录路径**编进本目标）。
+
+    void realSampleSbootsSplitWithinTableBounds()
+    {
+        // 表能不能**切开真文件**：合成夹具按需造尺寸，永远测不到"表比真包大"这类错。
+        struct Sample { const char *soc; const char *file; quint64 size; };
+        const Sample samples[] = {
+            {"Exynos9830", "sboot_Exynos9830.bin", 4194304},   // 0x400000
+            {"Exynos9610", "sboot_Exynos9610.bin", 4194304},   // 0x400000
+            {"Exynos7580", "sboot_Exynos7580.bin", 1618192},   // 0x18B110
+            {"Exynos8895", "sboot_Exynos8895.bin", 1847568},   // 0x1C3110
+            {"Exynos8890", "sboot_Exynos8890.bin", 1777936},   // 0x1B2110
+        };
+        for (const Sample &s : samples) {
+            if (!eubSampleAvailable(QLatin1String(s.file))) {
+                EUB_SKIP_OR_FAIL(QLatin1String(s.file));   // 样本是一个整体：缺一个就整体跳过/判红
+            }
+        }
+
+        QStringList withoutSample;
+        int withSample = 0;
+        for (const eub::EubLoadout &lo : eub::allLoadouts()) {
+            const Sample *hit = nullptr;
+            for (const Sample &s : samples) {
+                if (lo.soc == QLatin1String(s.soc))
+                    hit = &s;
+            }
+            if (!hit) {
+                withoutSample << lo.soc;
+                continue;
+            }
+            ++withSample;
+            const QByteArray sboot = readSample(QLatin1String(hit->file));
+            QCOMPARE(quint64(sboot.size()), hit->size);   // facts §H2 的尺寸（逐 SoC 钉死）
+            QList<QPair<QString, QByteArray>> parts;
+            QString err;
+            QVERIFY2(eub::splitSboot(sboot, lo, parts, &err), qPrintable(lo.soc + QStringLiteral(": ") + err));
+            QCOMPARE(parts.size(), lo.segments.size());
+            // 逐段核对：名字 + 长度 + 内容 == sboot.mid(offset, length)。真数据上再钉一遍 ——
+            // 表里任何 offset/length 与真包结构不符，这里就现形（真 sboot 非周期，见文件头的合成夹具说明）。
+            for (qsizetype i = 0; i < lo.segments.size(); ++i) {
+                const eub::EubSegment &seg = lo.segments[i];
+                QCOMPARE(parts[i].first, seg.name);
+                QCOMPARE(quint64(parts[i].second.size()), seg.length);
+                QVERIFY2(parts[i].second == sboot.mid(qsizetype(seg.offset), qsizetype(seg.length)),
+                         qPrintable(QStringLiteral("%1 第 %2 段（%3）内容与真 sboot 的切片不符")
+                                        .arg(lo.soc).arg(i).arg(seg.name)));
+            }
+        }
+        QCOMPARE(withSample, 5);
+        // 无样本的 3 个 SoC 跳过并计数：7885/9810/9820 没有对应机型的官方 BL 包（facts §H 只覆盖 5 个）
+        QCOMPARE(withoutSample, QStringList({"Exynos7885", "Exynos9810", "Exynos9820"}));
+    }
+
+    void real7580SbootSha1MatchesTableSourceNote()
+    {
+        // facts §H2：真 A510FXXS8CTI7 的 sboot sha1 = 466852d1…，与 7580 表 sourceNote 里记的
+        // **未被采信那一源**的修订号逐字符一致（表项 sbootSha1 刻意留空，见 table7580()）。
+        const QString file = QStringLiteral("sboot_Exynos7580.bin");
+        if (!eubSampleAvailable(file)) {
+            EUB_SKIP_OR_FAIL(file);
+        }
+        const QByteArray sboot = readSample(file);
+        QVERIFY2(!sboot.isEmpty(), qPrintable(file));
+        const QString sha1 = eub::sha1Hex(sboot);
+        QCOMPARE(sha1, QStringLiteral("466852d13fa02d51729d21633f47708308579f58"));
+        const eub::EubLoadout lo = mustLoad(QStringLiteral("Exynos7580"));
+        QVERIFY(lo.sbootSha1.isEmpty());                    // 表项不记该 sha1（采信的分歧源无修订记录）
+        QVERIFY2(lo.sourceNote.contains(sha1), qPrintable(lo.sourceNote));   // 但出处里记着 → 两处一致
+    }
+
+    void real8895SbootHasOnly272BytesSurplus()
+    {
+        // facts §H2：真 sboot 1,847,568 字节 vs 表所需 max(offset + length) = 0x1C3000 = 1,847,296
+        // → 富余**恰好 272**。这是"表能用、但几乎没余量"的边界：既证明表没写超，也把"表多要一字节
+        // 才够"这类改动钉红 —— 合成夹具按需造尺寸，这条边界它永远碰不到。
+        const QString file = QStringLiteral("sboot_Exynos8895.bin");
+        if (!eubSampleAvailable(file)) {
+            EUB_SKIP_OR_FAIL(file);
+        }
+        const QByteArray sboot = readSample(file);
+        const eub::EubLoadout lo = mustLoad(QStringLiteral("Exynos8895"));
+        QCOMPARE(quint64(sboot.size()), quint64(1847568));   // 真文件尺寸
+        QCOMPARE(tableNeed(lo), quint64(1847296));           // 表所需 = 0x143000 + 0x80000
+        QCOMPARE(quint64(sboot.size()) - tableNeed(lo), quint64(272));   // 富余：**恰好 272**
+        // 272 字节也算"够"：切段必须成功且末段（part6，0x143000/0x80000）真的切得出来 ——
+        // 只断言"没报错"不够，末段尾部必须落在真文件之内。
+        QList<QPair<QString, QByteArray>> parts;
+        QString err;
+        QVERIFY2(eub::splitSboot(sboot, lo, parts, &err), qPrintable(err));
+        QCOMPARE(parts.size(), lo.segments.size());
+        QCOMPARE(quint64(parts.last().second.size()), quint64(0x80000));
     }
 };
 

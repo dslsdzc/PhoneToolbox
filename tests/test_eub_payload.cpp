@@ -1,20 +1,60 @@
 // tests/test_eub_payload.cpp
 //
 // 载荷来源三条路径（spec §D8）：裸镜像 / LZ4 frame / BL tar 内查找。
-// 本线**无真机、也无真样本**（sboot.bin 是三星签名二进制，不进仓库；facts §F1/§F8）：
-// 用例自造合成 sboot（确定性非周期图案），用 imgtar::buildTar / appendMd5Footer 造包 ——
-// 不读 reference/ 下的任何二进制、不碰设备。
+// 本线**无真机**：前半段用自造合成 sboot（确定性非周期图案）+ imgtar::buildTar / appendMd5Footer
+// 造包，不碰设备；后半段的"真样本硬断言"读 reference/eub-samples/ 下的官方 BL 包（**gitignored**，
+// 样本本身绝不进仓库）—— 目录缺失时按 gating 策略 QSKIP/FAIL，见文件头的 EUB_SKIP_OR_FAIL。
+// sboot.bin 是三星签名二进制，本仓不**分发**它（facts §F8）；这些槽是"手上有官方包时"的回归。
 //
 // 参照事实：BL_*.tar.md5 内是 sboot.bin（现代包为 .lz4 压缩，需 lz4.frame.decompress）
 // —— facts §C1（reference/hubble/hubble.py:152-183）；本仓 lz4 能力为 LZ4 **frame** 格式
 // （src/image_engine/compression/lz4_wrapper.cpp，用 LZ4F_* API）。
 #include <QtTest>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
+#include <utility>
 
+#include "core/eub/eub_loadout.h"   // eub::sha1Hex（真样本槽与 §H2 记录对拍用）
 #include "core/eub/eub_payload.h"
 #include "image_engine/compression/lz4_wrapper.h"
 #include "image_engine/tar_image.h"
+
+// 真样本目录（reference/eub-samples/，gitignored）：CMake 只把**路径**编进来（样本内容绝不进仓库）。
+#ifndef EUB_SAMPLES_DIR
+#define EUB_SAMPLES_DIR ""
+#endif
+// 1 = 真样本缺失时 FAIL 而非 SKIP（CMake 侧 EUB_SAMPLES_REQUIRED=ON 时传入；默认 0 保持离线友好）。
+#ifndef EUB_SAMPLES_REQUIRED
+#define EUB_SAMPLES_REQUIRED 0
+#endif
+
+// 真样本缺失时的统一处置。QSKIP **不改退出码**（ctest 报 pass），故验证跑一律用 REQUIRED=ON
+// 把"没跑"变成"红"—— 否则这些槽会以绿灯的名义静默空转。
+// 用 do{...}while(0) 包住：QFAIL/QSKIP 都展开成"...; return;"两条语句，裸用时漏写花括号会让
+// 那句 return 脱离 if（样本存在时也照样退出）——包起来后调用点必须带分号、语义与单条语句一致。
+#if EUB_SAMPLES_REQUIRED
+#define EUB_SKIP_OR_FAIL(what)                                                                     \
+    do {                                                                                           \
+        QFAIL(qPrintable(QStringLiteral("真样本缺失，但本次构建要求真样本（EUB_SAMPLES_REQUIRED=ON）：") \
+                         + QString(what)));                                                        \
+    } while (0)
+#else
+#define EUB_SKIP_OR_FAIL(what)                                                                     \
+    do {                                                                                           \
+        QSKIP(qPrintable(QStringLiteral("真样本缺失（reference/ 为 gitignored）：") + QString(what))); \
+    } while (0)
+#endif
+
+// 真样本路径（样本只读，绝不写回）与存在性判据
+static QString eubSamplePath(const QString &fileName)
+{
+    return QString::fromLatin1(EUB_SAMPLES_DIR) + QLatin1Char('/') + fileName;
+}
+static bool eubSampleAvailable(const QString &fileName)
+{
+    return QFileInfo::exists(eubSamplePath(fileName));
+}
 
 class TestEubPayload : public QObject
 {
@@ -365,6 +405,85 @@ private slots:
         QVERIFY2(eub::loadNamedEntriesFromTar(m_dir.filePath("does-not-exist.tar"), {}, out, &err),
                  qPrintable(err));
         QVERIFY(out.isEmpty());
+    }
+
+    // ---- 真样本硬断言（reference/eub-samples/，gitignored；缺失时 QSKIP/FAIL）----
+    // 事实出处：docs/superpowers/specs/exynos-eub-facts.md §H（5 个官方 BL 包的核对结果）。
+    // 只读样本、绝不写回；样本内容不进仓库（CMake 只把**目录路径**编进本目标）。
+
+    void real9830BlPackageYieldsExtraFilesAndSboot()
+    {
+        // 9830 的 extraFiles 在真包里叫 ldfw.img.lz4 / tzsw.img.lz4（facts §H2）—— 裸名**不存在**，
+        // 故本槽跑通即证明实现确实走了"先找同名、没有才同名 +.lz4"的**回退**分支（而不是碰巧命中）。
+        const QString pkg = QStringLiteral("BL_SM-G980F_G980FXXSNHYB1.tar.md5");   // SM-G980F = Exynos9830
+        if (!eubSampleAvailable(pkg)) {
+            EUB_SKIP_OR_FAIL(pkg);
+        }
+        const QString tar = eubSamplePath(pkg);
+
+        // 夹具自检：先钉死真包**就是** lz4 包裹的形态 —— 否则下面的"回退"断言是空转。
+        QList<imgtar::TarIndexEntry> idx;
+        QString idxErr;
+        QVERIFY2(imgtar::indexTarStream(tar, idx, nullptr, &idxErr), qPrintable(idxErr));
+        QStringList names;
+        for (const imgtar::TarIndexEntry &e : std::as_const(idx))
+            names << e.name;
+        const QString listing = names.join(QStringLiteral("、"));
+        QVERIFY2(names.contains(QStringLiteral("ldfw.img.lz4")), qPrintable(listing));
+        QVERIFY2(names.contains(QStringLiteral("tzsw.img.lz4")), qPrintable(listing));
+        QVERIFY2(names.contains(QStringLiteral("sboot.bin.lz4")), qPrintable(listing));
+        QVERIFY2(!names.contains(QStringLiteral("ldfw.img")), qPrintable(listing));
+        QVERIFY2(!names.contains(QStringLiteral("tzsw.img")), qPrintable(listing));
+        QVERIFY2(!names.contains(QStringLiteral("sboot.bin")), qPrintable(listing));
+
+        // ① extraFiles：按 Exynos9830.json 的 files_to_send 请求两个**裸名** → 必须经 .lz4 回退取到。
+        // 尺寸是解压后的（.lz4 字节数 337909/634293 都比它小得多，拿 .lz4 原字节比必红）——
+        // 这一条同时证明"取出后按内容解压"。
+        QList<QByteArray> extras;
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(
+                     tar, {QStringLiteral("ldfw.img"), QStringLiteral("tzsw.img")}, extras, &err),
+                 qPrintable(err));
+        QCOMPARE(extras.size(), 2);
+        QCOMPARE(extras[0].size(), qsizetype(0x600000));   // facts §H2：ldfw 解压后 6,291,456
+        QCOMPARE(extras[1].size(), qsizetype(0x180000));   // facts §H2：tzsw 解压后 1,572,864
+        QVERIFY2(err.isEmpty(), qPrintable(err));          // 成功路径不留错误文本
+
+        // ② 同一真包里的 sboot：sha1 必须与 §H2 记录**逐字符一致**（用本仓 eub::sha1Hex 现算，
+        // 不是拿记录值回显）。
+        eub::SbootSource src;
+        QByteArray sboot;
+        QVERIFY2(eub::loadSbootBytes(tar, sboot, &src, &err), qPrintable(err));
+        QCOMPARE(sboot.size(), qsizetype(4194304));        // 0x400000
+        QCOMPARE(eub::sha1Hex(sboot), QStringLiteral("59ea267f01320dfea781668ecf229585e010a7d5"));
+        QVERIFY(src.wasCompressed);                        // 真包内是 sboot.bin.lz4
+        QVERIFY(src.description.contains(QStringLiteral("sboot.bin.lz4")));
+    }
+
+    void real9610BlPackageHasNoExtraFilesSoRequestFails()
+    {
+        // 9610 的 BL 包里**没有** ldfw/tzsw（facts §H2）：同一函数请求这两个名字必须失败。
+        // 同一包先跑一次 loadSbootBytes 成功 —— 失败可归因到"缺条目"，而不是"包本身坏掉"
+        // （否则本槽会被一个与被测逻辑无关的原因骗绿）。
+        const QString pkg = QStringLiteral("BL_SM-A505FN.tar.md5");   // SM-A505FN = Exynos9610
+        if (!eubSampleAvailable(pkg)) {
+            EUB_SKIP_OR_FAIL(pkg);
+        }
+        const QString tar = eubSamplePath(pkg);
+
+        eub::SbootSource src;
+        QByteArray sboot;
+        QString err;
+        QVERIFY2(eub::loadSbootBytes(tar, sboot, &src, &err), qPrintable(err));   // 包本身可用
+        QCOMPARE(sboot.size(), qsizetype(4194304));                              // facts §H2
+
+        QList<QByteArray> extras;
+        extras << QByteArrayLiteral("stale");   // 失败路径必须清空（仓内约定），预置陈旧字节才有断言力
+        QVERIFY(!eub::loadNamedEntriesFromTar(
+            tar, {QStringLiteral("ldfw.img"), QStringLiteral("tzsw.img")}, extras, &err));
+        QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));   // 两个都缺 → 一次报全
+        QVERIFY(extras.isEmpty());
     }
 };
 

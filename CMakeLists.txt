@@ -338,6 +338,13 @@ if(ENABLE_IMAGE_TESTS)
                 CACHE PATH "三星真样本目录（gitignored）")
             # ON = 真样本缺失/不足时让用例 FAIL 而非 SKIP（本仓 CI/验证跑这个；默认 OFF 保持离线友好）
             option(ODIN_SAMPLES_REQUIRED "Fail (instead of skip) when Samsung samples are missing" OFF)
+            # EUB 真样本目录（reference/eub-samples/，gitignored）：5 个官方 BL 包 + 解压后的
+            # sboot_Exynos*.bin（facts §H 的核对产物）。只把**路径**编进用例，内容不进仓库。
+            # CACHE PATH —— 便于做"指向不存在目录"的负控制实验（同 PT_ODIN_SAMPLES_DIR）。
+            set(PT_EUB_SAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/reference/eub-samples"
+                CACHE PATH "Exynos EUB 真样本目录（gitignored）")
+            # ON = 真样本缺失时让用例 FAIL 而非 SKIP（QSKIP 不改退出码，ctest 绿灯会骗人）
+            option(EUB_SAMPLES_REQUIRED "Fail (instead of skip) when EUB samples are missing" OFF)
             foreach(_test_src IN LISTS IMAGE_TEST_SOURCES)
                 if(_test_count EQUAL 0)
                     set(_test_target image_engine_tests)
@@ -577,13 +584,17 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
                 elseif(_test_stem STREQUAL "test_eub_payload")
                     # Phase E Task 5：载荷来源解析（裸镜像 / LZ4 frame / BL tar 内查找，spec §D8）。
-                    # 本目标**只补 eub_payload.cpp**：它消费的 imgtar::indexTarStream 与
-                    # imgcomp::lz4Decompress 都已在 image_engine 静态库里（本循环统一
-                    # `target_link_libraries(... PRIVATE image_engine Qt6::Test)`），liblz4 也随
-                    # image_engine 的 PUBLIC 链接传递（CMakeLists.txt:211-213）—— 补
-                    # tar_image.cpp 会与该库里的同名符号撞车。不碰 libusb，故不进下方链接名单。
+                    # 它消费的 imgtar::indexTarStream 与 imgcomp::lz4Decompress 都已在 image_engine
+                    # 静态库里（本循环统一 `target_link_libraries(... PRIVATE image_engine
+                    # Qt6::Test)`），liblz4 也随 image_engine 的 PUBLIC 链接传递
+                    # （CMakeLists.txt:211-213）—— 补 tar_image.cpp 会与该库里的同名符号撞车。
+                    # Task 1b：真样本槽要拿 eub::sha1Hex 与 facts §H2 的 sha1 对拍，而 sha1Hex 落在
+                    # eub_loadout.cpp（它取 EubFrameStyle 又要 eub_protocol.cpp）→ 两个一起补链。
+                    # 三者都不碰 libusb，故本目标不进下方 libusb 链接名单。
                     set(_test_extra_sources
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
                 elseif(_test_stem STREQUAL "test_eub_recovery_dialog")
                     # Phase E Task 7：救援对话框（src/ui，不编入任何静态库）。除被测源外要
                     # 会话层（identify/run）+ 切段表 + 帧层（EubFrameStyle）+ 载荷解析
@@ -705,6 +716,15 @@ if(ENABLE_IMAGE_TESTS)
                         MTK_SAMPLES_DIR="${MTK_SAMPLES_DIR_DEFAULT}")
                     if(MTK_SAMPLES_REQUIRED)
                         target_compile_definitions(${_test_target} PRIVATE MTK_SAMPLES_REQUIRED=1)
+                    endif()
+                endif()
+                # EUB 真样本（reference/eub-samples/，gitignored）：只把**路径**编进用例（内容绝不
+                # 进仓库）。EUB_SAMPLES_REQUIRED=ON 时缺失即 FAIL（QSKIP 不改退出码，绿灯会骗人）。
+                if(_test_stem STREQUAL "test_eub_payload" OR _test_stem STREQUAL "test_eub_loadout")
+                    target_compile_definitions(${_test_target} PRIVATE
+                        EUB_SAMPLES_DIR="${PT_EUB_SAMPLES_DIR}")
+                    if(EUB_SAMPLES_REQUIRED)
+                        target_compile_definitions(${_test_target} PRIVATE EUB_SAMPLES_REQUIRED=1)
                     endif()
                 endif()
                 target_link_libraries(${_test_target} PRIVATE image_engine Qt6::Test)
