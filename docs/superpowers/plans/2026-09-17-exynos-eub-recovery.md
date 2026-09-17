@@ -918,7 +918,7 @@ private slots:
         QCOMPARE(lo.style.trailer, eub::zeroStyle().trailer);
         QVERIFY(lo.evidence.contains(QStringLiteral("单源")));
         QVERIFY(lo.sourceNote.contains(QStringLiteral("reference/")));
-        QVERIFY(!lo.sboutSha1.isEmpty());   // scripts/split-sboot-8890.sh:1 给了 sha1
+        QVERIFY(!lo.sbootSha1.isEmpty());   // scripts/split-sboot-8890.sh:1 给了 sha1
     }
 
     void table8895()   // reference/exynos-usbdl/scripts/split-sboot-8895.sh:2-7（第 5 行是作者自注的"重发"）
@@ -997,11 +997,16 @@ private slots:
 
     void splitCutsExactRangesAndRepeatsAreIdentical()
     {
-        // 合成样本：长度必须 ≥ 9610 表的最大末段（0x1DA000 + 0x40000 = 0x21A000），
-        // 带确定性图案（facts §F1：无真样本，用合成夹具）
+        // 合成样本：长度必须 ≥ 9610 表的最大末段（0x1DA000 + 0x40000 = 0x21A000）
+        // （facts §F1：无真样本，用合成夹具）
         QByteArray sboot(0x220000, '\0');
-        for (int i = 0; i < sboot.size(); ++i)
-            sboot[i] = char(i & 0xFF);
+        // 非周期填充（xorshift32）：`i & 0xFF` 一类 256 周期图案会让"偏移错 256 的整数倍"**漏检** ——
+        // T4 实现者用变异证明过（brief 原夹具下 offset 错 0x100 时 split 槽仍全绿）。
+        quint32 x = 0x12345678u;
+        for (int i = 0; i < sboot.size(); ++i) {
+            x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+            sboot[i] = char(x & 0xFF);
+        }
 
         const eub::EubLoadout lo = mustLoad(QStringLiteral("Exynos9610"));
         QList<QPair<QString, QByteArray>> parts;
@@ -1206,8 +1211,11 @@ private:
     }
     static QByteArray syntheticSboot()
     {
+        // 非周期填充（xorshift32）：`(i * k) & 0xFF` 仍是 256 周期图案，会让"偏移错 256 的整数倍"漏检
+        //（T4 实现者的变异证据：brief 原夹具下 offset 错 0x100 时 split 槽仍全绿）
         QByteArray b(0x8000, '\0');
-        for (int i = 0; i < b.size(); ++i) b[i] = char((i * 31) & 0xFF);
+        quint32 x = 0x12345678u;
+        for (int i = 0; i < b.size(); ++i) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; b[i] = char(x & 0xFF); }
         return b;
     }
 
@@ -1439,10 +1447,13 @@ git commit -m "feat(eub): 载荷来源解析（裸镜像 / LZ4 frame / BL tar �
 namespace {
 
 // 合成 sboot：够 9610 全表（最大段到 0x1DA000 + 0x40000 = 0x21A000）
+// 非周期填充（xorshift32）：`(i * k) & 0xFF` 是 256 周期图案，会让"偏移错 256 的整数倍"漏检
+//（T4 实现者的变异证据：brief 原夹具下 offset 错 0x100 时 split 槽仍全绿）
 QByteArray syntheticSboot(quint64 bytes = 0x220000)
 {
     QByteArray b(int(bytes), '\0');
-    for (int i = 0; i < b.size(); ++i) b[i] = char((i * 7) & 0xFF);
+    quint32 x = 0x12345678u;
+    for (int i = 0; i < b.size(); ++i) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; b[i] = char(x & 0xFF); }
     return b;
 }
 
