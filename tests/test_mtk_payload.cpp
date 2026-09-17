@@ -1538,6 +1538,12 @@ void TestMtkPayload::bromFlashOnSessionRoutesXmlEndToEnd()
         QVERIFY2(iWrite > iRead, "WRITE-FLASH 必须在 READ-FLASH 之后（先取表、后写）");
     }
     QVERIFY2(m->writes.indexOf(le32(mtkbrom::X_CMD_INIT_EXT_RAM)) == -1, "XML 代不得发 XFlash 的 INIT_EXT_RAM");
+    // 收尾复位必须是 **IMMEDIATE**（上游 `cmd_reboot(disconnect=False)`，`xml_lib.py:1045` 唯一调用点）——
+    // T12 审查 Important：原先发 DISCONNECT 且无用例钉住，把 false 改回 true 也不会红。
+    QVERIFY2(m->writes.contains(xmlFrame(QStringLiteral(
+                 "<?xml version=\"1.0\" encoding=\"utf-8\"?><da><version>1.0</version>"
+                 "<command>CMD:REBOOT</command><arg><action>IMMEDIATE</action></arg></da>"))),
+             "收尾 REBOOT 必须是 IMMEDIATE（不是 DISCONNECT）");
 }
 
 // XML 分支的空表显式门（T11 在 XFlash 分支补的同款）：GPT 合法但**零个有效条目** →

@@ -704,7 +704,7 @@ void TestMtkXmlPayload::rebootRequestsDisconnectOrImmediate()
     m.reads << commandReads();
     mtkbrom::XmlSession x(&m);
     QString err;
-    QVERIFY2(mtkbrom::xmlReboot(x, true, &err), qPrintable(err));          // 默认参数即 disconnect=true
+    QVERIFY2(mtkbrom::xmlReboot(x, true, &err), qPrintable(err));          // 显式 DISCONNECT（默认现为 false=IMMEDIATE，与上游一致）
     QCOMPARE(m.writeFrames.at(1), expectDisconnect);
     QVERIFY(m.reads.isEmpty());
 

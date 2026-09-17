@@ -3287,7 +3287,9 @@ git commit -m "feat(mtk): XML 载荷①（CMD:START 握手 + setup_env/setup_hw_
   bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, quint32 length,
                         QByteArray &out, QString *error = nullptr);
   // 收尾复位（XC:439 REBOOT；IMMEDIATE / DISCONNECT）
-  bool xmlReboot(XmlSession &x, bool disconnect = true, QString *error = nullptr);
+  // ⚠️ **实施期更正（T12 审查 Important）**：默认是 `false`（IMMEDIATE）—— 上游 `cmd_reboot` 默认 False，
+  //    且全仓唯一调用点 `xml_lib.py:1045` 显式传 `disconnect=False`。原稿默认 true 且集成层传 true = 发了反向动作。
+  bool xmlReboot(XmlSession &x, bool disconnect = false, QString *error = nullptr);
   }
   ```
 
@@ -4076,7 +4078,7 @@ constexpr quint32 kXEmmcPartUser = 0x8;   // ST:16-49（user 区）
         else
             warn(QStringLiteral("XFlash SHUTDOWN 收尾失败（数据已写入）：%1").arg(shutErr));
     } else {
-        // T12 换成： QString rbErr; if (xmlReboot(xml, true, &rbErr)) say(...); else warn(...);
+        // T12 换成： QString rbErr; if (xmlReboot(xml, /*disconnect=*/false, &rbErr)) say(...); else warn(...);
         warn(QStringLiteral("XML 代：REBOOT 收尾在 Task 12 接线"));
     }
     return true;
@@ -4290,7 +4292,7 @@ mtkgpt::ReadFn xmlSectorReader(XmlSession &x, const QString &partition)
 // (e) 段：收尾的 else 分支 → 
     } else {
         QString rbErr;
-        if (xmlReboot(xml, true, &rbErr))
+        if (xmlReboot(xml, /*disconnect=*/false, &rbErr))
             say(QStringLiteral("XML：REBOOT 收尾完成"));
         else
             warn(QStringLiteral("XML REBOOT 收尾失败（数据已写入）：%1").arg(rbErr));

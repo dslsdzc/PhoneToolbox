@@ -1082,7 +1082,7 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
             warn(QStringLiteral("XFlash SHUTDOWN 收尾失败（数据已写入）：%1").arg(shutErr));
     } else {
         QString rbErr;
-        if (xmlReboot(xml, true, &rbErr))
+        if (xmlReboot(xml, /*disconnect=*/false, &rbErr))   // 上游唯一调用点传 False（IMMEDIATE）—— 刷完立刻重启，不是只断 USB
             say(QStringLiteral("XML：REBOOT 收尾完成"));
         else
             warn(QStringLiteral("XML REBOOT 收尾失败（数据已写入）：%1").arg(rbErr));

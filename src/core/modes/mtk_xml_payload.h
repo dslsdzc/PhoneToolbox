@@ -119,8 +119,11 @@ bool xmlReadDataFrames(XmlSession &x, quint32 length, QByteArray &out, QString *
 bool xmlReadPartition(XmlSession &x, const QString &partition, quint64 offset, quint32 length,
                       QByteArray &out, QString *error = nullptr);
 
-// 收尾复位（XL:1038-1046 的 shutdown → XC:429-440 cmd_reboot）：action = DISCONNECT（默认）/
-// IMMEDIATE；走 send_command 的**默认**节奏（OK → CMD:END → CMD:START）。
-bool xmlReboot(XmlSession &x, bool disconnect = true, QString *error = nullptr);
+// 收尾复位（XL:1038-1046 的 shutdown → XC:429-441 cmd_reboot）：disconnect=true → DISCONNECT、false → IMMEDIATE；
+// 走 send_command 的**默认**节奏（OK → CMD:END → CMD:START）。
+// ⚠️ 控制方核对（T12 审查 Important）：上游 `cmd_reboot` 的**默认就是 False（IMMEDIATE）**，全仓**唯一**调用点
+//    `xml_lib.py:1045`（`shutdown()` 内）显式传 `disconnect=False` —— 故本函数默认也是 `false`；
+//    刷完分区要的是"立刻重启"，不是"只断开 USB"。
+bool xmlReboot(XmlSession &x, bool disconnect = false, QString *error = nullptr);
 
 } // namespace mtkbrom
