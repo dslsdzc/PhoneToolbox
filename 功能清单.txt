@@ -347,9 +347,6 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (现为拒绝并说明原因)
 [ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」)
 [ ] 高通 Diag / DM 端口 (QXDM/QPST 诊断与日志; 属诊断非刷写)
-
-不做
-----
-[ ] BROM 漏洞利用 (kamakiri / carbonara) —— 超出维修用途, 不做
-[ ] 熔丝类 (QFuse/QFuse2)、DA 二进制提取/生成、签名绕过 —— 不做
-[ ] MTK DOWNLOAD / UPLOAD / FORMAT_PARTITION —— 上游零调用, 不做
+[ ] MTK DOWNLOAD / UPLOAD / FORMAT_PARTITION (上游零调用, 需真实抓包样本才谈得上实现)
+[ ] BROM 漏洞利用 (kamakiri / carbonara) —— 前置: 解除"不做"决定
+[ ] DA 二进制提取/生成、签名绕过、熔丝类 (QFuse) —— 前置: 解除"不做"决定
