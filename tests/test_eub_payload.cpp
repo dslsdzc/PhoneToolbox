@@ -1,7 +1,8 @@
 // tests/test_eub_payload.cpp
 //
 // 载荷来源三条路径（spec §D8）：裸镜像 / LZ4 frame / BL tar 内查找。
-// 本线**无真机**：前半段用自造合成 sboot（确定性非周期图案）+ imgtar::buildTar / appendMd5Footer
+// 本线无真机（真样本核对见文件末尾的 gated 槽，样本在 reference/eub-samples/，facts §H）：
+// 前半段用自造合成 sboot（确定性非周期图案）+ imgtar::buildTar / appendMd5Footer
 // 造包，不碰设备；后半段的"真样本硬断言"读 reference/eub-samples/ 下的官方 BL 包（**gitignored**，
 // 样本本身绝不进仓库）—— 目录缺失时按 gating 策略 QSKIP/FAIL，见文件头的 EUB_SKIP_OR_FAIL。
 // sboot.bin 是三星签名二进制，本仓不**分发**它（facts §F8）；这些槽是"手上有官方包时"的回归。
@@ -17,44 +18,10 @@
 
 #include "core/eub/eub_loadout.h"   // eub::sha1Hex（真样本槽与 §H2 记录对拍用）
 #include "core/eub/eub_payload.h"
+#include "eub_test_helpers.h"   // 真样本 gating（共享）：EUB_SAMPLES_DIR / EUB_SKIP_OR_FAIL / eubtest::*
 #include "image_engine/compression/lz4_wrapper.h"
 #include "image_engine/tar_image.h"
 
-// 真样本目录（reference/eub-samples/，gitignored）：CMake 只把**路径**编进来（样本内容绝不进仓库）。
-#ifndef EUB_SAMPLES_DIR
-#define EUB_SAMPLES_DIR ""
-#endif
-// 1 = 真样本缺失时 FAIL 而非 SKIP（CMake 侧 EUB_SAMPLES_REQUIRED=ON 时传入；默认 0 保持离线友好）。
-#ifndef EUB_SAMPLES_REQUIRED
-#define EUB_SAMPLES_REQUIRED 0
-#endif
-
-// 真样本缺失时的统一处置。QSKIP **不改退出码**（ctest 报 pass），故验证跑一律用 REQUIRED=ON
-// 把"没跑"变成"红"—— 否则这些槽会以绿灯的名义静默空转。
-// 用 do{...}while(0) 包住：QFAIL/QSKIP 都展开成"...; return;"两条语句，裸用时漏写花括号会让
-// 那句 return 脱离 if（样本存在时也照样退出）——包起来后调用点必须带分号、语义与单条语句一致。
-#if EUB_SAMPLES_REQUIRED
-#define EUB_SKIP_OR_FAIL(what)                                                                     \
-    do {                                                                                           \
-        QFAIL(qPrintable(QStringLiteral("真样本缺失，但本次构建要求真样本（EUB_SAMPLES_REQUIRED=ON）：") \
-                         + QString(what)));                                                        \
-    } while (0)
-#else
-#define EUB_SKIP_OR_FAIL(what)                                                                     \
-    do {                                                                                           \
-        QSKIP(qPrintable(QStringLiteral("真样本缺失（reference/ 为 gitignored）：") + QString(what))); \
-    } while (0)
-#endif
-
-// 真样本路径（样本只读，绝不写回）与存在性判据
-static QString eubSamplePath(const QString &fileName)
-{
-    return QString::fromLatin1(EUB_SAMPLES_DIR) + QLatin1Char('/') + fileName;
-}
-static bool eubSampleAvailable(const QString &fileName)
-{
-    return QFileInfo::exists(eubSamplePath(fileName));
-}
 
 class TestEubPayload : public QObject
 {
@@ -292,7 +259,8 @@ private slots:
 
     // ---- loadNamedEntriesFromTar：按名取多条（backlog Task 1，9830 的 extraFiles 用） ----
     // 事实出处：hubble.py:152-185（BL tar 全条目解出后逐个尝试 lz4 解压）、Exynos9830.json:3
-    // （files_to_send = ldfw.img / tzsw.img）。本仓无真样本（facts §F1）：包与载荷都是合成的。
+    // （files_to_send = ldfw.img / tzsw.img）。本槽的包与载荷都是**合成**的（不依赖真样本）；
+    // 真样本上的同名核对在同文件末尾的 gated 槽。
 
     void namedEntriesAreExtractedInRequestedOrder()
     {
@@ -416,10 +384,10 @@ private slots:
         // 9830 的 extraFiles 在真包里叫 ldfw.img.lz4 / tzsw.img.lz4（facts §H2）—— 裸名**不存在**，
         // 故本槽跑通即证明实现确实走了"先找同名、没有才同名 +.lz4"的**回退**分支（而不是碰巧命中）。
         const QString pkg = QStringLiteral("BL_SM-G980F_G980FXXSNHYB1.tar.md5");   // SM-G980F = Exynos9830
-        if (!eubSampleAvailable(pkg)) {
+        if (!eubtest::sampleAvailable(pkg)) {
             EUB_SKIP_OR_FAIL(pkg);
         }
-        const QString tar = eubSamplePath(pkg);
+        const QString tar = eubtest::samplePath(pkg);
 
         // 夹具自检：先钉死真包**就是** lz4 包裹的形态 —— 否则下面的"回退"断言是空转。
         QList<imgtar::TarIndexEntry> idx;
@@ -440,7 +408,8 @@ private slots:
         // 尺寸是解压后的（.lz4 字节数 337909/634293 都比它小得多，拿 .lz4 原字节比必红）——
         // 这一条同时证明"取出后按内容解压"。
         QList<QByteArray> extras;
-        QString err;
+        // 预置 stale：空串上的 isEmpty() 近乎恒真（成功路径本就不写 err），预置后才有甄别力（1b 审查 M1）
+        QString err = QStringLiteral("stale");
         QVERIFY2(eub::loadNamedEntriesFromTar(
                      tar, {QStringLiteral("ldfw.img"), QStringLiteral("tzsw.img")}, extras, &err),
                  qPrintable(err));
@@ -466,10 +435,10 @@ private slots:
         // 同一包先跑一次 loadSbootBytes 成功 —— 失败可归因到"缺条目"，而不是"包本身坏掉"
         // （否则本槽会被一个与被测逻辑无关的原因骗绿）。
         const QString pkg = QStringLiteral("BL_SM-A505FN.tar.md5");   // SM-A505FN = Exynos9610
-        if (!eubSampleAvailable(pkg)) {
+        if (!eubtest::sampleAvailable(pkg)) {
             EUB_SKIP_OR_FAIL(pkg);
         }
-        const QString tar = eubSamplePath(pkg);
+        const QString tar = eubtest::samplePath(pkg);
 
         eub::SbootSource src;
         QByteArray sboot;

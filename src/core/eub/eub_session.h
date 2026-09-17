@@ -13,7 +13,7 @@
 // （见 forwardNotes），**不是**"一次会话只转一次" —— 会话级"只转一次"标志会让 identify 之后的
 // run 里 N 次 open 的说明全部静默丢弃，而真机线索（端点回退）往往正是那时才出现。
 //
-// ⚠️ 真机路径未验证：本机没有任何 Exynos 设备（facts §F1），本层只到"按 spec 编排 + mock 覆盖"
+// ⚠️ 真机路径未验证：本机没有任何 Exynos 设备（facts §F1；真样本已就位、见 §H），本层只到"按 spec 编排 + mock 覆盖"
 // 这一层证据；段间时序、重枚举窗口、回显内容留持机人。
 #pragma once
 #include <QByteArray>
@@ -88,7 +88,7 @@ public:
     // 连发，hubble.py:310-341）；本仓选"每文件重开"——与本仓分段阶段一致，且容忍段间重枚举
     // （facts §B9）。设备身份核对仍只在第 1 段做，extra 阶段不重做。
     // 进度沿用 "send" stage（percent 把 extra 计入分母：段发完不再直接到 100），detail 点明是额外文件。
-    // 证据等级**单源**（hubble，只有 9830 有该字段）：本仓无真机、无真样本，"9830 需要这两个文件"
+    // 证据等级**单源**（hubble，只有 9830 有该字段）：本仓无真机；真样本已就位（facts §H），"9830 需要这两个文件"
     // 是参照流程的要求，不是本仓的实测结论。
     bool run(const EubLoadout &lo, const QByteArray &sboot,
              const QList<QByteArray> &extras, QString *error);

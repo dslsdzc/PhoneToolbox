@@ -9,7 +9,8 @@
 //      读出条目字节后若是 LZ4 再解压
 // **不做**：从 AP 包找 boot.img（spec §D8 只认 BL 是承载物）、分发任何三星签名二进制（facts §F8）。
 //
-// ⚠️ 真机路径未验证：本机没有任何 Exynos 设备、也没有真样本（载荷由用户自备，facts §F1/§F8）——
+// ⚠️ 真机路径未验证：本机没有任何 Exynos 设备（载荷由用户自备，facts §F1/§F8）——
+// 真样本已下载（`reference/eub-samples/`，facts §H）并由 Task 1b 的 gated 用例实跑核对；
 // 本层只到"按 spec §D8 与 facts §C1 解析用户文件"这一层证据，不对设备行为做任何断言。
 #pragma once
 #include <QByteArray>
@@ -36,7 +37,7 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
 // 用途：Exynos9830 的 extraFiles（ldfw.img / tzsw.img）—— 参照流程要求"段之后另发"的文件就取自
 // 用户给的**同一个 BL 包**：hubble.py:152-185 把 BL tar 的全部条目解出、逐个尝试 lz4.frame.decompress，
 // 随后 :329-341 按 ExynosData/Exynos9830.json:3 的 files_to_send 逐个发送。
-// 证据等级**单源**（hubble，只有 9830 有该字段）：本仓无真机、无真样本，本函数只到"按给定名字把
+// 证据等级**单源**（hubble，只有 9830 有该字段）：本仓无真机；真样本已就位（facts §H），本函数只到"按给定名字把
 // 条目取出来"这一层证据，不对设备行为做任何断言。
 //
 // 语义：

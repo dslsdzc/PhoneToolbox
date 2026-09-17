@@ -7,7 +7,7 @@
 //   * 失败语义（含"不支持从中间续传"）→ spec §7
 //   * 段后的额外文件（9830 的 ldfw.img/tzsw.img）→ reference/hubble/hubble.py:329-341 +
 //     ExynosData/Exynos9830.json:3（facts §C7）——**证据等级单源**，且只是"参照流程的要求"，
-//     本仓无真机无真样本可验证
+//     本仓无真机；真样本已下载（reference/eub-samples/，facts §H）并由 Task 1b 的 gated 用例实跑核对
 // 本文件不碰 libusb、不构造帧、不切段 —— 只按表驱动 IEubTransport（依赖契约见 CMakeLists 的
 // test_eub_session 分支：该目标不含任何 libusb 源）。
 //
@@ -283,7 +283,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot,
     // 设备身份核对不在这里重做（参照也不做；真要换设备，第 1 段的核对或 open 失败会先拦下）。
     for (int j = 0; j < m; ++j) {
         const QString &name = lo.extraFiles[j];
-        const QByteArray &data = extras[j];
+        // 值拷贝而非引用（T1 审查 M2）：`extras[j]` 越界是 UB，而本层的内存安全**只**靠上面那条
+        // 数量校验。`value(j)` 越界得空载荷 → 走下面既有的"空载荷拒发"路径 —— 失败形态从
+        // 进程崩溃（变异 S1 实测为 SEGV_MAPERR）变成一条可归因的断言失败。
+        const QByteArray data = extras.value(j);
 
         if (!openWithRetry(&err)) {
             forwardNotes();     // 与段阶段的 open 失败同因：传输层的现场说明是唯一线索

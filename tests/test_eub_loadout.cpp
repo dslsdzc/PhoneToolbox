@@ -5,60 +5,21 @@
 // spec 的表逐条来自 facts §C3–§C6；每条 sourceNote 必须能落到 reference/ 里的 file:line
 // （reference/ 是 gitignored 的只读参照，故本文件对 sourceNote 只断言**字符串形态**，
 // 不读那些文件 —— 这样用例在只有仓库内容的机器上也能跑）。
-// 本线无真机（sboot.bin 是三星签名二进制，本仓不**分发**它，facts §F1/§F8）：本文件只钉住
+// **真机未验证**（sboot.bin 是三星签名二进制，本仓不**分发**它，facts §F1/§F8）：本文件只钉住
 // "表内容 == spec §5.4"，不对任何设备行为做断言。
-// 末尾三条"真样本硬断言"读 reference/eub-samples/ 下官方 BL 包解出的 sboot_Exynos*.bin
-//（facts §H 的核对产物，**gitignored**，样本本身绝不进仓库）—— 目录缺失时按 gating 策略
-// QSKIP/FAIL（见文件头 EUB_SKIP_OR_FAIL），只在"手上有官方包"的机器上实跑。
+// 真样本已下载（reference/eub-samples/，facts §H）并由末尾四条"真样本硬断言"实跑核对 ——
+// 读官方 BL 包解出的 sboot_Exynos*.bin（**gitignored**，样本本身绝不进仓库）：目录缺失时按
+// gating 策略 QSKIP/FAIL（见 eub_test_helpers.h），只在"手上有官方包"的机器上实跑。
+// 注意：这是**真样本核对**，不是真机验证（本线仍无任何 Exynos 设备）。
 #include <QtTest>
 
 #include <QFile>
-#include <QFileInfo>
 #include <QRegularExpression>
 
 #include "core/eub/eub_loadout.h"
+#include "eub_test_helpers.h"   // 真样本 gating：EUB_SAMPLES_DIR / EUB_SKIP_OR_FAIL / eubtest::*
 
 using Seg = QPair<QString, QPair<quint64, quint64>>;   // 名字, (offset, length)
-
-// 真样本目录（reference/eub-samples/，gitignored）：CMake 只把**路径**编进来（样本内容绝不进仓库）。
-#ifndef EUB_SAMPLES_DIR
-#define EUB_SAMPLES_DIR ""
-#endif
-// 1 = 真样本缺失时 FAIL 而非 SKIP（CMake 侧 EUB_SAMPLES_REQUIRED=ON 时传入；默认 0 保持离线友好）。
-#ifndef EUB_SAMPLES_REQUIRED
-#define EUB_SAMPLES_REQUIRED 0
-#endif
-
-// 真样本缺失时的统一处置。QSKIP **不改退出码**（ctest 报 pass），故验证跑一律用 REQUIRED=ON
-// 把"没跑"变成"红"—— 否则这些槽会以绿灯的名义静默空转。
-// 用 do{...}while(0) 包住：QFAIL/QSKIP 都展开成"...; return;"两条语句，裸用时漏写花括号会让
-// 那句 return 脱离 if（样本存在时也照样退出）——包起来后调用点必须带分号、语义与单条语句一致。
-#if EUB_SAMPLES_REQUIRED
-#define EUB_SKIP_OR_FAIL(what)                                                                     \
-    do {                                                                                           \
-        QFAIL(qPrintable(QStringLiteral("真样本缺失，但本次构建要求真样本（EUB_SAMPLES_REQUIRED=ON）：") \
-                         + QString(what)));                                                        \
-    } while (0)
-#else
-#define EUB_SKIP_OR_FAIL(what)                                                                     \
-    do {                                                                                           \
-        QSKIP(qPrintable(QStringLiteral("真样本缺失（reference/ 为 gitignored）：") + QString(what))); \
-    } while (0)
-#endif
-
-static QString eubSamplePath(const QString &fileName)
-{
-    return QString::fromLatin1(EUB_SAMPLES_DIR) + QLatin1Char('/') + fileName;
-}
-static bool eubSampleAvailable(const QString &fileName)
-{
-    return QFileInfo::exists(eubSamplePath(fileName));
-}
-static QByteArray readSample(const QString &fileName)
-{
-    QFile f(eubSamplePath(fileName));
-    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
-}
 
 // 表所需的最小 sboot 尺寸 = max(offset + length)——与 splitSboot 的越界判据同一口径。
 // 真样本槽用它算"富余"：不硬编表数字，表被改宽/改窄时富余断言跟着变红。
@@ -386,6 +347,12 @@ private slots:
     void realSampleSbootsSplitWithinTableBounds()
     {
         // 表能不能**切开真文件**：合成夹具按需造尺寸，永远测不到"表比真包大"这类错。
+        // ⚠️ 这些期望值**钉死在具体修订**上（1b 审查 M5）：样本文件名不含修订，重下同类机的 BL 会**原地覆盖**
+        //    同名文件 → 红的会是这些以**样本**命名的断言。届时**先核对修订**（下表）再怀疑表：
+        //      Exynos9830 ← SM-G980F `G980FXXSNHYB1` ｜ Exynos9610 ← SM-A505FN（FUS 最新）
+        //      Exynos7580 ← SM-A510F `A510FXXS8CTI7`（= 表内 sourceNote 记录的修订）
+        //      Exynos8895 ← SM-G950F `G950FXXUCDZE9` ｜ Exynos8890 ← SM-G930F `G930FXXU8EVG3`
+        //    （表内 8895/8890 两个 sha1 绑定的是 2017 年修订，**已从 FUS 下架**，故手上样本的 sboot 与之不同——见 facts §H3）
         struct Sample { const char *soc; const char *file; quint64 size; };
         const Sample samples[] = {
             {"Exynos9830", "sboot_Exynos9830.bin", 4194304},   // 0x400000
@@ -395,7 +362,7 @@ private slots:
             {"Exynos8890", "sboot_Exynos8890.bin", 1777936},   // 0x1B2110
         };
         for (const Sample &s : samples) {
-            if (!eubSampleAvailable(QLatin1String(s.file))) {
+            if (!eubtest::sampleAvailable(QLatin1String(s.file))) {
                 EUB_SKIP_OR_FAIL(QLatin1String(s.file));   // 样本是一个整体：缺一个就整体跳过/判红
             }
         }
@@ -413,14 +380,17 @@ private slots:
                 continue;
             }
             ++withSample;
-            const QByteArray sboot = readSample(QLatin1String(hit->file));
+            const QByteArray sboot = eubtest::readSample(QLatin1String(hit->file));
             QCOMPARE(quint64(sboot.size()), hit->size);   // facts §H2 的尺寸（逐 SoC 钉死）
             QList<QPair<QString, QByteArray>> parts;
             QString err;
             QVERIFY2(eub::splitSboot(sboot, lo, parts, &err), qPrintable(lo.soc + QStringLiteral(": ") + err));
             QCOMPARE(parts.size(), lo.segments.size());
-            // 逐段核对：名字 + 长度 + 内容 == sboot.mid(offset, length)。真数据上再钉一遍 ——
-            // 表里任何 offset/length 与真包结构不符，这里就现形（真 sboot 非周期，见文件头的合成夹具说明）。
+            // 逐段核对：名字 + 长度 + 内容 == sboot.mid(offset, length)。
+            // ⚠️ 期望值取自**被测的同一张表** → 本循环只证明"切片自洽 + **不越界**"（与 splitSboot 同源判据），
+            //    **证明不了 offset 是否正确**：界内错误（挪一点但仍在文件内）会自洽通过
+            //    （1b 审查 Important；实现者的 m2a 变异日志即反证：part6 改 0x80100 时本循环仍绿）。
+            //    偏移的正确性由下一个槽 realSampleSbootsCarryTableIndependentLandmarks 的**与表无关地标**承担。
             for (qsizetype i = 0; i < lo.segments.size(); ++i) {
                 const eub::EubSegment &seg = lo.segments[i];
                 QCOMPARE(parts[i].first, seg.name);
@@ -435,15 +405,79 @@ private slots:
         QCOMPARE(withoutSample, QStringList({"Exynos7885", "Exynos9810", "Exynos9820"}));
     }
 
+    void realSampleSbootsCarryTableIndependentLandmarks()
+    {
+        // 与表无关的结构地标（1b 审查 Important 的落实）：期望值来自**真样本的字节结构**，
+        // 不是被测的表 —— 表把这些 offset 写偏（哪怕只偏 0x100）这里就红，而上面那条自指的
+        // "逐段内容相符"循环对界内错误无能为力。
+        // 事实出处：docs/superpowers/specs/exynos-eub-facts.md §H2；
+        // .superpowers/sdd/eub-real-samples-verification.md §6.1（A 5/5）、§6.2（B 9/9）、§6.3（C 反例）。
+        struct Sample { const char *soc; const char *file; };
+        const Sample samples[] = {
+            {"Exynos9830", "sboot_Exynos9830.bin"},
+            {"Exynos9610", "sboot_Exynos9610.bin"},
+            {"Exynos7580", "sboot_Exynos7580.bin"},
+            {"Exynos8895", "sboot_Exynos8895.bin"},
+            {"Exynos8890", "sboot_Exynos8890.bin"},
+        };
+        for (const Sample &s : samples) {
+            if (!eubtest::sampleAvailable(QLatin1String(s.file)))
+                EUB_SKIP_OR_FAIL(QLatin1String(s.file));
+        }
+
+        // B 的判据：头 4 字节 01000014 + 字节 8..12 为 414238d5（§6.2 的 9/9 共同形态）
+        const QByteArray kHead4 = QByteArray::fromHex("01000014");
+        const QByteArray kTail = QByteArray::fromHex("414238d5");
+
+        for (const Sample &s : samples) {
+            eub::EubLoadout lo;
+            QString err;
+            QVERIFY2(eub::eubLoadoutFor(QLatin1String(s.soc), lo, &err), qPrintable(err));
+            const QByteArray sboot = eubtest::readSample(QLatin1String(s.file));
+            QVERIFY2(!sboot.isEmpty(), s.file);
+            QVERIFY(lo.segments.size() >= 2);
+
+            // —— 地标 A：第二段 offset + 8 处是 ASCII "daeh"（小端 "head"）——
+            const qsizetype aOff = qsizetype(lo.segments[1].offset) + 8;
+            QVERIFY2(sboot.mid(aOff, 4) == QByteArray("daeh"),
+                     qPrintable(QStringLiteral("%1 第二段（%2）offset+8 不是 daeh，实际 %3")
+                                    .arg(lo.soc, lo.segments[1].name)
+                                    .arg(QString::fromLatin1(sboot.mid(aOff, 4).toHex()))));
+
+            // —— 地标 B / 反例 C：逐段判"该有镜像头的必须有、该没有的必须没有" ——
+            for (const eub::EubSegment &seg : lo.segments) {
+                const bool expectHeader = (seg.name == QLatin1String("bl2")
+                                           || seg.name == QLatin1String("u-boot")
+                                           || seg.name == QLatin1String("part5")
+                                           || seg.name == QLatin1String("bootloader"));
+                const bool expectNoHeader = (seg.name == QLatin1String("lk")
+                                             || seg.name == QLatin1String("part6"));
+                if (!expectHeader && !expectNoHeader)
+                    continue;   // 其余段（fwbl1 / bl31 / epbl / el3_mon / 重发段）真样本里无共同形态，不断言
+                const QByteArray head = sboot.mid(qsizetype(seg.offset), 12);
+                const bool hasHeader = head.startsWith(kHead4) && head.mid(8, 4) == kTail;
+                if (expectHeader)
+                    QVERIFY2(hasHeader,
+                             qPrintable(QStringLiteral("%1 的 %2（0x%3）起点不是镜像头，实际 %4")
+                                            .arg(lo.soc, seg.name).arg(seg.offset, 0, 16)
+                                            .arg(QString::fromLatin1(head.toHex()))));
+                else
+                    QVERIFY2(!hasHeader,
+                             qPrintable(QStringLiteral("%1 的 %2（0x%3）本应**无**标准镜像头，却命中 01000014…414238d5")
+                                            .arg(lo.soc, seg.name).arg(seg.offset, 0, 16)));
+            }
+        }
+    }
+
     void real7580SbootSha1MatchesTableSourceNote()
     {
         // facts §H2：真 A510FXXS8CTI7 的 sboot sha1 = 466852d1…，与 7580 表 sourceNote 里记的
         // **未被采信那一源**的修订号逐字符一致（表项 sbootSha1 刻意留空，见 table7580()）。
         const QString file = QStringLiteral("sboot_Exynos7580.bin");
-        if (!eubSampleAvailable(file)) {
+        if (!eubtest::sampleAvailable(file)) {
             EUB_SKIP_OR_FAIL(file);
         }
-        const QByteArray sboot = readSample(file);
+        const QByteArray sboot = eubtest::readSample(file);
         QVERIFY2(!sboot.isEmpty(), qPrintable(file));
         const QString sha1 = eub::sha1Hex(sboot);
         QCOMPARE(sha1, QStringLiteral("466852d13fa02d51729d21633f47708308579f58"));
@@ -458,10 +492,10 @@ private slots:
         // → 富余**恰好 272**。这是"表能用、但几乎没余量"的边界：既证明表没写超，也把"表多要一字节
         // 才够"这类改动钉红 —— 合成夹具按需造尺寸，这条边界它永远碰不到。
         const QString file = QStringLiteral("sboot_Exynos8895.bin");
-        if (!eubSampleAvailable(file)) {
+        if (!eubtest::sampleAvailable(file)) {
             EUB_SKIP_OR_FAIL(file);
         }
-        const QByteArray sboot = readSample(file);
+        const QByteArray sboot = eubtest::readSample(file);
         const eub::EubLoadout lo = mustLoad(QStringLiteral("Exynos8895"));
         QCOMPARE(quint64(sboot.size()), quint64(1847568));   // 真文件尺寸
         QCOMPARE(tableNeed(lo), quint64(1847296));           // 表所需 = 0x143000 + 0x80000

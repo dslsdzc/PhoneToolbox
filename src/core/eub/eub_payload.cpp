@@ -249,8 +249,9 @@ bool loadNamedEntriesFromTar(const QString &tarPath, const QStringList &baseName
         if (!readTarEntryBytes(f, *hit, fileName,
                                QStringLiteral("超出本函数单次读入上限"), bytes, error))
             return false;
-        bool compressed = false;
-        if (!decompressIfLz4(bytes, tarPath, &compressed, error))
+        // 本路径不消费压缩标志（描述信息只由 loadSbootBytes 那条路径产出）：传 nullptr ——
+        // 留一个从不读取的局部变量会让读者以为这里用了它（T1 审查 M1；取地址故 -Wall 抓不到）。
+        if (!decompressIfLz4(bytes, tarPath, nullptr, error))
             return false;
         // 空载荷无意义（0 字节条目、解压出 0 字节都在此收口）：发一个空文件既无意义、
         // sendSegment 也会以"空载荷"拒发。
