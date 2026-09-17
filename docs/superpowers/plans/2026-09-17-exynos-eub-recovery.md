@@ -42,6 +42,11 @@
 6. **构建与验证纪律**：`/tmp` 在本机是满的 → 全新构建目录放 `/home`；"0 警告"必须用
    **全新目录**核（增量构建不重放警告）；`ctest` 必须 100% 通过；本线**没有真样本**，
    测试目标报告必须如实说明（不得写成"真样本验证"）。
+   ⚠️ **相位级判据修正（T5 审查发现）**：本仓 CMake **不开任何警告开关** —— 实测编译 flags 只有
+   `-std=gnu++17 -mno-direct-extern-access`，`grep -c -- "-Wall\|-Wextra" build.ninja` = 0。
+   故**裸构建的"0 警告"没有甄别力**（对编译器没被要求发出的警告沉默）。合格跑法 = 在全新构建配置上
+   显式追加 `-DCMAKE_CXX_FLAGS="-Wall -Wextra -Wsign-compare"`，并把日志留成产物。
+   （控制方已对 T1–T5 的 19 个 TU 补做审计：本仓来源诊断 **0** 条，日志 `/home/DslsDZC/eub-warn-audit.log`。）
 7. **提交纪律**：只 `git add` 明确路径，**绝不** `git add -A/-u/commit -a`（`build/` 有 4 个历史
    跟踪文件；`build-h1/`、`build-release/` 是既存未跟踪产物，别碰）。提交信息写清"改了什么/为什么/边界"。
 8. **UI 文案中文**，错误信息给出可行动的信息（哪一段、多少字节、下一步怎么做）。
@@ -2072,7 +2077,8 @@ git commit -m "feat(eub): 救援对话框（段表/sha1 对照/未验证勾选/�
 
 ```bash
 # ① 全新目录构建（/tmp 满，必须用 /home）——"0 警告"的**唯一**合格证据
-rm -rf /home/DslsDZC/eub-final && cmake -B /home/DslsDZC/eub-final -G Ninja -DMTK_SAMPLES_REQUIRED=ON
+rm -rf /home/DslsDZC/eub-final && cmake -B /home/DslsDZC/eub-final -G Ninja -DMTK_SAMPLES_REQUIRED=ON \
+      -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wsign-compare"   # 见 Global Constraints 第 6 条：裸构建的 0 警告无甄别力
 cmake --build /home/DslsDZC/eub-final 2>&1 | tee /home/DslsDZC/eub-final-build.log | tail -5
 grep -ci warning /home/DslsDZC/eub-final-build.log     # 期望 0
 
