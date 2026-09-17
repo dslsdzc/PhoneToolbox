@@ -50,6 +50,8 @@
    `!writeBulk({}) && !err.isEmpty()` 同样为真）。若你在实现中发现某条断言**无法区分"实现了"与"没实现"**，
    按 T1 先例**加固它**（加一条只在正确实现下才成立的断言），并在报告里写明"原断言恒真 + 加固方式 +
    变异证据（改回错误实现 → 该 slot 变红）"。**不要**默默照抄，也**不要**改弱或删除既有断言。
+   加固/新增 slot 后，该任务 Step 4 的 `Totals:` 期望值会同步变大 —— **以实际通过为准**，报告里写明
+   实际数与差值原因（T1/T2/T3 三次实现都因加固而增了 slot；期望值是起点不是判据）。
 
 ---
 
@@ -841,7 +843,8 @@ CMakeLists：测试源清单加 `tests/test_eub_protocol.cpp`；extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_protocol && ./build/image_engine_tests_test_eub_protocol`
-Expected: `Totals: 10 passed, 0 failed, 0 skipped`（本任务用例 slots 8 + 2）
+Expected: `Totals: 10 passed, 0 failed, 0 skipped`（brief 用例 slots 8 + 2）—— 实现实测为 **12**
+（按约束 9 新增 2 个加固 slot：`kFrameOverhead` 与线上字节脱钩的恒真空洞、mock 空帧语义无承重）。
 
 - [ ] **Step 5: 提交**
 
@@ -1953,7 +1956,10 @@ private:
   "未写任何存储，设备仍需正常刷写。")`；失败 → `QMessageBox::critical` + `log(err, true)`。
   **文案必须含"未写存储/仍需刷写"**（facts §F5/§D1）。
 - `segmentTableText`：逐段一行 `"%1  offset 0x%2  length 0x%3（%4 字节）"`，末尾附
-  `证据：<evidence>` 与 `来源：<sourceNote>`，再附 `extraFiles`（非空时）与 `responseSupport` 说明。
+  `证据：<evidence>` 与 `来源：<sourceNote>`，再附 `extraFiles`（非空时）与 `responseSupport` 说明，
+  以及**帧风格出处**（facts §B6 要求"UI 必须说明照抄自哪个实现"，本任务承接 —— T3 无 UI 改动的遗留）：
+  风格头为 `1b444e57` → 显示"帧风格：照抄 hubble（头 `1B 44 4E 57` / 尾 `FF FF`）；该两字段语义未定"；
+  为 `00000000` → 显示"帧风格：照抄 exynos-usbdl（头 `00 00 00 00` / 尾 `00 00`）；该两字段语义未定"。
 - `sha1CompareText`：表为空 → `"该表未记录固件修订（无法对照）；你的文件 sha1 前 8 位 <x>"`；
   相同 → `"sha1 一致"`；不同 → `"sha1 不一致：表 <前8位> / 你的文件 <前8位>（布局偏移可能不匹配）"`。
 - `refreshStartEnabled`：`m_startBtn->setEnabled(m_prepared && m_confirmBox->isChecked())`；
