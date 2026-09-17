@@ -317,7 +317,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xflash_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xflash_payload.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xml_session.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xml_payload.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xml_payload.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_transport.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -530,6 +531,13 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_protocol.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/samsung_plan.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/tar_image.cpp)
+                elseif(_test_stem STREQUAL "test_eub_transport")
+                    # Phase E Task 1：EUB 真机传输（eub 侧唯一的 libusb 依赖点）。本目标只需
+                    # eub_libusb_transport.cpp —— 用例只碰它的纯函数（判据/超时换算/文案）；
+                    # 会话层（eub_session.cpp）与 samsung_mode.cpp 在后续任务按需追加。
+                    # libusb 按名补链，见下方 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_libusb_transport.cpp)
                 elseif(_test_stem STREQUAL "test_samsung_plan_dialog")
                     # Phase C Task 9：三星计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
                     # + 计划层/PIT/tar 索引。Qt6::Widgets 与 offscreen 见下方 if 块。
@@ -671,7 +679,8 @@ if(ENABLE_IMAGE_TESTS)
                    OR _test_stem STREQUAL "test_mtk_xflash_payload"
                    OR _test_stem STREQUAL "test_mtk_xml_session"
                    OR _test_stem STREQUAL "test_mtk_xml_payload"
-                   OR _test_stem STREQUAL "test_odin_libusb_transport")
+                   OR _test_stem STREQUAL "test_odin_libusb_transport"
+                   OR _test_stem STREQUAL "test_eub_transport")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
                 endif()
