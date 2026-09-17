@@ -60,13 +60,13 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] XFlash EMI: INIT_EXT_RAM + **长度单独一帧** + 0x200 分块 (整块切片 912B, 与 LEGACY 800B 并存; 832 真样本两代对拍 832/832)
 [√] XFlash DA2: BOOT_TO **剥尾部签名** + sleep + status ∈ {0, SYNC} —— 成功 = 状态字匹配, **不证明 DA2 在跑** (日志只写"已上传")
 [√] XFlash 写读: WRITE_DATA **56B 参数** (8×u32 NandExtension) + write_packet_length 分块 (非 512 对齐 → fail-closed) + 循环后最终 status + CC_OPTIONAL_DOWNLOAD_ACT; READ_DATA 逐帧收数 + flag 判定
-[√] GPT 分区表: 512/4096 扇区探测 + 头/条目**双 CRC fail-closed** + 备份 GPT 窗口兜底 (真 4096 样本 PGPT/SGPT + sgdisk 独立对拍; 上游 4 处缺陷不复刻)
+[√] GPT 分区表: 512/4096 扇区探测 + 头/条目**双 CRC fail-closed** + 备份 GPT 窗口兜底 (真 4096 样本 PGPT/SGPT; sgdisk 输出仅作分区名集合旁证, **非逐条对拍基准**; 上游 4 处缺陷不复刻)
 [√] XFlash 链整合: GET_PACKET_LENGTH/GET_CHIP_ID/GET_PARTITION_CATA → GPT 读 → 逐分区 WRITE_DATA (地址取分区条目 first_lba) → SHUTDOWN 收尾; PMT 分支**明确拒绝** (上游不可达且有 bug)
 [√] XML 帧层: 文本帧 (str 长度 = 字符数+1 且带 NUL) + OK / OK@0x<hexlen> / OK!EOT 保活 + command_result 解析 + DA 日志帧**跳过** (有上限) + `ERR!` 一律判失败 (不复刻上游把它当成功)
 [√] XML 引导: 等 **CMD:START** 文本消息 + setup_env (`initialize_dram=YES`, **不发 EMI**) / setup_hw_init / SET-HOST-INFO; 三步各自点名失败
 [√] XML 写读: WRITE-FLASH (FileSysOp key=FILE-SIZE → ackValue(length) ×2 → 逐包 ack/数据) / READ-FLASH (**逐帧 ack** 的 download_raw 形状, 独立于单次尾 ack 分支) / REBOOT 收尾
 [√] XML 链整合: CMD:START 引导 + READ-FLASH 读 GPT (与 XFlash/LEGACY 共用同一解析器) + 逐分区 WRITE-FLASH (写地址 = 分区条目 first_lba, 存储描述符 "EMMC-USER") + REBOOT 收尾
-[√] 刷机通道文案 (说明走了哪条链) + 文档收口 (功能清单/README/事实报告归档 mtk-xflash-facts.md/D1 spec 不做项回收)
+[√] 刷机通道文案: 日志/按钮提示写明按设备代际自动选链 (LEGACY / XFLASH / XML)
 [√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储暂只 eMMC user (0x1/0x8); 0x6781 的 16B ack 仅按上游实现 (无该芯片真机复核)
 
 --- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---

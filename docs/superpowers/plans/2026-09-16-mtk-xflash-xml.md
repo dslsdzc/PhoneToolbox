@@ -4345,7 +4345,7 @@ MTK BROM 段追加（照 D1 的写法，逐条带实测/出处粒度）：
 [√] XFlash 代: 12B 小端帧 (magic/datatype/length) + 七步握手 (SYNC/SETUP_ENV/SETUP_HW_INIT) + 0x6781 单次 16B ack
 [√] XFlash EMI: INIT_EXT_RAM + 长度单帧 + 0x200 分块 (整块 912B 切片, 与 LEGACY 800B 并存)
 [√] XFlash 写: WRITE_DATA **56B 参数** + write_packet_length 分块（**要求 512 对齐，否则 fail-closed**）+ 循环后最终 status + CC_OPTIONAL_DOWNLOAD_ACT + 16 位加和校验 + READ_DATA 逐帧收数/flag 路径
-[√] GPT 分区表: 512/4096 探测 + 头/条目双 CRC fail-closed + 备份 GPT 兜底 (真 4096 样本 PGPT/SGPT + sgdisk 对拍)
+[√] GPT 分区表: 512/4096 探测 + 头/条目双 CRC fail-closed + 备份 GPT 兜底 (真 4096 样本 PGPT/SGPT; sgdisk 输出**仅作分区名集合旁证**, 非逐条对拍基准)
 [√] XML 代: CMD:START 握手 + SET-RUNTIME-PARAMETER(initialize_dram=YES, **不发 EMI**) + HOST-SUPPORTED-COMMANDS/NOTIFY-INIT-HW + SET-HOST-INFO
 [√] XML 写读: WRITE-FLASH/READ-FLASH + DOWNLOAD-FILE/UPLOAD-FILE 数据流 + CMD:END/CMD:START 收尾 + REBOOT
 [√] scatter XML 方言: 按 storage 过滤 EMMC/UFS 双副本 (真样本 MT6789: 130 块 = 两份 × 65)
@@ -4356,7 +4356,7 @@ MTK BROM 段追加（照 D1 的写法，逐条带实测/出处粒度）：
 - [ ] **Step 4: 新建 `docs/superpowers/specs/mtk-xflash-facts.md`**
 
 必备条目（逐条带 `file:line`，从 `.superpowers/sdd/mtk-d2d3-facts-report.md` 与本次实测提炼）：
-① 三代握手差异（`XFL:979-995` / `XL:271-321` / D1 的 `0xC0`）；② 12B 帧与 `ack` 的 0x6781 特例（`XFL:85-100/112`）；③ `status()` 三态判据（`XFL:138-158`）；④ `send_param` 0x200 分块 + 帧头一次/载荷分块（`XFL:163-177`）+ `0xC0040050` **静默 False**、显式 preloader 路径据此中止（`XFL:181-186`、`:1147-1149`）；⑤ XFlash EMI（`XFL:251-270`）；⑥ `boot_to` 剥签名（`XFL:970-978/288-328`）；⑦ 写数据流（`XFL:852-899`：分块+校验和 → 循环后最终 status → CC_OPTIONAL_DOWNLOAD_ACT）；⑧ XML 信封/应答/`OK!EOT`（`XC:18-27`、`XL:146-163/188-232/369-449`）；⑨ XML 无 EMI（`xml_cmd.py:100-128`）；⑩ GPT 布局 + 双 CRC + 备份窗口 + 真样本实测（本计划 T1）；⑪ 上游 GPT 4 处缺陷；⑫ 代际判定三方投票与 `plcap` 死代码；⑬ **真样本清单**（PGPT/SGPT/sgdisk/scatter.xml 的 URL、sha256、实测值）；⑭ scatter XML 的 EMMC/UFS 双副本。
+① 三代握手差异（`XFL:979-995` / `XL:271-321` / D1 的 `0xC0`）；② 12B 帧与 `ack` 的 0x6781 特例（`XFL:85-100/112`）；③ `status()` 三态判据（`XFL:138-158`）；④ `send_param` 0x200 分块 + 帧头一次/载荷分块（`XFL:163-177`）+ `0xC0040050` **静默 False**、显式 preloader 路径据此中止（`XFL:181-186`、`:1147-1149`）；⑤ XFlash EMI（`XFL:251-270`）；⑥ `boot_to` 剥签名（`XFL:970-978/288-328`）；⑦ 写数据流（`XFL:852-899`：分块+校验和 → 循环后最终 status → CC_OPTIONAL_DOWNLOAD_ACT）；⑧ XML 信封/应答/`OK!EOT`（`XC:18-27`、`XL:146-163/188-232/369-449`）；⑨ XML 无 EMI（`xml_cmd.py:100-128`）；⑩ GPT 布局 + 双 CRC + 备份窗口 + 真样本实测（本计划 T1）；⑪ 上游 GPT 4 处缺陷；⑫ 代际判定三方投票与 `plcap` 死代码；⑬ **真样本清单**（PGPT/SGPT/scatter.xml 的 URL、sha256、实测值；sgdisk 输出注明"另一版布局、仅作分区名旁证"）；⑭ scatter XML 的 EMMC/UFS 双副本。
 
 **诚实边界小节**（逐条如实，不粉饰）：真机全链未验证（三代）；XML 无真实设备样本（帧与命令全部来自上游代码）；
 **spec §9 的三条"实现时核实"到此结案**——① XML 分区表读取路径：设计期已核实（`CMD:READ-FLASH` + 同一 GPT，`xml_cmd.py:474-483`、`mtk_daloader.py:296-302`）；② `UFSPartitionType` 文本表示：XML 用字符串 `"EMMC-USER"`（`ST:216`、`XC:452-461`），非整数的 `UFSPartitionType` 枚举值（BOOT1=1/BOOT2=2/USER=3/RPMB=4）只在 XFlash 侧用；③ `max_address_length = 9`：**全仓库只被 import 无消费点**（`USBLIB:21`、`seriallib.py:9`；`XP:2` 定义）→ 与 plcap/blver 同类，属**死常量，本实现不实现**（不猜语义）。
