@@ -190,6 +190,10 @@ private slots:
         QVERIFY2(!text.contains(QStringLiteral("不发送")), qPrintable(text));        // 旧口径必须消失
         // 反向：旧口径"各段发完后另发"（不说清谁发）也必须消失 —— 只补新句、留旧句同样误导
         QVERIFY2(!text.contains(QStringLiteral("各段发完后另发")), qPrintable(text));
+        // "不编数字"的形状断言（未加载形态特有）：extras 行**不得**出现"名字（数字…"的形态 ——
+        // 只查"不出现某个具体数字"钉不住（未加载时编个别的数字，比如 0 字节，照样绿）。
+        QVERIFY2(!text.contains(QStringLiteral("ldfw.img（")), qPrintable(text));
+        QVERIFY2(!text.contains(QStringLiteral("tzsw.img（")), qPrintable(text));
 
         // 传了 extras（= 预检成功后的展示形态）→ 每个文件带上**实际取出的**字节数。
         // 两份长度刻意不同（12,345 / 17,185）：互换顺序或拿固定数字顶替都会在这里挂。
@@ -210,6 +214,28 @@ private slots:
         const QString plainText = EubRecoveryDialog::segmentTableText(plain);
         QVERIFY(!plainText.contains(QStringLiteral("ldfw.img")));
         QVERIFY(!plainText.contains(QStringLiteral("会回显")));
+    }
+
+    void non9830ExtraFilesEvidenceLineDoesNotClaimNoSamples()
+    {
+        // ① 复审（Task 2 修复）：非 9830 分支的唯一职责是给**未来**的 SoC 如实标证据等级，而盘上有
+        // 5 个真样本（facts §H1：9610/7580/8890/8895/9830）—— 写成"本仓只有 9830 的真样本"是假话
+        // （A505FN 的包就在 reference/eub-samples/），会把"这个 SoC 要另做核对"误导成"本仓没它的包"。
+        // 表里只有 9830 带 extraFiles（分支因此不可达），故用**合成表**把这条文案钉住。
+        eub::EubLoadout lo;
+        lo.soc = QStringLiteral("Exynos9610");
+        lo.style = eub::dnwStyle();
+        lo.segments = {{QStringLiteral("fwbl1"), 0x0, 0x2000}};
+        lo.extraFiles = {QStringLiteral("ldfw.img")};
+        const QString text = EubRecoveryDialog::segmentTableText(lo);
+        QVERIFY2(text.contains(QStringLiteral("未经真样本核对")), qPrintable(text));   // 如实的说法在
+        // 失真表述一个不许留（旧文案："该 SoC 无真样本核对（本仓只有 9830 的真样本，facts §H）"）
+        QVERIFY2(!text.contains(QStringLiteral("无真样本核对")), qPrintable(text));
+        QVERIFY2(!text.contains(QStringLiteral("只有 9830")), qPrintable(text));
+        // 反向：9830 的"真样本已证实"不得被别的 SoC 继承（要另做核对）
+        QVERIFY2(!text.contains(QStringLiteral("真样本已证实")), qPrintable(text));
+        QVERIFY2(text.contains(QStringLiteral("facts §H1")), qPrintable(text));        // 覆盖范围要给出处
+        // 裸查"真样本"会恒真（如实的说法里也有这三个字）—— 断言要落到**否定式**上，见上。
     }
 
     void sha1CompareTextDistinguishesMatchAndMismatch()
@@ -423,6 +449,40 @@ private slots:
         // 日志要说明发送计划（用户据此知道设备接下来会发生什么）
         const QString logText = sink.join(QLatin1Char('\n'));
         QVERIFY2(logText.contains(QStringLiteral("ldfw.img")), qPrintable(logText));
+    }
+
+    void runRescueSendsExtrasAfterSegments()
+    {
+        // 4 参接线的回归保护（Task 2 复审）：onStart 的核心抽成 runRescue（不弹窗），用例直接调它
+        // —— 成功/失败都被模态弹窗挡着，走按钮的用例在无显示环境下会卡死。
+        // 把它改回三参 `run(m_loadout, m_sboot, &err)` **仍能编译**（eub_session.h 有三参重载），
+        // 但 9830 会在入口因 extras 数量不符 fail-closed（一个字节都不发）：下面的 writes 断言
+        // 会停在 0 而不是 段数 + 2 —— 这正是本槽的甄别力所在（只断言"返回 true"钉不住它）。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos9830");
+        EubRecoveryDialog dlg(mock, nullptr);
+
+        const QByteArray sboot = syntheticSboot(0x400000);
+        const QByteArray ldfw(12345, '\x37');          // 与 tzsw 长度/图案刻意不同：发错/发重都能看出来
+        const QByteArray tzsw(0x4321, '\x9C');
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry s; s.name = QStringLiteral("sboot.bin"); s.data = sboot;
+        imgtar::TarEntry l; l.name = QStringLiteral("ldfw.img"); l.data = ldfw;
+        imgtar::TarEntry t; t.name = QStringLiteral("tzsw.img.lz4"); t.data = imgcomp::lz4Compress(tzsw);
+        entries << s << l << t;
+        const QString pkg = writeTar(QStringLiteral("BL_SM-G980F_RUN.tar.md5"), entries);
+
+        QString err;
+        QVERIFY2(dlg.prepare(sboot, pkg, QStringLiteral("BL_SM-G980F_RUN.tar.md5 内的 sboot.bin"), &err),
+                 qPrintable(err));
+        const int segments = dlg.loadout().segments.size();
+        QCOMPARE(segments, 5);                 // 前置：9830 表 5 段（数量对不上时下面的 "+2" 无意义）
+        QVERIFY2(dlg.runRescue(&err), qPrintable(err));
+        // 5 段 + ldfw/tzsw 两帧。帧 = 头 4 + 长度 4 + 载荷 + 尾 2（eub_protocol.cpp），
+        // 故载荷字节原样出现在对应的那条 write 里。
+        QCOMPARE(mock.writes.size(), segments + 2);
+        QVERIFY2(mock.writes[segments].contains(ldfw), "第 6 帧应是 ldfw.img 的载荷");
+        QVERIFY2(mock.writes[segments + 1].contains(tzsw), "第 7 帧应是 tzsw.img 的载荷");
     }
 
     void prepareRejectsUnsupportedSoc()

@@ -130,6 +130,16 @@ bool looksLikeLz4Frame(const QByteArray &data)
     return data.startsWith(kMagic);   // 短于魔数 → startsWith 直接 false
 }
 
+bool looksLikeTar(const QByteArray &head, const QString &fileName)
+{
+    // 魔数判据与 tar_image.cpp:631 逐字一致（同一份定义，避免两处判据分歧）；文件名后缀是补充 ——
+    // 空归档/魔数之外的变体仍按 tar 报错，而不是被当成裸镜像收下。head 短于 262 字节时 mid() 取不满
+    // 5 字节 → 与 "ustar" 不等 → 魔数判据不成立（不越界、不抛）。
+    return head.mid(257, 5) == QByteArray("ustar", 5)
+           || fileName.endsWith(QStringLiteral(".tar"), Qt::CaseInsensitive)
+           || fileName.endsWith(QStringLiteral(".tar.md5"), Qt::CaseInsensitive);
+}
+
 bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, QString *error)
 {
     out.clear();                       // 失败路径不留陈旧字节（见头文件注释）
@@ -145,11 +155,9 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
     const QString fileName = QFileInfo(path).fileName();
     const QByteArray head = f.read(kTarHeaderBytes);
 
-    // "是不是 tar"：魔数判据与 tar_image.cpp:631 逐字一致（同一份定义，避免两处判据分歧）；
-    // 文件名后缀是补充 —— 空归档/魔数之外的变体仍按 tar 报错，而不是被当成裸镜像收下。
-    const bool isTar = head.mid(257, 5) == QByteArray("ustar", 5)
-                       || fileName.endsWith(QStringLiteral(".tar"), Qt::CaseInsensitive)
-                       || fileName.endsWith(QStringLiteral(".tar.md5"), Qt::CaseInsensitive);
+    // "是不是 tar"：判据在 looksLikeTar（本文件），对话框侧的 sourceLooksLikeTar 也调它 ——
+    // 三份同义判据曾散在载荷层/对话框层/索引层，这里收口到一处。
+    const bool isTar = looksLikeTar(head, fileName);
 
     QString entryInTar;                // 非空 = 载荷取自 tar 条目
     QByteArray bytes;

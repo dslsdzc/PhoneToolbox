@@ -25,6 +25,10 @@ class QPushButton;
 class EubRecoveryDialog : public QDialog
 {
     Q_OBJECT
+    // 只开这一个口子：runRescue（见下）是私有实现细节，但用例要**直接调它**才能在无模态的环境下钉住
+    // "extras 一并交给会话层"这条接线 —— 走 onStart 会被成功/失败两个模态弹窗挡住（无显示环境下点
+    // 按钮的用例会卡死，T7 起就不这么测）。友元只对该用例类生效，不进入对外契约。
+    friend class TestEubRecoveryDialog;
 
 public:
     // transport 由调用方持有（真机 = LibusbEubTransport；用例 = MockEubTransport）。
@@ -79,6 +83,12 @@ private:
     bool extrasReady() const;
     // 段表/sha1 两处展示的刷新（prepare 的成功与早退路径都要走到，避免留上一次的旧值）
     void refreshPreview(const QString &deviceLine, const QString &sourceDescription);
+    // 执行救援（不弹窗）：开始日志 + 会话 run（**带 extras**）+ 完成日志。抽出来是为了让用例能在
+    // 无模态的环境下钉住接线 —— 三参 run 重载同样能编译（eub_session.h），漏传 extras 会把 9830
+    // 退化成"点开始才 fail-closed"（数量校验拒掉、一个字节都不发），而日志/弹窗看不出差别。
+    // 成功/失败的**弹窗留在 onStart**（模态框在用例里无处理面，也不该被用例点）。
+    // 返回 false 时 *error = 会话的失败原文（可行动文案由 onStart 补）。
+    bool runRescue(QString *error);
 
     eub::IEubTransport &m_transport;
     eub::EubOptions      m_opt;

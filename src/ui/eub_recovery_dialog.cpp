@@ -50,12 +50,11 @@ QString bytesText(qsizetype bytes)
     return QLocale(QLocale::English, QLocale::UnitedStates).toString(qulonglong(bytes));
 }
 
-// 用户选的来源**是不是 tar 包**（只判容器类型，不解析内容）：判据与 eub_payload.cpp:150-152 的那条
-// 逐字一致（"ustar" 魔数落在 257..261，或 .tar/.tar.md5 后缀）—— 那是同一个问题的既有判据，这里只是
-// 在 UI 层**分流**（裸镜像 → 指引改选 BL 包），包内容的裁定仍由 eub::loadNamedEntriesFromTar 做。
-// 不共用函数的理由：那个判据夹在 loadSbootBytes 的解析流程里（读头块、条目选择同一处），抽出来要动
-// core 层签名；本函数只在 extraFiles 非空时调用一次，错了也只会退化成"再走一次 loadNamedEntriesFromTar
-// 并以它的错误文案收场"（fail-closed，不会发出错误的字节）。
+// 用户选的来源**是不是 tar 包**（只判容器类型，不解析内容）—— 判据本体在 core 层
+// （eub::looksLikeTar，eub_payload.h），这里只是薄包装：开文件读头块 + 取 basename，打不开/空路径
+// 一律 false（→ prepare 给出"改选 BL 包"的可执行指引）。包内容的裁定仍由 eub::loadNamedEntriesFromTar 做。
+// 抽到 core 的理由：三份同义判据（载荷层 / 这里 / 索引层）已在仓库里出现过，而 eub_payload.cpp 自己
+// 写着"同一份定义，避免两处判据分歧"—— 判据留在 UI 层就是那条约定的第一个例外。
 bool sourceLooksLikeTar(const QString &path)
 {
     if (path.isEmpty())
@@ -63,11 +62,7 @@ bool sourceLooksLikeTar(const QString &path)
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly))
         return false;
-    const QByteArray head = f.read(512);
-    const QString name = QFileInfo(path).fileName();
-    return head.mid(257, 5) == QByteArray("ustar", 5)
-           || name.endsWith(QStringLiteral(".tar"), Qt::CaseInsensitive)
-           || name.endsWith(QStringLiteral(".tar.md5"), Qt::CaseInsensitive);
+    return eub::looksLikeTar(f.read(512), QFileInfo(path).fileName());
 }
 
 } // namespace
@@ -354,20 +349,34 @@ void EubRecoveryDialog::onPickSource()
     log(QStringLiteral("已载入载荷：%1").arg(source.description));
 }
 
-void EubRecoveryDialog::onStart()
+bool EubRecoveryDialog::runRescue(QString *error)
 {
-    if (!m_startBtn->isEnabled())      // 双保险：门控以外的路径（如快捷键）不许绕过
-        return;
-
-    QString err;
     // 额外文件一并交给会话层（不带该字段的表项传空表；顺序 = 段表所列，契约见 EubSession::run）
     const QString extrasNote = m_extras.isEmpty()
         ? QString()
         : QStringLiteral("，随后按序另发 %1 个额外文件").arg(m_extras.size());
     log(QStringLiteral("开始救援：向设备 RAM 逐段发送 %1 段%2（每段重开设备；失败即中止，"
                        "不支持从中间续传）…").arg(m_loadout.segments.size()).arg(extrasNote));
+    QString err;
     if (!m_session.run(m_loadout, m_sboot, m_extras, &err)) {
+        if (error)
+            *error = err;
         log(err, true);
+        return false;
+    }
+    // 成功文案按"本次实际发了什么"分岔：9830 会在分段之后另发额外文件，少报与多报同样是失真
+    log(m_extras.isEmpty() ? QStringLiteral("救援完成：分段已全部发送。")
+                           : QStringLiteral("救援完成：分段与 %1 个额外文件已全部发送。").arg(m_extras.size()));
+    return true;
+}
+
+void EubRecoveryDialog::onStart()
+{
+    if (!m_startBtn->isEnabled())      // 双保险：门控以外的路径（如快捷键）不许绕过
+        return;
+
+    QString err;
+    if (!runRescue(&err)) {
         // 失败文案要可行动：告诉用户"设备现在处于什么状态"与"下一步做什么"（对话框是人机界面）
         QMessageBox::critical(this, QStringLiteral("EUB 救援失败"),
                               QStringLiteral("%1\n\n本次救援中止：设备未被引导进 Download 模式"
@@ -377,9 +386,6 @@ void EubRecoveryDialog::onStart()
                                   .arg(err));
         return;
     }
-    // 成功文案按"本次实际发了什么"分岔：9830 会在分段之后另发额外文件，少报与多报同样是失真
-    log(m_extras.isEmpty() ? QStringLiteral("救援完成：分段已全部发送。")
-                           : QStringLiteral("救援完成：分段与 %1 个额外文件已全部发送。").arg(m_extras.size()));
     QMessageBox::information(this, QStringLiteral("EUB 救援"), rescueSuccessText(!m_extras.isEmpty()));
 }
 
@@ -435,15 +441,19 @@ QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo,
         }
         lines << QStringLiteral("额外文件 —— 段后另发（来自同一个 BL 包）：%1")
                      .arg(items.join(QStringLiteral("、")));
-        // 证据等级：单源（hubble 的 ExynosData/<SoC>.json + hubble.py:329-341）。真样本核对**只覆盖
-        // 9830**（表里唯一带该字段的 SoC，facts §C7/§H2），故这句按 SoC 名限定 —— 将来别的 SoC 也带
-        // extraFiles 时不得自动继承 9830 的真样本声明（要另做核对），也不得写成"真机已验证"。
+        // 证据等级：单源（hubble 的 ExynosData/<SoC>.json + hubble.py:329-341）。**额外文件的**
+        // 真样本核对只覆盖 9830（表里唯一带该字段的 SoC，facts §C7/§H2）—— 样本集本身有 5 个包
+        //（9610/7580/8890/8895/9830，facts §H1），故未核对的 SoC 不能写成"无真样本"：那是假的，
+        // 会把"这个 SoC 需要另外核对"误导成"本仓没有它的包"。将来别的 SoC 带 extraFiles 时既不得
+        // 自动继承 9830 的核对结论（要另做核对），也不得写成"真机已验证"。
         const bool haveSampleFacts = lo.soc.compare(QStringLiteral("Exynos9830"), Qt::CaseInsensitive) == 0;
         lines << QStringLiteral("额外文件证据等级：单源（hubble）；%1；真机仍未验证")
                      .arg(haveSampleFacts
                               ? QStringLiteral("真样本已证实该 SoC 的 BL 包内含这两个文件"
                                                "（facts §H2：包内为 ldfw.img.lz4 / tzsw.img.lz4）")
-                              : QStringLiteral("该 SoC 无真样本核对（本仓只有 9830 的真样本，facts §H）"));
+                              : QStringLiteral("该 SoC 的额外文件未经真样本核对"
+                                               "（本仓仅核对过 9830 的 ldfw.img/tzsw.img；"
+                                               "样本覆盖 9610/7580/8890/8895/9830，facts §H1）"));
     }
     lines << (lo.responseSupport
         ? QStringLiteral("回显：该 SoC 会回显，每段后读一次、原文落日志（本期不解析结构，facts §C8/§D7）")

@@ -257,6 +257,35 @@ private slots:
         QVERIFY(eub::looksLikeLz4Frame(QByteArray::fromHex("04224d18" "00")));
     }
 
+    void looksLikeTarMatchesMagicOrSuffix()
+    {
+        // "是不是 tar"的判据收口（Task 2 复审）：三份同义表达式（载荷层 / 对话框层 / 索引层）
+        // 合并为这一处纯函数。两条判据各自独立成立：
+        //   ① 魔数：257..261 为 "ustar"（与 image_engine/tar_image.cpp:631 同源）；
+        //   ② 后缀：.tar / .tar.md5，**大小写不敏感**（包名在各来源里大小写混写）。
+        QByteArray head(512, '\0');
+        head.replace(257, 5, QByteArrayLiteral("ustar"));
+        QVERIFY2(eub::looksLikeTar(head, QStringLiteral("no-suffix")),
+                 "只有魔数（无后缀）也必须命中 —— 后缀是补充判据，不是前提");
+        // 魔数错位 / 头不足 262 字节 → 不命中（短头不许越界，也不许按"像 tar"收下）
+        QByteArray shifted(512, '\0');
+        shifted.replace(258, 5, QByteArrayLiteral("ustar"));
+        QVERIFY(!eub::looksLikeTar(shifted, QStringLiteral("no-suffix")));
+        QVERIFY(!eub::looksLikeTar(QByteArrayLiteral("ustar"), QStringLiteral("no-suffix")));
+
+        // 后缀判据（内容给空：命中只能来自后缀）
+        QVERIFY(eub::looksLikeTar(QByteArray(), QStringLiteral("BL_X.tar")));
+        QVERIFY(eub::looksLikeTar(QByteArray(), QStringLiteral("BL_X.tar.md5")));
+        QVERIFY(eub::looksLikeTar(QByteArray(), QStringLiteral("BL_X.TAR")));        // 大小写不敏感
+        QVERIFY(eub::looksLikeTar(QByteArray(), QStringLiteral("BL_X.Tar.MD5")));
+
+        // 都不像 → 不命中（裸镜像路径：sboot.bin / sboot.bin.lz4 是**正常**来源，不是 tar）
+        QVERIFY(!eub::looksLikeTar(QByteArray(512, '\0'), QStringLiteral("sboot.bin")));
+        QVERIFY(!eub::looksLikeTar(QByteArray(512, '\0'), QStringLiteral("sboot.bin.lz4")));
+        QVERIFY2(!eub::looksLikeTar(QByteArray(), QStringLiteral("sboot.tar.bin")),
+                 "后缀必须落在**末尾**：名字中间出现 .tar 不算 tar");
+    }
+
     // ---- loadNamedEntriesFromTar：按名取多条（backlog Task 1，9830 的 extraFiles 用） ----
     // 事实出处：hubble.py:152-185（BL tar 全条目解出后逐个尝试 lz4 解压）、Exynos9830.json:3
     // （files_to_send = ldfw.img / tzsw.img）。本槽的包与载荷都是**合成**的（不依赖真样本）；

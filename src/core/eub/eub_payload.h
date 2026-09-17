@@ -50,4 +50,12 @@ bool loadNamedEntriesFromTar(const QString &tarPath, const QStringList &baseName
 // LZ4 frame 魔数 04 22 4D 18（纯判据，测试可直接调）
 bool looksLikeLz4Frame(const QByteArray &data);
 
+// 是不是 tar：魔数（257..261 为 "ustar"，与 image_engine/tar_image.cpp:631 的判据同源）或文件名后缀
+// （.tar / .tar.md5，大小写不敏感）。抽到这里是因为"同一份定义，避免两处判据分歧"（见 .cpp 内既有注释）
+// —— 三份同义判据已经在仓库里出现过（载荷层 / 对话框层 / 索引层）。
+// head = 文件**开头**（至少 262 字节；头不足 262 时魔数判据不成立）；fileName = basename
+//（调用方用 QFileInfo::fileName() 取，带目录的整路径会让后缀判据失准）。
+// 判"容器类型"，不解析内容：包内容的裁定仍由 loadSbootBytes / loadNamedEntriesFromTar 做。
+bool looksLikeTar(const QByteArray &head, const QString &fileName);
+
 } // namespace eub
