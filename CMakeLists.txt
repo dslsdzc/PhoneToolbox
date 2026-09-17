@@ -321,7 +321,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_transport.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_samsung_mode.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_protocol.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_loadout.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_loadout.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_payload.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -562,6 +563,15 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
+                elseif(_test_stem STREQUAL "test_eub_payload")
+                    # Phase E Task 5：载荷来源解析（裸镜像 / LZ4 frame / BL tar 内查找，spec §D8）。
+                    # 本目标**只补 eub_payload.cpp**：它消费的 imgtar::indexTarStream 与
+                    # imgcomp::lz4Decompress 都已在 image_engine 静态库里（本循环统一
+                    # `target_link_libraries(... PRIVATE image_engine Qt6::Test)`），liblz4 也随
+                    # image_engine 的 PUBLIC 链接传递（CMakeLists.txt:211-213）—— 补
+                    # tar_image.cpp 会与该库里的同名符号撞车。不碰 libusb，故不进下方链接名单。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp)
                 elseif(_test_stem STREQUAL "test_samsung_plan_dialog")
                     # Phase C Task 9：三星计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
                     # + 计划层/PIT/tar 索引。Qt6::Widgets 与 offscreen 见下方 if 块。
