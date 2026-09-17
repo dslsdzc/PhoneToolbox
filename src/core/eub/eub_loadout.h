@@ -35,8 +35,11 @@ struct EubLoadout {
     EubFrameStyle style;       // 帧头/尾风格（facts §B4/§B5）
     QList<EubSegment> segments;// 按序发送；重发段照列（facts §C5）
     // 参照流程要求"段之后另发"的 BL 包内文件（9830：ldfw.img/tzsw.img，facts §C7；发送逻辑见
-    // hubble.py:329-341）。**本仓本期只记录该要求、没有发送路径** —— run 会据此 fail-closed
-    // （见 eub_session.cpp 的守卫），UI 也据此禁用「开始救援」。填过它的表项不可被 run 执行。
+    // hubble.py:329-341）。**证据等级单源**：本仓无真机无真样本，"9830 需要这两个文件"是参照流程
+    // 的要求，不是本仓的实测结论。
+    // 本字段**只记录名单**：载荷由调用方按同一份名单从 BL 包取出（eub::loadNamedEntriesFromTar，
+    // 见 eub_payload.h）后传给 EubSession::run 的 extras —— 数量不符时 run 在切段前 fail-closed
+    //（一个字节都不写，见 eub_session.cpp 的入口校验）。
     QStringList extraFiles;
     bool responseSupport = false;  // 设备会回显（facts §C7/§C8）
 };

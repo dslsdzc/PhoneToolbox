@@ -40,7 +40,7 @@ eub::EubOptions fastOptions()
 // 写成"返回差异"而不是在助手函数里直接 QCOMPARE：QCOMPARE 的失败分支只从**助手函数** return，
 // 槽函数会继续往下跑（假绿风险）。
 QString callSequenceDiff(const eub::MockEubTransport &t, int segmentCount,
-                         bool expectInfo, bool expectRead)
+                         bool expectInfo, bool expectRead, int extraCount = 0)
 {
     QStringList expect;
     for (int i = 0; i < segmentCount; ++i) {
@@ -48,6 +48,14 @@ QString callSequenceDiff(const eub::MockEubTransport &t, int segmentCount,
         if (i == 0 && expectInfo)
             expect << QStringLiteral("info");
         expect << QStringLiteral("write");
+        if (expectRead)
+            expect << QStringLiteral("read");
+        expect << QStringLiteral("close");
+    }
+    // 额外文件阶段（backlog Task 1）：每个文件都是**全新的一轮** open → write →（可选 read）→ close，
+    // 接在**全部段之后**。**不含 info**：设备身份核对只在第 1 段做（见 eub_session.cpp 的头注释）。
+    for (int i = 0; i < extraCount; ++i) {
+        expect << QStringLiteral("open") << QStringLiteral("write");
         if (expectRead)
             expect << QStringLiteral("read");
         expect << QStringLiteral("close");
@@ -87,9 +95,9 @@ private:
         if (!eub::eubLoadoutFor(QStringLiteral("Exynos9830"), lo, &err)) qFatal("查表失败");
         return lo;
     }
-    // 9830 原表带 extraFiles（ldfw.img/tzsw.img）→ run 会 fail-closed 拒绝执行（见
-    // extraFilesTableIsRejectedWithoutTouchingDevice）。回显接线与 extraFiles 无关，故本助手把该
-    // 字段清掉：那个槽钉的是"回显读在写之后、读几次"，不是 9830 整表的可执行性。
+    // 9830 原表带 extraFiles（ldfw.img/tzsw.img）：带字段的表项要调用方按名单备齐载荷（见
+    // extraFilesCountMismatchFailsBeforeAnyWriteOrDeviceTouch 的形态①）。本槽钉的是"回显读在写之后、
+    // 读几次"，与额外文件无关，故助手把该字段清掉，只留 5 段 + responseSupport 的接线。
     static eub::EubLoadout runnable9830ForEchoTest()
     {
         eub::EubLoadout lo = loadout9830();
@@ -681,28 +689,177 @@ private slots:
         QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
     }
 
-    void extraFilesTableIsRejectedWithoutTouchingDevice()
+    // ---- extraFiles 阶段（backlog Task 1；参照事实 hubble.py:329-341 + ExynosData/Exynos9830.json:3）----
+    // 证据等级**单源**（hubble）：本仓无真机无真样本，"9830 需要这两个文件"来自参照流程的要求，
+    // 不是实测结论。断言对象仍是 mock 的记录与文案。
+
+    void extraFilesAreSentAfterSegmentsInOrder()
     {
-        // 终审 I1（fail-closed）：9830 的参照流程要在分段**之后另发** BL 包内文件（ldfw.img / tzsw.img，
-        // hubble.py:329-341 + ExynosData/Exynos9830.json:3），而本仓本期没有该发送路径（run 只遍历
-        // segments，载荷入口只找 sboot）—— 照旧发完 5 段再报"全部 N 段已发送：设备应已进入 Download
-        // 模式"，对 9830 用户是**对未发生动作的断言**，且设备被留在"分段已发、文件未发"的半完成状态。
-        // 故 run 必须在**切段之前**拒绝：零写入，且连设备都不碰（句柄尚未打开）。
+        const eub::EubLoadout lo = loadout9830();
+        QVERIFY2(lo.extraFiles.size() == 2, "前置：9830 表必须带 2 个 extraFiles，否则本槽恒真");
+        const QByteArray ldfw(0x111, '\x37');        // 两份载荷等长则互换位置也看不出：长度与图案都不同
+        const QByteArray tzsw(0x2225, '\x9C');
+
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName = QStringLiteral("Exynos9830");
+        QStringList details;
+        QList<eub::EubProgress> seen;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; seen << p; });
+        const QByteArray sboot = syntheticSboot(0x400000);
+        QString err;
+        QVERIFY2(s.run(lo, sboot, {ldfw, tzsw}, &err), qPrintable(err));
+
+        const int n = int(lo.segments.size());
+        QCOMPARE(t.writes.size(), n + 2);            // 段之后**恰好**再多 2 笔（少了=没发，多了=多发）
+        for (int i = 0; i < n; ++i) {                // 前 n 笔仍是各段（extra 不得插队/顶替）
+            const eub::EubSegment &seg = lo.segments[i];
+            QString ferr;
+            const QByteArray expect = eub::buildEubFrame(
+                sboot.mid(int(seg.offset), int(seg.length)), lo.style, &ferr);
+            QVERIFY2(!expect.isEmpty(), qPrintable(ferr));
+            QCOMPARE(t.writes[i], expect);
+        }
+        QString ferr;
+        const QByteArray f0 = eub::buildEubFrame(ldfw, lo.style, &ferr);
+        QVERIFY2(!f0.isEmpty(), qPrintable(ferr));
+        const QByteArray f1 = eub::buildEubFrame(tzsw, lo.style, &ferr);
+        QVERIFY2(!f1.isEmpty(), qPrintable(ferr));
+        // 帧风格 = 该表的 style（hubble 的 extra 与分段走同一个 send_part_to_device，facts §C7）；
+        // 顺序 = lo.extraFiles 顺序。直发原始字节 / 用错 style / 顺序颠倒都会在这里判红。
+        QCOMPARE(t.writes[n], f0);
+        QCOMPARE(t.writes[n + 1], f1);
+
+        // 每个 extra 都**重开**设备（facts §B8 的两种做法里本仓选①；与参照的单句柄连发是有意分歧，
+        // 见 eub_session.cpp 的同款注释）。驱动同一句柄连发的实现在 open/close 计数上立刻判红。
+        QCOMPARE(t.calls.count(QStringLiteral("open")), n + 2);
+        QCOMPARE(t.calls.count(QStringLiteral("close")), n + 2);
+        QCOMPARE(t.calls.count(QStringLiteral("read")), n + 2);   // 9830 responseSupport=true：段与 extra 都读
+        const QString diff = callSequenceDiff(t, n, /*expectInfo=*/true, /*expectRead=*/true, /*extraCount=*/2);
+        QVERIFY2(diff.isEmpty(), qPrintable(diff));
+
+        // 进度：extra 阶段继续用 "send" stage（UI 契约），detail 点明是额外文件（不是"第 N 段"）。
+        // 只数 send 阶段的那两条 —— 收尾的 "done" 里也会提"额外文件"（属正常，不算多刷）。
+        int extraSendDetails = 0;
+        for (const eub::EubProgress &p : seen)
+            if (p.stage == QStringLiteral("send") && p.detail.contains(QStringLiteral("额外文件")))
+                ++extraSendDetails;
+        QCOMPARE(extraSendDetails, 2);
+        QVERIFY2(countDetails(details, QStringLiteral("ldfw.img")) >= 1, qPrintable(details.join(QStringLiteral(" | "))));
+        QVERIFY2(countDetails(details, QStringLiteral("tzsw.img")) >= 1, qPrintable(details.join(QStringLiteral(" | "))));
+        QCOMPARE(seen.last().stage, QStringLiteral("done"));
+        QCOMPARE(seen.last().percent, 100);
+        for (int i = 1; i < seen.size(); ++i)
+            QVERIFY2(seen[i].percent >= seen[i - 1].percent,
+                     qPrintable(QStringLiteral("进度回退：%1 → %2").arg(seen[i - 1].percent).arg(seen[i].percent)));
+    }
+
+    void extraFilesCountMismatchFailsBeforeAnyWriteOrDeviceTouch()
+    {
+        // 入口校验（在**切段之前**）：数量不符 → 失败、零字节。放在切段前是刻意的 —— 若挪到
+        // "段都发完之后"再校验，设备会被留在"分段已发、文件没发"的半完成状态（终审 I1 的同一顾虑）。
         const eub::EubLoadout lo = loadout9830();
         QVERIFY2(!lo.extraFiles.isEmpty(), "前置：9830 表必须带 extraFiles，否则本槽恒真");
+        const QByteArray sboot = syntheticSboot(0x400000);
+        // ① 表要 2 个、一个都不给（旧契约调用者的形态：run(lo, sboot, &err)）
+        {
+            eub::MockEubTransport t;
+            t.info = info9610();
+            t.info.socName = QStringLiteral("Exynos9830");
+            eub::EubSession s(t, fastOptions());
+            QString err;
+            QVERIFY(!s.run(lo, sboot, &err));
+            QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err));   // 要哪些文件
+            QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));
+            QVERIFY2(err.contains(QStringLiteral("本次提供了 0 个")), qPrintable(err));   // 给了几个
+            QCOMPARE(t.writes.size(), 0);                                          // 零写入
+            // 变异证据：去掉入口校验 → 本槽必红（run 返回 true、err 为空、写出 5 帧、calls 非空）
+            QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
+        }
+        // ② 表要 2 个、只给 1 个 → 同样零发送：那 1 个也**不发**（半完成状态比"什么都没发"更糟）
+        {
+            eub::MockEubTransport t;
+            t.info = info9610();
+            t.info.socName = QStringLiteral("Exynos9830");
+            eub::EubSession s(t, fastOptions());
+            QString err;
+            QVERIFY(!s.run(lo, sboot, {QByteArray(64, '\x11')}, &err));
+            QVERIFY2(err.contains(QStringLiteral("本次提供了 1 个")), qPrintable(err));
+            QCOMPARE(t.writes.size(), 0);
+            QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
+        }
+        // ③ 反向：表不要求（9610）却给了 1 个 → 拒绝（否则"给错表也照发"，帧风格也未必对）
+        {
+            eub::MockEubTransport t;
+            t.info = info9610();
+            eub::EubSession s(t, fastOptions());
+            QString err;
+            QVERIFY(!s.run(loadout9610(), sboot, {QByteArray(64, '\x11')}, &err));
+            QVERIFY2(err.contains(QStringLiteral("Exynos9610")), qPrintable(err));
+            QCOMPARE(t.writes.size(), 0);
+            QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
+        }
+    }
+
+    void extraFileEmptyPayloadIsRejectedBeforeAnyWrite()
+    {
+        // 空载荷的 extra：若放到发送阶段才发现，sendSegment 会在**段都发完之后**失败 —— 又是半完成
+        // 状态。故与数量校验同处入口拒掉（零字节、不碰设备）。
+        const eub::EubLoadout lo = loadout9830();
         eub::MockEubTransport t;
         t.info = info9610();
         t.info.socName = QStringLiteral("Exynos9830");
         eub::EubSession s(t, fastOptions());
         QString err;
-        QVERIFY(!s.run(lo, syntheticSboot(0x400000), &err));
-        QVERIFY2(err.contains(QStringLiteral("Exynos9830")), qPrintable(err));
-        QVERIFY2(err.contains(QStringLiteral("未实现")), qPrintable(err));   // 说清"本仓做不到"
-        QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err)); // 用户要知道涉及哪些文件
+        QVERIFY(!s.run(lo, syntheticSboot(0x400000), {QByteArray(64, '\x22'), QByteArray()}, &err));
+        QVERIFY2(err.contains(QStringLiteral("额外文件 2/共 2")), qPrintable(err));
         QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));
-        QCOMPARE(t.writes.size(), 0);                                      // 零写入
-        // 变异证据：去掉 run 开头的守卫 → 本槽必红（run 返回 true、err 为空、写出 5 帧、calls 非空）
+        QCOMPARE(t.writes.size(), 0);
         QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
+    }
+
+    void extraFileWriteFailureNamesFileAndStops()
+    {
+        const eub::EubLoadout lo = loadout9830();
+        const int n = int(lo.segments.size());
+        const QByteArray ldfw(0x111, '\x37');
+        const QByteArray tzsw(0x222, '\x9C');        // 546 字节：文案里的"多少字节"要能对上
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName = QStringLiteral("Exynos9830");
+        t.failWriteAt = n + 1;                       // 前 n 段 + 第 1 个 extra 成功；第 2 个 extra 失败
+        eub::EubSession s(t, fastOptions());
+        QString err;
+        QVERIFY(!s.run(lo, syntheticSboot(0x400000), {ldfw, tzsw}, &err));
+        QCOMPARE(t.writes.size(), n + 1);            // 失败即停、不续传（段阶段的同款语义）
+        QVERIFY2(err.contains(QStringLiteral("额外文件 2/共 2")), qPrintable(err));   // 第几个/共几个
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));         // 哪个文件
+        QVERIFY2(err.contains(QString::number(tzsw.size())), qPrintable(err));       // 多少字节
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));      // 原因不能吞掉
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));                          // 句柄收干净
+    }
+
+    void extraFileOpenFailureNamesFileAndRetries()
+    {
+        // extra 阶段的 open 失败：与段同款"按次数重试"（facts §B8/§B9 的重枚举顾虑对 extra 同样成立），
+        // 失败文案要点名是哪个额外文件、第几个。注入点用 failOpenFromOpenIndex —— openFailures
+        // 是从头数的（会被前 5 段消耗掉），够不到"段发完了、extra 之前设备不在了"这个时序。
+        const eub::EubLoadout lo = loadout9830();
+        const int n = int(lo.segments.size());
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName = QStringLiteral("Exynos9830");
+        t.failOpenFromOpenIndex = n + 1;             // 第 n+1 次 open = 第 2 个额外文件之前那次
+        eub::EubSession s(t, fastOptions());
+        QString err;
+        QVERIFY(!s.run(lo, syntheticSboot(0x400000), {QByteArray(0x111, '\x37'), QByteArray(0x222, '\x9C')}, &err));
+        QCOMPARE(t.calls.count(QStringLiteral("open")), n + 4);   // n 段 + 第 1 个 extra 1 次 + 第 2 个重试 3 次
+        QCOMPARE(t.writes.size(), n + 1);                         // 第 1 个 extra 已写出，第 2 个一个字节没发
+        QVERIFY2(err.contains(QStringLiteral("额外文件 2/共 2")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("未出现")), qPrintable(err));            // openWithRetry 的文案
+        QVERIFY2(err.contains(QStringLiteral("注入的打开失败（按序号）")), qPrintable(err));
     }
 
     void splitFailureStopsBeforeAnyWrite()

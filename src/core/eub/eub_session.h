@@ -17,6 +17,7 @@
 // 这一层证据；段间时序、重枚举窗口、回显内容留持机人。
 #pragma once
 #include <QByteArray>
+#include <QList>
 #include <QString>
 #include <QStringList>
 #include <functional>
@@ -62,17 +63,35 @@ public:
     // 返回值也不会拿到上一次的表项）。
     bool identify(EubLoadout &out, QString *error);
 
-    // 完整救援：切段（失败即中止，**不写任何字节**）→ 逐段 open(带重试) → 发送 → 可选读回显 → close。
+    // 完整救援（**不带额外文件**的形态）：等价于 extras 传空表，只对不带 extraFiles 的表项成立
+    // —— 带该字段的表项（9830）会因数量不符在入口 fail-closed（见下面那个重载）。
+    bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
+
+    // 完整救援：入口校验 → 切段（失败即中止，**不写任何字节**）→ 逐段 open(带重试) → 发送 →
+    // 可选读回显 → close →（表项带 extraFiles 时）额外文件阶段。
+    // 入口校验（**在切段与碰设备之前**）：extras 的数量必须与该表的 lo.extraFiles 相等，且每个载荷
+    // 非空 —— 不符即失败、零字节。理由是"半完成状态比什么都没发更糟"：若等到段都发完才发现文件
+    // 没备齐，设备会被留在"分段已发、文件未发"的状态（终审 I1 的同一顾虑）。
     // 第 1 段发送前核对设备**身份**：拿设备当前自报的 SoC 名与 **identify() 时自报的那个**比
     //（防"识别与开始之间换了设备"）—— 基准是设备自己的历史自述，**不是** lo.soc：兜底路径
     //（设备不自报 / 自报的名字无表时按镜像反推选表，facts §A4）产出的 lo.soc 与设备自报串
     // 永不相等，拿 lo.soc 当基准会让"预检能过、点开始必被拒"。本次会话未先 identify()（run 是
     // 公开 API，可单独调用）→ 无基准可比，**不阻断**，只落一条日志。
-    // 失败文案含段序号/段名/偏移长度；**不支持从中间续传**（引导链必须从第一段起，spec §7）。
-    // 表项带 extraFiles（9830）→ **直接失败且零写入**：参照流程要在段后另发 BL 包内文件，而本仓
-    // 本期没有该发送路径（见 eub_loadout.h 的字段注释）—— 只发段就报"全部已发送"是对未发生动作
-    // 的断言，故 fail-closed（连切段都不做，句柄也不打开）。
-    bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
+    // 失败文案含段序号/段名/偏移长度、额外文件的序号/名字/字节数；**不支持从中间续传**（引导链必须
+    // 从第一段起，spec §7）。
+    // 额外文件阶段（段全部发完后）：按 lo.extraFiles 的顺序逐个
+    // open(带重试) → 发送（**与分段同款的一帧**：hubble 的 extra 与分段共用 send_part_to_device，
+    // facts §C7）→（该表 responseSupport 且选项开启时）读一次回显 → close → 与段间同款的等待。
+    // extras[i] 与 lo.extraFiles[i] 一一对应（调用方用 loadNamedEntriesFromTar 按同一份名单从
+    // BL 包里取，见 eub_payload.h）。
+    // **与参照的有意分歧**（facts §B8 记录的两种做法）：hubble 在分段后**不重开**设备（同一句柄
+    // 连发，hubble.py:310-341）；本仓选"每文件重开"——与本仓分段阶段一致，且容忍段间重枚举
+    // （facts §B9）。设备身份核对仍只在第 1 段做，extra 阶段不重做。
+    // 进度沿用 "send" stage（percent 把 extra 计入分母：段发完不再直接到 100），detail 点明是额外文件。
+    // 证据等级**单源**（hubble，只有 9830 有该字段）：本仓无真机、无真样本，"9830 需要这两个文件"
+    // 是参照流程的要求，不是本仓的实测结论。
+    bool run(const EubLoadout &lo, const QByteArray &sboot,
+             const QList<QByteArray> &extras, QString *error);
 
 private:
     // 最多 m_opt.revolveAttempts 次；每次失败后（除最后一次）等待 m_opt.revolvePollMs。
@@ -85,6 +104,10 @@ private:
     void forwardNotes();
     void sleepMs(int ms) const;
     void report(const QString &stage, const QString &detail, int percent);
+    // 段后回显的 best-effort 读取（facts §C7/§C8）：只在该表 responseSupport 且选项开启时读一次，
+    // **读不到不判失败**（spec §7）。返回可直接拼进日志的备注（"；回显：…"/"；未读到回显（不判失败）"
+    // /"；回显读取失败（不判失败）：…"）。段与额外文件两个阶段共用（同一份行为，不再抄第二遍）。
+    QString echoNoteText(const EubLoadout &lo);
 
     IEubTransport &m_t;
     EubOptions     m_opt;

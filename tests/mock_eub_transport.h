@@ -19,6 +19,9 @@ public:
     QList<QByteArray> writes;      // 每次 writeBulk 追加（一帧一条）
     QStringList       calls;       // "open"/"close"/"info"/"write"/"read"
     int  openFailures = 0;         // 前 N 次 open 失败（0 = 一次就成功）
+    // 从第 N 次 open 调用**起**全部失败（0 基，按已发生的 open 数计；-1 = 不注入）。与 openFailures
+    // （从头数）互补：后者会被前面的段消耗掉，够不到"段发完了、后续阶段 open 才失败"这类时序。
+    int  failOpenFromOpenIndex = -1;
     // 注：与 writes.size() 比对，而 writes 只记**成功**的写 → 这个注入是**粘性**的：
     // 一旦命中，本次 mock 对象的后续所有 writeBulk 都会失败。需要"只失败一次"的用例请自行
     // 在失败后把 failWriteAt 复位为 -1（或改用只读断言）。
@@ -30,6 +33,11 @@ public:
 
     bool open(QString *error) override {
         calls << QStringLiteral("open");
+        const int openIndex = int(calls.count(QStringLiteral("open"))) - 1;   // 含本次
+        if (failOpenFromOpenIndex >= 0 && openIndex >= failOpenFromOpenIndex) {
+            if (error) *error = QStringLiteral("注入的打开失败（按序号）");
+            return false;
+        }
         if (openFailures > 0) {
             --openFailures;
             if (error) *error = QStringLiteral("注入的打开失败");

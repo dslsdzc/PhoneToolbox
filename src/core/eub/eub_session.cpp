@@ -5,6 +5,9 @@
 //   * 段间"重开设备 + 等待" → facts §B8①（shell 脚本路径：每段一次全新的 exynos-usbdl 调用 +
 //     sleep 1）；重枚举会失败（facts §B9）→ 本层用**次数**重试而不是照抄脚本的"碰运气"
 //   * 失败语义（含"不支持从中间续传"）→ spec §7
+//   * 段后的额外文件（9830 的 ldfw.img/tzsw.img）→ reference/hubble/hubble.py:329-341 +
+//     ExynosData/Exynos9830.json:3（facts §C7）——**证据等级单源**，且只是"参照流程的要求"，
+//     本仓无真机无真样本可验证
 // 本文件不碰 libusb、不构造帧、不切段 —— 只按表驱动 IEubTransport（依赖契约见 CMakeLists 的
 // test_eub_session 分支：该目标不含任何 libusb 源）。
 //
@@ -122,24 +125,48 @@ bool EubSession::identify(EubLoadout &out, QString *error)
     return true;
 }
 
+// 不带额外文件的形态：等价于 extras 传空表。带 extraFiles 的表项走这里会因数量不符 fail-closed
+//（见下个重载的入口校验）—— 这正是旧契约调用者（run(lo, sboot, &err)）该有的行为。
 bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *error)
+{
+    return run(lo, sboot, {}, error);
+}
+
+bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot,
+                     const QList<QByteArray> &extras, QString *error)
 {
     m_lastPercent = 0;          // 本次 run 的进度锚点：新操作从头计
 
-    // ⓪ fail-closed：带 extraFiles 的表项（9830）在参照流程里要求"分段发完后**另发**BL 包内文件"
-    //（hubble.py:329-341 + ExynosData/Exynos9830.json:3，facts §C7），而本仓本期**没有**该发送路径：
-    // 本函数只遍历 lo.segments，载荷入口 loadSbootBytes 也只找 sboot.bin/.lz4 —— "另发"从未发生。
-    // 照旧发完段再报"全部 N 段已发送：设备应已进入 Download 模式"，对 9830 用户就是**对未发生动作的
-    // 断言**，且设备被留在"分段已发、文件未发"的半完成状态。故在**切段之前**拒绝：一个字节都不写，
-    // 也不碰设备（句柄尚未打开）—— 宁可让用户看到"本仓本期做不到"，也不给错误的完成保证。
-    if (!lo.extraFiles.isEmpty()) {
-        setErr(error, QStringLiteral(
-            "该 SoC（%1）的参照流程需要在分段之后另发 %2 个文件（%3），"
-            "本仓本期未实现发送路径；为避免把设备留在半完成状态，拒绝执行（不发送任何字节）")
+    // ⓪ fail-closed（入口，**在切段与碰设备之前**）：带 extraFiles 的表项（9830）在参照流程里要求
+    //"分段发完后**另发**BL 包内的文件"（hubble.py:329-341 + ExynosData/Exynos9830.json:3，facts §C7，
+    // 证据等级**单源**），调用方必须把载荷按同一份名单备齐（见 eub_payload.h 的
+    // loadNamedEntriesFromTar）。数量不符 → 直接拒，一个字节都不写，也不碰设备（句柄尚未打开）。
+    // 放在切段之前是刻意的：若挪到"段都发完之后"再发现缺文件，设备会被留在"分段已发、文件未发"的
+    // 半完成状态 —— 宁可让用户看到"文件没备齐"，也不给错误的完成保证。
+    if (lo.extraFiles.size() != extras.size()) {
+        if (lo.extraFiles.isEmpty())
+            setErr(error, QStringLiteral(
+                "布局表 \"%1\" 没有额外文件（参照流程不要求段后另发），本次却提供了 %2 个载荷"
+                "—— 拒绝执行（不发送任何字节）").arg(lo.soc).arg(extras.size()));
+        else
+            setErr(error, QStringLiteral(
+                "该 SoC（%1）的参照流程要求在分段之后另发 %2 个文件（%3），本次提供了 %4 个"
+                "—— 拒绝执行（不发送任何字节）")
                           .arg(lo.soc)
                           .arg(lo.extraFiles.size())
-                          .arg(lo.extraFiles.join(QStringLiteral("、"))));
+                          .arg(lo.extraFiles.join(QStringLiteral("、")))
+                          .arg(extras.size()));
         return false;
+    }
+    // 空载荷的 extra 同样在这里拒掉：若拖到发送阶段，段已经发完了 —— 又是半完成状态。
+    // （loadNamedEntriesFromTar 不会产出空载荷；但 run 是公开 API，调用方可以直接传字节。）
+    for (int i = 0; i < extras.size(); ++i) {
+        if (extras[i].isEmpty()) {
+            setErr(error, QStringLiteral("额外文件 %1/共 %2「%3」的载荷是空的（0 字节）"
+                                         "—— 拒绝执行（不发送任何字节）")
+                              .arg(i + 1).arg(extras.size()).arg(lo.extraFiles[i]));
+            return false;
+        }
     }
 
     // ① 先切段：失败即中止，**一个字节都不写**，也**不碰设备**（句柄尚未打开）
@@ -158,6 +185,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
     }
 
     const int n = int(lo.segments.size());
+    const int m = int(lo.extraFiles.size());
+    // 进度分母把额外文件也算进去：否则段一发完进度就到 100%（用户以为完事了，extra 还在写）。
+    // m == 0 时与旧行为逐值相同（不带 extraFiles 的表项：total == n）。
+    const int total = n + m;
     for (int i = 0; i < n; ++i) {
         const EubSegment &seg = lo.segments[i];
 
@@ -229,33 +260,82 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
         }
 
         // ⑤ 回显 best-effort（facts §C7/§C8）：落日志，**读不到不判失败**（spec §7）
-        QString echoNote;
-        if (lo.responseSupport && m_opt.readResponse) {
-            QString readErr;
-            const QByteArray echo = m_t.readBulk(kReadEchoMaxBytes, kReadEchoTimeoutMs, &readErr);
-            if (echo.isEmpty())
-                echoNote = readErr.isEmpty()
-                    ? QStringLiteral("；未读到回显（不判失败）")
-                    : QStringLiteral("；回显读取失败（不判失败）：%1").arg(readErr);
-            else
-                echoNote = QStringLiteral("；回显：%1").arg(QString::fromUtf8(echo));
-        }
+        const QString echoNote = echoNoteText(lo);
 
         m_t.close();
         report(QStringLiteral("send"),
                QStringLiteral("第 %1/%2 段 \"%3\" 已发送（0x%4/0x%5）%6")
                    .arg(i + 1).arg(n).arg(seg.name)
                    .arg(seg.offset, 0, 16).arg(seg.length, 0, 16).arg(echoNote),
-               int((i + 1) * 100 / n));
+               int((i + 1) * 100 / total));
 
         // ⑥ 段间等待（facts §B8 的 sleep 1，等设备重枚举）；**最后一段后不睡**
         if (i + 1 < n)
             sleepMs(m_opt.segmentGapMs);
     }
 
-    report(QStringLiteral("done"),
-           QStringLiteral("全部 %1 段已发送：设备应已进入 Download 模式，请继续刷写").arg(n), 100);
+    // ⑦ 额外文件阶段（表项带 extraFiles 时；目前只有 9830）：参照流程要求在**段全部发完之后**按
+    // files_to_send 的顺序另发 BL 包内的文件（hubble.py:329-341，facts §C7；证据等级**单源**）。
+    // 每文件都是本仓分段阶段的同款一轮：open(带重试) → 发送（同 lo.style 的一帧）→（可选）读回显
+    // → close → 段间同款等待。
+    // **与参照的有意分歧**（facts §B8 记录的两种做法）：hubble 在分段后**不重开**设备（同一句柄连发）；
+    // 本仓选"每文件重开"——与自己的分段阶段一致，且容忍段间重枚举（facts §B9）。
+    // 设备身份核对不在这里重做（参照也不做；真要换设备，第 1 段的核对或 open 失败会先拦下）。
+    for (int j = 0; j < m; ++j) {
+        const QString &name = lo.extraFiles[j];
+        const QByteArray &data = extras[j];
+
+        if (!openWithRetry(&err)) {
+            forwardNotes();     // 与段阶段的 open 失败同因：传输层的现场说明是唯一线索
+            setErr(error, QStringLiteral("额外文件 %1/共 %2「%3」发送前打开设备失败：%4")
+                              .arg(j + 1).arg(m).arg(name).arg(err));
+            return false;       // open 失败不留句柄（IEubTransport 契约），无需 close
+        }
+        forwardNotes();
+
+        // 一段一帧的同一函数（facts §C7：hubble 的 extra 与分段共用 send_part_to_device）
+        if (!sendSegment(m_t, data, lo.style, &err)) {
+            m_t.close();        // 失败也要收干净句柄
+            setErr(error, QStringLiteral("额外文件 %1/共 %2「%3」（%4 字节）写入失败：%5")
+                              .arg(j + 1).arg(m).arg(name).arg(data.size()).arg(err));
+            return false;       // 失败即停、不续传（与段阶段同款语义）
+        }
+
+        const QString echoNote = echoNoteText(lo);
+        m_t.close();
+        report(QStringLiteral("send"),
+               QStringLiteral("额外文件 %1/共 %2「%3」（%4 字节）已发送%5")
+                   .arg(j + 1).arg(m).arg(name).arg(data.size()).arg(echoNote),
+               int((n + j + 1) * 100 / total));
+
+        // 与段间同款等待（最后一项后不睡）：等设备重枚举（facts §B8）
+        if (j + 1 < m)
+            sleepMs(m_opt.segmentGapMs);
+    }
+
+    if (m > 0)
+        report(QStringLiteral("done"),
+               QStringLiteral("全部 %1 段 + %2 个额外文件（%3）已发送：设备应已进入 Download 模式，"
+                              "请继续刷写")
+                   .arg(n).arg(m).arg(lo.extraFiles.join(QStringLiteral("、"))), 100);
+    else
+        report(QStringLiteral("done"),
+               QStringLiteral("全部 %1 段已发送：设备应已进入 Download 模式，请继续刷写").arg(n), 100);
     return true;
+}
+
+QString EubSession::echoNoteText(const EubLoadout &lo)
+{
+    // 回显 best-effort（facts §C7/§C8）：只在该表 responseSupport 且选项开启时读一次，**读不到不判
+    // 失败**（spec §7）—— 落日志即可。段与额外文件两阶段共用本函数（同一份行为，不再抄第二遍）。
+    if (!lo.responseSupport || !m_opt.readResponse)
+        return QString();
+    QString readErr;
+    const QByteArray echo = m_t.readBulk(kReadEchoMaxBytes, kReadEchoTimeoutMs, &readErr);
+    if (echo.isEmpty())
+        return readErr.isEmpty() ? QStringLiteral("；未读到回显（不判失败）")
+                                 : QStringLiteral("；回显读取失败（不判失败）：%1").arg(readErr);
+    return QStringLiteral("；回显：%1").arg(QString::fromUtf8(echo));
 }
 
 } // namespace eub

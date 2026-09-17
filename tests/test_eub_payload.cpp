@@ -249,6 +249,123 @@ private slots:
         QVERIFY(!eub::looksLikeLz4Frame(QByteArray::fromHex("00000000")));
         QVERIFY(eub::looksLikeLz4Frame(QByteArray::fromHex("04224d18" "00")));
     }
+
+    // ---- loadNamedEntriesFromTar：按名取多条（backlog Task 1，9830 的 extraFiles 用） ----
+    // 事实出处：hubble.py:152-185（BL tar 全条目解出后逐个尝试 lz4 解压）、Exynos9830.json:3
+    // （files_to_send = ldfw.img / tzsw.img）。本仓无真样本（facts §F1）：包与载荷都是合成的。
+
+    void namedEntriesAreExtractedInRequestedOrder()
+    {
+        // 两条目：一条裸文件、一条 .lz4（**解压后**比对 —— 不解压就会拿 .lz4 字节比，必红）。
+        const QByteArray ldfw = syntheticSboot();
+        const QByteArray tzsw = otherSyntheticSboot();
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry lz4e; lz4e.name = QStringLiteral("tzsw.img.lz4");
+        lz4e.data = imgcomp::lz4Compress(tzsw);
+        imgtar::TarEntry plainE; plainE.name = QStringLiteral("ldfw.img"); plainE.data = ldfw;
+        imgtar::TarEntry decoy; decoy.name = QStringLiteral("sboot.bin"); decoy.data = QByteArray(32, '\x5A');
+        entries << lz4e << plainE << decoy;   // 包内顺序与请求顺序**不同**：实现不能拿条目顺序顶替
+        const QString path = writeFile("BL_NAMED.tar.md5", imgtar::buildTar(entries));
+
+        QList<QByteArray> out;
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(path,
+                                              {QStringLiteral("ldfw.img"), QStringLiteral("tzsw.img")},
+                                              out, &err), qPrintable(err));
+        QCOMPARE(out.size(), 2);
+        QCOMPARE(out[0], ldfw);
+        QCOMPARE(out[1], tzsw);
+        QVERIFY2(err.isEmpty(), qPrintable(err));   // 成功路径不留上一次的错误文本（与 loadSbootBytes 同约定）
+
+        // 顺序 = **baseNames 顺序**（把请求反过来，结果也要反过来）：按包内条目顺序返回的实现二红
+        QList<QByteArray> rev;
+        QVERIFY2(eub::loadNamedEntriesFromTar(path,
+                                              {QStringLiteral("tzsw.img"), QStringLiteral("ldfw.img")},
+                                              rev, &err), qPrintable(err));
+        QCOMPARE(rev.size(), 2);
+        QCOMPARE(rev[0], tzsw);
+        QCOMPARE(rev[1], ldfw);
+    }
+
+    void namedEntryMissingFailsAndListsMissingNamePlusPackageContents()
+    {
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry a; a.name = QStringLiteral("ldfw.img");  a.data = syntheticSboot();
+        imgtar::TarEntry b; b.name = QStringLiteral("param.bin"); b.data = QByteArray(8, '\x11');
+        entries << a << b;
+
+        QList<QByteArray> out;
+        out << QByteArrayLiteral("stale");        // 失败路径必须清空（仓内约定），预置陈旧字节才有断言力
+        QString err;
+        QVERIFY(!eub::loadNamedEntriesFromTar(writeFile("BL_PART.tar", imgtar::buildTar(entries)),
+                                              {QStringLiteral("ldfw.img"), QStringLiteral("tzsw.img")},
+                                              out, &err));
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));   // 缺哪个要说清
+        QVERIFY2(err.contains(QStringLiteral("param.bin")), qPrintable(err));  // 包内有什么（可行动）
+        QVERIFY(out.isEmpty());
+    }
+
+    void namedEntryPrefersPlainOverLz4()
+    {
+        const QByteArray plain = syntheticSboot();
+        const QByteArray viaLz4 = otherSyntheticSboot();
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry lz4e;   lz4e.name = QStringLiteral("ldfw.img.lz4"); lz4e.data = imgcomp::lz4Compress(viaLz4);
+        imgtar::TarEntry plainE; plainE.name = QStringLiteral("ldfw.img");   plainE.data = plain;
+        entries << lz4e << plainE;               // .lz4 在前：条目顺序不能成为实现的依据
+
+        QList<QByteArray> out;
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(writeFile("BL_BOTH_NAMED.tar", imgtar::buildTar(entries)),
+                                              {QStringLiteral("ldfw.img")}, out, &err), qPrintable(err));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out[0], plain);
+    }
+
+    void namedEntryIsMatchedByBasenameCaseInsensitively()
+    {
+        const QByteArray img = otherSyntheticSboot();
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry e; e.name = QStringLiteral("firmware/LDFW.IMG"); e.data = img;
+        entries << e;
+
+        QList<QByteArray> out;
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(writeFile("BL_SUB_NAMED.tar", imgtar::buildTar(entries)),
+                                              {QStringLiteral("ldfw.img")}, out, &err), qPrintable(err));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out[0], img);
+    }
+
+    void namedEntryWithLz4ExtensionButPlainContentStaysVerbatim()
+    {
+        // 解压判据是**内容**（LZ4 frame 魔数），不是条目名后缀 —— 与 loadSbootBytes 同一规则。
+        // 这里走的是"先找 tzsw.img、没有才找 tzsw.img.lz4"的**后半条**名字：命中 .lz4 条目但内容是裸字节。
+        const QByteArray img = syntheticSboot();
+        QVERIFY(!eub::looksLikeLz4Frame(img));
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry e; e.name = QStringLiteral("tzsw.img.lz4"); e.data = img;
+        entries << e;
+
+        QList<QByteArray> out;
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(writeFile("BL_MISNAME_NAMED.tar", imgtar::buildTar(entries)),
+                                              {QStringLiteral("tzsw.img")}, out, &err), qPrintable(err));
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out[0], img);
+    }
+
+    void namedEntriesEmptyRequestSucceedsWithoutTouchingTheFile()
+    {
+        // 空请求 = 没有要求任何条目 → 成功、出参清空，**且不碰文件**：传一个不存在的路径，
+        // 若实现仍去 open/索引它，这里就会以"无法打开"判红。
+        QList<QByteArray> out;
+        out << QByteArrayLiteral("stale");
+        QString err;
+        QVERIFY2(eub::loadNamedEntriesFromTar(m_dir.filePath("does-not-exist.tar"), {}, out, &err),
+                 qPrintable(err));
+        QVERIFY(out.isEmpty());
+    }
 };
 
 QTEST_APPLESS_MAIN(TestEubPayload)

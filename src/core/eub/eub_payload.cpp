@@ -66,6 +66,60 @@ QString describe(const QString &fileName, const QString &entryInTar, bool compre
                       : QStringLiteral("%1（裸镜像）").arg(fileName);
 }
 
+// 在已打开的 tar 文件里定位并读出条目字节：上限守卫 → 定位读取 → 完整性核对。
+// sizeGuardReason 是超限文案里那句"为什么拒"（sboot 与 extra 各有各的说法），其余文案两处共用。
+bool readTarEntryBytes(QFile &f, const imgtar::TarIndexEntry &hit, const QString &fileName,
+                       const QString &sizeGuardReason, QByteArray &out, QString *error)
+{
+    if (hit.size > kMaxPayloadBytes)
+        return fail(error, QStringLiteral("%1 内的 %2 有 %3 字节 —— %4，疑为选错文件")
+                                .arg(fileName, hit.name).arg(hit.size).arg(sizeGuardReason));
+    if (!f.seek(qint64(hit.offset)))
+        return fail(error, QStringLiteral("读取 %1 内的 %2 失败（偏移 %3）")
+                                .arg(fileName, hit.name).arg(hit.offset));
+    out = f.read(qint64(hit.size));
+    if (quint64(out.size()) != hit.size)
+        return fail(error, QStringLiteral("%1 内的 %2 读取不完整（要 %3 字节，实得 %4）")
+                                .arg(fileName, hit.name).arg(hit.size).arg(out.size()));
+    return true;
+}
+
+// 按**内容**判据（LZ4 frame 魔数）解压 —— 不是按条目名后缀：名字骗人（"x.img.lz4" 里是裸字节）
+// 时按原样收下（用例钉住）。命中即解压，解压失败即失败。
+// imgcomp::lz4Decompress 失败时返回**空数组且无 error 出参**（lz4_wrapper.h:6）——
+// 空返回必须在这里判成失败，否则会以"零长度载荷"的名义静默通过。
+bool decompressIfLz4(QByteArray &bytes, const QString &path, bool *compressed, QString *error)
+{
+    if (compressed)
+        *compressed = false;
+    if (!looksLikeLz4Frame(bytes))
+        return true;
+    const QByteArray plain = imgcomp::lz4Decompress(bytes);
+    if (plain.isEmpty())
+        return fail(error, QStringLiteral("LZ4 解压失败（LZ4 frame 魔数在，但内容截断或损坏）：%1")
+                                .arg(path));
+    bytes = plain;
+    if (compressed)
+        *compressed = true;
+    return true;
+}
+
+// 在索引里按名找条目：先**同名**，没有才同名 + ".lz4"；basename 大小写不敏感；目录条目跳过。
+// 返回 nullptr = 两种名字都没有。
+const imgtar::TarIndexEntry *findEntryByName(const QList<imgtar::TarIndexEntry> &idx,
+                                             const QString &name)
+{
+    for (const QString &cand : {name, name + QStringLiteral(".lz4")}) {
+        for (const imgtar::TarIndexEntry &e : idx) {
+            if (e.isDir)
+                continue;
+            if (baseName(e.name).compare(cand, Qt::CaseInsensitive) == 0)
+                return &e;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 bool looksLikeLz4Frame(const QByteArray &data)
@@ -108,39 +162,15 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
             return fail(error, QStringLiteral("按 tar 解析 %1 失败：%2").arg(fileName, tarErr));
 
         // 条目选择：先 sboot.bin，没有才 sboot.bin.lz4；basename 大小写不敏感（spec §D8 的
-        // "按名找"，包内命名随工具/版本大小写不一）
-        const imgtar::TarIndexEntry *hit = nullptr;
-        for (const QString &want : {QStringLiteral("sboot.bin"), QStringLiteral("sboot.bin.lz4")}) {
-            for (const imgtar::TarIndexEntry &e : idx) {
-                if (e.isDir)
-                    continue;
-                if (baseName(e.name).compare(want, Qt::CaseInsensitive) == 0) {
-                    hit = &e;
-                    break;
-                }
-            }
-            if (hit)
-                break;
-        }
+        // "按名找"，包内命名随工具/版本大小写不一）——规则与 loadNamedEntriesFromTar 同一份实现
+        const imgtar::TarIndexEntry *hit = findEntryByName(idx, QStringLiteral("sboot.bin"));
         if (!hit)
             return fail(error, QStringLiteral("%1 里找不到 sboot.bin / sboot.bin.lz4（%2）")
                                     .arg(fileName, listingOf(idx)));
 
-        if (hit->size > kMaxPayloadBytes)
-            return fail(error, QStringLiteral("%1 内的 %2 有 %3 字节 —— sboot.bin 是 bootloader "
-                                              "镜像，疑为选错文件")
-                                    .arg(fileName, hit->name)
-                                    .arg(hit->size));
-        if (!f.seek(qint64(hit->offset)))
-            return fail(error, QStringLiteral("读取 %1 内的 %2 失败（偏移 %3）")
-                                    .arg(fileName, hit->name)
-                                    .arg(hit->offset));
-        bytes = f.read(qint64(hit->size));
-        if (quint64(bytes.size()) != hit->size)
-            return fail(error, QStringLiteral("%1 内的 %2 读取不完整（要 %3 字节，实得 %4）")
-                                    .arg(fileName, hit->name)
-                                    .arg(hit->size)
-                                    .arg(bytes.size()));
+        if (!readTarEntryBytes(f, *hit, fileName, QStringLiteral("sboot.bin 是 bootloader 镜像"),
+                               bytes, error))
+            return false;
         entryInTar = hit->name;
     } else {
         // QFile::size() 在异常路径可返回 -1：夹取后再进文案，否则会印出 18446744073709551615
@@ -163,18 +193,10 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
                                     .arg(bytes.size()));
     }
 
-    // 解压判据是**内容**（LZ4 frame 魔数），不是文件名后缀：命中即解压，解压失败即失败。
-    // imgcomp::lz4Decompress 失败时返回**空数组且无 error 出参**（lz4_wrapper.h:6）——
-    // 空返回必须在这里判成失败，否则会以"零长度载荷"的名义静默通过。
+    // 解压判据是**内容**（LZ4 frame 魔数），不是文件名后缀：命中即解压，解压失败即失败（见助手）
     bool compressed = false;
-    if (looksLikeLz4Frame(bytes)) {
-        const QByteArray plain = imgcomp::lz4Decompress(bytes);
-        if (plain.isEmpty())
-            return fail(error, QStringLiteral("LZ4 解压失败（LZ4 frame 魔数在，但内容截断或损坏）：%1")
-                                    .arg(path));
-        bytes = plain;
-        compressed = true;
-    }
+    if (!decompressIfLz4(bytes, path, &compressed, error))
+        return false;
 
     // 空载荷无意义（空文件、0 字节条目、解压出 0 字节都在此收口）
     if (bytes.isEmpty())
@@ -188,6 +210,60 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
         source->wasCompressed = compressed;
     }
     out = bytes;
+    return true;
+}
+
+bool loadNamedEntriesFromTar(const QString &tarPath, const QStringList &baseNames,
+                             QList<QByteArray> &out, QString *error)
+{
+    out.clear();                        // 失败路径不留陈旧字节（头文件契约）
+    if (error)
+        error->clear();
+    // 空请求 = 没有要求任何条目：直接成功且**不读文件**（调用方传空表时不该被"文件坏"绊住）。
+    if (baseNames.isEmpty())
+        return true;
+
+    QFile f(tarPath);
+    if (!f.open(QIODevice::ReadOnly))
+        return fail(error, QStringLiteral("无法打开文件：%1").arg(tarPath));
+    const QString fileName = QFileInfo(tarPath).fileName();
+
+    QList<imgtar::TarIndexEntry> idx;
+    QString tarErr;
+    // 与 loadSbootBytes 同款：按 tar 解析失败就**直接报错、不回退**（以 .tar 名义给出的文件，
+    // 其内容完整性由索引层裁定）。
+    if (!imgtar::indexTarStream(tarPath, idx, nullptr, &tarErr))
+        return fail(error, QStringLiteral("按 tar 解析 %1 失败：%2").arg(fileName, tarErr));
+
+    // 逐名取条目；**缺失的名字先累加、最后一次性报出**（报第一个就停会让用户来回试，
+    // 9830 恰好要两个文件）。已取到的字节先进局部表：任一环节失败时 out 保持为空（fail-closed）。
+    QStringList missing;
+    QList<QByteArray> found;
+    for (const QString &want : baseNames) {
+        const imgtar::TarIndexEntry *hit = findEntryByName(idx, want);
+        if (!hit) {
+            missing << want;
+            continue;
+        }
+        QByteArray bytes;
+        if (!readTarEntryBytes(f, *hit, fileName,
+                               QStringLiteral("超出本函数单次读入上限"), bytes, error))
+            return false;
+        bool compressed = false;
+        if (!decompressIfLz4(bytes, tarPath, &compressed, error))
+            return false;
+        // 空载荷无意义（0 字节条目、解压出 0 字节都在此收口）：发一个空文件既无意义、
+        // sendSegment 也会以"空载荷"拒发。
+        if (bytes.isEmpty())
+            return fail(error, QStringLiteral("%1 内的 %2 是空条目（0 字节）")
+                                    .arg(fileName, hit->name));
+        found << bytes;
+    }
+    if (!missing.isEmpty())
+        return fail(error, QStringLiteral("%1 里找不到 %2（%3）")
+                                .arg(fileName, missing.join(QStringLiteral("、")), listingOf(idx)));
+
+    out = found;
     return true;
 }
 
