@@ -4042,9 +4042,17 @@ constexpr quint32 kXEmmcPartUser = 0x8;   // ST:16-49（user 区）
                                  xWritePacketLength, nullptr, error))
                 return false;
         } else {
-            // T12 换成： if (!xmlWritePartition(xml, e.partition, image, nullptr, error)) return false;
-            if (error) *error = QStringLiteral("XML 代：写入在 Task 12 接线（当前明确拒绝）");
-            return false;
+            // ⚠️ **实施期更正（T12，控制方核对上游）**：原稿写 `xmlWritePartition(xml, e.partition, image, …)` 有**两处错** ——
+            //   ① XML 的 `<partition>` 是**存储描述符**（"EMMC-USER" 一类，`storage.py:216-241`），**不是分区名**；
+            //   ② **漏了写地址** —— 上游 `addr = partition.sector × pagesize`（`mtk_da_handler.py:544-548`、`v6.py:1095-1097`）。
+            //   照原稿写会落到**偏移 0 = 分区表区**（真机上等于毁表）。已按 first_lba 契约传 `partAddr`（= `mtkgpt::offsetBytes(p, sectorSize)`）。
+            const auto it = partAddr.constFind(e.partition);
+            if (it == partAddr.constEnd()) {
+                if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
+                return false;
+            }
+            if (!xmlWritePartition(xml, QStringLiteral("EMMC-USER"), image, it.value(), nullptr, error))
+                return false;
         }
         written += quint64(image.size());
         if (progress)
