@@ -65,7 +65,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] XML 帧层: 文本帧 (str 长度 = 字符数+1 且带 NUL) + OK / OK@0x<hexlen> / OK!EOT 保活 + command_result 解析 + DA 日志帧**跳过** (有上限) + `ERR!` 一律判失败 (不复刻上游把它当成功)
 [√] XML 引导: 等 **CMD:START** 文本消息 + setup_env (`initialize_dram=YES`, **不发 EMI**) / setup_hw_init / SET-HOST-INFO; 三步各自点名失败
 [√] XML 写读: WRITE-FLASH (FileSysOp key=FILE-SIZE → ackValue(length) ×2 → 逐包 ack/数据) / READ-FLASH (**逐帧 ack** 的 download_raw 形状, 独立于单次尾 ack 分支) / REBOOT 收尾
-[ ] XML 链整合 (T12, 进行中) + 通道文案/文档/终验 (T13)
+[ ] XML 链整合 (进行中)
+[ ] 刷机通道文案 (说明走了哪条链) + 文档收口 (进行中)
 [√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储暂只 eMMC user (0x1/0x8)
 
 --- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---
@@ -335,20 +336,20 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 三星 Heimdall 集成 (Odin 协议开源实现) —— Phase C 代码就绪: PIT 解析/计划层/协议/会话/通道/UI, mock 验证; **真机验证待持机人**
 [ ] 工作站化 (QDockWidget 可停靠布局, 不加菜单栏)
 
-排队中 (特殊模式; 每项纪律: 事实侦察(带出处) → spec → 用户评审 → 计划 → 执行)
+排队中 (特殊模式)
 ------------------------------------------------------------
-[ ] 展锐 EUB 紧急引导模式 (仓库**零实现**; 需先侦察进入方式/USB 描述符/是否复用 HDLC-BSL)
-[ ] 展锐 .pac 内 FDL 自动提取 (当前 FDL1/FDL2 需用户手选 —— 见"展锐 ResearchDownload"段的诚实边界)
-[ ] 高通 9006 / crashdump 类 (诊断/转储端口, **非刷写**; 需与 9008 的区分判据)
+[ ] 展锐 EUB 紧急引导模式 (仓库**零实现**)
+[ ] 展锐 .pac 内 FDL 自动提取 (当前 FDL1/FDL2 需用户手选)
+[ ] 高通 9006 / crashdump 类 (诊断/转储端口, **非刷写**)
 [ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
-[ ] 三星非 Odin 变体 (⚠️ 变体未指明: 先侦察"三星有哪些非 Odin 特殊流程" → 列候选给用户挑)
-[ ] 华为 HiSuite 升级模式 (参照 hisuite-proxy 已在 reference/; Kirin VCOM 强刷链**已交付**, 这是另一条通道)
+[ ] 三星非 Odin 变体 (具体变体未定, 需先列出候选)
+[ ] 华为 HiSuite 升级模式 (与已交付的 Kirin VCOM 强刷链是两条不同通道)
 [ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (当前为**明确拒绝**, 见"MTK 华为后续")
-[ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属**诊断**非刷写, 契合现有「维修诊断」分类)
+[ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」)
 [ ] 高通 Diag / DM 端口 (QXDM/QPST 诊断与日志; 属诊断非刷写)
 
-已确认**不做** (记录以免重复提议)
-------------------------------------------------------------
-[ ] BROM 漏洞利用 (kamakiri / carbonara) —— 超出维修用途且碰法律边线
-[ ] 熔丝类 (QFuse/QFuse2)、DA 二进制提取/生成、签名绕过 —— 同上
-[ ] MTK `DOWNLOAD`/`UPLOAD`/`FORMAT_PARTITION` —— 上游仅枚举定义、零调用 (无路径可参照)
+明确不做
+--------
+[ ] BROM 漏洞利用 (kamakiri / carbonara) —— 超出维修用途, 不做
+[ ] 熔丝类 (QFuse/QFuse2)、DA 二进制提取/生成、签名绕过 —— 不做
+[ ] MTK DOWNLOAD / UPLOAD / FORMAT_PARTITION —— 上游零调用, 不做
