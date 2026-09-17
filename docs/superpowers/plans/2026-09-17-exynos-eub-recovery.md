@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> ⚠️ **历史快照**：本计划已执行完毕（Phase E 于 2026-09-18 交付并终审通过）。文中数处"本线**无真样本**"的表述
+> 是**当时的**事实；2026-09-18 之后已下载 5 个官方 BL 包（`reference/eub-samples/`，facts §H）并由 gated 用例实跑核对 ——
+> 读到时请以 `docs/superpowers/specs/exynos-eub-facts.md` §H 为准。**正文按当时原样保留，不回改**（快照的意义在于可追溯）。
+
 **Goal:** 让 PhoneToolbox 能认出处于 EUB（Exynos USB Boot）态的三星设备，用用户自备的原厂 `sboot.bin`
 按公开的每 SoC 布局表分段注入设备 RAM，把设备引导进 Download 模式，随后交给已交付的 Odin 链刷写。
 
