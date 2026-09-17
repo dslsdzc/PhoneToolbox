@@ -2,6 +2,8 @@
 #include "flash_plan_dialog.h"          // Phase B Task 8：EDL 刷写计划预览
 #include "samsung_plan_dialog.h"        // Phase C Task 9：三星 Odin 刷写计划预览
 #include "mtk_plan_dialog.h"            // Phase D1 Task 11：MTK BROM 刷写计划预览
+#include "eub_recovery_dialog.h"        // Phase E Task 7：EUB 救援（Exynos USB Boot）
+#include "core/eub/eub_libusb_transport.h"  // 真机传输在本面板构造，对话框只认抽象（IEubTransport）
 #include "core/filename_parser.h"
 #include "core/mtk_flash_plan.h"        // D1 Task 11：MTK 入口的计划构建（scatter 参照表 + 镜像）
 #include "core/restart_tool.h"
@@ -263,6 +265,11 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         modeStr = "展锐"; break;
     case DeviceDetector::MODE_SAMSUNG_ODIN:
         modeStr = "三星 (Odin)"; break;
+    // Phase E Task 7：本 switch 是**本地副本**（不复用 DeviceDetector::getModeDisplayName，
+    // device_detector.cpp:752-769）—— E2 只给那边加了 EUB 分支，这里不加就会让 EUB 设备顶着
+    // 「模式: 未知」却点「EUB 救援…」。文案与 device_detector.cpp:768 保持一致。
+    case DeviceDetector::MODE_SAMSUNG_EUB:
+        modeStr = "三星 EUB (Exynos)"; break;
     default:
         modeStr = "未知"; break;
     }
@@ -357,17 +364,28 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     // 华为/展锐为整包通道，三星侧分区来自包内 PIT（刷写入口里弹预览）；
     // 跳过 onRefreshPartitions，避免对协议设备(如 usb-1-2)发 ADB 查询。
     // 「刷入」按所选设备模式走协议通道文件参数对话框。
+    // Phase E Task 7：三星 EUB 也归这一档（分区列表同样无意义）—— 但「刷入」在 EUB 上不是刷写，
+    // 而是「EUB 救援…」入口（把设备引导进 Download 模式）。
     if (m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM ||
         m_deviceInfo.mode == DeviceDetector::MODE_HUAWEI_USB_UPDATE ||
         m_deviceInfo.mode == DeviceDetector::MODE_SPD ||
-        m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_ODIN) {
+        m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_ODIN ||
+        m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_EUB) {
         m_partitionList->clear();
         m_partitions.clear();
         m_flashBtn->setEnabled(true);
-        m_flashBtn->setToolTip(m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM
-            ? QStringLiteral("协议通道按计划刷写：DA + 镜像 → 计划预览 → 按设备代际自动选择 "
-                             "LEGACY / XFLASH / XML 链（三代均已实现，实际链路见日志「代际判定」）")
-            : QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
+        if (m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_EUB) {
+            m_flashBtn->setText(QStringLiteral("EUB 救援…"));
+            m_flashBtn->setToolTip(QStringLiteral(
+                "EUB 救援：用你自备的原厂 BL（sboot.bin / BL_*.tar.md5）按 SoC 布局表分段注入设备 RAM，"
+                "把设备引导进 Download 模式；本流程只发 RAM 镜像、不写存储，完成后请继续用三星刷写"));
+        } else {
+            m_flashBtn->setText(QStringLiteral("刷入"));
+            m_flashBtn->setToolTip(m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM
+                ? QStringLiteral("协议通道按计划刷写：DA + 镜像 → 计划预览 → 按设备代际自动选择 "
+                                 "LEGACY / XFLASH / XML 链（三代均已实现，实际链路见日志「代际判定」）")
+                : QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
+        }
         return;
     }
 
@@ -675,6 +693,16 @@ void FlashPanel::onFlashClicked()
     // 整包按计划刷写走专用入口「EDL 刷写计划…」（onEdlPlanFlash），与本按钮互不干扰。
     const DeviceDetector::DeviceMode deviceMode =
         static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode);
+    // Phase E Task 7：EUB 不是刷写模式 —— 本按钮在 EUB 设备上是「EUB 救援…」入口（先把设备引导进
+    // Download 模式，之后才谈得上刷写）；不进入通道分派，也不走分区列表路径（对本模式无意义）。
+    // 真机传输**在这里构造**（对话框只认 IEubTransport 抽象，见 eub_recovery_dialog.h 头注释）。
+    if (deviceMode == DeviceDetector::MODE_SAMSUNG_EUB) {
+        eub::LibusbEubTransport transport;
+        EubRecoveryDialog dlg(transport, this);
+        dlg.setLogSink([this](const QString &m, bool isErr) { emit outputMessage(m, isErr); });
+        dlg.exec();
+        return;
+    }
     const QString channel = FlashTool::flashChannelForMode(deviceMode);
     if (FlashTool::isPackageChannelMode(deviceMode)) {
         const QString deviceId = m_deviceInfo.serialNumber;
