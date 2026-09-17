@@ -338,11 +338,11 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 
 排队中 (特殊模式)
 ------------------------------------------------------------
-[ ] 展锐 EUB 紧急引导模式 (仓库**零实现**)
+[ ] 三星 Exynos EUB 救援链 (EUB → Download 模式; 载荷=用户自备原厂 BL, 内置 8 个 SoC 布局表; 侦察报告+设计 spec 已出, 待评审)
 [ ] 展锐 .pac 内 FDL 自动提取 (当前 FDL1/FDL2 需用户手选)
 [ ] 高通 9006 / crashdump 类 (诊断/转储端口, **非刷写**)
 [ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
-[ ] 三星非 Odin 变体 (具体变体未定, 需先列出候选)
+[ ] 三星非 Odin 变体 (EUB 已单列; 其余候选待列)
 [ ] 华为 HiSuite 升级模式 (与已交付的 Kirin VCOM 强刷链是两条不同通道)
 [ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (现为拒绝并说明原因)
 [ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」)
