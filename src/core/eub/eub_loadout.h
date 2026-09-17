@@ -34,7 +34,10 @@ struct EubLoadout {
     QByteArray sbootSha1;      // 参照所用 sboot 修订的 sha1（hex 文本；无记录则为空）
     EubFrameStyle style;       // 帧头/尾风格（facts §B4/§B5）
     QList<EubSegment> segments;// 按序发送；重发段照列（facts §C5）
-    QStringList extraFiles;    // 段之后另发的 BL 包内文件（9830：ldfw.img/tzsw.img，facts §C7）
+    // 参照流程要求"段之后另发"的 BL 包内文件（9830：ldfw.img/tzsw.img，facts §C7；发送逻辑见
+    // hubble.py:329-341）。**本仓本期只记录该要求、没有发送路径** —— run 会据此 fail-closed
+    // （见 eub_session.cpp 的守卫），UI 也据此禁用「开始救援」。填过它的表项不可被 run 执行。
+    QStringList extraFiles;
     bool responseSupport = false;  // 设备会回显（facts §C7/§C8）
 };
 

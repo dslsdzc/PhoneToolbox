@@ -126,6 +126,22 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
 {
     m_lastPercent = 0;          // 本次 run 的进度锚点：新操作从头计
 
+    // ⓪ fail-closed：带 extraFiles 的表项（9830）在参照流程里要求"分段发完后**另发**BL 包内文件"
+    //（hubble.py:329-341 + ExynosData/Exynos9830.json:3，facts §C7），而本仓本期**没有**该发送路径：
+    // 本函数只遍历 lo.segments，载荷入口 loadSbootBytes 也只找 sboot.bin/.lz4 —— "另发"从未发生。
+    // 照旧发完段再报"全部 N 段已发送：设备应已进入 Download 模式"，对 9830 用户就是**对未发生动作的
+    // 断言**，且设备被留在"分段已发、文件未发"的半完成状态。故在**切段之前**拒绝：一个字节都不写，
+    // 也不碰设备（句柄尚未打开）—— 宁可让用户看到"本仓本期做不到"，也不给错误的完成保证。
+    if (!lo.extraFiles.isEmpty()) {
+        setErr(error, QStringLiteral(
+            "该 SoC（%1）的参照流程需要在分段之后另发 %2 个文件（%3），"
+            "本仓本期未实现发送路径；为避免把设备留在半完成状态，拒绝执行（不发送任何字节）")
+                          .arg(lo.soc)
+                          .arg(lo.extraFiles.size())
+                          .arg(lo.extraFiles.join(QStringLiteral("、"))));
+        return false;
+    }
+
     // ① 先切段：失败即中止，**一个字节都不写**，也**不碰设备**（句柄尚未打开）
     QList<QPair<QString, QByteArray>> parts;
     QString err;
@@ -147,6 +163,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
 
         // ② 每段都重新打开（段间设备可能重枚举，facts §B8/§B9）；失败按次数重试
         if (!openWithRetry(&err)) {
+            // open 失败的现场说明同样要转（与 identify 的打开失败分支同因）：传输层的 close
+            // 不清 notes，真机上"回退了固定端点"这类线索常常正是失败的上下文 —— 不打日志就只剩一句
+            // "设备在 N 次尝试内未出现"，用户无从判断是没插好还是端点不对。
+            forwardNotes();
             setErr(error, QStringLiteral("第 %1 段 \"%2\" 发送前打开设备失败：%3")
                               .arg(i + 1).arg(seg.name).arg(err));
             return false;       // open 失败不留句柄（IEubTransport 契约），无需 close

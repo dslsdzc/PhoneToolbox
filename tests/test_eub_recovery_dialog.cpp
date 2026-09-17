@@ -130,6 +130,8 @@ private slots:
     void segmentTableListsExtraFilesAndResponseSupport()
     {
         // facts §C7：9830 在 sboot 各段之后还要另发 BL 包内的 ldfw.img / tzsw.img，且设备会回显。
+        // 终审 I1：段表**不得**把这些文件说成"本工具会发" —— 参照流程要求另发，而本仓本期没有该
+        // 发送路径（run 会据此 fail-closed）。文案必须把"参照要求"与"本仓不做"分开写。
         eub::EubLoadout lo; QString err;
         QVERIFY(eub::eubLoadoutFor(QStringLiteral("Exynos9830"), lo, &err));
         QVERIFY(lo.responseSupport);            // 前置：该表确实带这两项（否则下面的断言无意义）
@@ -138,6 +140,9 @@ private slots:
         QVERIFY(text.contains(QStringLiteral("ldfw.img")));
         QVERIFY(text.contains(QStringLiteral("tzsw.img")));
         QVERIFY(text.contains(QStringLiteral("回显")));
+        QVERIFY2(text.contains(QStringLiteral("本仓本期不发送")), qPrintable(text));
+        // 反向：旧口径"各段发完后另发"（= 本工具会发）必须消失 —— 只补新句、留旧句同样误导
+        QVERIFY2(!text.contains(QStringLiteral("各段发完后另发")), qPrintable(text));
 
         // 反向：9610 的 responseSupport=false 且无 extraFiles → 段表不得凭空说"会回显"。
         eub::EubLoadout plain;
@@ -192,8 +197,8 @@ private slots:
         // "读 m_sboot → sha1Hex → 填标签"这条链才可能出现这个值。
         const QString filePrefix = eub::sha1Hex(sboot).left(8);
         QVERIFY2(dlg.statusText().contains(filePrefix), qPrintable(dlg.statusText()));
-        // 9610 表**未记录** sboot 修订（hubble 系 JSON 无修订字段，只有 8890/8895/7580 记了
-        // sha1；见 eub_loadout.cpp:39/68/97）→ spec §D6 要求此时明说"该表未记录"，不得假报一致。
+        // 9610 表**未记录** sboot 修订（hubble 系 JSON 无修订字段；终审 I2 后只有 8890/8895 记了
+        // sha1，7580 也留空了）→ spec §D6 要求此时明说"该表未记录"，不得假报一致。
         QVERIFY(dlg.loadout().sbootSha1.isEmpty());            // 前置：本表确实没有修订记录
         QVERIFY2(dlg.statusText().contains(QStringLiteral("未记录")), qPrintable(dlg.statusText()));
         // 反向断言要**精确到 sha1 那句**：设备行里的证据等级 "双源一致" 本身含 "一致" 二字，
@@ -237,6 +242,51 @@ private slots:
         const QString text = EubRecoveryDialog::sha1CompareText(lo.sbootSha1, lo.sbootSha1);
         QVERIFY2(text.contains(QStringLiteral("一致")), qPrintable(text));
         QVERIFY(!text.contains(QStringLiteral("不一致")));
+    }
+
+    void prepareShowsUnrecordedRevisionWhenTableHasNoSha1()
+    {
+        // 终审 I2：7580 的 sbootSha1 已置空（唯一记了修订的那一源正被本表否决，见 eub_loadout.cpp）
+        // → 必须走"该表未记录固件修订"分支（明说不知道），**不得**报成一致 —— 报一致会让用户
+        // 以为"我的固件与该表所用修订相同"（方向相反的保证）。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos7580");
+        EubRecoveryDialog dlg(mock, nullptr);
+        QString err;
+        const QByteArray sboot = syntheticSboot();          // 7580 表最大段到 0x10B000，够用
+        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos7580"));
+        QVERIFY(dlg.loadout().sbootSha1.isEmpty());         // 前置：本表确实没有修订记录
+        QVERIFY2(dlg.statusText().contains(QStringLiteral("未记录")), qPrintable(dlg.statusText()));
+        QVERIFY2(!dlg.statusText().contains(QStringLiteral("sha1 一致")), qPrintable(dlg.statusText()));
+        // 仍要给出用户文件自己的前 8 位（不给就无从人工比对）
+        QVERIFY2(dlg.statusText().contains(eub::sha1Hex(sboot).left(8)), qPrintable(dlg.statusText()));
+    }
+
+    void prepareDisablesStartForSoCWithUnsupportedExtraFiles()
+    {
+        // 终审 I1：9830 的参照流程要在分段后另发 ldfw.img/tzsw.img，而本仓本期**没有**该发送路径
+        //（EubSession::run 会据此 fail-closed）—— 用户不该点了"开始"才发现：预检时就要讲明并关闸，
+        // 且**勾选确认不能解除**（勾了也只得到一次必然失败的发送）。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos9830");
+        EubRecoveryDialog dlg(mock, nullptr);
+        QStringList sink;
+        dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
+        QCheckBox *box = dlg.findChild<QCheckBox *>(QStringLiteral("eubConfirmCheck"));
+        QVERIFY(box != nullptr);
+        box->setChecked(true);                  // 先勾选：下面的断言证明它救不活这个载荷
+        QString err;
+        const QByteArray sboot = syntheticSboot(0x400000);   // 9830 表最大段到 0x39B000
+        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9830"));   // 表照常展示（可人工核对偏移）
+        QVERIFY(!dlg.loadout().extraFiles.isEmpty());
+        // 两个口径各钉一次：真实按钮控件 + 状态文案（用户看得见的那行）
+        QVERIFY2(!dlg.isStartEnabledForTest(), "9830（extraFiles）下开始按钮必须不可用");
+        QVERIFY2(dlg.statusText().contains(QStringLiteral("不发送")), qPrintable(dlg.statusText()));
+        QVERIFY2(dlg.statusText().contains(QStringLiteral("ldfw.img")), qPrintable(dlg.statusText()));
+        QVERIFY2(sink.join(QLatin1Char('\n')).contains(QStringLiteral("本仓本期不发送")),
+                 qPrintable(sink.join(QStringLiteral(" | "))));
     }
 
     void prepareRejectsUnsupportedSoc()

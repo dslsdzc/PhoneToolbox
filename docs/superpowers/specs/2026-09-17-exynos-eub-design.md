@@ -205,7 +205,8 @@ struct EubLoadout {
     QByteArray sbootSha1;        // 参照的原始 sboot 修订（可空）
     EubFrameStyle style;         // §D2
     QList<EubSegment> segments;  // 按序发送；repeat 段照列
-    QStringList extraFiles;      // 9830: {"ldfw.img","tzsw.img"}（§C7）
+    QStringList extraFiles;      // 9830: {"ldfw.img","tzsw.img"}（§C7）—— **只记录参照要求**：
+                                 // 本仓本期无发送路径，run 据此 fail-closed（§7）
     bool responseSupport = false;// 是否读回显（§C7/§C8）
 };
 
@@ -227,7 +228,7 @@ bool splitSboot(const QByteArray &sboot, const EubLoadout &lo,
 | **Exynos9610** | fwbl1 `0/0x2000` → epbl `0x2000/0x13000` → bl2 `0x15000/0x2F000` → **fwbl1（重发）** `0/0x2000` → u-boot `0x5A000/0x180000` → el3_mon `0x1DA000/0x40000` | Dnw | **双源一致**（`hubble/…/Exynos9610.json:5-34` ↔ `exynos9610…/split_bootloader_a505.sh:1-6` + `dltool/dltool.c:311-319`；后者多一段 part6 `0x21A000/0x101000`，**不采纳**，注释记录） |
 | **Exynos9810** | fwbl1 `0/0x2000` → bl31 `0x2000/0x13000` → bl2 `0x15000/0x4F000` → **fwbl1（重发）** `0/0x2000` → u-boot `0x7D000/0x180000` → el3_mon `0x1FD000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9810.json`） |
 | **Exynos9820** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x52000` → u-boot `0xA4000/0x180000` → el3_mon `0x224000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9820.json`）；`responseSupport=true` |
-| **Exynos9830** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x6C000` → lk `0xDB000/0x280000` → el3_mon `0x35B000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9830.json`）+ 论坛帖对 `el3_mon 0x35B000` 的部分佐证；`responseSupport=true`；`extraFiles={"ldfw.img","tzsw.img"}` |
+| **Exynos9830** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x6C000` → lk `0xDB000/0x280000` → el3_mon `0x35B000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9830.json`）+ 论坛帖对 `el3_mon 0x35B000` 的部分佐证；`responseSupport=true`；`extraFiles={"ldfw.img","tzsw.img"}`（只记录参照要求，**本仓本期不发送**，见 §7） |
 
 > **表的可核对性**：`sourceNote` 必须能落到 `reference/` 里的 `file:line`；测试对每一行的每个数
 > 做硬断言（改表必改测试，且测试里写明出处）。
@@ -252,6 +253,7 @@ public:
     // 打开 → 读自述 → 查表 → **关闭**（不持有句柄：设备可能瞬态消失，facts §A6）
     bool identify(EubLoadout &out, QString *error);
     // 切段（失败即中止、不写任何字节）→ 逐段 [open(带重试) → 发送 →（可选）读回显 → close]
+    // 表项带 extraFiles（9830）→ **直接失败、零写入**：本期无"段后另发"路径（§7）
     bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
 };
 ```
@@ -299,7 +301,8 @@ public:
 | 某段写入失败 | 立即停止，报"第 N 段 `<名>`（`offset`/`length`）写入失败：<err>"；**不支持从中间续传**（引导链必须从第一段起，文案说明"请重新上电/重新进入 EUB 后从头再试"） |
 | 段后设备未重现 | `waitForDevice` 超时 → 失败，文案含"设备可能已进入 Download 模式（请检查）或需要重新进入 EUB" |
 | 读回显失败/为空 | **不判失败**（best-effort，只落日志） |
-| 中途用户取消 | **本期不做**（T6 定案）：本流程只发 RAM 镜像、不发收尾命令，中途取消没有需要清理的设备侧状态；用户直接关闭进度窗口即可。若日后要做，入口是 `EubOptions` 加 `std::function<bool()> cancelled` 并在段间检查 |
+| 表项带 `extraFiles`（9830） | **直接失败、零写入**（终审 I1 定案）：参照流程要在分段发完后另发 BL 包内文件（`hubble.py:329-341` / `ExynosData/Exynos9830.json:3`），本仓本期**没有该发送路径**（`run` 只遍历 `segments`，载荷入口只找 sboot）—— 只发段就报"全部已发送"是对未发生动作的断言。`EubSession::run` 在切段前拒绝（不碰设备），对话框预检时就禁用「开始救援」并说明"本仓本期不发送" |
+| 中途用户取消 | **本期不做**（T6 定案）：本流程只发 RAM 镜像、不发收尾命令，中途取消没有需要清理的设备侧状态。**但"关窗即可"不成立**（终审 M-b 更正）：发送期间进度窗**不可交互**（`QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents)`，`eub_recovery_dialog.cpp`）—— 窗口内按钮的点击不被投递；identify 重试（默认 20×500ms ≈ 9.5s）与段间等待（`sleepMs`，每段 1s）期间**根本不跑事件循环**，窗口完全无响应。**强制结束进程无害**：只发 RAM 镜像、不发收尾命令，设备侧没有待清理状态（重新进 EUB 从头再来即可）。若日后要可取消，入口是 `EubOptions` 加 `std::function<bool()> cancelled` 并在段间检查 |
 
 ---
 

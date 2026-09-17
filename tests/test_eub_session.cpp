@@ -87,6 +87,15 @@ private:
         if (!eub::eubLoadoutFor(QStringLiteral("Exynos9830"), lo, &err)) qFatal("查表失败");
         return lo;
     }
+    // 9830 原表带 extraFiles（ldfw.img/tzsw.img）→ run 会 fail-closed 拒绝执行（见
+    // extraFilesTableIsRejectedWithoutTouchingDevice）。回显接线与 extraFiles 无关，故本助手把该
+    // 字段清掉：那个槽钉的是"回显读在写之后、读几次"，不是 9830 整表的可执行性。
+    static eub::EubLoadout runnable9830ForEchoTest()
+    {
+        eub::EubLoadout lo = loadout9830();
+        lo.extraFiles.clear();
+        return lo;
+    }
     static eub::EubDeviceInfo info9610()
     {
         eub::EubDeviceInfo i;
@@ -325,7 +334,7 @@ private slots:
         }
         // 9830：responseSupport = true → 每段读一次，且**读在写之后**（序列助手钉住 read 的位置）
         {
-            const eub::EubLoadout lo = loadout9830();
+            const eub::EubLoadout lo = runnable9830ForEchoTest();
             eub::MockEubTransport t;
             t.info = info9610(); t.info.socName = QStringLiteral("Exynos9830");
             t.response = QByteArray("boot ok");
@@ -350,8 +359,8 @@ private slots:
             t.info = info9610(); t.info.socName = QStringLiteral("Exynos9830");
             eub::EubSession s(t, fastOptions());     // response 留空 → readBulk 返回空
             QString err;
-            QVERIFY2(s.run(loadout9830(), syntheticSboot(0x400000), &err), qPrintable(err));
-            QCOMPARE(t.calls.count(QStringLiteral("read")), loadout9830().segments.size());
+            QVERIFY2(s.run(runnable9830ForEchoTest(), syntheticSboot(0x400000), &err), qPrintable(err));
+            QCOMPARE(t.calls.count(QStringLiteral("read")), runnable9830ForEchoTest().segments.size());
         }
     }
 
@@ -520,6 +529,27 @@ private slots:
         }
     }
 
+    void runOpenFailureForwardsTransportNotes()
+    {
+        // 终审 M-a：run 的 open 失败分支此前**不**调 forwardNotes（identify 的同型分支调了）。
+        // "设备在但打不开"时，传输层的现场说明（端点回退/补设配置）恰恰是唯一线索 —— 丢掉它，
+        // 用户只剩一句"设备在 N 次尝试内未出现"，分不清是没插好还是端点不对（与 identify 同因）。
+        const QString note = QStringLiteral("EUB 端点回退：改用参照实现的常数 0x02/0x81");
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.noteList = {note};
+        t.openFailures = 99;                    // 一直打不开 → 走 run 的 open 失败早退
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        QString err;
+        QVERIFY(!s.run(loadout9610(), syntheticSboot(), &err));
+        QVERIFY2(err.contains(QStringLiteral("未出现")), qPrintable(err));   // 确认走的是 open 失败那条
+        // 变异证据：去掉 run open 失败分支里的 forwardNotes() → 这条从 1 变 0，本槽红
+        QCOMPARE(countDetails(details, note), 1);
+        QCOMPARE(t.writes.size(), 0);
+    }
+
     void notesForwardedAgainWhenBatchChangesBetweenIdentifyAndRun()
     {
         // notes 的作用域是**单次 open**（传输层每次 open 清空、close 不清，见 eub_session.h）：
@@ -648,6 +678,30 @@ private slots:
         QVERIFY(!s.run(lo, syntheticSboot(), &err));
         QVERIFY(!err.isEmpty());
         QCOMPARE(t.writes.size(), 0);
+        QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
+    }
+
+    void extraFilesTableIsRejectedWithoutTouchingDevice()
+    {
+        // 终审 I1（fail-closed）：9830 的参照流程要在分段**之后另发** BL 包内文件（ldfw.img / tzsw.img，
+        // hubble.py:329-341 + ExynosData/Exynos9830.json:3），而本仓本期没有该发送路径（run 只遍历
+        // segments，载荷入口只找 sboot）—— 照旧发完 5 段再报"全部 N 段已发送：设备应已进入 Download
+        // 模式"，对 9830 用户是**对未发生动作的断言**，且设备被留在"分段已发、文件未发"的半完成状态。
+        // 故 run 必须在**切段之前**拒绝：零写入，且连设备都不碰（句柄尚未打开）。
+        const eub::EubLoadout lo = loadout9830();
+        QVERIFY2(!lo.extraFiles.isEmpty(), "前置：9830 表必须带 extraFiles，否则本槽恒真");
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName = QStringLiteral("Exynos9830");
+        eub::EubSession s(t, fastOptions());
+        QString err;
+        QVERIFY(!s.run(lo, syntheticSboot(0x400000), &err));
+        QVERIFY2(err.contains(QStringLiteral("Exynos9830")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("未实现")), qPrintable(err));   // 说清"本仓做不到"
+        QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err)); // 用户要知道涉及哪些文件
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));
+        QCOMPARE(t.writes.size(), 0);                                      // 零写入
+        // 变异证据：去掉 run 开头的守卫 → 本槽必红（run 返回 true、err 为空、写出 5 帧、calls 非空）
         QVERIFY2(t.calls.isEmpty(), qPrintable(t.calls.join(QStringLiteral(","))));
     }
 

@@ -83,6 +83,11 @@ EubLoadout make8895()
 // ananjaser 脚本作 0x7D10（32016，其后留 752B 空隙）。**谁对未定** —— 本仓采信 hubble 的
 // 连续切法（理由：与下一段连续，且 hubble 是仅有的给出完整 JSON 表的一方），另一源写进
 // sourceNote 保留分歧记录（facts §F3：表项必须写明采信哪一源）。
+// sbootSha1 **留空**：唯一记了修订的是**未被采信的那一源**（A510FXXS8CTI7 / 466852d1…，
+// 其 bl2=0x7D10 正被本表的 0x8000 否决）；拿被否决源的修订当"本表所用修订"是**方向相反**的
+// 保证 —— 用户文件若与它相符，UI 会报"sha1 一致：你的固件与该表所用修订相同"，而两表的切法
+// 本身就不一致。hubble（本表采信方）未记录所用 sboot 修订，故本表**不记 sha1**（facts §C9），
+// 分歧与另一源的修订只留在 sourceNote 里（比较两边前 8 位仍可人工核对）。
 EubLoadout make7580()
 {
     EubLoadout lo;
@@ -90,11 +95,12 @@ EubLoadout make7580()
     lo.models = {QStringLiteral("A510F")};    // split-sboot-7580.sh:1 的固件串 A510FXXS8CTI7
     lo.evidence = QStringLiteral("双源分歧（采信 hubble 连续切法）");
     lo.sourceNote = QStringLiteral(
-        "reference/hubble/ExynosData/Exynos7580.json:4-23（采信：bl2 长度 0x8000 与下一段起点连续）；"
-        "另一源 reference/exynos8890-exynos-usbdl-recovery/A510F/split-sboot-7580.sh:4 作 0x7D10"
-        "（其后留 752B 空隙）—— facts §C4 记录该分歧，谁对未定；"
-        "sboot 修订与 sha1 出处：split-sboot-7580.sh:1（A510FXXS8CTI7）");
-    lo.sbootSha1 = QByteArray("466852d13fa02d51729d21633f47708308579f58");
+        "reference/hubble/ExynosData/Exynos7580.json:4-23（采信：bl2 长度 0x8000 与下一段起点连续；"
+        "该源未记录所用 sboot 修订，故本表 sbootSha1 留空）；"
+        "另一源（未采信其 bl2 值）reference/exynos8890-exynos-usbdl-recovery/A510F/split-sboot-7580.sh:4 "
+        "作 0x7D10（其后留 752B 空隙），其第 1 行记录修订 A510FXXS8CTI7 / sha1 "
+        "466852d13fa02d51729d21633f47708308579f58 —— 该 sha1 属**另一源**，与本表采信的切法不构成"
+        "同源对应，仅供人工比对；facts §C4 记录该分歧，谁对未定");
     lo.style = dnwStyle();    // hubble 路径（facts §B4 头 1B 44 4E 57 / §B5 尾 FF FF）
     lo.segments = {
         {QStringLiteral("fwbl1"),  0x0,    0x2000},

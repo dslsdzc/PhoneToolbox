@@ -69,6 +69,9 @@ public:
     // 永不相等，拿 lo.soc 当基准会让"预检能过、点开始必被拒"。本次会话未先 identify()（run 是
     // 公开 API，可单独调用）→ 无基准可比，**不阻断**，只落一条日志。
     // 失败文案含段序号/段名/偏移长度；**不支持从中间续传**（引导链必须从第一段起，spec §7）。
+    // 表项带 extraFiles（9830）→ **直接失败且零写入**：参照流程要在段后另发 BL 包内文件，而本仓
+    // 本期没有该发送路径（见 eub_loadout.h 的字段注释）—— 只发段就报"全部已发送"是对未发生动作
+    // 的断言，故 fail-closed（连切段都不做，句柄也不打开）。
     bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
 
 private:

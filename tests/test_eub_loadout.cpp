@@ -116,7 +116,13 @@ private slots:
         QVERIFY(lo.sourceNote.contains(QStringLiteral("0x7D10")));
         QVERIFY(lo.sourceNote.contains(QStringLiteral(
             "reference/exynos8890-exynos-usbdl-recovery/A510F/split-sboot-7580.sh:4")));
-        QCOMPARE(lo.sbootSha1, QByteArray("466852d13fa02d51729d21633f47708308579f58"));
+        // sha1 **留空**（终审 I2）：唯一记了修订的正是**未被采信的那一源**（其 bl2=0x7D10 恰被本表的
+        // 0x8000 否决）—— 拿它当"本表所用修订"会给出方向相反的保证（用户文件若与它相符，UI 会报
+        // "sha1 一致：你的固件与该表所用修订相同"，而两源切法本身就不一致）。该修订只留在 sourceNote
+        // 里供人工比对；UI 走"该表未记录固件修订"分支（对话框用例另有钉）。
+        QVERIFY(lo.sbootSha1.isEmpty());
+        QVERIFY(lo.sourceNote.contains(QStringLiteral("466852d1")));      // 另一源的修订号仍可查
+        QVERIFY(lo.sourceNote.contains(QStringLiteral("A510FXXS8CTI7")));
     }
 
     void table7885()   // spec §5.4 行 4；出处 reference/hubble/ExynosData/Exynos7885.json:5-28

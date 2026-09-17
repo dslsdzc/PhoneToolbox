@@ -79,4 +79,8 @@ private:
     QByteArray       m_sboot;
     eub::EubLoadout  m_loadout;
     bool             m_prepared = false;
+    // 表项带 extraFiles（9830）：参照流程要在分段后另发 BL 包内文件，而本仓本期没有该发送路径
+    //（EubSession::run 会据此 fail-closed，见 eub_loadout.h 的字段注释）。预检时置位 → 「开始救援」
+    // 保持禁用并把原因写在设备行/日志里 —— 用户不该点了"开始"才发现这一步做不了。
+    bool             m_extraFilesBlocked = false;
 };

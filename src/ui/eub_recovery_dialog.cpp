@@ -125,7 +125,9 @@ void EubRecoveryDialog::log(const QString &line, bool isError)
 
 void EubRecoveryDialog::refreshStartEnabled()
 {
-    m_startBtn->setEnabled(m_prepared && m_confirmBox->isChecked());
+    // extraFiles（9830）一票否决：勾选也不能解除 —— 本仓本期没有"段后另发"路径，run 会 fail-closed
+    // 拒绝执行（见 prepare 与该字段注释），让按钮亮着等于给用户一个必然失败的入口。
+    m_startBtn->setEnabled(m_prepared && m_confirmBox->isChecked() && !m_extraFilesBlocked);
 }
 
 bool EubRecoveryDialog::isStartEnabledForTest() const
@@ -158,6 +160,7 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
 {
     // fail-closed：入口先清（早退路径不少，逐个清容易漏；同 eub_session.cpp:100 的 identify 惯例）
     m_prepared = false;
+    m_extraFilesBlocked = false;        // 本次预检的闸位：不随上一次的载荷残留
     m_sboot = sboot;
     m_loadout = eub::EubLoadout{};
 
@@ -214,19 +217,34 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
     }
 
     m_prepared = true;
-    refreshPreview(QStringLiteral("设备 SoC：%1（来源：%2）\n布局表：%3 段；证据：%4")
+    // I1（终审）：该 SoC 的参照流程要在分段**之后另发** BL 包内文件（9830 = ldfw.img/tzsw.img，
+    // hubble.py:329-341），而本仓本期没有该发送路径 —— run 会据此 fail-closed 拒绝执行。在这里
+    // 就把情形讲明并关闸：让用户"点了开始才发现"等于把一次**已知做不成**的操作留给设备去承担。
+    // 段表照常展示（偏移/证据仍可供人工与参照核对），只是「开始救援」不可用。
+    QString extraNote;
+    if (!m_loadout.extraFiles.isEmpty()) {
+        m_extraFilesBlocked = true;
+        extraNote = QStringLiteral(
+            "\n本仓本期不发送额外文件（%1）：参照流程要求它们在分段之后另发，而本仓尚未实现该发送"
+            "路径 —— 为避免把设备留在半完成状态（分段已发、文件未发），「开始救援」已禁用。")
+                        .arg(m_loadout.extraFiles.join(QStringLiteral("、")));
+    }
+    refreshPreview(QStringLiteral("设备 SoC：%1（来源：%2）\n布局表：%3 段；证据：%4%5")
                        .arg(m_loadout.soc, socOrigin)
                        .arg(m_loadout.segments.size())
-                       .arg(m_loadout.evidence),
+                       .arg(m_loadout.evidence, extraNote),
                    sourceDescription);
     refreshStartEnabled();
+    const QString gateNote = m_extraFilesBlocked
+        ? QStringLiteral("该 SoC 的参照流程需在段后另发 %1（本仓本期不发送），已禁用「开始救援」")
+              .arg(m_loadout.extraFiles.join(QStringLiteral("、")))
+        : (m_confirmBox->isChecked()
+               ? QStringLiteral("已勾选确认，可以开始")
+               : QStringLiteral("请阅读段表与 sha1 对照后勾选确认"));
     log(QStringLiteral("预检通过：%1，%2 段（证据：%3）。%4")
             .arg(m_loadout.soc)
             .arg(m_loadout.segments.size())
-            .arg(m_loadout.evidence,
-                 m_confirmBox->isChecked()
-                     ? QStringLiteral("已勾选确认，可以开始")
-                     : QStringLiteral("请阅读段表与 sha1 对照后勾选确认")));
+            .arg(m_loadout.evidence, gateNote));
     return true;
 }
 
@@ -317,7 +335,10 @@ QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo)
                  .arg(origin, hexBytes(lo.style.header), hexBytes(lo.style.trailer));
 
     if (!lo.extraFiles.isEmpty()) {
-        lines << QStringLiteral("额外文件（各段发完后另发，包内自备）：%1")
+        // 口径与实现一致（终审 I1）：参照流程要在段后另发这些文件，而本仓本期**没有**该发送路径
+        // （run 会据此 fail-closed）—— 写"各段发完后另发"会让用户以为本工具会发。
+        lines << QStringLiteral("额外文件：%1 —— 参照流程需在段后另发（包内自备）；"
+                                "**本仓本期不发送**（发送路径未实现，run 会据此拒绝执行）")
                      .arg(lo.extraFiles.join(QStringLiteral("、")));
     }
     lines << (lo.responseSupport
