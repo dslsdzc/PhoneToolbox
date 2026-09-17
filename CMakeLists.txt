@@ -720,7 +720,10 @@ if(ENABLE_IMAGE_TESTS)
                 endif()
                 # EUB 真样本（reference/eub-samples/，gitignored）：只把**路径**编进用例（内容绝不
                 # 进仓库）。EUB_SAMPLES_REQUIRED=ON 时缺失即 FAIL（QSKIP 不改退出码，绿灯会骗人）。
-                if(_test_stem STREQUAL "test_eub_payload" OR _test_stem STREQUAL "test_eub_loadout")
+                # backlog Task 2：对话框用例也要真样本 —— 9830 的段表字节数只有拿真包才钉得住
+                # （6,291,456 / 1,572,864，facts §H2）。
+                if(_test_stem STREQUAL "test_eub_payload" OR _test_stem STREQUAL "test_eub_loadout"
+                   OR _test_stem STREQUAL "test_eub_recovery_dialog")
                     target_compile_definitions(${_test_target} PRIVATE
                         EUB_SAMPLES_DIR="${PT_EUB_SAMPLES_DIR}")
                     if(EUB_SAMPLES_REQUIRED)

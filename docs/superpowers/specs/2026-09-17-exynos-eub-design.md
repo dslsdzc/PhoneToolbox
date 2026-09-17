@@ -205,8 +205,9 @@ struct EubLoadout {
     QByteArray sbootSha1;        // 参照的原始 sboot 修订（可空）
     EubFrameStyle style;         // §D2
     QList<EubSegment> segments;  // 按序发送；repeat 段照列
-    QStringList extraFiles;      // 9830: {"ldfw.img","tzsw.img"}（§C7）—— **只记录参照要求**：
-                                 // 本仓本期无发送路径，run 据此 fail-closed（§7）
+    QStringList extraFiles;      // 9830: {"ldfw.img","tzsw.img"}（§C7）—— **只记录名单**：载荷由调用方
+                                 // 按同一名单从**同一个 BL 包**取出（eub::loadNamedEntriesFromTar）
+                                 // 后传给 run 的 extras；数量/空载荷不符 → 切段前 fail-closed（§7）
     bool responseSupport = false;// 是否读回显（§C7/§C8）
 };
 
@@ -228,7 +229,7 @@ bool splitSboot(const QByteArray &sboot, const EubLoadout &lo,
 | **Exynos9610** | fwbl1 `0/0x2000` → epbl `0x2000/0x13000` → bl2 `0x15000/0x2F000` → **fwbl1（重发）** `0/0x2000` → u-boot `0x5A000/0x180000` → el3_mon `0x1DA000/0x40000` | Dnw | **双源一致**（`hubble/…/Exynos9610.json:5-34` ↔ `exynos9610…/split_bootloader_a505.sh:1-6` + `dltool/dltool.c:311-319`；后者多一段 part6 `0x21A000/0x101000`，**不采纳**，注释记录） |
 | **Exynos9810** | fwbl1 `0/0x2000` → bl31 `0x2000/0x13000` → bl2 `0x15000/0x4F000` → **fwbl1（重发）** `0/0x2000` → u-boot `0x7D000/0x180000` → el3_mon `0x1FD000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9810.json`） |
 | **Exynos9820** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x52000` → u-boot `0xA4000/0x180000` → el3_mon `0x224000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9820.json`）；`responseSupport=true` |
-| **Exynos9830** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x6C000` → lk `0xDB000/0x280000` → el3_mon `0x35B000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9830.json`）+ 论坛帖对 `el3_mon 0x35B000` 的部分佐证；`responseSupport=true`；`extraFiles={"ldfw.img","tzsw.img"}`（只记录参照要求，**本仓本期不发送**，见 §7） |
+| **Exynos9830** | fwbl1 `0/0x3000` → epbl `0x3000/0x13000` → bl2 `0x16000/0x6C000` → lk `0xDB000/0x280000` → el3_mon `0x35B000/0x40000` | Dnw | 单源（`hubble/ExynosData/Exynos9830.json`）+ 论坛帖对 `el3_mon 0x35B000` 的部分佐证；`responseSupport=true`；`extraFiles={"ldfw.img","tzsw.img"}`（**已实现**：由同一个 BL 包提取、段后按序另发，见 §7 —— backlog Task 2。证据：单源 hubble + **真样本已证实** 9830 的 BL 包内含该二文件（facts §H2）；**真机仍未验证**） |
 
 > **表的可核对性**：`sourceNote` 必须能落到 `reference/` 里的 `file:line`；测试对每一行的每个数
 > 做硬断言（改表必改测试，且测试里写明出处）。
@@ -253,8 +254,12 @@ public:
     // 打开 → 读自述 → 查表 → **关闭**（不持有句柄：设备可能瞬态消失，facts §A6）
     bool identify(EubLoadout &out, QString *error);
     // 切段（失败即中止、不写任何字节）→ 逐段 [open(带重试) → 发送 →（可选）读回显 → close]
-    // 表项带 extraFiles（9830）→ **直接失败、零写入**：本期无"段后另发"路径（§7）
-    bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
+    // → 表项带 extraFiles（9830）时：额外文件阶段（按名单顺序逐个 open→发送→回显→close，§7）
+    bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);   // = extras 传空表
+    // extras[i] ↔ lo.extraFiles[i] 一一对应（调用方用 eub::loadNamedEntriesFromTar 从同一个 BL 包取）；
+    // 数量不符或任一为空 → **切段前** fail-closed、零字节（§7）
+    bool run(const EubLoadout &lo, const QByteArray &sboot,
+             const QList<QByteArray> &extras, QString *error);
 };
 ```
 
@@ -301,21 +306,26 @@ public:
 | 某段写入失败 | 立即停止，报"第 N 段 `<名>`（`offset`/`length`）写入失败：<err>"；**不支持从中间续传**（引导链必须从第一段起，文案说明"请重新上电/重新进入 EUB 后从头再试"） |
 | 段后设备未重现 | `waitForDevice` 超时 → 失败，文案含"设备可能已进入 Download 模式（请检查）或需要重新进入 EUB" |
 | 读回显失败/为空 | **不判失败**（best-effort，只落日志） |
-| 表项带 `extraFiles`（9830） | **直接失败、零写入**（终审 I1 定案）：参照流程要在分段发完后另发 BL 包内文件（`hubble.py:329-341` / `ExynosData/Exynos9830.json:3`），本仓本期**没有该发送路径**（`run` 只遍历 `segments`，载荷入口只找 sboot）—— 只发段就报"全部已发送"是对未发生动作的断言。`EubSession::run` 在切段前拒绝（不碰设备），对话框预检时就禁用「开始救援」并说明"本仓本期不发送" |
+| 表项带 `extraFiles`（9830） | **段后按序另发**（backlog Task 2 落地；原 I1 的"直接失败、零写入"已废止）：参照流程要在分段发完后另发 BL 包内文件（`hubble.py:329-341` / `ExynosData/Exynos9830.json:3`），本仓由**同一个 BL 包**提取这些条目（`eub::loadNamedEntriesFromTar`：先裸名、再 `.lz4`，按内容判据解压）并在分段之后逐个发送（`EubSession::run` 的 extras 阶段；每文件重开设备，与分段阶段同款）。**入口校验**：extras 数量与该表名单不等或任一份为空 → **切段前 fail-closed、零字节**（半完成状态比什么都没发更糟）。**对话框（预检阶段、不碰设备就收口）**：来源不是 tar（裸 `sboot.bin`/`.lz4`）→ 失败并指引改选该机型的 `BL_*.tar.md5`（不另开第二个文件选择器，§D8）；是 tar 但缺条目 → 失败并列出缺失名与包内条目。失败时表被清空、「开始救援」保持禁用。证据等级**单源**（hubble）+ **真样本已证实** 9830 的 BL 包内含该二文件（`ldfw.img.lz4`/`tzsw.img.lz4`，解压后 0x600000/0x180000，facts §H2）；**真机仍未验证** |
 | 中途用户取消 | **本期不做**（T6 定案）：本流程只发 RAM 镜像、不发收尾命令，中途取消没有需要清理的设备侧状态。**但"关窗即可"不成立**（终审 M-b 更正）：发送期间进度窗**不可交互**（`QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents)`，`eub_recovery_dialog.cpp`）—— 窗口内按钮的点击不被投递；identify 重试（默认 20×500ms ≈ 9.5s）与段间等待（`sleepMs`，每段 1s）期间**根本不跑事件循环**，窗口完全无响应。**强制结束进程无害**：只发 RAM 镜像、不发收尾命令，设备侧没有待清理状态（重新进 EUB 从头再来即可）。若日后要可取消，入口是 `EubOptions` 加 `std::function<bool()> cancelled` 并在段间检查 |
 
 ---
 
 ## 8. 测试策略
 
-**无真样本**（§F1：sboot 是三星二进制，不进仓库）——本线**如实标注为 mock + 数值断言**，
-不冒充"真样本验证"。合成样本：确定性图案 + 已知位置写入 ASCII `EXYNOS9610`（测 §A4 的退化识别路径）。
+**真样本已就位**（`reference/eub-samples/`：5 个三星官方 BL 包，**gitignored、不进仓库、不提交**；facts §H，2026-09-18）：
+gated 用例（`EUB_SAMPLES_REQUIRED=ON` 时样本缺失即 **FAIL** 而非 QSKIP —— QSKIP 不改退出码，绿灯会骗人）
+在真包上核对尺寸 / 条目名 / sha1 / extraFiles 解压后大小；其余仍以合成样本为主：确定性图案 +
+已知位置写入 ASCII `EXYNOS9610`（测 §A4 的退化识别路径）。**真机仍未验证**（本机无 Exynos 设备，§F1）
+—— 真样本核对 ≠ 真机验证，两者不得混写。
 
 | 目标 | 覆盖 |
 |---|---|
 | `test_eub_protocol.cpp` | 帧字节逐字节（两种风格各一）；长度字段 = `n+10`；空载荷 → 失败；大载荷（>2 MiB）；`sendSegment` 的写序列（次数字节）|
 | `test_eub_loadout.cpp` | **8 张表逐值硬断言**（含 7580 采信值与注释、8895/9610 的重发段、9830 的 `extraFiles`）；未知 SoC → false；越界 → false 且**不产出半段**；SHA-1 计算；SoC 名大小写不敏感 |
-| `test_eub_session.cpp` | mock transport 记录 `open/close/write/read` 全序列：N 段 → N 次重开；段间等待；重枚举（注入"设备先消失后出现"）；每类失败路径（第 2 段写失败 → 只发 2 段 + 错误文案含段名）；超时路径 |
+| `test_eub_session.cpp` | mock transport 记录 `open/close/write/read` 全序列：N 段 → N 次重开；段间等待；重枚举（注入"设备先消失后出现"）；每类失败路径（第 2 段写失败 → 只发 2 段 + 错误文案含段名）；超时路径；**extras 阶段**（顺序、每文件重开、数量/空载荷不符 → 切段前零字节）|
+| `test_eub_payload.cpp` | 三条来源路径（裸镜像 / LZ4 frame / `BL_*.tar.md5` 内按名取条目）+ `loadNamedEntriesFromTar`（顺序、裸名优先于 `.lz4`、大小写、缺失清单、空请求不读文件）；gated 真样本槽：真 9830 包取出 `ldfw.img`/`tzsw.img`（6,291,456 / 1,572,864）与 sboot 的 sha1 对拍 |
+| `test_eub_recovery_dialog.cpp` | 段表/摘要两个纯函数 + mock 传输下的识别与预检门控；**extraFiles**：裸来源 → 失败且指引改选 BL 包、缺条目 → 失败且含缺失名、完整 tar → 成功且勾选后「开始救援」可用、段表字节数来自实际取出的载荷；gated 真样本槽：真 9830 包走完整预检、段表出现 6,291,456 / 1,572,864 |
 | `test_eub_transport.cpp`（新目标，链接 `eub_libusb_transport.cpp` + `odin_libusb_transport.cpp`） | `isEubDevice(0x04E8, 0x1234)` 命中、其它 PID 不命中；**`samsungModeFor` 的优先级**：`(0x04E8, 0x1234, {0x0A}, true)` → `Eub`（**即使 Odin 判据也会命中**，§E2 的回归钉）、老 PID `0x6601` → `Odin`、非三星 VID → `NotSamsung` |
 
 ---

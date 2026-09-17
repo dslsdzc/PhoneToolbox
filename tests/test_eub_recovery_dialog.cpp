@@ -9,15 +9,25 @@
 //   * statusText 槽查的是**由镜像字节推导出的 sha1 前 8 位**（不是回显表里的常量）——
 //     只有真的走了"读镜像 → sha1 → 填标签"这条链才可能有这个值；
 //   * 门控槽查**真实按钮控件**的 enabled（findChild 拿到的那个），并覆盖"先勾选后 prepare"的
-//     负向序（只按 isChecked() 计算门控的实现会在这里挂）。
+//     负向序（只按 isChecked() 计算门控的实现会在这里挂）；
+//   * extraFiles（9830）槽（backlog Task 2）：字节数断言用**两份长度不同的合成载荷**（12,345 /
+//     17,185）钉住"数字来自实际取出的载荷"，末尾的 gated 真样本槽再用真包的 6,291,456 / 1,572,864
+//     复核 —— 单靠真样本槽无法分辨"数字来自包"与"数字被硬编"（两者恰好相同）。
 #include <QtTest>
 #include <QCheckBox>
+#include <QFile>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 
-#include "ui/eub_recovery_dialog.h"
+#include "core/eub/eub_payload.h"   // loadSbootBytes（gated 真样本槽按 onPickSource 的同一条入口载入）
+#include "eub_test_helpers.h"       // 真样本 gating（共享）：EUB_SAMPLES_DIR / EUB_SKIP_OR_FAIL / eubtest::*
+#include "image_engine/compression/lz4_wrapper.h"
+#include "image_engine/tar_image.h"
 #include "mock_eub_transport.h"
+#include "ui/eub_recovery_dialog.h"
 
 namespace {
 
@@ -71,6 +81,41 @@ bool segmentLinePaired(const QString &text, const eub::EubSegment &s)
 class TestEubRecoveryDialog : public QObject
 {
     Q_OBJECT
+
+private:
+    QTemporaryDir m_dir;
+
+    // 裸文件落盘（裸 sboot.bin 的源约束槽要一个**真的不是 tar** 的路径：判据在对话框里，
+    // 拿合成路径骗不过去）
+    QString writeFile(const QString &name, const QByteArray &bytes)
+    {
+        const QString path = m_dir.filePath(name);
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly))
+            qFatal("无法写临时文件");
+        f.write(bytes);
+        f.close();
+        return path;
+    }
+
+    // 合成的 BL 包落盘（用例自造，不依赖真样本）
+    QString writeTar(const QString &name, const QList<imgtar::TarEntry> &entries)
+    {
+        const QString path = m_dir.filePath(name);
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly))
+            qFatal("无法写临时包");
+        f.write(imgtar::buildTar(entries));
+        f.close();
+        return path;
+    }
+
+    // 段表控件的**展示文本**（用户在界面上读到的那份，不是另拼一份）
+    static QString segmentViewText(const EubRecoveryDialog &dlg)
+    {
+        QPlainTextEdit *view = dlg.findChild<QPlainTextEdit *>(QStringLiteral("eubSegmentView"));
+        return view ? view->toPlainText() : QString();
+    }
 
 private slots:
     void segmentTableListsEverySegmentWithHexRanges()
@@ -130,8 +175,8 @@ private slots:
     void segmentTableListsExtraFilesAndResponseSupport()
     {
         // facts §C7：9830 在 sboot 各段之后还要另发 BL 包内的 ldfw.img / tzsw.img，且设备会回显。
-        // 终审 I1：段表**不得**把这些文件说成"本工具会发" —— 参照流程要求另发，而本仓本期没有该
-        // 发送路径（run 会据此 fail-closed）。文案必须把"参照要求"与"本仓不做"分开写。
+        // backlog Task 2：这两个文件**已实现**（从同一个 BL 包取出、段后按序另发）—— 段表不得再写
+        // "本仓本期不发送"（I1 的旧口径）；也不得只写"各段发完后另发"而不说清**从哪来**。
         eub::EubLoadout lo; QString err;
         QVERIFY(eub::eubLoadoutFor(QStringLiteral("Exynos9830"), lo, &err));
         QVERIFY(lo.responseSupport);            // 前置：该表确实带这两项（否则下面的断言无意义）
@@ -140,9 +185,22 @@ private slots:
         QVERIFY(text.contains(QStringLiteral("ldfw.img")));
         QVERIFY(text.contains(QStringLiteral("tzsw.img")));
         QVERIFY(text.contains(QStringLiteral("回显")));
-        QVERIFY2(text.contains(QStringLiteral("本仓本期不发送")), qPrintable(text));
-        // 反向：旧口径"各段发完后另发"（= 本工具会发）必须消失 —— 只补新句、留旧句同样误导
+        QVERIFY2(text.contains(QStringLiteral("段后另发")), qPrintable(text));      // 什么时候发
+        QVERIFY2(text.contains(QStringLiteral("同一个 BL 包")), qPrintable(text));  // 从哪来
+        QVERIFY2(!text.contains(QStringLiteral("不发送")), qPrintable(text));        // 旧口径必须消失
+        // 反向：旧口径"各段发完后另发"（不说清谁发）也必须消失 —— 只补新句、留旧句同样误导
         QVERIFY2(!text.contains(QStringLiteral("各段发完后另发")), qPrintable(text));
+
+        // 传了 extras（= 预检成功后的展示形态）→ 每个文件带上**实际取出的**字节数。
+        // 两份长度刻意不同（12,345 / 17,185）：互换顺序或拿固定数字顶替都会在这里挂。
+        const QList<QByteArray> extras{QByteArray(12345, '\x37'), QByteArray(0x4321, '\x9C')};
+        const QString sized = EubRecoveryDialog::segmentTableText(lo, extras);
+        QVERIFY2(sized.contains(QStringLiteral("12,345")), qPrintable(sized));
+        QVERIFY2(sized.contains(QStringLiteral("17,185")), qPrintable(sized));
+        // 证据等级声明仍在，且**不得**越界成"真机已验证"（facts §H：真样本≠真机）
+        QVERIFY2(sized.contains(QStringLiteral("单源")), qPrintable(sized));
+        QVERIFY2(sized.contains(QStringLiteral("真样本")), qPrintable(sized));
+        QVERIFY2(!sized.contains(QStringLiteral("真机已验证")), qPrintable(sized));
 
         // 反向：9610 的 responseSupport=false 且无 extraFiles → 段表不得凭空说"会回显"。
         eub::EubLoadout plain;
@@ -187,7 +245,8 @@ private slots:
 
         const QByteArray sboot = syntheticSboot();
         QString err;
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
+        QVERIFY2(dlg.prepare(sboot, QString() /* 无来源路径：该 SoC 无额外文件，本参数用不到 */,
+                             QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9610"));
         QVERIFY(dlg.statusText().contains(QStringLiteral("Exynos9610")));
         QVERIFY(dlg.statusText().contains(QStringLiteral("双源一致")));
@@ -219,7 +278,8 @@ private slots:
         EubRecoveryDialog dlg(mock, nullptr);
         const QByteArray sboot = syntheticSboot();
         QString err;
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
+        QVERIFY2(dlg.prepare(sboot, QString() /* 无来源路径：该 SoC 无额外文件，本参数用不到 */,
+                             QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos8890"));
         QVERIFY(!dlg.loadout().sbootSha1.isEmpty());           // 前置：本表记了修订
         QVERIFY(dlg.statusText().contains(QStringLiteral("不一致")));
@@ -254,7 +314,8 @@ private slots:
         EubRecoveryDialog dlg(mock, nullptr);
         QString err;
         const QByteArray sboot = syntheticSboot();          // 7580 表最大段到 0x10B000，够用
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
+        QVERIFY2(dlg.prepare(sboot, QString() /* 无来源路径：该 SoC 无额外文件，本参数用不到 */,
+                             QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos7580"));
         QVERIFY(dlg.loadout().sbootSha1.isEmpty());         // 前置：本表确实没有修订记录
         QVERIFY2(dlg.statusText().contains(QStringLiteral("未记录")), qPrintable(dlg.statusText()));
@@ -263,30 +324,105 @@ private slots:
         QVERIFY2(dlg.statusText().contains(eub::sha1Hex(sboot).left(8)), qPrintable(dlg.statusText()));
     }
 
-    void prepareDisablesStartForSoCWithUnsupportedExtraFiles()
+    // ---- extraFiles（9830）：源约束 + 包内取件 + 解禁门控（backlog Task 2）----
+    // 旧口径（终审 I1）是"预检照常通过但禁用开始"；Task 2 起改为**来源必须是 BL 包、预检时就把
+    // 额外文件取出来**：取不出来即预检失败（连表都不给），取出来才放行 —— 两头的失败都在
+    // **不碰设备**的预检阶段收口，用户不会点了"开始"才发现少文件。
+
+    void prepareRejectsBareSourceForSocWithExtraFiles()
     {
-        // 终审 I1：9830 的参照流程要在分段后另发 ldfw.img/tzsw.img，而本仓本期**没有**该发送路径
-        //（EubSession::run 会据此 fail-closed）—— 用户不该点了"开始"才发现：预检时就要讲明并关闸，
-        // 且**勾选确认不能解除**（勾了也只得到一次必然失败的发送）。
+        // 源约束：9830 的额外文件只存在于 BL_*.tar.md5 里（facts §H2）—— 选裸 sboot.bin 时必须
+        // **失败并指引改选 BL 包**（本仓不另开第二个文件选择器，spec §D8 的既定取舍）。
+        // 勾选确认不能救活它（门控是"预检通过 AND 勾选"，不是"勾选"）。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos9830");
+        EubRecoveryDialog dlg(mock, nullptr);
+        QCheckBox *box = dlg.findChild<QCheckBox *>(QStringLiteral("eubConfirmCheck"));
+        QVERIFY(box != nullptr);
+        box->setChecked(true);
+        const QByteArray sboot = syntheticSboot(0x400000);   // 9830 表最大段到 0x39B000，够长
+        // 真的落一个**裸** sboot.bin（不是拿空路径骗：判据在对话框里，要对真文件成立）
+        const QString bare = writeFile(QStringLiteral("sboot.bin"), sboot);
+        QString err;
+        QVERIFY2(!dlg.prepare(sboot, bare, QStringLiteral("sboot.bin（裸镜像）"), &err),
+                 "裸来源 + 带 extraFiles 的表必须预检失败");
+        QVERIFY2(err.contains(QStringLiteral("BL_*.tar.md5")), qPrintable(err));   // 可行动：改选什么
+        QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err));       // 缺哪几个（列名）
+        QVERIFY2(err.contains(QStringLiteral("tzsw.img")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("不是 tar")), qPrintable(err));       // 成因如实（不是"包坏了"）
+        QVERIFY(!dlg.isStartEnabledForTest());
+        QVERIFY(dlg.loadout().soc.isEmpty());          // fail-closed：不留半张表
+    }
+
+    void prepareRejectsTarMissingExtraEntry()
+    {
+        // 合成了 sboot 与 tzsw、**缺 ldfw** 的 9830 包 → 预检失败，文案点名缺哪个（用户据此换包，
+        // 而不是只看到一句"预检失败"）。名称要落到 err（来自 loadNamedEntriesFromTar 的缺失清单）。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos9830");
+        EubRecoveryDialog dlg(mock, nullptr);
+        const QByteArray sboot = syntheticSboot(0x400000);
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry s; s.name = QStringLiteral("sboot.bin"); s.data = sboot;
+        imgtar::TarEntry t; t.name = QStringLiteral("tzsw.img.lz4");
+        t.data = imgcomp::lz4Compress(QByteArray(0x2000, '\x5A'));
+        entries << s << t;
+        const QString pkg = writeTar(QStringLiteral("BL_SM-G980F_PART.tar.md5"), entries);
+
+        QCheckBox *box = dlg.findChild<QCheckBox *>(QStringLiteral("eubConfirmCheck"));
+        QVERIFY(box != nullptr);
+        box->setChecked(true);
+        QString err;
+        QVERIFY2(!dlg.prepare(sboot, pkg, QStringLiteral("BL_SM-G980F_PART.tar.md5 内的 sboot.bin"), &err),
+                 "缺 ldfw 的包必须预检失败（否则会把设备留在半完成状态）");
+        QVERIFY2(err.contains(QStringLiteral("ldfw.img")), qPrintable(err));
+        QVERIFY(!dlg.isStartEnabledForTest());
+        QVERIFY(dlg.loadout().soc.isEmpty());
+    }
+
+    void prepareAcceptsTarWithExtraFilesAndUnblocksStart()
+    {
+        // 完整的合成 9830 包：sboot + ldfw.img（**裸**条目）+ tzsw.img.lz4（压缩条目）——
+        // 一次覆盖两条名字优先级（先裸名、再 .lz4），且字节数断言用的是**实际取出的**长度。
         eub::MockEubTransport mock;
         mock.info.socName = QStringLiteral("Exynos9830");
         EubRecoveryDialog dlg(mock, nullptr);
         QStringList sink;
         dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
+
+        const QByteArray sboot = syntheticSboot(0x400000);
+        const QByteArray ldfw(12345, '\x37');          // 与 tzsw 长度刻意不同：互换/顶替都能看出来
+        const QByteArray tzsw(0x4321, '\x9C');
+        QList<imgtar::TarEntry> entries;
+        imgtar::TarEntry s; s.name = QStringLiteral("sboot.bin"); s.data = sboot;
+        imgtar::TarEntry l; l.name = QStringLiteral("ldfw.img"); l.data = ldfw;
+        imgtar::TarEntry t; t.name = QStringLiteral("tzsw.img.lz4"); t.data = imgcomp::lz4Compress(tzsw);
+        entries << s << l << t;
+        const QString pkg = writeTar(QStringLiteral("BL_SM-G980F_FULL.tar.md5"), entries);
+
         QCheckBox *box = dlg.findChild<QCheckBox *>(QStringLiteral("eubConfirmCheck"));
         QVERIFY(box != nullptr);
-        box->setChecked(true);                  // 先勾选：下面的断言证明它救不活这个载荷
         QString err;
-        const QByteArray sboot = syntheticSboot(0x400000);   // 9830 表最大段到 0x39B000
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（用例）"), &err), qPrintable(err));
-        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9830"));   // 表照常展示（可人工核对偏移）
-        QVERIFY(!dlg.loadout().extraFiles.isEmpty());
-        // 两个口径各钉一次：真实按钮控件 + 状态文案（用户看得见的那行）
-        QVERIFY2(!dlg.isStartEnabledForTest(), "9830（extraFiles）下开始按钮必须不可用");
-        QVERIFY2(dlg.statusText().contains(QStringLiteral("不发送")), qPrintable(dlg.statusText()));
-        QVERIFY2(dlg.statusText().contains(QStringLiteral("ldfw.img")), qPrintable(dlg.statusText()));
-        QVERIFY2(sink.join(QLatin1Char('\n')).contains(QStringLiteral("本仓本期不发送")),
-                 qPrintable(sink.join(QStringLiteral(" | "))));
+        QVERIFY2(dlg.prepare(sboot, pkg, QStringLiteral("BL_SM-G980F_FULL.tar.md5 内的 sboot.bin"), &err),
+                 qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9830"));
+
+        // 段表（用户在界面上读到的那份）：两个文件名 + 实际字节数；旧口径必须一个不剩
+        const QString table = segmentViewText(dlg);
+        QVERIFY2(table.contains(QStringLiteral("ldfw.img")), qPrintable(table));
+        QVERIFY2(table.contains(QStringLiteral("tzsw.img")), qPrintable(table));
+        QVERIFY2(table.contains(QStringLiteral("12,345")), qPrintable(table));    // ldfw 的实际大小
+        QVERIFY2(table.contains(QStringLiteral("17,185")), qPrintable(table));    // tzsw 解压后的实际大小
+        QVERIFY2(!table.contains(QStringLiteral("不发送")), qPrintable(table));
+        QVERIFY2(table.contains(QStringLiteral("段后另发")), qPrintable(table));
+
+        // 门控：勾选前不许开始、勾选后**必须放行**（撤掉 I1 的一票否决是本任务的目的）
+        QVERIFY2(!dlg.isStartEnabledForTest(), "未勾选时仍须关闸");
+        box->setChecked(true);
+        QVERIFY2(dlg.isStartEnabledForTest(), "extras 齐备 + 已勾选 → 开始按钮必须可用");
+        // 日志要说明发送计划（用户据此知道设备接下来会发生什么）
+        const QString logText = sink.join(QLatin1Char('\n'));
+        QVERIFY2(logText.contains(QStringLiteral("ldfw.img")), qPrintable(logText));
     }
 
     void prepareRejectsUnsupportedSoc()
@@ -298,7 +434,7 @@ private slots:
         QVERIFY(box != nullptr);
         box->setChecked(true);                 // 勾选不能救活一个失败的预检
         QString err;
-        QVERIFY(!dlg.prepare(syntheticSboot(), QString(), &err));
+        QVERIFY(!dlg.prepare(syntheticSboot(), QString(), QString(), &err));
         QVERIFY(!err.isEmpty());
         // 文案必须点名是哪个 SoC 没有表（可行动：用户据此判断是设备不对还是型号不支持）
         QVERIFY2(err.contains(QStringLiteral("Exynos9999")), qPrintable(err));
@@ -315,7 +451,7 @@ private slots:
         QVERIFY(box != nullptr);
         box->setChecked(true);
         QString err;
-        QVERIFY(!dlg.prepare(QByteArray(0x1000, '\xAB'), QString(), &err));
+        QVERIFY(!dlg.prepare(QByteArray(0x1000, '\xAB'), QString(), QString(), &err));
         QVERIFY(!err.isEmpty());
         // 文案要说清"太短"（而不是笼统失败）——用户据此知道要换与表匹配的固件修订
         QVERIFY2(err.contains(QStringLiteral("太短")), qPrintable(err));
@@ -338,7 +474,7 @@ private slots:
         dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
         QString err;
         const QByteArray sboot = sbootWithMarker(QByteArray("EXYNOS9610"));
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
+        QVERIFY2(dlg.prepare(sboot, QString(), QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
                  qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9610"));
         // SoC 名的来源必须写在明处：不写，用户会以为设备自报了型号。断言两半：说"镜像"
@@ -367,7 +503,7 @@ private slots:
         QString err;
         const QByteArray sboot = sbootWithMarker(QByteArray("EXYNOS9610"));
         // 镜像能反推出 SoC → 预检**照样通过**（这正是危险处：设备没连上也能"预检通过"）
-        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
+        QVERIFY2(dlg.prepare(sboot, QString(), QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
                  qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9610"));
         const QString logText = sink.join(QLatin1Char('\n'));
@@ -383,7 +519,7 @@ private slots:
         EubRecoveryDialog dlg(mock, nullptr);
         QString err;
         // 镜像里没有 EXYNOS<型号> 字样（合成随机字节）→ 兜底也失败
-        QVERIFY(!dlg.prepare(syntheticSboot(), QString(), &err));
+        QVERIFY(!dlg.prepare(syntheticSboot(), QString(), QString(), &err));
         QVERIFY(!err.isEmpty());
         QVERIFY2(err.contains(QStringLiteral("无法从镜像识别")), qPrintable(err));
         QVERIFY2(err.contains(QStringLiteral("自报 SoC 名")), qPrintable(err));  // 兜底的存在理由
@@ -406,7 +542,7 @@ private slots:
         box->setChecked(true);
         QVERIFY(!dlg.isStartEnabledForTest());
 
-        QVERIFY(dlg.prepare(syntheticSboot(), QString(), &err));
+        QVERIFY(dlg.prepare(syntheticSboot(), QString(), QString(), &err));
         QVERIFY(dlg.isStartEnabledForTest());
         // 断言对象是**真实控件**：isStartEnabledForTest 必须反映它，不能自己另算一份
         QVERIFY(btn->isEnabled());
@@ -437,6 +573,47 @@ private slots:
         QVERIFY2(t.contains(QStringLiteral("仍需正常刷写")), qPrintable(t));
         QVERIFY(t.contains(QStringLiteral("Download")));          // 交接目标：Download 模式（§D1）
         QVERIFY(t.contains(QStringLiteral("请继续")));            // 可行动：下一步做什么（§D10）
+        // Task 2：9830 会在分段之后另发额外文件 —— 成功文案不得**少报**已发生的动作
+        const QString withExtras = EubRecoveryDialog::rescueSuccessText(true);
+        QVERIFY2(withExtras.contains(QStringLiteral("额外文件")), qPrintable(withExtras));
+        QVERIFY2(withExtras.contains(QStringLiteral("未写")), qPrintable(withExtras));   // 未写存储这句不能丢
+    }
+
+    // ---- 真样本槽（reference/eub-samples/，gitignored；缺失时 QSKIP/FAIL，见 CMakeLists 的
+    //      EUB_SAMPLES_DIR / EUB_SAMPLES_REQUIRED=ON）----
+    // 事实出处：docs/superpowers/specs/exynos-eub-facts.md §H2 与 .superpowers/sdd 的独立取值报告。
+    // 只读样本、绝不写回；样本内容不进仓库（CMake 只把**目录路径**编进本目标）。
+
+    void real9830BlPackageUnblocksStartWithRealExtraSizes()
+    {
+        // 9830 的**真** BL 包走完整预检（与 onPickSource 同一条入口：loadSbootBytes → prepare）：
+        // 段表里的字节数必须是**从真包解压出来的** 6,291,456 / 1,572,864（facts §H2）。
+        // 与合成槽（12,345 / 17,185）合起来才钉得住"数字来自包"：单看本槽，硬编这两个数字也全绿。
+        const QString pkg = QStringLiteral("BL_SM-G980F_G980FXXSNHYB1.tar.md5");   // SM-G980F = Exynos9830
+        if (!eubtest::sampleAvailable(pkg))
+            EUB_SKIP_OR_FAIL(pkg);
+        const QString tar = eubtest::samplePath(pkg);
+
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos9830");
+        EubRecoveryDialog dlg(mock, nullptr);
+        eub::SbootSource src;
+        QByteArray sboot;
+        QString err;
+        QVERIFY2(eub::loadSbootBytes(tar, sboot, &src, &err), qPrintable(err));   // 真包里的 sboot.bin.lz4
+        QVERIFY2(dlg.prepare(sboot, tar, src.description, &err), qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9830"));
+
+        const QString table = segmentViewText(dlg);
+        QVERIFY2(table.contains(QStringLiteral("6,291,456")), qPrintable(table));   // ldfw 解压后 0x600000
+        QVERIFY2(table.contains(QStringLiteral("1,572,864")), qPrintable(table));   // tzsw 解压后 0x180000
+        QVERIFY2(!table.contains(QStringLiteral("不发送")), qPrintable(table));
+
+        QCheckBox *box = dlg.findChild<QCheckBox *>(QStringLiteral("eubConfirmCheck"));
+        QVERIFY(box != nullptr);
+        QVERIFY(!dlg.isStartEnabledForTest());
+        box->setChecked(true);
+        QVERIFY2(dlg.isStartEnabledForTest(), "真包齐备 + 已勾选 → 开始按钮必须可用");
     }
 };
 

@@ -4,7 +4,9 @@
 //   ① 把设备的识别结果与布局表摊开到人眼前（含**证据等级**与**帧风格出处** —— facts §B6 要求
 //      UI 说明"照抄自哪个实现"，本类承接 T3 无 UI 改动的遗留）；
 //   ② 把 shai 对照讲清楚（spec §D6：不硬拒绝，但要让用户看到"两边前 8 位"）；
-//   ③ 门控"开始"（未验证勾选惯例，spec §D6）与交接提示（§D10）。
+//   ③ 门控"开始"（未验证勾选惯例，spec §D6）与交接提示（§D10）；
+//   ④ 表项带 extraFiles（9830）时，从**用户给的同一个 BL 包**里把额外文件取出来（backlog Task 2）——
+//      源不是 tar 或包内缺条目都在预检阶段失败（不碰设备、指引改选 BL 包），取到了才放行"开始"。
 //
 // ⚠️ 真机路径未验证：本机无任何 Exynos 设备（facts §F1）—— 识别/发送/回显的真机行为留持机人；
 // 本层只到"注入 IEubTransport 后按 spec 编排"这一层证据（用例见 tests/test_eub_recovery_dialog.cpp）。
@@ -15,8 +17,11 @@
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -35,6 +40,34 @@ QString hexBytes(const QByteArray &b)
     for (unsigned char c : b)
         parts << QStringLiteral("%1").arg(c, 2, 16, QLatin1Char('0')).toUpper();
     return parts.join(QLatin1Char(' '));
+}
+
+// 字节数文案："6,291,456"（与 facts §H2 / 表里的十六进制并列，方便用户拿这两个数去核对照）。
+// **显式 en_US** 而不是系统 locale：用例钉的是字面量 6,291,456，跟着系统 locale 变（如 de_DE 的
+// 6.291.456）会让断言假红 —— 与"勾选门控用例在无显示环境下跑"同类的环境无关性要求。
+QString bytesText(qsizetype bytes)
+{
+    return QLocale(QLocale::English, QLocale::UnitedStates).toString(qulonglong(bytes));
+}
+
+// 用户选的来源**是不是 tar 包**（只判容器类型，不解析内容）：判据与 eub_payload.cpp:150-152 的那条
+// 逐字一致（"ustar" 魔数落在 257..261，或 .tar/.tar.md5 后缀）—— 那是同一个问题的既有判据，这里只是
+// 在 UI 层**分流**（裸镜像 → 指引改选 BL 包），包内容的裁定仍由 eub::loadNamedEntriesFromTar 做。
+// 不共用函数的理由：那个判据夹在 loadSbootBytes 的解析流程里（读头块、条目选择同一处），抽出来要动
+// core 层签名；本函数只在 extraFiles 非空时调用一次，错了也只会退化成"再走一次 loadNamedEntriesFromTar
+// 并以它的错误文案收场"（fail-closed，不会发出错误的字节）。
+bool sourceLooksLikeTar(const QString &path)
+{
+    if (path.isEmpty())
+        return false;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray head = f.read(512);
+    const QString name = QFileInfo(path).fileName();
+    return head.mid(257, 5) == QByteArray("ustar", 5)
+           || name.endsWith(QStringLiteral(".tar"), Qt::CaseInsensitive)
+           || name.endsWith(QStringLiteral(".tar.md5"), Qt::CaseInsensitive);
 }
 
 } // namespace
@@ -111,7 +144,7 @@ EubRecoveryDialog::EubRecoveryDialog(eub::IEubTransport &transport, QWidget *par
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::reject);
     layout->addWidget(buttons);
 
-    refreshStartEnabled();      // 初始关闸（未预检 + 未勾选）
+    refreshStartEnabled();      // 初始关闸（未预检 + 未勾选 + 无额外文件）
     log(QStringLiteral("EUB 救援：本流程只用你自备的原厂 BL 引导设备进入 Download 模式；"
                        "不写任何存储，完成后仍需正常刷写（facts §F5）。"));
 }
@@ -125,9 +158,15 @@ void EubRecoveryDialog::log(const QString &line, bool isError)
 
 void EubRecoveryDialog::refreshStartEnabled()
 {
-    // extraFiles（9830）一票否决：勾选也不能解除 —— 本仓本期没有"段后另发"路径，run 会 fail-closed
-    // 拒绝执行（见 prepare 与该字段注释），让按钮亮着等于给用户一个必然失败的入口。
-    m_startBtn->setEnabled(m_prepared && m_confirmBox->isChecked() && !m_extraFilesBlocked);
+    // 门控 = 预检通过 AND 勾选确认 AND 额外文件齐备。9830 的额外文件在 prepare 里就取好了
+    //（取不到即预检失败），这里的 extrasReady 是那道"数量对得上"的提前版校验 —— 与 run 入口的
+    // fail-closed 同一条判据，让按钮要么可用、要么有**看得见的**原因。
+    m_startBtn->setEnabled(m_prepared && m_confirmBox->isChecked() && extrasReady());
+}
+
+bool EubRecoveryDialog::extrasReady() const
+{
+    return m_extras.size() == m_loadout.extraFiles.size();
 }
 
 bool EubRecoveryDialog::isStartEnabledForTest() const
@@ -150,19 +189,20 @@ void EubRecoveryDialog::refreshPreview(const QString &deviceLine, const QString 
         m_shaLabel->setText(QStringLiteral("sboot 修订对照：（未通过预检，不做对照）"));
         return;
     }
-    m_segmentView->setPlainText(segmentTableText(m_loadout));
+    // 传 m_extras 而不是空表：段表里的字节数只能是**实际取出的**载荷大小（backlog Task 2）
+    m_segmentView->setPlainText(segmentTableText(m_loadout, m_extras));
     m_shaLabel->setText(QStringLiteral("sboot 修订对照：%1")
         .arg(sha1CompareText(m_loadout.sbootSha1, eub::sha1Hex(m_sboot).toLatin1())));
 }
 
-bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDescription,
-                                QString *error)
+bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourcePath,
+                                const QString &sourceDescription, QString *error)
 {
     // fail-closed：入口先清（早退路径不少，逐个清容易漏；同 eub_session.cpp:100 的 identify 惯例）
     m_prepared = false;
-    m_extraFilesBlocked = false;        // 本次预检的闸位：不随上一次的载荷残留
     m_sboot = sboot;
     m_loadout = eub::EubLoadout{};
+    m_extras.clear();                   // 上一次的额外文件不得留到这一次（数量相同也会真的发出去）
 
     // 失败路径带上"识别到底成没成"：设备行不能一律写"识别失败"—— 太短/不匹配是**载荷**的问题，
     // 设备其实识别成功了（用户据此知道该换固件还是该查设备）。
@@ -205,6 +245,40 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
                 .arg(err, imageSoc));
     }
 
+    // 额外文件（9830，facts §C7；backlog Task 2）：参照流程要在分段**之后另发** BL 包内的这些文件
+    // （hubble.py:329-341 / ExynosData/Exynos9830.json:3），本仓的做法是从**同一个 BL 包**里按名单把
+    // 它们取出来（eub_payload.h 的 loadNamedEntriesFromTar：先裸名、再 .lz4），再交给 run 按序发出。
+    // 于是来源必须是 tar：裸 sboot.bin/.lz4 里没有这些文件，而本仓**不另开第二个文件选择器**
+    //（spec §D8 的既定取舍 —— 额外文件必须与 sboot 同源，否则无从核对修订）。
+    // 判在切段**之前**：来源不对 / 包内缺件是更根本的问题（换包即可一并解决），先报它更可行动；
+    // 取不出来就**不预检通过**（不碰设备、零字节）—— 半完成状态（段已发、文件未发）比什么都没发更糟。
+    if (!m_loadout.extraFiles.isEmpty()) {
+        const QString soc = m_loadout.soc;
+        const QStringList names = m_loadout.extraFiles;    // 表要清，名单先留（下面两处失败都要用）
+        const QString wanted = names.join(QStringLiteral("、"));
+        auto failExtras = [&](const QString &msg) {
+            m_loadout = eub::EubLoadout{};   // 与切段失败同一处置：不留半张表（fail-closed）
+            m_extras.clear();
+            return fail(QStringLiteral("设备 SoC：%1（已识别；载荷预检未通过，未发送任何字节）").arg(soc),
+                        msg);
+        };
+        if (!sourceLooksLikeTar(sourcePath)) {
+            const QString srcName = sourcePath.isEmpty()
+                ? QStringLiteral("（未提供来源路径）") : QFileInfo(sourcePath).fileName();
+            return failExtras(QStringLiteral(
+                "该 SoC 的参照流程需要在分段之后另发 %1 个文件（%2），它们只存在于 BL_*.tar.md5 里 —— "
+                "请改选该机型的 BL 包（BL_*.tar.md5）：本次来源「%3」不是 tar 包，取不到这些文件"
+                "（sboot 与额外文件都取自同一个 BL 包，本工具不单独选这些文件）。")
+                    .arg(names.size()).arg(wanted, srcName));
+        }
+        QString extraErr;
+        if (!eub::loadNamedEntriesFromTar(sourcePath, names, m_extras, &extraErr))
+            return failExtras(QStringLiteral(
+                "本工具要从你选的来源里取出这些额外文件（%1），未能取到：\n%2\n"
+                "请确认来源是该机型的 BL 包（BL_*.tar.md5）且包内含这些文件。")
+                    .arg(wanted, extraErr));
+    }
+
     // 切段**试算**：太短当场拒绝，不等到用户点了"开始"才报（也保证"开始"时不再有表/镜像不匹配
     // 这类可预见的失败）。切出的字节本层不留用 —— run() 会按同一张表重切（不重复实现）。
     QList<QPair<QString, QByteArray>> parts;
@@ -212,22 +286,22 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
     if (!eub::splitSboot(sboot, m_loadout, parts, &splitErr)) {
         const QString soc = m_loadout.soc;          // 清表前留名，供设备行说明"识别成功但载荷不匹配"
         m_loadout = eub::EubLoadout{};
+        m_extras.clear();                           // 同上：载荷都不匹配了，额外文件也不该留着
         return fail(QStringLiteral("设备 SoC：%1（已识别；载荷预检未通过，未发送任何字节）").arg(soc),
                     splitErr);
     }
 
     m_prepared = true;
-    // I1（终审）：该 SoC 的参照流程要在分段**之后另发** BL 包内文件（9830 = ldfw.img/tzsw.img，
-    // hubble.py:329-341），而本仓本期没有该发送路径 —— run 会据此 fail-closed 拒绝执行。在这里
-    // 就把情形讲明并关闸：让用户"点了开始才发现"等于把一次**已知做不成**的操作留给设备去承担。
-    // 段表照常展示（偏移/证据仍可供人工与参照核对），只是「开始救援」不可用。
+    // 额外文件就绪说明（9830）：字节数取自**实际取出的载荷**（不是包里 .lz4 条目的大小，也不是硬编）。
     QString extraNote;
-    if (!m_loadout.extraFiles.isEmpty()) {
-        m_extraFilesBlocked = true;
-        extraNote = QStringLiteral(
-            "\n本仓本期不发送额外文件（%1）：参照流程要求它们在分段之后另发，而本仓尚未实现该发送"
-            "路径 —— 为避免把设备留在半完成状态（分段已发、文件未发），「开始救援」已禁用。")
-                        .arg(m_loadout.extraFiles.join(QStringLiteral("、")));
+    if (!m_extras.isEmpty()) {
+        QStringList items;
+        items.reserve(m_extras.size());
+        for (int i = 0; i < m_extras.size(); ++i)
+            items << QStringLiteral("%1（%2 字节）")
+                         .arg(m_loadout.extraFiles.at(i), bytesText(m_extras.at(i).size()));
+        extraNote = QStringLiteral("\n额外文件：%1 —— 已从同一个 BL 包取出，将在 %2 段之后按序另发")
+                        .arg(items.join(QStringLiteral("、"))).arg(m_loadout.segments.size());
     }
     refreshPreview(QStringLiteral("设备 SoC：%1（来源：%2）\n布局表：%3 段；证据：%4%5")
                        .arg(m_loadout.soc, socOrigin)
@@ -235,16 +309,19 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
                        .arg(m_loadout.evidence, extraNote),
                    sourceDescription);
     refreshStartEnabled();
-    const QString gateNote = m_extraFilesBlocked
-        ? QStringLiteral("该 SoC 的参照流程需在段后另发 %1（本仓本期不发送），已禁用「开始救援」")
-              .arg(m_loadout.extraFiles.join(QStringLiteral("、")))
-        : (m_confirmBox->isChecked()
+    const QString gateNote = m_confirmBox->isChecked()
+        ? (m_extras.isEmpty()
                ? QStringLiteral("已勾选确认，可以开始")
-               : QStringLiteral("请阅读段表与 sha1 对照后勾选确认"));
+               : QStringLiteral("已勾选确认，可以开始（连同 %1 个额外文件一起发送）").arg(m_extras.size()))
+        : QStringLiteral("请阅读段表与 sha1 对照后勾选确认");
     log(QStringLiteral("预检通过：%1，%2 段（证据：%3）。%4")
             .arg(m_loadout.soc)
             .arg(m_loadout.segments.size())
             .arg(m_loadout.evidence, gateNote));
+    if (!m_extras.isEmpty())
+        log(QStringLiteral("额外文件已就绪：%1 —— 将在 %2 段全部发完后按序另发（顺序即段表所列）")
+                .arg(m_loadout.extraFiles.join(QStringLiteral("、")))
+                .arg(m_loadout.segments.size()));
     return true;
 }
 
@@ -267,7 +344,9 @@ void EubRecoveryDialog::onPickSource()
         return;
     }
 
-    if (!prepare(sboot, source.description, &err)) {
+    // 路径一并交给 prepare：表项带 extraFiles（9830）时它要**从同一个来源**里把额外文件取出来
+    //（裸 sboot.bin 会被拒 —— 那些文件只存在于 BL 包里，本对话框不另开第二个选择器）
+    if (!prepare(sboot, path, source.description, &err)) {
         QMessageBox::warning(this, QStringLiteral("预检失败"),
                              QStringLiteral("%1\n\n本流程不会发送任何字节。").arg(err));
         return;
@@ -281,9 +360,13 @@ void EubRecoveryDialog::onStart()
         return;
 
     QString err;
-    log(QStringLiteral("开始救援：向设备 RAM 逐段发送 %1 段（每段重开设备；失败即中止，"
-                       "不支持从中间续传）…").arg(m_loadout.segments.size()));
-    if (!m_session.run(m_loadout, m_sboot, &err)) {
+    // 额外文件一并交给会话层（不带该字段的表项传空表；顺序 = 段表所列，契约见 EubSession::run）
+    const QString extrasNote = m_extras.isEmpty()
+        ? QString()
+        : QStringLiteral("，随后按序另发 %1 个额外文件").arg(m_extras.size());
+    log(QStringLiteral("开始救援：向设备 RAM 逐段发送 %1 段%2（每段重开设备；失败即中止，"
+                       "不支持从中间续传）…").arg(m_loadout.segments.size()).arg(extrasNote));
+    if (!m_session.run(m_loadout, m_sboot, m_extras, &err)) {
         log(err, true);
         // 失败文案要可行动：告诉用户"设备现在处于什么状态"与"下一步做什么"（对话框是人机界面）
         QMessageBox::critical(this, QStringLiteral("EUB 救援失败"),
@@ -294,8 +377,10 @@ void EubRecoveryDialog::onStart()
                                   .arg(err));
         return;
     }
-    log(QStringLiteral("救援完成：分段已全部发送。"));
-    QMessageBox::information(this, QStringLiteral("EUB 救援"), rescueSuccessText());
+    // 成功文案按"本次实际发了什么"分岔：9830 会在分段之后另发额外文件，少报与多报同样是失真
+    log(m_extras.isEmpty() ? QStringLiteral("救援完成：分段已全部发送。")
+                           : QStringLiteral("救援完成：分段与 %1 个额外文件已全部发送。").arg(m_extras.size()));
+    QMessageBox::information(this, QStringLiteral("EUB 救援"), rescueSuccessText(!m_extras.isEmpty()));
 }
 
 QString EubRecoveryDialog::statusText() const
@@ -305,7 +390,8 @@ QString EubRecoveryDialog::statusText() const
     return m_deviceLabel->text() + QLatin1Char('\n') + m_shaLabel->text();
 }
 
-QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo)
+QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo,
+                                            const QList<QByteArray> &extras)
 {
     QStringList lines;
     lines.reserve(lo.segments.size() + 6);
@@ -335,11 +421,29 @@ QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo)
                  .arg(origin, hexBytes(lo.style.header), hexBytes(lo.style.trailer));
 
     if (!lo.extraFiles.isEmpty()) {
-        // 口径与实现一致（终审 I1）：参照流程要在段后另发这些文件，而本仓本期**没有**该发送路径
-        // （run 会据此 fail-closed）—— 写"各段发完后另发"会让用户以为本工具会发。
-        lines << QStringLiteral("额外文件：%1 —— 参照流程需在段后另发（包内自备）；"
-                                "**本仓本期不发送**（发送路径未实现，run 会据此拒绝执行）")
-                     .arg(lo.extraFiles.join(QStringLiteral("、")));
+        // 口径与实现一致（backlog Task 2）：这些文件由**用户给的同一个 BL 包**提供、在分段之后按序
+        // 另发（EubSession::run 的 extras 阶段）。extras 传进来时给出**实际取出的**载荷字节数 ——
+        // 不硬编（数字随包/修订变），也不拿包内 .lz4 条目的大小顶替（那是压缩后的大小，差一个量级）。
+        QStringList items;
+        items.reserve(lo.extraFiles.size());
+        for (int i = 0; i < lo.extraFiles.size(); ++i) {
+            if (i < extras.size())
+                items << QStringLiteral("%1（%2 字节）")
+                             .arg(lo.extraFiles.at(i), bytesText(extras.at(i).size()));
+            else
+                items << lo.extraFiles.at(i);   // 未加载形态：只列名字，不编数字
+        }
+        lines << QStringLiteral("额外文件 —— 段后另发（来自同一个 BL 包）：%1")
+                     .arg(items.join(QStringLiteral("、")));
+        // 证据等级：单源（hubble 的 ExynosData/<SoC>.json + hubble.py:329-341）。真样本核对**只覆盖
+        // 9830**（表里唯一带该字段的 SoC，facts §C7/§H2），故这句按 SoC 名限定 —— 将来别的 SoC 也带
+        // extraFiles 时不得自动继承 9830 的真样本声明（要另做核对），也不得写成"真机已验证"。
+        const bool haveSampleFacts = lo.soc.compare(QStringLiteral("Exynos9830"), Qt::CaseInsensitive) == 0;
+        lines << QStringLiteral("额外文件证据等级：单源（hubble）；%1；真机仍未验证")
+                     .arg(haveSampleFacts
+                              ? QStringLiteral("真样本已证实该 SoC 的 BL 包内含这两个文件"
+                                               "（facts §H2：包内为 ldfw.img.lz4 / tzsw.img.lz4）")
+                              : QStringLiteral("该 SoC 无真样本核对（本仓只有 9830 的真样本，facts §H）"));
     }
     lines << (lo.responseSupport
         ? QStringLiteral("回显：该 SoC 会回显，每段后读一次、原文落日志（本期不解析结构，facts §C8/§D7）")
@@ -364,12 +468,17 @@ QString EubRecoveryDialog::sha1CompareText(const QByteArray &tableSha1, const QB
         .arg(tablePrefix, filePrefix);
 }
 
-QString EubRecoveryDialog::rescueSuccessText()
+QString EubRecoveryDialog::rescueSuccessText(bool withExtraFiles)
 {
     // facts §F5/§D1：本流程只向设备 RAM 发了引导镜像，**没有任何写存储命令**；bootloader 仍处于
     // 被擦状态，必须随后正常刷写 —— 这句不能省（用户以为"救援完成 = 修好了"是最坏误解）。
-    return QStringLiteral("分段已全部发送。设备应已进入 Download 模式，请继续用三星刷写"
+    // withExtraFiles（9830）：本次在分段之后还另发了 BL 包内的额外文件 —— 成功文案不得**少报**
+    // 已发生的动作（"不得多报"是 I1，这是同一条原则的另一半）。
+    const QString sent = withExtraFiles
+        ? QStringLiteral("分段与该 SoC 需要的额外文件已全部发送")
+        : QStringLiteral("分段已全部发送");
+    return QStringLiteral("%1。设备应已进入 Download 模式，请继续用三星刷写"
                           "（BL/AP/CP/CSC）刷入固件。\n\n"
                           "注意：本流程只向设备 RAM 发送了引导镜像，未写任何存储，"
-                          "设备仍需正常刷写。");
+                          "设备仍需正常刷写。").arg(sent);
 }
