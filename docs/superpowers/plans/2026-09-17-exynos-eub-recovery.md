@@ -516,7 +516,7 @@ CMakeLists：`test_eub_samsung_mode` 加进测试源清单；其 extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build && ./build/image_engine_tests_test_eub_samsung_mode && ./build/image_engine_tests_test_eub_transport`
-Expected: 两个目标各自 `Totals: 8 passed, 0 failed`（本任务 slots 6 + 2）/ `7 passed, 0 failed`（T1 的 5 + 2）；全项目 build 通过。
+Expected: 两个目标各自 `Totals: 8 passed, 0 failed`（本任务 slots 6 + 2）/ `8 passed, 0 failed`（T1 目标经 T1 修复后为 6 slots + 2）；全项目 build 通过。
 
 - [ ] **Step 5: 提交**
 
