@@ -231,31 +231,33 @@ bool splitSboot(const QByteArray &sboot, const EubLoadout &lo,
 ### 5.5 会话层
 
 ```cpp
-// src/core/eub/eub_session.h
+// src/core/eub/eub_session.h —— **已按 T6 落地实现同步**（2026-09-18）
 struct EubOptions {
-    int segmentGapMs      = 1000;   // 段间基础等待（§B8：脚本用 sleep 1）
-    int revolveTimeoutMs  = 10000;  // 等设备重现的上限（§B9：重连会失败，需重试）
-    bool readResponse     = true;   // responseSupport 表项：每段后读一次回显（§D7）
+    int  segmentGapMs    = 1000;   // 段间基础等待（§B8：脚本用 sleep 1）
+    int  revolveAttempts = 20;     // open 重试**次数**（总上限 ≈ 次数 × 间隔）
+    int  revolvePollMs   = 500;    // 重试间隔
+    bool readResponse    = true;   // responseSupport 表项：每段后读一次回显（§D7）
+    std::function<void(int)> sleepFn;   // 注入用：空 = QThread::msleep（用例注入空实现 → 不等真实时间）
 };
-struct EubProgress { QString stage; QString detail; int percent = 0; };  // stage: info/loadout/split/send/wait/done
+struct EubProgress { QString stage; QString detail; int percent = 0; };  // stage: identify/send/done
 using EubProgressFn = std::function<void(const EubProgress &)>;
-
-// 载荷来源（§D8 三条路径在 UI 层解析成 bytes 后传入）
-struct EubRequest {
-    QByteArray sboot;      // 完整 sboot.bin
-    QString    sbootSha1;  // 可选（有则展示对照；§D6）
-};
 
 class EubSession {
 public:
-    explicit EubSession(IEubTransport &t, EubProgressFn progress = {});
-    // 打开 → 读自述 → 查表 → 切段 → [逐段重新 open → 发送 →（可选）读回显] → done
-    bool run(const EubRequest &req, const EubOptions &opt, QString *error);
-
-private:
-    bool openAndIdentify(EubLoadout &lo, QString *error);
-    bool waitForDevice(const QString &segmentName, QString *error);  // 重枚举等待（§D4）
+    explicit EubSession(IEubTransport &t, const EubOptions &opt = {}, EubProgressFn progress = {});
+    // 打开 → 读自述 → 查表 → **关闭**（不持有句柄：设备可能瞬态消失，facts §A6）
+    bool identify(EubLoadout &out, QString *error);
+    // 切段（失败即中止、不写任何字节）→ 逐段 [open(带重试) → 发送 →（可选）读回显 → close]
+    bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
 };
+```
+
+**与本节初稿的两处有意偏离**（T6 实施时定案，理由是让 UI 能"先预览再开跑"）：
+① `identify()` 与 `run()` **分成两次调用**——UI 需要在发送前展示段表/sha1 对照并等用户确认
+（初稿的单次 `run(EubRequest, …)` 无法在中间插入人工确认）；② 超时用**次数**（`revolveAttempts` ×
+`revolvePollMs`）而非墙钟，`sleepFn` 可注入 → 用例确定、不等真实时间。载荷的 sha1 对照由 UI 层
+在 `identify()` 之后自行计算与展示（`EubLoadout::sbootSha1` 对 `sha1Hex(bytes)`），故 `EubRequest`
+结构不再需要。
 ```
 
 ---
@@ -294,7 +296,7 @@ private:
 | 某段写入失败 | 立即停止，报"第 N 段 `<名>`（`offset`/`length`）写入失败：<err>"；**不支持从中间续传**（引导链必须从第一段起，文案说明"请重新上电/重新进入 EUB 后从头再试"） |
 | 段后设备未重现 | `waitForDevice` 超时 → 失败，文案含"设备可能已进入 Download 模式（请检查）或需要重新进入 EUB" |
 | 读回显失败/为空 | **不判失败**（best-effort，只落日志） |
-| 中途用户取消 | 关闭句柄、不发送任何"收尾"命令，报"已取消（已发 N/M 段）" |
+| 中途用户取消 | **本期不做**（T6 定案）：本流程只发 RAM 镜像、不发收尾命令，中途取消没有需要清理的设备侧状态；用户直接关闭进度窗口即可。若日后要做，入口是 `EubOptions` 加 `std::function<bool()> cancelled` 并在段间检查 |
 
 ---
 
