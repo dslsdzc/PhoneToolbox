@@ -344,12 +344,12 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
 [ ] 三星非 Odin 变体 (具体变体未定, 需先列出候选)
 [ ] 华为 HiSuite 升级模式 (与已交付的 Kirin VCOM 强刷链是两条不同通道)
-[ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (当前为**明确拒绝**, 见"MTK 华为后续")
+[ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (现为拒绝并说明原因)
 [ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」)
 [ ] 高通 Diag / DM 端口 (QXDM/QPST 诊断与日志; 属诊断非刷写)
 
-明确不做
---------
+不做
+----
 [ ] BROM 漏洞利用 (kamakiri / carbonara) —— 超出维修用途, 不做
 [ ] 熔丝类 (QFuse/QFuse2)、DA 二进制提取/生成、签名绕过 —— 不做
 [ ] MTK DOWNLOAD / UPLOAD / FORMAT_PARTITION —— 上游零调用, 不做
