@@ -390,6 +390,9 @@ private slots:
         const QString tar = eubtest::samplePath(pkg);
 
         // 夹具自检：先钉死真包**就是** lz4 包裹的形态 —— 否则下面的"回退"断言是空转。
+        // ⚠️ 诚实边界（1b 审查 M4）：本自检用的是**被测同一原语**（imgtar::indexTarStream，见 eub_payload.cpp 的同名调用），
+        //    因此它只证明"该包的形态符合预期"，**不独立于被测实现** —— 真包条目名的独立核对在
+        //    .superpowers/sdd/eub-real-samples-verification.md（用 tar(1)/lz4(1) 自写工具，未用本仓代码）。
         QList<imgtar::TarIndexEntry> idx;
         QString idxErr;
         QVERIFY2(imgtar::indexTarStream(tar, idx, nullptr, &idxErr), qPrintable(idxErr));
