@@ -403,7 +403,16 @@ bool XmlSession::sendCommand(const QString &xml, Result *out, bool noack, QStrin
         if (out) *out = r;
         return true;
     }
-    if (out) *out = r;
+    // 走到这里 = 具名但**未列举**的命令（如 `CMD:CUSTOM*`）：头文件契约要求调用方自己核 `out.command`。
+    // ⚠️ 终审 seam 4：若调用方**没给 out**（setup_env / setup_hw_init×2 / set_host_info / xmlReboot 五处都传 nullptr），
+    //    它结构上无法核 → 这里必须 **fail-closed**：上游 `send_command` 的 `else: return result` 对该类帧返回 `""`（假值）
+    //    就是"失败"，所以判失败才与上游一致（先前的 `return true` 是 fail-open 的分歧）。
+    if (!out) {
+        if (error) *error = QStringLiteral("XML：命令以 %1 结束（非 CMD:END），而调用方未提供 Result 供核验 —— 按失败处理")
+                                .arg(r.command.isEmpty() ? QStringLiteral("(空)") : r.command);
+        return false;
+    }
+    *out = r;
     return true;
 }
 

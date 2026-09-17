@@ -62,7 +62,7 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 - 设备侧源数据：**LBA0..N 的原始扇区**（XFlash 经 `READ_DATA` 读）；扇区大小：eMMC 512、UFS 4096（`XFL:448` 读出 `emmc.block_size` 但**从未赋给 `config.pagesize`** —— 上游缺陷③）、XML+UFS 硬编码 4096（`XL:805`）。
 - 解析：LBA1 头 `EFI PART`（8 字节整体比较，`gpt.py:45/223`）× 512/4096 两档探测（`gpt.py:219-224`）；`revision != 0x10000` 上游直接拒（`gpt.py:165-167`）；CRC32 **被解析但从不校验**（缺陷④）。
 - **上游 4 处已知缺陷，我们不复刻**：① `--gpt-num-part-entries`/`--gpt-part-entry-size` 无效、`--gpt-part-entry-start-lba` 被当**字节偏移**（`gpt.py:168-171`）；② **备份 GPT 兜底实际不生效**（`partition.py:45` 的 seek 被 `gpt.py:161` 覆盖）；③ eMMC 恒 512；④ CRC 不校验。
-- **真样本**（`reference/mtk-samples/PGPT.img`，来源与实测见 §9）：**4096 字节扇区**、LBA1@4096 才是 `EFI PART`、61 条目、条目 CRC 校验通过、头部 CRC 需"字段清零后再算"才通过；`sgdisk_print.txt` 为独立对拍基准。
+- **真样本**（`reference/mtk-samples/PGPT.img`，来源与实测见 §9）：**4096 字节扇区**、LBA1@4096 才是 `EFI PART`、61 条目、条目 CRC 校验通过、头部 CRC 需"字段清零后再算"才通过；`sgdisk_print.txt` 是**同型号另一版布局**的 sgdisk 输出，**仅作分区名集合旁证、非逐条对拍基准**（见 `mtk-xflash-facts.md` §8）。
 
 **DA 文件（沿用 D1 解析器，本阶段新增的消费点）**
 - `region[2].m_start_addr` **逐条目从文件读**（现代几乎都是 `0x40000000`），**不是常量**；DA2 二进制 = `region[2].m_buf` 起 `m_len` **再剥 `m_sig_len`**（`XFL:970-978`）。
@@ -146,7 +146,7 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 
 | 层 | 内容 |
 |---|---|
-| **真实 GPT 样本** | `reference/mtk-samples/PGPT.img`/`SGPT.img`（**4096 字节扇区**，来源 `https://github.com/ReCoreShift/mtk-gpt-tool` `tests/fixtures/`，MPL-2.0 仓库，**非我们自己的设备**；sha256 `1124d035…`/`45495fd5…`）：硬断言 61 条目、`EFI PART`@4096、**头部 CRC（字段清零后）= 0x25c45852**、**条目 CRC = 0xac89a396**、前几条分区名（`misc`/`para`/`expdb`/`frp`/`nvcfg`/`nvdata`）；与 `sgdisk_print.txt` 独立对拍 |
+| **真实 GPT 样本** | `reference/mtk-samples/PGPT.img`/`SGPT.img`（**4096 字节扇区**，来源 `https://github.com/ReCoreShift/mtk-gpt-tool` `tests/fixtures/`，MPL-2.0 仓库，**非我们自己的设备**；sha256 `1124d035…`/`45495fd5…`）：硬断言 61 条目、`EFI PART`@4096、**头部 CRC（字段清零后）= 0x25c45852**、**条目 CRC = 0xac89a396**、前几条分区名（`misc`/`para`/`expdb`/`frp`/`nvcfg`/`nvdata`）；与 `sgdisk_print.txt` 对比**分区名集合**（该文件是另一版布局，**不可逐条对拍**，见 facts §8） |
 | **真实 scatter（新方言）** | `MT6789_Android_scatter.xml`（同源，真样本）：**130 个 `<partition_index>` 块 = EMMC 与 UFS 两份完整副本**（同一个 `SYS0` 标签，一份 `<region>EMMC_BOOT1</region>/<storage>HW_STORAGE_EMMC</storage>`、一份 `<region>UFS_LU0</region>/<storage>HW_STORAGE_UFS</storage>`）→ **解析必须按 storage 过滤**（每份 65 个分区：`preloader`/`preloader_backup`/`pgpt`/`misc`/`para`/`expdb`…），不过滤会让每个分区翻倍且大小对不上；解析结果与 GPT 条目交叉对照 |
 | **真 DA 样本** | V5/V6：`region[1]`=DA1、`region[2]` 地址逐条目（`0x40000000`）、**剥签名**（XFlash）与**保留签名**（LEGACY）双向断言 |
 | **832 preloader** | 两代 EMI 切片与上游逐字移植对拍（沿用 D1 的方法） |

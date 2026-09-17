@@ -3012,7 +3012,15 @@ bool XmlSession::sendCommand(const QString &xml, Result *out, bool noack, QStrin
         if (out) *out = r;
         return true;
     }
-    if (out) *out = r;
+    // ⚠️ **终审 seam 4 更正**：走到这里 = 具名但未列举的命令。调用方给了 `out` 就自己核（T8 契约）；
+    //    **没给 `out` 时结构上无法核 → 必须 fail-closed** —— 上游 `send_command` 的 `else: return result`
+    //    对该类帧返回 `""`（假值）就是失败，先前的 `return true` 是与上游不一致的 fail-open 分歧。
+    if (!out) {
+        if (error) *error = QStringLiteral("XML：命令以 %1 结束（非 CMD:END），而调用方未提供 Result 供核验 —— 按失败处理")
+                                .arg(r.command.isEmpty() ? QStringLiteral("(空)") : r.command);
+        return false;
+    }
+    *out = r;
     return true;
 }
 

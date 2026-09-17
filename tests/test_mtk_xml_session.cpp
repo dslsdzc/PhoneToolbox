@@ -94,6 +94,7 @@ private slots:
     void readCommandResultRejectsFrameWithoutCommandOrOkAt();
     void readCommandResultRejectsMalformedOkAtLength();
     void sendCommandFailsOnEmptyResult();
+    void sendCommandFailsOnUnlistedCommandWithoutResultSink();
     void sendCommandFailsOnUnparseableFollowUp();
     void readCommandResultKeepsUnknownNamedCommandForCaller();
 };
@@ -379,6 +380,30 @@ void TestMtkXmlSession::sendCommandFailsOnEmptyResult()
     QString err;
     QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
     QVERIFY2(err.contains(QStringLiteral("空结果")), qPrintable(err));
+}
+
+// 终审 seam 4：具名但未列举的命令（`CMD:CUSTOM*`）—— **有 out** 时按契约返回 true 并置名；
+// **没 out** 时调用方结构上无法核 → 必须 fail-closed（上游 `send_command` 对该类帧返回 ""＝假值＝失败）。
+void TestMtkXmlSession::sendCommandFailsOnUnlistedCommandWithoutResultSink()
+{
+    const QString unlisted = QStringLiteral("<host><command>CMD:CUSTOMX</command></host>");
+    {   // ① 有 out：true + 名字置上（T8 契约，不变）
+        MockUsbChannel m;
+        m.reads << textReads(QStringLiteral("OK")) << textReads(unlisted);
+        mtkbrom::XmlSession s(&m);
+        mtkbrom::XmlSession::Result r;
+        QString err;
+        QVERIFY2(s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), &r, false, &err), qPrintable(err));
+        QCOMPARE(r.command, QStringLiteral("CMD:CUSTOMX"));
+    }
+    {   // ② 没 out：必须失败（此前是 fail-open 的 return true）
+        MockUsbChannel m;
+        m.reads << textReads(QStringLiteral("OK")) << textReads(unlisted);
+        mtkbrom::XmlSession s(&m);
+        QString err;
+        QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
+        QVERIFY2(err.contains(QStringLiteral("CMD:CUSTOMX")), qPrintable(err));   // 文案报出实收命令
+    }
 }
 
 // 窄化的边界：**具名但未列举**的命令（如扩展命令 CMD:CUSTOM*）不算"不可解析" ——
