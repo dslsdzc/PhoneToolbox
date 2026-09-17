@@ -107,12 +107,14 @@ private slots:
         QVERIFY2(eub::loadSbootBytes(writeFile("BL_TEST.tar.md5", tar), out, &src, &err), qPrintable(err));
         QCOMPARE(out, img);
         QVERIFY(!src.wasCompressed);
-        // 有甄别力的判据是**条目名出现在描述里**：实现若退化成"裸镜像"描述（只回显文件名），
-        // 这里就会红。变异证据（控制方实跑）：把 eub_payload.cpp:185 的 describe(fileName, entryInTar, ...)
-        // 改成不回显条目名 → 本 slot 变红，其余全绿。
+        // 两条互补判据（原 `contains("tar")` 恒真已替换，T5 审查 Minor 3；改"删除"为"加固"是复审意见）：
+        //   ① 条目名出现在描述里 —— 实现若退化成"裸镜像"描述（只回显文件名）即红
+        //   ② 模板结构（"<包名> 内的 <条目名>"）在 —— 只回显条目名、不回显包名的实现即红
+        // 变异证据（控制方实跑）：把 eub_payload.cpp:187 的 describe(fileName, entryInTar, ...)
+        // 改成 describe(fileName, QString(), ...) → 夹在本 slot 的 ① 上变红（13 passed / 1 failed），
+        // 其余 13 条（含 raw/lz4 两个同型槽：它们的文件名本就含条目名）全绿，与推演吻合。
         QVERIFY(src.description.contains(QStringLiteral("sboot.bin")));
-        // （原第二条 `contains("tar")` 已删：夹具文件名就是 BL_TEST.tar.md5，描述必然回显文件名 → 该断言恒真，
-        //   对"是否真的走了 tar 分支"零甄别力。T5 审查 Minor 3。）
+        QVERIFY(src.description.contains(QStringLiteral("内的")));
     }
 
     void tarWithLz4SbootIsExtractedThenDecompressed()
