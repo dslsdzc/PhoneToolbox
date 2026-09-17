@@ -2106,7 +2106,7 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
     // ⚠️ 实施期新增（T6 审查 Minor 4，**控制方裁决：比上游更严，覆盖审查者"只加注释"的建议**）：
     //    分块循环只在 `writePacketLength % 512 == 0` 时才与上游等价；否则每块是"先切原始数据、再补零"，
     //    补的零落在**实时数据之间**、实发字节也不等于参数里承诺的总长 = **静默写坏镜像**。
-    //    真机报的 0x200/0x400/0x1000 全部对齐 → 分支不可达，但"不可达且静默破坏"正是本项目 fail-closed 的一类
+    //    上游默认档与常见 DA 报值（0x200/0x400/0x1000）都对齐 → 分支不可达，但"不可达且静默破坏"正是本项目 fail-closed 的一类
     //    （同 GPT CRC、未知分区表、未知代际）。**在任何写之前拒绝**（与上面的 0 值检查同位）。
     if (writePacketLength % 512 != 0) {
         if (error) *error = QStringLiteral("XFlash 写：write_packet_length = 0x%1 不是 512 的整数倍 —— 拒绝写入（分块补齐会把零插进数据中间）")

@@ -72,6 +72,10 @@ public:
     // ⚠️ **调用方契约**：`command` 为空的 `Result` 可能是"无名帧"（已被 sendCommand 拦成失败），也可能是
     //    **具名但未列举**的命令（如 `CMD:CUSTOM*`，上游 `get_command_result` 返回 `(cmd,"")` 交调用方判，`XL:449`）。
     //    因此**调用方必须自己查 `out.command`**，不能只看返回值。
+    //    ⚠️ 且：**调用方传 `out == nullptr` 时**（setup_env/setup_hw_init/set_host_info/xmlReboot 五处），本层对**所有非 `CMD:END`
+    //    的结构化响应**（含 `CMD:START` / `DOWNLOAD-FILE` / `UPLOAD-FILE` / `FILE-SYS-OPERATION`）一律**判失败** —— 因为
+    //    调用方结构上无法核验，而这些形状对"期待 END+START 收尾"的调用都是协议意外。**比上游更严**（上游对这几类返回真值）。
+    //    ⇒ 需要"允许这些形状"的调用方请传 `Result*` 并自行判定。
     // XL:188-219：xsend → 响应必须 "OK" → （非 noack）readCommandResult → CMD:END/CMD:START 收尾
     bool sendCommand(const QString &xml, Result *out, bool noack = false, QString *error = nullptr);
 

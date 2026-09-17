@@ -175,7 +175,7 @@ bool xflashGetPacketLength(XFlashSession &x, XPacketLength &out, QString *error)
 
 // GET_PARTITION_TBL_CATA：<I，0x64=GPT / 0x65=PMT / 其它=Unknown（XFL:612-621）。
 // **本层唯一不读尾部 status 的查询** —— 上游这一条拿到回包就直接返回（XFL:612-621），
-// 本层照做（"上游 wins"）——**但注意**：本层收尾帧走 `xread`，它会**强制校验 magic**，而上游在该段 magic 不符时静默通过；方向是 fail-closed（更严），此处注释与代码的差异是有意的。若以后把它夹在别的 devctrl 之间调用，上游同样的写法会留下
+// 本层照做（"上游 wins"）。若以后把它夹在别的 devctrl 之间调用，上游同样的写法会留下
 // 一帧未读的 status 把后续读错位；届时需要控制方裁决是否比上游多读这一帧。
 bool xflashGetPartitionCata(XFlashSession &x, PartitionCata &out, QString *error)
 {
@@ -464,6 +464,9 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
         return false;
     }
     // 收尾帧（XFL:770-776）：上游**只在 slength == 4 时**解析并判 flag，其它长度既不解析也不报错。
+    // ⚠️ **本层比上游更严（有意）**：上游在收尾段 magic 不符时**静默通过**（只 `if magic == 0xFEEEEEEF` 才解析）；
+    //    本层走 `xread`，magic 不符会**显式报错**。这里更严是安全的 —— 收尾帧是本次操作最后一帧，
+    //    不存在"留在设备侧让后续读错位"的风险（与 `xflashGetPartitionCata` 不读尾 status 的取舍同理）。
     // 本层照做（"上游 wins"）：这是本次操作的**最后一帧**，不存在"留在设备侧让后续读错位"的风险
     // （与 devCtrlQuery 尾部 status 的取舍不同），此处更严只会让真机能用、上游能过的场景反而失败。
     QByteArray fin;
