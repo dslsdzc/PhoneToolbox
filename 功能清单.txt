@@ -329,7 +329,9 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 --- 三星 Exynos EUB 救援链 (Phase E 自研, 2026-09-18) ---
 [√] EUB 检测 (VID 0x04E8 / PID 0x1234, **先于 Odin 判据**认领) + 打开设备读自述 (SoC 名 / SoC ID / Chip ID / USB Booting Version)
 [√] 逐段下载进设备 RAM: 帧 = [4B 头][u32 LE = 数据长+10][数据][2B 尾]; 段间重开设备 + 等重枚举 (默认 20 次 × 500ms) + 失败重试
-[√] 8 个 SoC 的 sboot 切段表: 8890 / 8895 / 7580 / 7885 / 9610 / 9810 / 9820 / 9830 (逐表带证据等级 + 可核对出处)
+[√] 8 个 SoC 的 sboot 切段表: 8890 / 8895 / 7580 / 7885 / 9610 / 9810 / 9820 / 9830 (逐表带证据等级 + 可核对出处);
+    **9830 本期禁用**: 其参照流程需在分段后另发 ldfw.img/tzsw.img, 本仓未实现该发送路径 → run 层 fail-closed 拒绝
+    (不把设备留在半完成状态); 对话框预检即禁用开始. 其余 7 个 SoC 不受影响
 [√] 载荷由用户自备: sboot.bin / sboot.bin.lz4 / BL_*.tar.md5 内提取 (复用 tar 流式索引 + lz4, 不自动从 AP 包找)
 [√] FlashPanel 三星模式「EUB 救援…」入口 + 对话框 (来源选择 / 读自述 / 段预览 / sha1 对照 / 未验证勾选门控 / 进度)
 [√] 交接: 完成后提示设备应已进入 Download 模式, 交给**已交付的 Odin 链**刷写 (不自动跳转)
