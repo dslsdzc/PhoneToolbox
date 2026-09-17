@@ -1,0 +1,205 @@
+// src/core/eub/eub_session.cpp
+//
+// 编排本体。步骤与文案的出处：
+//   * 段序/切段 → eub_loadout（表来自 spec §5.4）
+//   * 段间"重开设备 + 等待" → facts §B8①（shell 脚本路径：每段一次全新的 exynos-usbdl 调用 +
+//     sleep 1）；重枚举会失败（facts §B9）→ 本层用**次数**重试而不是照抄脚本的"碰运气"
+//   * 失败语义（含"不支持从中间续传"）→ spec §7
+// 本文件不碰 libusb、不构造帧、不切段 —— 只按表驱动 IEubTransport（依赖契约见 CMakeLists 的
+// test_eub_session 分支：该目标不含任何 libusb 源）。
+//
+// ⚠️ 真机路径未验证（facts §F1）：本层只到"按 spec 编排 + mock 全覆盖"这一层证据。
+#include "eub_session.h"
+
+#include <QThread>
+#include <utility>
+
+namespace eub {
+namespace {
+void setErr(QString *error, const QString &msg) { if (error) *error = msg; }
+} // namespace
+
+EubSession::EubSession(IEubTransport &t, const EubOptions &opt, EubProgressFn progress)
+    : m_t(t), m_opt(opt), m_progress(std::move(progress))
+{
+}
+
+void EubSession::report(const QString &stage, const QString &detail, int percent)
+{
+    m_lastPercent = percent;
+    if (m_progress)
+        m_progress({stage, detail, percent});
+}
+
+void EubSession::forwardNotes()
+{
+    if (m_notesForwarded)
+        return;
+    const QStringList notes = m_t.notes();
+    if (notes.isEmpty())
+        return;                 // 本次没有说明：不置位，后续 open 若产生说明仍能转出
+    m_notesForwarded = true;    // notes 描述的是本次打开环境，一次会话只转一次
+    for (const QString &n : notes)
+        report(QStringLiteral("identify"), QStringLiteral("设备说明：%1").arg(n), m_lastPercent);
+}
+
+void EubSession::sleepMs(int ms) const
+{
+    if (ms <= 0)
+        return;                 // 无意义的等待不落进注入回调（用例的 0 值配置不留噪声）
+    if (m_opt.sleepFn)
+        m_opt.sleepFn(ms);
+    else
+        QThread::msleep(static_cast<unsigned long>(ms));
+}
+
+bool EubSession::openWithRetry(QString *error)
+{
+    QString lastErr;
+    for (int i = 0; i < m_opt.revolveAttempts; ++i) {
+        if (m_t.open(&lastErr))
+            return true;
+        if (i + 1 < m_opt.revolveAttempts)
+            sleepMs(m_opt.revolvePollMs);   // 最后一次失败后不再等
+    }
+    setErr(error, QStringLiteral("设备在 %1 次尝试内未出现（每次间隔 %2 ms）：%3 —— "
+                                 "设备可能已进入 Download 模式（请检查）或需要重新进入 EUB")
+                      .arg(m_opt.revolveAttempts).arg(m_opt.revolvePollMs)
+                      .arg(lastErr.isEmpty() ? QStringLiteral("（原因未知）") : lastErr));
+    return false;
+}
+
+bool EubSession::identify(EubLoadout &out, QString *error)
+{
+    m_lastPercent = 0;
+    QString err;
+    if (!openWithRetry(&err)) {
+        // 打开失败的现场说明同样要转（传输层的 close 不清 notes，见其注释）：真机上
+        // "回退了固定端点" 这类线索常常正是失败的上下文。
+        forwardNotes();
+        setErr(error, err);
+        return false;
+    }
+    forwardNotes();
+
+    EubDeviceInfo info;
+    const bool haveInfo = m_t.readDeviceInfo(info, &err);
+    // 先关句柄再查表：identify 结束**不持有句柄**（设备可能瞬态消失，facts §A6），
+    // 且查表失败这条路径也不能漏关（故 close 在两个早退之前）。
+    m_t.close();
+
+    if (!haveInfo) {
+        setErr(error, QStringLiteral("读取设备自述失败：%1").arg(err));
+        return false;
+    }
+    if (info.socName.isEmpty()) {
+        setErr(error, QStringLiteral(
+            "设备未自报 SoC 名（iProduct 为空）。极老 SoC 只报 \"SEC S5PC210 Test B/D\"（facts §A4）——"
+            "请先用 detectSocFromImage(sboot) 从镜像反推 SoC 名，再自行查表。"));
+        return false;
+    }
+    if (!eubLoadoutFor(info.socName, out, &err)) {
+        setErr(error, err);     // eubLoadoutFor 的文案已列出支持的 SoC，并已清空 out（fail-closed）
+        return false;
+    }
+    report(QStringLiteral("identify"),
+           QStringLiteral("已识别 %1：布局表 %2 段（证据：%3）")
+               .arg(info.socName).arg(out.segments.size()).arg(out.evidence),
+           100);
+    return true;
+}
+
+bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *error)
+{
+    m_lastPercent = 0;          // 本次 run 的进度锚点：新操作从头计
+
+    // ① 先切段：失败即中止，**一个字节都不写**，也**不碰设备**（句柄尚未打开）
+    QList<QPair<QString, QByteArray>> parts;
+    QString err;
+    if (!splitSboot(sboot, lo, parts, &err)) {
+        setErr(error, err);
+        return false;
+    }
+    if (parts.isEmpty()) {
+        // 防御（fail-closed）：空表会"发 0 段然后报成功"，用户以为刷过了 —— 对救援工具是最坏的
+        // 假成功。8 张内置表都非空（tests/test_eub_loadout.cpp 钉住），但 run 是公开 API，
+        // 表可以由调用方自造。
+        setErr(error, QStringLiteral("布局表 \"%1\" 没有任何段：拒绝执行（不发送任何字节）").arg(lo.soc));
+        return false;
+    }
+
+    const int n = int(lo.segments.size());
+    for (int i = 0; i < n; ++i) {
+        const EubSegment &seg = lo.segments[i];
+
+        // ② 每段都重新打开（段间设备可能重枚举，facts §B8/§B9）；失败按次数重试
+        if (!openWithRetry(&err)) {
+            setErr(error, QStringLiteral("第 %1 段 \"%2\" 发送前打开设备失败：%3")
+                              .arg(i + 1).arg(seg.name).arg(err));
+            return false;       // open 失败不留句柄（IEubTransport 契约），无需 close
+        }
+        forwardNotes();
+
+        // ③ 仅第 1 段核对设备 SoC：识别不持有句柄（见 identify），用户可能在两步之间换了设备
+        if (i == 0) {
+            EubDeviceInfo info;
+            if (!m_t.readDeviceInfo(info, &err)) {
+                m_t.close();
+                setErr(error, QStringLiteral("第 1 段发送前读取设备自述失败：%1").arg(err));
+                return false;
+            }
+            if (info.socName.compare(lo.soc, Qt::CaseInsensitive) != 0) {
+                m_t.close();
+                setErr(error, QStringLiteral(
+                    "设备已更换：布局表是 %1，当前设备自报 %2 —— 请等设备稳定后重新识别，再从头开始")
+                              .arg(lo.soc,
+                                   info.socName.isEmpty() ? QStringLiteral("（空）") : info.socName));
+                return false;
+            }
+            report(QStringLiteral("identify"),
+                   QStringLiteral("设备 %1 与布局表一致，开始发送 %2 段").arg(lo.soc).arg(n),
+                   m_lastPercent);
+        }
+
+        // ④ 一段一帧（facts §B7：整帧一次写；不重发、不续传）
+        if (!sendSegment(m_t, parts[i].second, lo.style, &err)) {
+            m_t.close();        // 失败也要收干净句柄
+            // 文案格式固定（spec §7；序号**从 1 起**）：测试按 "第 2 段" 断言
+            setErr(error, QStringLiteral("第 %1 段 \"%2\"（0x%3/0x%4）写入失败：%5")
+                              .arg(i + 1).arg(seg.name)
+                              .arg(seg.offset, 0, 16).arg(seg.length, 0, 16)
+                              .arg(err));
+            return false;       // 引导链必须从第一段起（spec §7：不支持从中间续传）
+        }
+
+        // ⑤ 回显 best-effort（facts §C7/§C8）：落日志，**读不到不判失败**（spec §7）
+        QString echoNote;
+        if (lo.responseSupport && m_opt.readResponse) {
+            QString readErr;
+            const QByteArray echo = m_t.readBulk(kReadEchoMaxBytes, kReadEchoTimeoutMs, &readErr);
+            if (echo.isEmpty())
+                echoNote = readErr.isEmpty()
+                    ? QStringLiteral("；未读到回显（不判失败）")
+                    : QStringLiteral("；回显读取失败（不判失败）：%1").arg(readErr);
+            else
+                echoNote = QStringLiteral("；回显：%1").arg(QString::fromUtf8(echo));
+        }
+
+        m_t.close();
+        report(QStringLiteral("send"),
+               QStringLiteral("第 %1/%2 段 \"%3\" 已发送（0x%4/0x%5）%6")
+                   .arg(i + 1).arg(n).arg(seg.name)
+                   .arg(seg.offset, 0, 16).arg(seg.length, 0, 16).arg(echoNote),
+               int((i + 1) * 100 / n));
+
+        // ⑥ 段间等待（facts §B8 的 sleep 1，等设备重枚举）；**最后一段后不睡**
+        if (i + 1 < n)
+            sleepMs(m_opt.segmentGapMs);
+    }
+
+    report(QStringLiteral("done"),
+           QStringLiteral("全部 %1 段已发送：设备应已进入 Download 模式，请继续刷写").arg(n), 100);
+    return true;
+}
+
+} // namespace eub

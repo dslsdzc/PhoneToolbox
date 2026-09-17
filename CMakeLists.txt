@@ -322,7 +322,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_samsung_mode.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_protocol.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_loadout.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_payload.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_payload.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_session.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -561,6 +562,16 @@ if(ENABLE_IMAGE_TESTS)
                     # eub_loadout.cpp 取 EubFrameStyle 要 eub_protocol.cpp；两者都不碰 libusb
                     # （故本目标不进下方 libusb 链接名单）。
                     set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
+                elseif(_test_stem STREQUAL "test_eub_session")
+                    # Phase E Task 6：会话编排（逐段重开/重试/进度/失败语义）。本目标**不含任何
+                    # libusb 源** —— 会话只经 IEubTransport 碰设备，这是本层的依赖契约，也让
+                    # 构建图可见（故不进下方 libusb 链接名单）。eub_session.cpp 消费
+                    # splitSboot（eub_loadout.cpp）与 sendSegment（eub_protocol.cpp），
+                    # 后两者取 EubFrameStyle 又需 eub_protocol.cpp → 三个一起补链。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_session.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
                 elseif(_test_stem STREQUAL "test_eub_payload")
