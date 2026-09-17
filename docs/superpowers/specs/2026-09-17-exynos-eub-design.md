@@ -316,14 +316,15 @@ public:
 
 ## 9. 交付清单
 
-1. 传输层 + 检测：`eub_transport.h`/`eub_libusb_transport.{h,cpp}`、`samsung_mode.{h,cpp}`、`isEubDevice`、`MODE_SAMSUNG_EUB`，检测层改走 `samsungModeFor`（**认领顺序由纯函数+测试固化**）
-2. 协议层：`eub_protocol.{h,cpp}`（帧构造 + `sendSegment`）+ 测试
-3. 布局层：`eub_loadout.{h,cpp}`（8 张表 + 查表 + 切段 + SHA-1）+ 测试
-4. 会话层：`eub_session.{h,cpp}`（逐段重开/等待/进度/失败语义）+ 测试
-5. 载荷获取：`sboot.bin` / `.lz4` / `BL_*.tar.md5` 提取（复用 `imgtar::indexTarStream` + `lz4Decompress`）
-6. UI：`eub_recovery_dialog.{h,cpp}` + FlashPanel 三星模式入口 + 交接提示（§D9/§D10）
-7. 文案/文档/清单：`功能清单.txt`（**队列项更正**：展锐 EUB → 三星 Exynos EUB §A0）、README（模式表 + 测试目标计数）、本 spec 与事实报告的终稿
-8. 终验：全新构建 0 警告（**全新目录**）+ 全量 ctest + 各新目标 0 skipped 的如实记录
+- [√] 1. 传输层 + 检测：`eub_transport.h`/`eub_libusb_transport.{h,cpp}`、`samsung_mode.{h,cpp}`、`isEubDevice`、`MODE_SAMSUNG_EUB`，检测层改走 `samsungModeFor`（**认领顺序由纯函数+测试固化**）
+- [√] 2. 协议层：`eub_protocol.{h,cpp}`（帧构造 + `sendSegment`）+ 测试
+- [√] 3. 布局层：`eub_loadout.{h,cpp}`（8 张表 + 查表 + 切段 + SHA-1）+ 测试
+- [√] 4. 会话层：`eub_session.{h,cpp}`（逐段重开/等待/进度/失败语义）+ 测试
+- [√] 5. 载荷获取：`sboot.bin` / `.lz4` / `BL_*.tar.md5` 提取（复用 `imgtar::indexTarStream` + `lz4Decompress`）
+- [√] 6. UI：`eub_recovery_dialog.{h,cpp}` + FlashPanel 三星模式入口 + 交接提示（§D9/§D10）
+      —— **§D10 后半句"检测到 Download 设备时把提示点亮"未实现**（T7 计划接口里无该钩子；设备重枚举为 Odin 后面板回到「刷入」入口）；见 `功能清单.txt`「交接缺口」与 `.superpowers/sdd/eub-task-8-report.md` §4-A
+- [√] 7. 文案/文档/清单：`功能清单.txt`（**队列项更正**：展锐 EUB → 三星 Exynos EUB §A0）、README（模式表 + 测试目标计数）、本 spec 与事实报告的终稿
+- [√] 8. 终验：全新构建 `BUILD_RC=0` + `ctest` **63/63 通过** + 7 个新目标各自 `0 failed, 0 skipped`（**全部在全新目录**跑，显式加 `-Wall -Wextra -Wsign-compare`）。**警告计数非 0**：本相位文件 **0 条**，全库 **113 行既有警告**（15 个既有文件，与相位 E 无关；如实记录，见 `.superpowers/sdd/eub-task-8-report.md`）
 
 ---
 

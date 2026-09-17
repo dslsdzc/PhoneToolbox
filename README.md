@@ -51,6 +51,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 - **MTK DA** — MediaTek Download Agent 模式
 - **MTK BROM（LEGACY / XFLASH / XML 三代自动路由）** — BROM 直刷：DA 文件解析与选择、DA1/DA2 两阶段、EMI/DRAM 初始化（preloader 显式/自动导入/默认关闭的网络获取）、按设备分区表的刷写计划与预览。**链路按设备代际自动选择**：LEGACY = PMT + `0xE8` EMI；XFLASH = 12B 小端帧 + `INIT_EXT_RAM` EMI + `WRITE/READ_DATA` + `SHUTDOWN`；XML = 文本命令（`CMD:*` / `OK` / `OK@0x<len>` / `OK!EOT`）+ `WRITE-FLASH`/`READ-FLASH` + `REBOOT`；XFlash/XML 的分区表为 GPT（主 GPT；512/4096 探测 + 头/条目双 CRC fail-closed）。离线验证（真 DA/preloader/GPT 样本 + mock 逐帧），**真机全链未验证（三代皆是）**；**XML 代无真实设备样本**（帧与命令全部来自上游 mtkclient 源码）
 - **三星 Odin** — Odin 下载模式（VID 0x04E8 + CDC_DATA 接口类）→ 按 PIT 刷写 BL/AP/CP/CSC 的 .tar.md5（Phase C 代码就绪，真机未验证）
+- **三星 Exynos EUB 救援（EUB → Download 模式）** — 检测 VID `0x04E8` / PID `0x1234`（**先于 Odin 判据认领**）→ 打开设备读自述（SoC 名 / SoC ID / Chip ID / USB Booting Version）→ 按 **8 个 SoC 的布局表**把**用户自备**的 `sboot.bin` 切段逐段发进设备 RAM（段间重开设备 + 等重枚举）→ 设备进入 Download 模式后**交给上面的 Odin 链**正常刷写。载荷自备（`sboot.bin` / `sboot.bin.lz4` / `BL_*.tar.md5` 内提取），**不内置也不分发任何三星签名二进制**；**只发 RAM 镜像、不写设备存储**，完成后设备仍需正常刷写。**真机未验证、本线无真样本** —— 证据只到 mock + 数值断言；帧头 4 字节与尾 2 字节**语义未定**（三个可用实现互相矛盾，按表照抄其中一源）；布局表证据等级不一（9610 双源一致 / 8890 单源+实战报告 / 7580 双源分歧已采信 hubble 的 `bl2=0x8000` / 其余 5 个单源）且**绑定固件修订**；进 EUB 需主引导失败或测试点，**2025-04 起三星可用 eFuse 永久封堵 EUB**
 
 ## 快速开始
 
@@ -164,7 +165,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 55 个测试源文件；ctest 目标共 56 个）
+├── tests/                      # 单元测试（Qt Test, 62 个测试源文件；ctest 目标共 63 个）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
@@ -177,7 +178,7 @@ PhoneToolbox/
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build    # 56 个测试目标, 全绿
+ctest --test-dir build    # 63 个测试目标, 全绿
 
 # MTK 真样本用例（reference/mtk-samples/ 缺失时默认 SKIP；开启后缺失即 FAIL）
 cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build
@@ -237,6 +238,11 @@ PhoneToolbox 自动检测 ADB 工具，无需手动安装：
 | [bkerler/edl](https://github.com/bkerler/edl) | [GPL v3](https://github.com/bkerler/edl/blob/master/LICENSE) | EDL Sahara/Firehose 协议（参照自研） |
 | [bkerler/mtkclient](https://github.com/bkerler/mtkclient) | [GPL v3](https://github.com/bkerler/mtkclient/blob/main/LICENSE) | MTK DA/BROM 协议（参照自研） |
 | [ReCoreShift/mtk-gpt-tool](https://github.com/ReCoreShift/mtk-gpt-tool) | [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) | GPT / scatter 测试夹具（**仅作离线样本**，见下注） |
+| [frederic/exynos-usbdl](https://github.com/frederic/exynos-usbdl) | [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html) | Exynos EUB 帧格式与 sboot 切段脚本的参照（**仅作事实参照**，见下注） |
+| [VDavid003/exynos-usbdl](https://github.com/VDavid003/exynos-usbdl) | [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html) | 同上（fork：含设备自述串读取与 README 事实） |
+| [halal-beef/hubble](https://github.com/halal-beef/hubble) | [GPL-2.0](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html) | Exynos EUB 救援流程与 `ExynosData/*.json` 布局表 |
+| [ananjaser1211/exynos8890-exynos-usbdl-recovery](https://github.com/ananjaser1211/exynos8890-exynos-usbdl-recovery) | 未声明（仓库内无许可证文件） | 8890 / 7580 救援包（cfg + 恢复脚本 + 实战报告） |
+| [astarasikov/exynos9610-usb-emergency-recovery](https://github.com/astarasikov/exynos9610-usb-emergency-recovery) | 未声明（仓库内无许可证文件） | 9610 救援包（dltool，SMDK 血统） |
 | [KHwang9883/MobileModels-csv](https://github.com/KHwang9883/MobileModels-csv) | [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) | 设备型号数据（运行时下载） |
 | [Google platform-tools](https://developer.android.com/tools/releases/platform-tools) (adb, fastboot) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | 设备通讯协议 |
 | zstd / lz4 / bzip2 / xz / brotli | BSD/MIT 系 | 镜像压缩算法 |
@@ -249,6 +255,13 @@ PhoneToolbox 自动检测 ADB 工具，无需手动安装：
 >   `sgdisk_print.txt` / `MT6789_Android_scatter.xml`）取自该仓库的 `tests/fixtures/`，**只作离线验证样本** ——
 >   存放于 `reference/mtk-samples/`（**gitignored**），**不随仓库分发、不参与构建**；来源 URL、sha256 与实测值见
 >   `docs/superpowers/specs/mtk-xflash-facts.md`。**这些样本不是我们自己的设备**（第三方仓库的测试夹具）。
+> - **Exynos EUB 参照仓库**（`frederic/exynos-usbdl`、`VDavid003/exynos-usbdl`、`halal-beef/hubble`、
+>   `ananjaser1211/exynos8890-exynos-usbdl-recovery`、`astarasikov/exynos9610-usb-emergency-recovery`）：
+>   **仅作事实参照** —— 存放于 `reference/`（**gitignored**）、**不随仓库分发、不参与构建**；本仓的 EUB
+>   实现为自研，只取帧格式、偏移表等静态事实。其中**两个救援包未声明许可证**，仅作离线事实核对之用；
+>   救援包内附带的 sboot 各段二进制（上游从对应型号固件切出，如 8890 包的
+>   `fwbl1/bl2/el3_mon/bootloader.bin`）同属 gitignored，**不进构建、不进提交、不分发**。
+>   上游 commit 锚点与逐条出处见 `docs/superpowers/specs/exynos-eub-facts.md` §G。
 > - **MobileModels-csv** 数据仅在运行时从 GitHub 拉取，不内置分发，使用 CC BY-NC-SA 4.0 许可证（非商业用途）。
 
 ### 许可证兼容性
