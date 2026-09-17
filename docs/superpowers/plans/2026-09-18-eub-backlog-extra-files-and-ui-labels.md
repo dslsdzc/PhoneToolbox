@@ -20,6 +20,8 @@
 `/tmp` 满故全新目录放 `/home`、**"0 警告"必须显式 `-Wall -Wextra`**、只 `git add` 明确路径、
 **恒真断言要加固并给变异证据且逐条留日志**）。补充：
 
+0. **真样本（Task 1b）**：`reference/eub-samples/` 是 gitignored 的**真样本**（用户 2026-09-18 授权下载）；
+   只把**路径**编进用例、内容不进仓库；`EUB_SAMPLES_REQUIRED=ON` 时缺失即 FAIL（不许 QSKIP 静默通过）。
 1. **9830 的源约束（需用户确认的取舍）**：`extraFiles` 只能从 **BL tar** 内取（`ldfw.img` / `ldfw.img.lz4`）。
    用户若只给了裸 `sboot.bin`，对话框必须**明确拒绝**并指出"需要 BL_*.tar.md5"——不新增第二个文件选择器（YAGNI）。
 2. **发送序列的记账**：extraFiles 是**段之后的新阶段**，与段同款"重开设备 → 发送 →（可选）读回显"。
@@ -52,6 +54,25 @@
 - [ ] **Step 3: 实现**（payload 的通用取条目函数 + session 的 extra 阶段；**变异证据逐条留日志**）
 - [ ] **Step 4: GREEN + 全量 ctest**
 - [ ] **Step 5: 提交**（明确路径）
+
+### Task 1b: gated 真样本回归（EUB_SAMPLES_REQUIRED）
+
+> **为什么加这条**：真样本验证（`docs/superpowers/specs/exynos-eub-facts.md` §H）已把 **5 个官方 BL 包 + 解压后的
+> sboot.bin** 落在 `reference/eub-samples/`（gitignored）。此前"提取器/切段对不对"只能靠读码与合成夹具判断；
+> 现在可以**用真数据实跑**。仿既有的 `MTK_SAMPLES_REQUIRED` / `ODIN_SAMPLES_REQUIRED` 模式。
+
+**Files:** Modify `tests/test_eub_payload.cpp`、`tests/test_eub_loadout.cpp`、`CMakeLists.txt`（新 cache 变量 + 编译定义）
+
+- [ ] **Step 1: 用例（样本缺失时 QSKIP，`EUB_SAMPLES_REQUIRED=ON` 时缺失即 FAIL）**
+  - 用 **真 9830 BL tar** 跑 `loadNamedEntriesFromTar(tar, {"ldfw.img","tzsw.img"})` → 两个都取到；
+    解压后大小 **0x600000 / 0x180000**（§H2）；条目名在真包里是 `ldfw.img.lz4`/`tzsw.img.lz4` → 覆盖 `.lz4` 回退。
+  - 用真包跑 `loadSbootBytes` → 拿到 sboot.bin 且 **sha1 与 §H 记录一致**（9830 实测 `59ea267f01320dfea781668ecf229585e010a7d5`）。
+  - **尺寸硬核对**：对每张有样本的表，断言 `splitSboot(真 sboot.bin)` **成功**（不越界）；
+    并对 **8895** 断言其富余极小（真文件 1,847,568 − 表所需 1,847,296 = 272）——即"表能用但几乎没余量"这一边界被钉住。
+    有样本的 SoC：9830 / 9610 / 7580 / 8895 / 8890（7885/9810/9820 无样本，跳过并计数）。
+  - **7580 的 sha1 对拍**：真 `A510FXXS8CTI7` 的 sboot sha1 == `466852d13fa02d51729d21633f47708308579f58`（§H2 已证实）。
+- [ ] **Step 2–4: RED → 实现（含 CMake 的 `EUB_SAMPLES_REQUIRED` 选项与样本目录变量）→ GREEN**
+- [ ] **Step 5: 提交**（明确路径；**样本本身绝不进提交**）
 
 ### Task 2: 对话框解除 9830 禁用 + 源校验 + 文档口径
 
