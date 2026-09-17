@@ -107,8 +107,12 @@ private slots:
         QVERIFY2(eub::loadSbootBytes(writeFile("BL_TEST.tar.md5", tar), out, &src, &err), qPrintable(err));
         QCOMPARE(out, img);
         QVERIFY(!src.wasCompressed);
+        // 有甄别力的判据是**条目名出现在描述里**：实现若退化成"裸镜像"描述（只回显文件名），
+        // 这里就会红。变异证据（控制方实跑）：把 eub_payload.cpp:185 的 describe(fileName, entryInTar, ...)
+        // 改成不回显条目名 → 本 slot 变红，其余全绿。
         QVERIFY(src.description.contains(QStringLiteral("sboot.bin")));
-        QVERIFY(src.description.contains(QStringLiteral("tar")));
+        // （原第二条 `contains("tar")` 已删：夹具文件名就是 BL_TEST.tar.md5，描述必然回显文件名 → 该断言恒真，
+        //   对"是否真的走了 tar 分支"零甄别力。T5 审查 Minor 3。）
     }
 
     void tarWithLz4SbootIsExtractedThenDecompressed()

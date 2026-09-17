@@ -81,6 +81,8 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
     out.clear();                       // 失败路径不留陈旧字节（见头文件注释）
     if (error)
         error->clear();
+    if (source)                        // 失败时出参一律复位：仓内约定同 eub_loadout.cpp:235
+        *source = SbootSource{};       // （调用方忽略返回值也拿不到上一次的来源描述/压缩标志）
 
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly))
@@ -141,7 +143,9 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
                                     .arg(bytes.size()));
         entryInTar = hit->name;
     } else {
-        const qint64 fileSize = f.size();
+        // QFile::size() 在异常路径可返回 -1：夹取后再进文案，否则会印出 18446744073709551615
+        //（T5 审查 Minor 6；夹成 0 后下面的"读取不完整"守卫会给出诚实的失败文案）
+        const qint64 fileSize = f.size() > 0 ? f.size() : 0;
         if (quint64(fileSize) > kMaxPayloadBytes)
             return fail(error, QStringLiteral("%1 有 %2 字节 —— 超出本函数单次读入上限，疑为选错文件")
                                     .arg(fileName)
