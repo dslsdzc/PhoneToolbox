@@ -304,7 +304,7 @@ CMakeLists 改动（三处，按现有模式）：
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_transport && ./build/image_engine_tests_test_eub_transport`
-Expected: `Totals: 4 passed, 0 failed, 0 skipped`
+Expected: `Totals: 5 passed, 0 failed, 0 skipped`（本任务用例 slots = 5）
 
 - [ ] **Step 5: 提交**
 
@@ -506,7 +506,7 @@ CMakeLists：`test_eub_samsung_mode` 加进测试源清单；其 extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build && ./build/image_engine_tests_test_eub_samsung_mode && ./build/image_engine_tests_test_eub_transport`
-Expected: 两个目标各自 `Totals: 6 passed, 0 failed` / `4 passed, 0 failed`；全项目 build 通过。
+Expected: 两个目标各自 `Totals: 6 passed, 0 failed`（本任务 slots = 6）/ `5 passed, 0 failed`（T1 的 5）；全项目 build 通过。
 
 - [ ] **Step 5: 提交**
 
@@ -831,7 +831,7 @@ CMakeLists：测试源清单加 `tests/test_eub_protocol.cpp`；extra sources �
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_protocol && ./build/image_engine_tests_test_eub_protocol`
-Expected: `Totals: 9 passed, 0 failed, 0 skipped`
+Expected: `Totals: 8 passed, 0 failed, 0 skipped`（本任务用例 slots = 8）
 
 - [ ] **Step 5: 提交**
 
@@ -1128,7 +1128,7 @@ CMakeLists：测试源清单加 `tests/test_eub_loadout.cpp`；extra sources 分
 - [ ] **Step 4: 跑测试确认 GREEN**
 
 Run: `cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build --target image_engine_tests_test_eub_loadout && ./build/image_engine_tests_test_eub_loadout`
-Expected: `Totals: 12 passed, 0 failed, 0 skipped`
+Expected: `Totals: 13 passed, 0 failed, 0 skipped`（本任务用例 slots = 13）
 
 - [ ] **Step 5: 提交**
 
