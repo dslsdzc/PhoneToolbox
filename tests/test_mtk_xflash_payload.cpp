@@ -117,6 +117,7 @@ private slots:
     void readDataRejectsUnknownFrameLength();
     void readDataRejectsNonZeroFlagAfterDataFrame();
     void readDataRejectsNonZeroFinalFlag();
+    void readDataAbortsOnFlagFrameFlood();
     void readDataZeroLengthReadsFinalFrameOnly();
 };
 
@@ -751,7 +752,7 @@ void TestMtkXflashPayload::writeDataAnnounces512AlignedLength()
 
 // packet 长不是 512 的整数倍 → **拒绝写入**（控制器裁决，比上游更严）：此时循环会"切原始数据再补零"，
 // 补的零落在实时数据之间，实发字节也不再等于参数里承诺的长度 —— 是"静默写坏镜像"，不是"少写几个字节"。
-// 真机报的 0x200/0x400/0x1000 都对齐，所以这条分支实际不可达；**不可达且静默破坏** → fail-closed
+// 上游默认档与常见 DA 报值（0x200/0x400/0x1000）都对齐，所以这条分支实际不可达；**不可达且静默破坏** → fail-closed
 // （同 GPT CRC、未知分区表、未知代际的处置）。早拒在**任何写之前**。
 void TestMtkXflashPayload::writeDataRejectsUnalignedPacketLength()
 {
@@ -880,6 +881,21 @@ void TestMtkXflashPayload::readDataRejectsNonZeroFlagAfterDataFrame()
 
 // **收尾帧** flag 非 0（数据已按 length 读满）→ 失败。与上一条的区别在**位置**：此处循环已因字节数收尾，
 // 失败只能来自收尾帧那一读 —— 忽略收尾帧的实现会返回 true，在这里红（XFL:770-776）。
+// 无进展守卫（终审 §5）：设备持续刷 flag 帧 → 必须**按文案中止**，不挂死（上游此路径会永久挂死）
+void TestMtkXflashPayload::readDataAbortsOnFlagFrameFlood()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0) << statusReads(0);                    // 命令 status + 56B 参数后的 status
+    for (int i = 0; i < 5000; ++i)                                  // 连续 5000 个 flag(0) 帧（上限 4096，留余量）
+        m.reads << frameReads(1, le32(0));
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x200, 0x1, 0x8, got, &err));
+    // **必须是守卫拦下的**（不是"队列读空"）—— 文案是唯一判别点
+    QVERIFY2(err.contains(QStringLiteral("连续收到超过")), qPrintable(err));
+}
+
 void TestMtkXflashPayload::readDataRejectsNonZeroFinalFlag()
 {
     MockUsbChannel m;

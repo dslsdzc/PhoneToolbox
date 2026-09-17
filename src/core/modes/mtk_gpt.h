@@ -4,7 +4,7 @@
 //
 // 与上游（mtkclient `Library/Partitions/gpt.py`、`Library/partition.py`、`Library/realtime.py`）的**有意差异**：
 //   ① **头部 CRC 与条目表 CRC 都校验**（上游 `gpt.py:48` 解析但从不比较）→ 不符即 fail-closed
-//   ② **备份 GPT 兜底真的生效**（上游 `partition.py:45` 的 seek 被 `gpt.py:161` 的绝对 seek 覆盖）
+//   ② **备份 GPT 兜底真的生效（**注入 diskSectors 的路径**；两个出货调用点都传 0 → 该兜底在出货路径**不可达**）**（上游 `partition.py:45` 的 seek 被 `gpt.py:161` 的绝对 seek 覆盖）
 //   ③ **扇区大小可探测**（512→4096）—— 上游 eMMC 恒 512（`XFL:448` 读出的 `emmc.block_size` 从未赋给它）
 //   ④ **空条目判据 = type GUID 全 0 且逐条 continue**（UEFI 规范；上游 `gpt.py:192-193` 用 unique
 //      GUID 且**遇空即 break** 停止扫描 → 表中间有空槽时会漏掉其后的分区）

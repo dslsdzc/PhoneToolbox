@@ -175,7 +175,7 @@ bool xflashGetPacketLength(XFlashSession &x, XPacketLength &out, QString *error)
 
 // GET_PARTITION_TBL_CATA：<I，0x64=GPT / 0x65=PMT / 其它=Unknown（XFL:612-621）。
 // **本层唯一不读尾部 status 的查询** —— 上游这一条拿到回包就直接返回（XFL:612-621），
-// 本层照做（"上游 wins"）。若以后把它夹在别的 devctrl 之间调用，上游同样的写法会留下
+// 本层照做（"上游 wins"）——**但注意**：本层收尾帧走 `xread`，它会**强制校验 magic**，而上游在该段 magic 不符时静默通过；方向是 fail-closed（更严），此处注释与代码的差异是有意的。若以后把它夹在别的 devctrl 之间调用，上游同样的写法会留下
 // 一帧未读的 status 把后续读错位；届时需要控制方裁决是否比上游多读这一帧。
 bool xflashGetPartitionCata(XFlashSession &x, PartitionCata &out, QString *error)
 {
@@ -339,7 +339,7 @@ bool xflashWriteData(XFlashSession &x, quint64 addr, const QByteArray &data,
     // packet 长不是 512 的整数倍 → **拒绝写入**（比上游更严，控制器裁决 2026-09-17）：
     // 循环只在 `writePacketLength % 512 == 0` 时才与上游等价。否则每个块是"先切原始数据、再补零"，
     // 补的零落在**实时数据之间**，实发字节也不等于参数里承诺的总长 —— 结果是**静默写坏镜像**，
-    // 不是"少写几个字节"。真机报的 0x200/0x400/0x1000 都对齐，这条分支实际不可达；
+    // 不是"少写几个字节"。上游默认档与常见 DA 报值（0x200/0x400/0x1000）都对齐，这条分支实际不可达；
     // "不可达且静默破坏"正是本项目 fail-closed 的那一类（同 GPT CRC、未知分区表、未知代际）。
     // 早拒在**任何写之前**（与上面的 0 值检查同位）。
     if (writePacketLength % 512 != 0) {
@@ -431,6 +431,7 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
     quint32 remaining = length;
     // 循环以**字节数**收尾（上游 bytestoread，XFL:730/:757）：不是"见到 flag 就停" ——
     // 中途出现的 flag==0 帧照上游继续读，读满 length 字节后才去读收尾帧。
+    int consecutiveFlags = 0;                             // 连续 flag 帧计数（无进展守卫，见下）
     while (remaining > 0) {
         QByteArray payload;
         if (!x.xread(payload, nullptr, error))
@@ -448,8 +449,16 @@ bool xflashReadData(XFlashSession &x, quint64 addr, quint32 length,
                 if (error) *error = QStringLiteral("XFlash 读：设备报错（flag = %1）").arg(hexCode(flag));
                 return false;
             }
+            // ⚠️ **无进展守卫（比上游更严，终审 §5 建议）**：上游 `readflash` 在这里直接 `continue`，
+            //    设备若持续刷 flag 帧就**永久挂死**（本层不复制这种挂死）。上限取**连续**计数（有数据进展即清零），
+            //    且给得很宽（4096 帧）—— 正常设备不会接近，只有病态/刷屏设备才会撞上。
+            if (++consecutiveFlags > 4096) {
+                if (error) *error = QStringLiteral("XFlash 读：连续收到超过 4096 个 flag 帧仍无数据进展 —— 中止（防挂死）");
+                return false;
+            }
             continue;
         }
+        consecutiveFlags = 0;                             // 有数据进展即清零（见上）
         // 其它长度（含 0）：上游只打印一行就 break（XFL:766-768），本层明确报错
         if (error) *error = QStringLiteral("XFlash 读：收到未知长度的帧（%1 字节）").arg(payload.size());
         return false;

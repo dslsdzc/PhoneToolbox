@@ -147,7 +147,7 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 | 层 | 内容 |
 |---|---|
 | **真实 GPT 样本** | `reference/mtk-samples/PGPT.img`/`SGPT.img`（**4096 字节扇区**，来源 `https://github.com/ReCoreShift/mtk-gpt-tool` `tests/fixtures/`，MPL-2.0 仓库，**非我们自己的设备**；sha256 `1124d035…`/`45495fd5…`）：硬断言 61 条目、`EFI PART`@4096、**头部 CRC（字段清零后）= 0x25c45852**、**条目 CRC = 0xac89a396**、前几条分区名（`misc`/`para`/`expdb`/`frp`/`nvcfg`/`nvdata`）；与 `sgdisk_print.txt` 对比**分区名集合**（该文件是另一版布局，**不可逐条对拍**，见 facts §8） |
-| **真实 scatter（新方言）** | `MT6789_Android_scatter.xml`（同源，真样本）：**130 个 `<partition_index>` 块 = EMMC 与 UFS 两份完整副本**（同一个 `SYS0` 标签，一份 `<region>EMMC_BOOT1</region>/<storage>HW_STORAGE_EMMC</storage>`、一份 `<region>UFS_LU0</region>/<storage>HW_STORAGE_UFS</storage>`）→ **解析必须按 storage 过滤**（每份 65 个分区：`preloader`/`preloader_backup`/`pgpt`/`misc`/`para`/`expdb`…），不过滤会让每个分区翻倍且大小对不上；解析结果与 GPT 条目交叉对照 |
+| **真实 scatter（新方言）** | `MT6789_Android_scatter.xml`（同源，真样本）：**130 个 `<partition_index>` 块 = EMMC 与 UFS 两份完整副本**（同一个 `SYS0` 标签，一份 `<region>EMMC_BOOT1</region>/<storage>HW_STORAGE_EMMC</storage>`、一份 `<region>UFS_LU0</region>/<storage>HW_STORAGE_UFS</storage>`）→ **解析必须按 storage 过滤**（每份 65 个分区：`preloader`/`preloader_backup`/`pgpt`/`misc`/`para`/`expdb`…），不过滤会让每个分区翻倍且大小对不上；两份样本**各自独立断言**（**未做互相交叉核对** —— 它们是不同布局） |
 | **真 DA 样本** | V5/V6：`region[1]`=DA1、`region[2]` 地址逐条目（`0x40000000`）、**剥签名**（XFlash）与**保留签名**（LEGACY）双向断言 |
 | **832 preloader** | 两代 EMI 切片与上游逐字移植对拍（沿用 D1 的方法） |
 | **mock 逐帧** | 12B 帧与 `datatype`、0x200 分块边界、**0x6781 的 16B 合并写**、`WRITE_DATA` 48B 参数、`boot_to` 16B+数据+sleep+status 判据、`SHUTDOWN` 32B、XML 文本握手序列（`OK`/`OK@0x…`/`OK!EOT`/`CMD:END`+`CMD:START`） |
