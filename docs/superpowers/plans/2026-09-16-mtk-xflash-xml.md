@@ -3277,8 +3277,8 @@ git commit -m "feat(mtk): XML 载荷①（CMD:START 握手 + setup_env/setup_hw_
   // ⚠️ 实施期新增形参 `addr`（T12，默认 0 → T10 的既有调用点/断言零改动）：XML 的 `<partition>` 是**存储描述符**
   //    （"EMMC-USER" 一类，`storage.py:216-241`），**写地址必须由调用方给**（上游 `addr = partition.sector × pagesize`，
   //    `mtk_da_handler.py:544-548` / `v6.py:1095-1097`）。传分区名或漏地址 = 写到偏移 0（分区表区）——真机毁表。
-  bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data, quint64 addr = 0,
-                         QStringList *log = nullptr, QString *error = nullptr);
+  bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
+                         QStringList *log = nullptr, QString *error = nullptr, quint64 addr = 0);
   // 数据帧读取（**上游 download_raw 形状**，`XL:508-589`）：读 "OK@0x<len>" → ack → 读 "OK" → ack
   //   → 循环{ 收一帧 → ack → 读 "OK" → ack } → 返回数据。**不要**复用 `XmlSession::readCommandResult` 的裸 OK@ 路径
   //   —— 那条对应 `get_command_result`（单次尾 ack），节奏不同（T8 实施期实测 + 控制方核对）。
@@ -4056,7 +4056,8 @@ constexpr quint32 kXEmmcPartUser = 0x8;   // ST:16-49（user 区）
                 if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
                 return false;
             }
-            if (!xmlWritePartition(xml, QStringLiteral("EMMC-USER"), image, it.value(), nullptr, error))
+            // （实现用命名常量 `kXmlStoreEmmcUser`，值即 "EMMC-USER" —— 与 mtk_payload.cpp 的调用逐字一致）
+            if (!xmlWritePartition(xml, QStringLiteral("EMMC-USER"), image, nullptr, error, it.value()))
                 return false;
         }
         written += quint64(image.size());
@@ -4284,9 +4285,17 @@ mtkgpt::ReadFn xmlSectorReader(XmlSession &x, const QString &partition)
     XmlSession xml(session.usb());
 
 // (d) 段：整段 else { ... return false; } → 上面那段 XML 分区表代码
-// (e) 段：写循环里的 else 分支 → 
+// (e) 段：写循环里的 else 分支 →
         } else {
-            if (!xmlWritePartition(xml, e.partition, image, nullptr, error))
+            // ⚠️ 这一份是 T12 的替换文本（与 (c)(d)/(e) 那段同源）：`<partition>` 传**存储描述符**、
+            //    `addr` 传 GPT 条目的地址（`partAddr`）。**不要**照抄旧稿的 `e.partition`（= 分区名）
+            //    或省略 addr —— 那是"写到偏移 0（分区表区）"的毁表形态（见上文 ⚠️ 更正）。
+            const auto it = partAddr.constFind(e.partition);
+            if (it == partAddr.constEnd()) {
+                if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
+                return false;
+            }
+            if (!xmlWritePartition(xml, QStringLiteral("EMMC-USER"), image, nullptr, error, it.value()))
                 return false;
         }
 // (e) 段：收尾的 else 分支 → 
