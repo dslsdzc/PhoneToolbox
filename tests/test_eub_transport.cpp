@@ -45,6 +45,17 @@ private slots:
         QVERIFY(msg.contains(QStringLiteral("04e8")) || msg.contains(QStringLiteral("0x04e8")));
         QVERIFY(msg.contains(QStringLiteral("1234")));
     }
+
+    void emptyWriteIsRejectedEvenWhenClosed()   // EUB 无 ZLP 语义：空帧只可能是调用方 bug（fail-closed）
+    {
+        LibusbEubTransport t;                   // 默认构造：未 open，且**不触碰 USB 栈**
+        QString err;
+        QVERIFY(!t.writeBulk(QByteArray(), &err));
+        QVERIFY(!err.isEmpty());
+        // 光查"有 error"钉不住这条判据：把空帧检查放回 !m_dev 守卫**之后**，本用例照样全绿
+        // （两条路都是 false + 非空 error，离线复现过）。必须断言命中的是**空帧**分支。
+        QVERIFY(err.contains(QStringLiteral("空帧")));
+    }
 };
 
 QTEST_APPLESS_MAIN(TestEubTransport)

@@ -18,8 +18,10 @@ namespace {
 
 constexpr quint16 kEubVid = 0x04e8;   // facts §A1
 constexpr quint16 kEubPid = 0x1234;   // facts §A1
-constexpr int kFallbackEpOut = 0x02;  // exynos-usbdl.c:60 / dltool.c:339 / hubble.py:110
-constexpr int kFallbackEpIn  = 0x81;  // exynos-usbdl.c:242 / hubble.py:115
+// 出处写全仓库段：reference/ 下有 exynos-usbdl/ 与 exynos-usbdl-vdavid003/ 两份同名
+// exynos-usbdl.c，只写文件名会解析到错的那份（后者同位置是别的内容）。
+constexpr int kFallbackEpOut = 0x02;  // reference/exynos-usbdl/exynos-usbdl.c:60 / dltool.c:339 / hubble.py:110
+constexpr int kFallbackEpIn  = 0x81;  // reference/exynos-usbdl/exynos-usbdl.c:242 / hubble.py:115
 
 QString hex4(quint16 v)
 {
@@ -187,7 +189,8 @@ bool LibusbEubTransport::open(QString *error)
             epOut = kFallbackEpOut;
             epIn  = kFallbackEpIn;
             notes << QStringLiteral("EUB 端点回退：描述符里没有批量 in/out 对，改用参照实现的常数 "
-                                    "OUT 0x%1 / IN 0x%2（exynos-usbdl.c:60,242 / dltool.c:339 / hubble.py:110,115）")
+                                    "OUT 0x%1 / IN 0x%2（reference/exynos-usbdl/exynos-usbdl.c:60,242 / "
+                                    "dltool.c:339 / hubble.py:110,115）")
                      .arg(kFallbackEpOut, 2, 16, QLatin1Char('0'))
                      .arg(kFallbackEpIn, 2, 16, QLatin1Char('0'));
         }
@@ -235,6 +238,13 @@ bool LibusbEubTransport::open(QString *error)
             // 读失败 = 只是"不知道"：记一笔继续 —— 真有硬伤会在 claim 处如实报错（不制造假失败）。
             m_notes << QStringLiteral("读取活动配置失败（%1），补设配置 1 也失败（%2）—— 继续尝试认领接口")
                        .arg(usbErr(cfgRead), usbErr(sc));
+        } else {
+            // 补设成功同样要留痕：这**不是空操作** —— libusb 文档明说对设备重发 SET_CONFIGURATION
+            // 相当于一次轻量复位（altsetting 归零、端点 halt 清除、toggle 复位）。"补设"这个动作
+            // 本身有副作用，正是 notes() 存在的理由（失败才记会漏掉"我们动了设备状态"这一事实）。
+            m_notes << QStringLiteral("读活动配置未确认已配置，已显式补设配置 1：libusb 文档说明这会重发 "
+                                      "SET_CONFIGURATION，相当于一次轻量复位 —— altsetting 归零、"
+                                      "端点 halt 清除、toggle 复位");
         }
     }
 
@@ -334,15 +344,16 @@ bool LibusbEubTransport::readDeviceInfo(EubDeviceInfo &out, QString *error)
 
 bool LibusbEubTransport::writeBulk(const QByteArray &data, QString *error)
 {
-    if (!m_dev) {
-        setErr(error, QStringLiteral("写入失败：EUB 设备未打开"));
-        return false;
-    }
     if (data.isEmpty()) {
         // EUB **没有 ZLP 语义**（头文件差异 ② / facts §B7：一段一帧、发完即走，三家都没有逐帧
         // 应答、也没有"空写表示结束"）—— 空数组在这里只可能是调用方出错（帧至少 10 字节头尾），
         // 明确拒绝好过静默发一个 0 长度传输：后者在真机上是一次无人预期的总线事务。
+        // （排在未打开守卫之前：空帧判据不依赖设备状态，离线可断言该行为）
         setErr(error, QStringLiteral("写入失败：EUB 不接受空帧（本协议没有 ZLP 语义，facts §B7）"));
+        return false;
+    }
+    if (!m_dev) {
+        setErr(error, QStringLiteral("写入失败：EUB 设备未打开"));
         return false;
     }
 
