@@ -192,9 +192,14 @@ bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourceDe
             return fail(QStringLiteral("设备：识别失败（原因见日志与下方弹窗）"),
                         QStringLiteral("%1\n%2").arg(err, fallback));
         }
-        socOrigin = QStringLiteral("镜像反推（设备未自报 SoC 名，facts §A4）");
-        log(QStringLiteral("设备未自报 SoC 名；已按镜像里的 EXYNOS 字样反推为 %1（facts §A4）")
-                .arg(imageSoc));
+        // 措辞**不断言成因**：本兜底对"任意 identify 失败"生效 —— 设备没报名字只是其中一种，
+        // 设备根本没连上 / 自述读失败同样走到这里（那时写"设备未自报 SoC 名"就是假话）。
+        // 真实原因由 %1 原样带出（identify 的 error），来源只声称"镜像内容"，并点明这条判定的
+        // 前提（依赖镜像正确）与后续补丁（run 第 1 段仍会核对设备身份，见 eub_session.cpp）。
+        socOrigin = QStringLiteral("镜像内容反推（facts §A4）");
+        log(QStringLiteral("未能从设备读出可用的 SoC 名（%1）；已按镜像内容识别为 %2 —— "
+                           "该判定依赖镜像正确，且发送前仍会核对设备身份")
+                .arg(err, imageSoc));
     }
 
     // 切段**试算**：太短当场拒绝，不等到用户点了"开始"才报（也保证"开始"时不再有表/镜像不匹配

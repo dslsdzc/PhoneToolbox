@@ -63,7 +63,11 @@ public:
     bool identify(EubLoadout &out, QString *error);
 
     // 完整救援：切段（失败即中止，**不写任何字节**）→ 逐段 open(带重试) → 发送 → 可选读回显 → close。
-    // 第 1 段发送前核对设备 SoC 与 lo.soc 一致（防"识别与开始之间换了设备"）。
+    // 第 1 段发送前核对设备**身份**：拿设备当前自报的 SoC 名与 **identify() 时自报的那个**比
+    //（防"识别与开始之间换了设备"）—— 基准是设备自己的历史自述，**不是** lo.soc：兜底路径
+    //（设备不自报 / 自报的名字无表时按镜像反推选表，facts §A4）产出的 lo.soc 与设备自报串
+    // 永不相等，拿 lo.soc 当基准会让"预检能过、点开始必被拒"。本次会话未先 identify()（run 是
+    // 公开 API，可单独调用）→ 无基准可比，**不阻断**，只落一条日志。
     // 失败文案含段序号/段名/偏移长度；**不支持从中间续传**（引导链必须从第一段起，spec §7）。
     bool run(const EubLoadout &lo, const QByteArray &sboot, QString *error);
 
@@ -84,6 +88,12 @@ private:
     EubProgressFn  m_progress;
     int  m_lastPercent = 0;         // 最近一次 report 的 percent（notes 转发沿用它保持单调）
     QStringList m_lastNotes;        // 上次已转出的 notes 批次（笔记是**每次 open** 级的：传输层每次 open 清空）
+
+    // identify() 读到的设备自述 SoC 名，作为 run() 换设备守卫的基准（见 run 的头注释）。
+    // **查表之前**就记录（见 .cpp）：兜底路径正是"已读过设备自述、但查表失败"，只有在查表前
+    // 落下这一笔，run 阶段才有可比的设备自报值。
+    QString m_identifySocName;
+    bool    m_haveIdentifyName = false;
 };
 
 } // namespace eub

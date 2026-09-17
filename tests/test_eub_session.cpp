@@ -186,15 +186,92 @@ private slots:
 
     void socMismatchBetweenIdentifyAndRunFails()
     {
+        // 守卫的本意是防"识别与开始之间**换了设备**"—— 故基准是**设备自己**识别时自报的串
+        //（不是布局表：兜底路径下两者永不相等，见 fallbackLoadoutIsAcceptedWhenDeviceNameUnchanged）。
+        // 本槽走完整序：identify 时自报 Exynos9610（成功、名字被记下）→ 换设备（现在自报 8890）
+        // → run 必须拒绝、零写入；文案**两个名字都要有**（只说一个，用户无从判断"换成了什么"）。
         eub::MockEubTransport t;
         t.info = info9610();
-        t.info.socName = QStringLiteral("Exynos8890");         // 用户中途换了设备
         eub::EubSession s(t, fastOptions());
+        eub::EubLoadout lo;
         QString err;
-        QVERIFY(!s.run(loadout9610(), syntheticSboot(), &err));
-        QVERIFY(err.contains(QStringLiteral("Exynos8890")));   // 当前设备
-        QVERIFY(err.contains(QStringLiteral("Exynos9610")));   // 期望的布局表 —— 缺了它用户不知道换成了什么
+        QVERIFY2(s.identify(lo, &err), qPrintable(err));       // 此时设备自报 Exynos9610
         QCOMPARE(t.writes.size(), 0);
+
+        t.info.socName = QStringLiteral("Exynos8890");         // 用户中途换了设备
+        QVERIFY(!s.run(loadout9610(), syntheticSboot(), &err));
+        QVERIFY2(err.contains(QStringLiteral("Exynos8890")), qPrintable(err));   // 现在自报的
+        QVERIFY2(err.contains(QStringLiteral("Exynos9610")), qPrintable(err));   // 识别时自报的
+        QCOMPARE(t.writes.size(), 0);                          // 零写入
+        QCOMPARE(t.calls.last(), QStringLiteral("close"));     // 句柄照收
+    }
+
+    void fallbackLoadoutIsAcceptedWhenDeviceNameUnchanged()
+    {
+        // 跨任务缝合（T7 对话框兜底 ↔ T6 run 守卫）：设备不自报 SoC 名时，调用方按**镜像内容**
+        // 反推后选表（facts §A4）—— 这条路径产出的 lo.soc 与设备自报串（空）永不相等。
+        // 拿 lo.soc 当基准（旧契约）＝"预检能过、点开始必被拒"，整条兜底路径不可达。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName.clear();                     // 设备不自报名字（极老 SoC，facts §A4）
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        eub::EubLoadout lo;
+        QString err;
+        QVERIFY(!s.identify(lo, &err));             // 无表可查 → 识别失败
+        QVERIFY2(err.contains(QStringLiteral("detectSocFromImage")), qPrintable(err));
+
+        const eub::EubLoadout fallback = loadout9610();   // 调用方反推 SoC 名后查到的表
+        QVERIFY2(s.run(fallback, syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(t.writes.size(), fallback.segments.size());   // 兜底路径真的发完了
+        // 变异③的钉子：identify 的记录点必须**在查表之前**。挪到查表之后，本会话（查表失败早退）
+        // 就记不下名字 → run 走"没识别过"分支，下面这句会出现在日志里（＝换设备守卫根本没跑）。
+        QVERIFY2(countDetails(details, QStringLiteral("跳过换设备核对")) == 0,
+                 qPrintable(details.join(QStringLiteral(" | "))));
+    }
+
+    void runWithoutIdentifySkipsSwapCheck()
+    {
+        // run 是公开 API，可单独调用：此时没有可比基准 → **不阻断**（阻断会把"直接调 run"的
+        // 合法用法一并打死），但必须在日志里留下"核对没跑"的痕迹 —— 静默跳过会让用户以为
+        // 换设备守卫一直开着。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        QString err;
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(t.writes.size(), loadout9610().segments.size());
+        QCOMPARE(countDetails(details, QStringLiteral("跳过换设备核对")), 1);
+    }
+
+    void warnsWhenDeviceNameDiffersFromFallbackTable()
+    {
+        // 另一条兜底路径：设备**自报了一个表里没有的名字** → 调用方按镜像反推选表（facts §A4）。
+        // 身份没变（仍是那个名字）→ 不阻断，但设备自报串与所用布局表不同名，日志必须点明
+        // "表可能不匹配本机"（用户据此决定换固件还是换表），且两个名字写在**同一条**里。
+        eub::MockEubTransport t;
+        t.info = info9610();
+        t.info.socName = QStringLiteral("Exynos9999");     // 自报了，但没有对应布局表
+        QStringList details;
+        eub::EubSession s(t, fastOptions(),
+                          [&](const eub::EubProgress &p) { details << p.detail; });
+        eub::EubLoadout lo;
+        QString err;
+        QVERIFY(!s.identify(lo, &err));
+        QVERIFY2(err.contains(QStringLiteral("Exynos9610")), qPrintable(err));   // 文案列出支持的 SoC
+
+        QVERIFY2(s.run(loadout9610(), syntheticSboot(), &err), qPrintable(err));
+        QCOMPARE(t.writes.size(), loadout9610().segments.size());
+        bool warned = false;
+        for (const QString &d : details)
+            if (d.contains(QStringLiteral("表可能不匹配本机")))
+                warned = d.contains(QStringLiteral("Exynos9999"))
+                      && d.contains(QStringLiteral("Exynos9610"));
+        QVERIFY2(warned, qPrintable(details.join(QStringLiteral(" | "))));
+        QVERIFY(countDetails(details, QStringLiteral("跳过换设备核对")) == 0);   // 核对确实跑了
     }
 
     void echoIsReadOnlyWhenResponseSupport()

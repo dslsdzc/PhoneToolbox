@@ -284,14 +284,46 @@ private slots:
         eub::MockEubTransport mock;
         mock.info.socName = QString();          // 设备没报名字
         EubRecoveryDialog dlg(mock, nullptr);
+        QStringList sink;
+        dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
         QString err;
         const QByteArray sboot = sbootWithMarker(QByteArray("EXYNOS9610"));
         QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
                  qPrintable(err));
         QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9610"));
-        // SoC 名的来源必须写在明处：不写，用户会以为设备自报了型号
+        // SoC 名的来源必须写在明处：不写，用户会以为设备自报了型号。断言两半：说"镜像"
+        // 且**不声称**"设备自报"（后者是设备行上唯一会误导人的说法）。
         QVERIFY2(dlg.statusText().contains(QStringLiteral("镜像")), qPrintable(dlg.statusText()));
-        QVERIFY(dlg.statusText().contains(QStringLiteral("未自报")));
+        QVERIFY2(!dlg.statusText().contains(QStringLiteral("设备自报")), qPrintable(dlg.statusText()));
+        // 日志要同时给出"镜像"与反推出的 SoC 名 —— 用户据此核对选的 BL 包对不对
+        const QString logText = sink.join(QLatin1Char('\n'));
+        QVERIFY2(logText.contains(QStringLiteral("镜像")), qPrintable(logText));
+        QVERIFY2(logText.contains(QStringLiteral("Exynos9610")), qPrintable(logText));
+    }
+
+    void fallbackMessageDoesNotBlameTheDeviceWhenItNeverAppeared()
+    {
+        // 兜底对**任意** identify 失败生效 —— 设备根本没连上时同样走到这里。此时文案若一律说
+        // "设备未自报 SoC 名"就是假话（设备压根没被读到），把用户的排查方向从"为什么连不上"
+        // 带偏到"为什么不报名字"。真实原因要原样带出来。
+        // 注：对话框的 EubOptions 是构造时固定的默认值（revolveAttempts=20 / poll=500ms，且无
+        // 注入点）—— 本槽的"设备未出现"要真的走完重试，代价 ≈ 19×500ms = 9.5s。
+        eub::MockEubTransport mock;
+        mock.info.socName = QString();
+        mock.openFailures = 99;                 // 设备一直没出现
+        EubRecoveryDialog dlg(mock, nullptr);
+        QStringList sink;
+        dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
+        QString err;
+        const QByteArray sboot = sbootWithMarker(QByteArray("EXYNOS9610"));
+        // 镜像能反推出 SoC → 预检**照样通过**（这正是危险处：设备没连上也能"预检通过"）
+        QVERIFY2(dlg.prepare(sboot, QStringLiteral("合成 sboot（镜像内含 EXYNOS9610）"), &err),
+                 qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos9610"));
+        const QString logText = sink.join(QLatin1Char('\n'));
+        QVERIFY2(logText.contains(QStringLiteral("注入的打开失败")), qPrintable(logText));  // 真实原因带出来了
+        QVERIFY2(!logText.contains(QStringLiteral("设备未自报")), qPrintable(logText));
+        QVERIFY2(!dlg.statusText().contains(QStringLiteral("设备自报")), qPrintable(dlg.statusText()));
     }
 
     void prepareRejectsWhenNeitherDeviceNorImageNamesTheSoc()

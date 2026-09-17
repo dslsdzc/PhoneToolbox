@@ -99,6 +99,11 @@ bool EubSession::identify(EubLoadout &out, QString *error)
         setErr(error, QStringLiteral("读取设备自述失败：%1").arg(err));
         return false;
     }
+    // 换设备守卫的基准值：**必须在查表之前**记录 —— 兜底流程正是"已读过设备自述、但查表失败"
+    //（SoC 名为空 facts §A4 / 名字无表），跑到查表之后就永远记不下这一笔，run 里的守卫会退化
+    // 成"本次会话没识别过"而不再核对设备身份。
+    m_identifySocName = info.socName;
+    m_haveIdentifyName = true;
     if (info.socName.isEmpty()) {
         setErr(error, QStringLiteral(
             "设备未自报 SoC 名（iProduct 为空）。极老 SoC 只报 \"SEC S5PC210 Test B/D\"（facts §A4）——"
@@ -147,7 +152,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
         }
         forwardNotes();
 
-        // ③ 仅第 1 段核对设备 SoC：识别不持有句柄（见 identify），用户可能在两步之间换了设备
+        // ③ 仅第 1 段核对设备**身份**：识别不持有句柄（见 identify），用户可能在两步之间换了设备。
+        // 基准是 identify() 记下的**设备自报**串，不是 lo.soc —— 兜底路径（设备不自报 / 名字无表，
+        // 由调用方按镜像反推选表，facts §A4）下 lo.soc 与设备自报串永不相等，拿它当基准等于
+        // "预检能过、点开始必被拒"。把占位串白名单塞进本层属跨层硬编码，故不采纳。
         if (i == 0) {
             EubDeviceInfo info;
             if (!m_t.readDeviceInfo(info, &err)) {
@@ -155,16 +163,28 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot, QString *err
                 setErr(error, QStringLiteral("第 1 段发送前读取设备自述失败：%1").arg(err));
                 return false;
             }
-            if (info.socName.compare(lo.soc, Qt::CaseInsensitive) != 0) {
+            QString idNote;             // 追加到下面那行日志尾部（保持"开始发送"这条锚点只有一行）
+            if (!m_haveIdentifyName) {
+                // 本次会话没先 identify（run 是公开 API，可单独调用）→ 没有可比基准，不阻断
+                idNote = QStringLiteral("；未先识别设备，跳过换设备核对");
+            } else if (info.socName.compare(m_identifySocName, Qt::CaseInsensitive) != 0) {
                 m_t.close();
                 setErr(error, QStringLiteral(
-                    "设备已更换：布局表是 %1，当前设备自报 %2 —— 请等设备稳定后重新识别，再从头开始")
-                              .arg(lo.soc,
+                    "设备已更换：识别时自报 %1，现在自报 %2 —— 请等设备稳定后重新识别，再从头开始")
+                              .arg(m_identifySocName.isEmpty() ? QStringLiteral("（空）") : m_identifySocName,
                                    info.socName.isEmpty() ? QStringLiteral("（空）") : info.socName));
                 return false;
+            } else if (!info.socName.isEmpty()
+                       && info.socName.compare(lo.soc, Qt::CaseInsensitive) != 0) {
+                // 身份没变，但设备自报名与所用布局表不同名 —— 兜底路径的常态（表是镜像反推来的）。
+                // 不阻断（挡在这里等于把兜底路径又堵死），但要在日志里点明"表可能不匹配本机"。
+                idNote = QStringLiteral("；注意：设备自报 %1 与布局表 %2 不一致，表可能不匹配本机")
+                             .arg(info.socName, lo.soc);
             }
             report(QStringLiteral("identify"),
-                   QStringLiteral("设备 %1 与布局表一致，开始发送 %2 段").arg(lo.soc).arg(n),
+                   QStringLiteral("设备自报 %1，开始发送 %2 段%3")
+                       .arg(info.socName.isEmpty() ? QStringLiteral("（空）") : info.socName)
+                       .arg(n).arg(idNote),
                    m_lastPercent);
         }
 

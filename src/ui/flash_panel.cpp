@@ -297,6 +297,10 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     // 不复位就会跟着按钮状态漂到别的模式（Fastboot/MTK 下它们是可用的）
     m_frpBtn->setToolTip(QString());
     m_brickRepairBtn->setToolTip(QString());
+    // 文案同样要复位：下面 EUB 分支把本按钮改成「EUB 救援…」，而其余模式分支都不写 text ——
+    // 不复位则 EUB 设备拔掉、插上普通 fastboot 设备后，按钮顶着救援文案却执行"写所选分区"
+    // 的破坏性动作（救援文案 + 写分区，用户无从分辨点了会怎样）。
+    m_flashBtn->setText(QStringLiteral("刷入"));
 
     if (info.mode == DeviceDetector::MODE_EDL_9008) {
         // EDL 模式: 显示连接控件
