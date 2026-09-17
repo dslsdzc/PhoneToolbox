@@ -799,6 +799,35 @@ bool xflashBringUpDa(BromSession &brom, XFlashSession &x, const DaSelection &sel
 // 刷写主体（T9 审查 I1 从 runBromFlash 抽出；**D2-T11 起改为三代路由** —— 选完 DA 之后
 // 按 decideGeneration 分派到 LEGACY / XFlash / XML 三条链，D3-T12 起 XML 也是真链）。
 // 只把"枚举/打开/握手"留在 mtk_handler.cpp 的 runBromFlash 里，从而让本函数可离线逐帧测。
+namespace {
+// 读 GPT → 参照表 + "分区名 → 写入地址" 映射（XFlash 与 XML 两条链共用；T12 审查 Minor 2/4）。
+// **失败也把 gptLog 落出去** —— 那些行正是"为什么读表失败"的诊断（如"主 GPT 不可用（…）"）。
+// diskSectors = 0：两代都没有"磁盘总扇区数"的可靠来源 → 只走主 GPT（备份兜底不可用，readTable 会如实说明）。
+bool loadGptPartitions(const mtkgpt::ReadFn &read, const QString &label,
+                       QList<mtkplan::PartitionRef> &refs, QHash<QString, quint64> &partAddr,
+                       const std::function<void(const QString &)> &say, QString *error)
+{
+    mtkgpt::Table tbl;
+    QStringList gptLog;
+    const bool ok = mtkgpt::readTable(read, 0, tbl, &gptLog, error);
+    for (const QString &line : std::as_const(gptLog))
+        say(line);                                        // **成功、失败都落**
+    if (!ok)
+        return false;
+    refs = mtkplan::toPartitionRefs(tbl.partitions, tbl.sectorSize);       // T7 的适配器（不重复实现）
+    for (const mtkgpt::Partition &p : std::as_const(tbl.partitions))       // 地址 = firstLba × sectorSize
+        partAddr.insert(p.name, mtkgpt::offsetBytes(p, tbl.sectorSize));   // （**不是**头里的 first_usable_lba）
+    say(QStringLiteral("%1：GPT 读出 %2 个分区（扇区 %3 字节）")
+            .arg(label).arg(tbl.partitions.size()).arg(tbl.sectorSize));
+    // 空表**在这里**点名（否则计划层走"derived"分支，最终报成"内部错误：分区 X 不在设备表地址映射里"，把真因说成内部错位）
+    if (refs.isEmpty()) {
+        if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
+        return false;
+    }
+    return true;
+}
+} // namespace
+
 bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                         const BromLogFn &log, const BromProgressFn &progress, QString *error)
 {
@@ -965,49 +994,14 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                                     .arg(quint32(cata), 0, 16);
             return false;
         }
-        mtkgpt::Table tbl;
-        QStringList gptLog;
-        // diskSectors = 0：XFlash 侧没有"磁盘总扇区数"的可靠来源 → 只走主 GPT（备份兜底不可用；
-        // readTable 在需要时会把这一点写进日志/错误，不静默降级）
-        if (!mtkgpt::readTable(xflashSectorReader(xflash, kXStorageEmmc, kXEmmcPartUser), 0, tbl, &gptLog, error))
+        if (!loadGptPartitions(xflashSectorReader(xflash, kXStorageEmmc, kXEmmcPartUser),
+                               QStringLiteral("XFlash"), refs, partAddr, say, error))
             return false;
-        for (const QString &line : std::as_const(gptLog))
-            say(line);
-        refs = mtkplan::toPartitionRefs(tbl.partitions, tbl.sectorSize);   // T7 的适配器（不重复实现）
-        for (const mtkgpt::Partition &p : std::as_const(tbl.partitions))
-            partAddr.insert(p.name, mtkgpt::offsetBytes(p, tbl.sectorSize));
-        say(QStringLiteral("XFlash：GPT 读出 %1 个分区（扇区 %2 字节）")
-                .arg(tbl.partitions.size()).arg(tbl.sectorSize));
-        // T11 审查 Minor：空表要**在这里**点名（否则计划层走"derived"分支，最终报成
-        // "内部错误：分区 X 不在设备表地址映射里"，把真因（分区表为空）说成内部错位）。
-        if (refs.isEmpty()) {
-            if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
-            return false;
-        }
     } else {   // Xml
         // 分区表：**READ-FLASH + 同一个 mtkgpt**（T1 的解析器；spec §9 已核，`XC:474-484` 的区间读。
         // 上游 XML 侧没有"先问设备总扇区数"的命令 —— 分区表就是按字节偏移读回来的）
-        mtkgpt::Table tbl;
-        QStringList gptLog;
-        // diskSectors = 0：XML 侧没有磁盘总扇区数的可靠来源（GET-HW-INFO 的分区表字段留 D4 解析）
-        //   → 只走主 GPT；主 GPT 读不出来时 readTable 会明确失败（不静默降级、不假装有备份兜底）
-        if (!mtkgpt::readTable(xmlSectorReader(xml), 0, tbl, &gptLog, error))
+        if (!loadGptPartitions(xmlSectorReader(xml), QStringLiteral("XML"), refs, partAddr, say, error))
             return false;
-        for (const QString &line : std::as_const(gptLog))
-            say(line);                                     // **失败也落**（同 bringLog 口径）
-        refs = mtkplan::toPartitionRefs(tbl.partitions, tbl.sectorSize);   // T7 的适配器（不重复实现）
-        // 逐分区写的**地址**（`<offset>`）来自 GPT 条目的 first_lba：`mtkgpt::offsetBytes` 就是
-        // firstLba × sectorSize —— 与 XFlash 分支同一个来源（**不是**头里的 first_usable_lba）
-        for (const mtkgpt::Partition &p : std::as_const(tbl.partitions))
-            partAddr.insert(p.name, mtkgpt::offsetBytes(p, tbl.sectorSize));
-        say(QStringLiteral("XML：GPT 读出 %1 个分区（扇区 %2 字节）")
-                .arg(tbl.partitions.size()).arg(tbl.sectorSize));
-        // 空表显式门（与 XFlash 分支同款）：parsePrimary 对"零个有效条目"仍算**成功**，不点名的话
-        // 计划层会走 derived 分支，最终报成"内部错误：分区 X 不在设备表地址映射里"——把真因说成内部错位。
-        if (refs.isEmpty()) {
-            if (error) *error = QStringLiteral("设备分区表为空（GPT 无有效条目）—— 拒绝在未知分区表上写入");
-            return false;
-        }
     }
 
     mtkplan::MtkFlashPlan plan;
