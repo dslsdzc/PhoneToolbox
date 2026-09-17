@@ -132,6 +132,36 @@ private slots:
         QCOMPARE(t.calls.size(), 0);
     }
 
+    // 审查修复：上面这条只覆盖了"空载荷"分支；sendSegment 走**风格非法**分支此前无用例
+    // （buildEubFrame 那侧有 malformedStyleFails）。
+    void sendSegmentRejectsMalformedStyleBeforeWriting()
+    {
+        eub::MockEubTransport t;
+        eub::EubFrameStyle bad;
+        bad.header  = QByteArray(3, '\0');     // 必须 4 字节
+        bad.trailer = QByteArray(2, '\0');
+        QString err;
+        QVERIFY(!eub::sendSegment(t, QByteArray("AB"), bad, &err));
+        QVERIFY(!err.isEmpty());
+        QVERIFY(err.contains(QStringLiteral("风格")));   // 命中风格分支，而非空载荷/写失败
+        QCOMPARE(t.writes.size(), 0);          // fail-closed：不发出任何字节
+        QCOMPARE(t.calls.size(), 0);
+    }
+
+    // 审查修复：钉住守卫**顺序** —— 空帧拒绝必须先于注入式失败判定。既有用例从没让两者
+    // 同时命中（sendSegmentRejectsEmptyPayloadBeforeWriting 用默认 failWriteAt = -1），
+    // 把空帧守卫下移到 failWriteAt 之后曾使全部 slot 仍绿。
+    void mockRejectsEmptyWriteBeforeInjectedFailure()   // 钉住守卫顺序：空帧拒绝必须**先于**注入式失败判定
+    {
+        eub::MockEubTransport t;
+        t.failWriteAt = 0;                              // 让注入式失败**同时**命中
+        QString err;
+        QVERIFY(!t.writeBulk(QByteArray(), &err));
+        QVERIFY2(err.contains(QStringLiteral("空帧")), qPrintable(err));   // 必须是空帧拒绝，而不是"注入的写失败"
+        QCOMPARE(t.writes.size(), 0);
+        QCOMPARE(t.calls.size(), 0);                    // 拒绝路径不记任何东西
+    }
+
     // T1 审查交接要求"后续 mock 同款"：mock 在"未打开 + 空帧"这一格必须与真机同判
     // （真机那条路径见 tests/test_eub_transport.cpp:49-58）。本用例把这条 mock 契约钉住，
     // 免得 Task 6/7 复用时把失败原因误读成设备行为。

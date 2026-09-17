@@ -19,7 +19,10 @@ public:
     QList<QByteArray> writes;      // 每次 writeBulk 追加（一帧一条）
     QStringList       calls;       // "open"/"close"/"info"/"write"/"read"
     int  openFailures = 0;         // 前 N 次 open 失败（0 = 一次就成功）
-    int  failWriteAt = -1;         // 第 N 次 write 失败（0 基），-1 = 不失败
+    // 注：与 writes.size() 比对，而 writes 只记**成功**的写 → 这个注入是**粘性**的：
+    // 一旦命中，本次 mock 对象的后续所有 writeBulk 都会失败。需要"只失败一次"的用例请自行
+    // 在失败后把 failWriteAt 复位为 -1（或改用只读断言）。
+    int  failWriteAt = -1;         // 第 N 次**成功**写入之前插入失败（0 基），-1 = 不失败
     bool infoResult = true;
     EubDeviceInfo info;            // readDeviceInfo 返回内容
     QByteArray    response;        // readBulk 返回内容
