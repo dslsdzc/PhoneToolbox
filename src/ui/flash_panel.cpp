@@ -364,7 +364,10 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_partitionList->clear();
         m_partitions.clear();
         m_flashBtn->setEnabled(true);
-        m_flashBtn->setToolTip(QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
+        m_flashBtn->setToolTip(m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM
+            ? QStringLiteral("协议通道按计划刷写：DA + 镜像 → 计划预览 → 按设备代际自动选择 "
+                             "LEGACY / XFLASH / XML 链（三代均已实现，实际链路见日志「代际判定」）")
+            : QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
         return;
     }
 

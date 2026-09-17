@@ -161,7 +161,8 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 
 ## 9. 明确不做（本期）
 
-- XFlash / XML 两代协议（D2/D3）；`DOWNLOAD`/`UPLOAD`/`FORMAT_PARTITION`（实测仅定义零调用）。
+- ~~XFlash / XML 两代协议（D2/D3）~~ —— **XFlash / XML 两代已于 2026-09-16 交付**（见 `2026-09-16-mtk-xflash-xml-design.md`）；
+  `DOWNLOAD`/`UPLOAD`/`FORMAT_PARTITION`（实测仅定义零调用）**仍不做**。
 - repartition / 格式化 / UFS 命令族 / seccfg 解锁 / NV 项 / RPMB。
 - DA 二进制提取/生成、签名绕过。
 
@@ -181,6 +182,6 @@ bool selectDaEntry(const DaFile &f, quint16 hwCode, quint16 hwVersion, quint16 s
 - [x] `flash_tool` mtk-brom 通道 + `flash_panel` 入口（DA/镜像/preloader 选择）+ 预览复用
 - [x] 文档：功能清单（"待接线"→已交付 + 诚实边界）、README、配套事实报告归档
 
-**无遗留 `[ ]` 项**：XFlash / XML 两代归 **D2/D3**（另写 spec），不在本清单内。
+**无遗留 `[ ]` 项**：XFlash / XML 两代**已于 2026-09-16 交付**（见 `2026-09-16-mtk-xflash-xml-design.md`），不在本清单内。
 交付时的离线证据与未验证边界见 `docs/superpowers/specs/mtk-brom-facts.md` §10。
 "真机全链未验证"不是遗留项，是**本期的验收口径**（真机归持机人）。

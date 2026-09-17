@@ -1288,7 +1288,11 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
             emit outputMessage(QStringLiteral(
                 "检测到 %1 台同厂商设备，将刷写首个枚举设备（完整设备选择器为后续任务）")
                 .arg(mtkCount), false);
-        emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1（%2 个镜像）")
+        // 三代文案（D2+D3）：本通道按**设备代际自动路由** LEGACY / XFLASH / XML 三条链
+        // （判定 = 芯片表 damode + DA 文件 v6，`mtk_payload.cpp` 的 decideGeneration）。
+        // 具体走哪条链由 bromFlashOnSession 随后落"代际判定：…"日志，本行不预判（不新增参数）。
+        emit outputMessage(QStringLiteral("MTK BROM 刷写通道：%1（%2 个镜像；按设备代际自动选择 "
+                                          "LEGACY / XFLASH / XML 链，实际链路见后续「代际判定」）")
                                .arg(deviceId).arg(images.size()), false);
 
         const auto logFn = [this](const QString &m, bool isErr) { emit outputMessage(m, isErr); };

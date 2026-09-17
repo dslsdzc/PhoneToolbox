@@ -10,8 +10,10 @@ namespace {
 // 勾选框是纯文本控件（QCheckBox 不做富文本），故不写 Markdown 强调符 —— 会原样显示成星号。
 QString ackText()
 {
-    return QStringLiteral("我已知晓：MTK BROM（LEGACY 代）刷写路径在本机未经真机验证，"
-                          "分区写入有风险，出错自负。");
+    // 三代口径（D2+D3 交付后）：链路按设备代际自动路由，不再只是 LEGACY 一条
+    // （真机未验证这条边界**三代都适用**，故不写单代限定）。
+    return QStringLiteral("我已知晓：MTK BROM 刷写路径（LEGACY / XFLASH / XML 三代自动路由）"
+                          "在本机未经真机验证，分区写入有风险，出错自负。");
 }
 
 } // namespace

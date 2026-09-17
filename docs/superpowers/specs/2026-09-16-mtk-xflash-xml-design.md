@@ -158,7 +158,8 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 - **真机全链未验证**（三代皆是）；枚举/打开/握手/EMI/DA2/分区表/写入/收尾全段只有代码级保证。
 - **XML 代无真实设备样本**：帧格式与命令序列全部来自上游代码；`UFSPartitionType` 文本表示、`max_address_length` 语义两点**已于计划期结案**（**XML 的分区表读取路径已在设计期核实**：`CMD:READ-FLASH` + 同一个 GPT 解析器）：
   - `UFSPartitionType` 在 XML 下是**字符串** `"EMMC-USER"` 一类（`ST:216` 起、`XC:452-461`）；整数枚举（BOOT1=1/BOOT2=2/USER=3/RPMB=4）只用于 XFlash。**已核实**（事实报告 §5.3/§6）。
-  - `max_address_length = 9`（`XP:2`）：**全仓库只被 import、无任何消费点**（`USBLIB:21`、`seriallib.py:9`）→ 与 plcap/blver 同类的**死常量**，本实现**不实现、不猜语义**。
+  - `max_address_length = 9`（`XP:2`）：**全仓库只此一处定义、零 import、零消费点**（`grep -rn max_address_length` 只命中定义行）→ 与 plcap/blver 同类的**死常量**，本实现**不实现、不猜语义**。
+    （交付期更正：原写"只被 import 无消费点（`USBLIB:21`、`seriallib.py:9`）"——那两处 import 的是**另一个常量** `max_xml_data_length`；结论不变，论据见 `mtk-xflash-facts.md` §14。）
   - 非真机可证的部分（`0x6781` 的 16 字节 ack、DRAM 时序）只按上游实现，边界如实披露。
 - **GPT 样本来自第三方仓库**（非我们自己的设备，MPL-2.0 仓库的测试夹具）；`reference/` gitignored，不随仓库分发。
 - **mock 看不见"读了多少字节"**（D1 已记录）：读侧判据靠"逐条对上游读长度"+ probe。
@@ -175,15 +176,15 @@ D1 已让 MTK BROM 通道在**老代 LEGACY** 上闭环（DA 解析与选择、�
 
 ## 11. 交付清单
 
-- [ ] `mtk_xflash_session.{h,cpp}` + `test_mtk_xflash_session`
-- [ ] `mtk_xflash_payload.{h,cpp}` + `test_mtk_xflash_payload`（含 0x6781 特例、EMI、boot_to、WRITE/READ_DATA、SHUTDOWN、只读查询）
-- [ ] `mtk_gpt.{h,cpp}` + `test_mtk_gpt`（真样本 + 合成边界 + CRC fail-closed + 备份兜底）
-- [ ] `mtk_xml_session.{h,cpp}` + `mtk_xml_payload.{h,cpp}` + 两个测试目标
-- [ ] `mtk_preloader_emi` 扩 `extractEmiXflash` + 832 样本两代对拍
-- [ ] `mtk_flash_plan` 扩 scatter XML 方言 + `test_mtk_flash_plan` 扩
-- [ ] `bromFlashOnSession` 三代路由 + `test_mtk_payload` 扩（XFlash/XML 两条链的 bring-up 与失败边界）
-- [ ] 通道/UI 文案（说明走了哪条链）+ 无需新入口
-- [ ] 文档：功能清单、README、事实报告归档（`docs/superpowers/specs/mtk-xflash-facts.md`）、D1 spec 的"不做"项回收
+- [x] `mtk_xflash_session.{h,cpp}` + `test_mtk_xflash_session`
+- [x] `mtk_xflash_payload.{h,cpp}` + `test_mtk_xflash_payload`（含 0x6781 特例、EMI、boot_to、WRITE/READ_DATA、SHUTDOWN、只读查询）
+- [x] `mtk_gpt.{h,cpp}` + `test_mtk_gpt`（真样本 + 合成边界 + CRC fail-closed + 备份兜底）
+- [x] `mtk_xml_session.{h,cpp}` + `mtk_xml_payload.{h,cpp}` + 两个测试目标
+- [x] `mtk_preloader_emi` 扩 `extractEmiXflash` + 832 样本两代对拍
+- [x] `mtk_flash_plan` 扩 scatter XML 方言 + `test_mtk_flash_plan` 扩
+- [x] `bromFlashOnSession` 三代路由 + `test_mtk_payload` 扩（XFlash/XML 两条链的 bring-up 与失败边界）
+- [x] 通道/UI 文案（说明走了哪条链）+ 无需新入口
+- [x] 文档：功能清单、README、事实报告归档（`docs/superpowers/specs/mtk-xflash-facts.md`）、D1 spec 的"不做"项回收
 
 ## 12. 许可
 

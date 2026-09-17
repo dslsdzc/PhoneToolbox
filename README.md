@@ -8,7 +8,8 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 |------|----------|------|
 | 设备检测 | ADB / Fastboot / Fastbootd / EDL / MTK DA / MTK BROM | 自动轮询检测设备连接状态和当前模式 |
 | 设备信息 | ADB / Fastboot | 型号、Android 版本、SDK、安全补丁级别、Bootloader 锁定状态等 |
-| 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA / **MTK BROM（LEGACY）直刷** | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
+| 刷机工具 | Fastboot / Fastbootd / EDL / MTK DA / **MTK BROM 直刷** | GPT 分区匹配、A/B 槽、super 镜像、稀疏镜像检测、断点续传 |
+| **MTK BROM 直刷** | **MTK BROM（LEGACY / XFLASH / XML 三代自动路由）** | **按设备代际自动选链：DA 文件解析与选择、DA1→DA2 两阶段、EMI/DRAM 初始化、GPT 分区表（主 GPT；512/4096 探测 + 头/条目双 CRC fail-closed）、按设备分区表逐分区写** |
 | 死砖恢复 | EDL / MTK DA | 自动匹配分区文件、校验镜像大小、备份关键分区、支持失败重试 |
 | **镜像处理** | 本地 | **29 种格式拖放识别、17 格式解包、sparse 转换、打包、文件系统浏览** |
 | **Root 修补** | 本地 | **8 个方案入口全覆盖（Magisk 系 / KernelSU 系 / APatch），boot/init_boot 修补** |
@@ -16,8 +17,9 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 | 漏洞扫描 | ADB | 加载本地漏洞库 JSON，自动匹配设备版本，执行检测脚本发现已知漏洞 |
 | 漏洞利用 | ADB | 三段式自动化利用流程（检测 → 利用 → 验证），支持二进制 payload 推送 |
 
-> **MTK BROM（LEGACY）** 走「刷入」按计划刷写，**不含**「死砖恢复」的备份关键分区 / 失败重试
-> （BROM 模式下分区表按设计清空，单分区与死砖入口不可达；镜像超分区只能跳过，无强写出口）。
+> **MTK BROM** 走「刷入」按计划刷写（链路按设备代际自动选择 LEGACY / XFLASH / XML），**不含**
+> 「死砖恢复」的备份关键分区 / 失败重试（BROM 模式下分区表按设计清空，单分区与死砖入口不可达；
+> 镜像超分区只能跳过，无强写出口）。
 
 ## 镜像处理（全格式覆盖）
 
@@ -47,7 +49,7 @@ Android 设备多功能工具箱 v0.0.1-beta03 —— 通过 ADB / Fastboot / ED
 - **Fastbootd** — Android 10+ 用户空间 Fastboot
 - **EDL (9008)** — Qualcomm 紧急下载模式
 - **MTK DA** — MediaTek Download Agent 模式
-- **MTK BROM（LEGACY）** — 无 DA 依赖的 BROM 直刷：DA 文件解析与选择、DA1/DA2 两阶段、EMI/DRAM 初始化（preloader 显式/自动导入/默认关闭的网络获取）、按设备分区表的刷写计划与预览；离线验证（真 DA/preloader 样本 + mock 逐帧），**真机全链未验证**
+- **MTK BROM（LEGACY / XFLASH / XML 三代自动路由）** — BROM 直刷：DA 文件解析与选择、DA1/DA2 两阶段、EMI/DRAM 初始化（preloader 显式/自动导入/默认关闭的网络获取）、按设备分区表的刷写计划与预览。**链路按设备代际自动选择**：LEGACY = PMT + `0xE8` EMI；XFLASH = 12B 小端帧 + `INIT_EXT_RAM` EMI + `WRITE/READ_DATA` + `SHUTDOWN`；XML = 文本命令（`CMD:*` / `OK` / `OK@0x<len>` / `OK!EOT`）+ `WRITE-FLASH`/`READ-FLASH` + `REBOOT`；XFlash/XML 的分区表为 GPT（主 GPT；512/4096 探测 + 头/条目双 CRC fail-closed）。离线验证（真 DA/preloader/GPT 样本 + mock 逐帧），**真机全链未验证（三代皆是）**；**XML 代无真实设备样本**（帧与命令全部来自上游 mtkclient 源码）
 - **三星 Odin** — Odin 下载模式（VID 0x04E8 + CDC_DATA 接口类）→ 按 PIT 刷写 BL/AP/CP/CSC 的 .tar.md5（Phase C 代码就绪，真机未验证）
 
 ## 快速开始
@@ -162,7 +164,7 @@ PhoneToolbox/
 │       ├── vuln_matcher.cpp    # 版本/补丁/平台匹配引擎
 │       ├── exploit_engine.cpp  # ADB 脚本自动化执行引擎
 │       └── importers/          # 本地 JSON 导入
-├── tests/                      # 单元测试（Qt Test, 50 个测试源文件；ctest 目标共 51 个）
+├── tests/                      # 单元测试（Qt Test, 55 个测试源文件；ctest 目标共 56 个）
 ├── third_party/                # 第三方二进制
 │   └── mtk_bridge/             # MTK DA 通讯桥（兼容过渡）
 ├── edl/                        # bkerler/edl 子模块（GPLv3, 协议参考）
@@ -175,7 +177,7 @@ PhoneToolbox/
 ```bash
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build    # 51 个测试目标, 全绿
+ctest --test-dir build    # 56 个测试目标, 全绿
 
 # MTK 真样本用例（reference/mtk-samples/ 缺失时默认 SKIP；开启后缺失即 FAIL）
 cmake -B build -G Ninja -DMTK_SAMPLES_REQUIRED=ON && cmake --build build
@@ -234,6 +236,7 @@ PhoneToolbox 自动检测 ADB 工具，无需手动安装：
 | [libusb-1.0](https://libusb.info/) | [LGPL v2.1](https://github.com/libusb/libusb/blob/master/COPYING) | USB 通讯（EDL/MTK DA） |
 | [bkerler/edl](https://github.com/bkerler/edl) | [GPL v3](https://github.com/bkerler/edl/blob/master/LICENSE) | EDL Sahara/Firehose 协议（参照自研） |
 | [bkerler/mtkclient](https://github.com/bkerler/mtkclient) | [GPL v3](https://github.com/bkerler/mtkclient/blob/main/LICENSE) | MTK DA/BROM 协议（参照自研） |
+| [ReCoreShift/mtk-gpt-tool](https://github.com/ReCoreShift/mtk-gpt-tool) | [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) | GPT / scatter 测试夹具（**仅作离线样本**，见下注） |
 | [KHwang9883/MobileModels-csv](https://github.com/KHwang9883/MobileModels-csv) | [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) | 设备型号数据（运行时下载） |
 | [Google platform-tools](https://developer.android.com/tools/releases/platform-tools) (adb, fastboot) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | 设备通讯协议 |
 | zstd / lz4 / bzip2 / xz / brotli | BSD/MIT 系 | 镜像压缩算法 |
@@ -242,6 +245,10 @@ PhoneToolbox 自动检测 ADB 工具，无需手动安装：
 > - ADB 和 Fastboot 工具由 Google 提供，PhoneToolbox **不内置分发**其二进制，而是在运行时自动检测系统环境或从 Google 官方下载。
 > - **bkerler/edl**：EDL Sahara/Firehose 协议代码源自 [bkerler/edl](https://github.com/bkerler/edl)（GPLv3），对应许可证文件见 `edl/LICENSE`。
 > - **bkerler/mtkclient**：MTK DA 通讯功能基于 [bkerler/mtkclient](https://github.com/bkerler/mtkclient)（GPLv3），包含 `third_party/mtk_bridge/` 预编译二进制及完整源码树（`mtkclient/`），对应许可证文件见 `mtkclient/LICENSE`。其中**芯片代际表（hw_code → damode，89 条）为整表转写**——GPL-3.0 与本项目 GPLv3 兼容，转写只取静态事实；生成脚本 `tools/gen_mtk_chip_table.py`，来源 URL 与 commit 见生成物 `src/core/modes/mtk_chip_table.cpp` 头部注释。
+> - **ReCoreShift/mtk-gpt-tool**（**MPL-2.0**）：MTK BROM 的 **GPT / scatter 测试夹具**（`PGPT.img` / `SGPT.img` /
+>   `sgdisk_print.txt` / `MT6789_Android_scatter.xml`）取自该仓库的 `tests/fixtures/`，**只作离线验证样本** ——
+>   存放于 `reference/mtk-samples/`（**gitignored**），**不随仓库分发、不参与构建**；来源 URL、sha256 与实测值见
+>   `docs/superpowers/specs/mtk-xflash-facts.md`。**这些样本不是我们自己的设备**（第三方仓库的测试夹具）。
 > - **MobileModels-csv** 数据仅在运行时从 GitHub 拉取，不内置分发，使用 CC BY-NC-SA 4.0 许可证（非商业用途）。
 
 ### 许可证兼容性

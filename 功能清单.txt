@@ -54,7 +54,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 三代路由 (D2/D3): 芯片表 damode + DA 文件 v6 (v6 强制 XML) → LEGACY / XFLASH / XML 三条链自动分派
 [√] 诚实边界: SLA/DAA 检测返回明确错误 (RSA 响应生成标后续)
 
---- MTK BROM XFlash/XML 两代 (Phase D2+D3, 2026-09-16, 进行中) ---
+--- MTK BROM XFlash/XML 两代 (Phase D2+D3, 2026-09-16) ---
 [√] XFlash 帧层: 12B 小端帧 (magic/datatype/len, 头一次写+载荷分块) + status 三态判据 + ack 的 0x6781 特例 (16B 单写)
 [√] XFlash 引导: 七步握手 (SYNC → SETUP_ENV → SETUP_HW_INIT → 读回 SYNC; **SYNC 只发不读**) + bring-up 四步 (expire_date/reset_key/checksum_level/connection_agent; 有回包的查询都带**尾部 status**, 分区表类别是唯一例外)
 [√] XFlash EMI: INIT_EXT_RAM + **长度单独一帧** + 0x200 分块 (整块切片 912B, 与 LEGACY 800B 并存; 832 真样本两代对拍 832/832)
@@ -65,9 +65,9 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] XML 帧层: 文本帧 (str 长度 = 字符数+1 且带 NUL) + OK / OK@0x<hexlen> / OK!EOT 保活 + command_result 解析 + DA 日志帧**跳过** (有上限) + `ERR!` 一律判失败 (不复刻上游把它当成功)
 [√] XML 引导: 等 **CMD:START** 文本消息 + setup_env (`initialize_dram=YES`, **不发 EMI**) / setup_hw_init / SET-HOST-INFO; 三步各自点名失败
 [√] XML 写读: WRITE-FLASH (FileSysOp key=FILE-SIZE → ackValue(length) ×2 → 逐包 ack/数据) / READ-FLASH (**逐帧 ack** 的 download_raw 形状, 独立于单次尾 ack 分支) / REBOOT 收尾
-[ ] XML 链整合 (进行中)
-[ ] 刷机通道文案 (说明走了哪条链) + 文档收口 (进行中)
-[√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储暂只 eMMC user (0x1/0x8)
+[√] XML 链整合: CMD:START 引导 + READ-FLASH 读 GPT (与 XFlash/LEGACY 共用同一解析器) + 逐分区 WRITE-FLASH (写地址 = 分区条目 first_lba, 存储描述符 "EMMC-USER") + REBOOT 收尾
+[√] 刷机通道文案 (说明走了哪条链) + 文档收口 (功能清单/README/事实报告归档 mtk-xflash-facts.md/D1 spec 不做项回收)
+[√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储暂只 eMMC user (0x1/0x8); 0x6781 的 16B ack 仅按上游实现 (无该芯片真机复核)
 
 --- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---
 [√] USB Update (VCOM) 协议: 0x7E HDLC 帧 / CRC16-X25 / 转义
