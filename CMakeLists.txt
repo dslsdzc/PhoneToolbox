@@ -319,7 +319,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xml_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_xml_payload.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_transport.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_samsung_mode.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_samsung_mode.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_protocol.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -548,6 +549,11 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/samsung_mode.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_libusb_transport.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_libusb_transport.cpp)
+                elseif(_test_stem STREQUAL "test_eub_protocol")
+                    # Phase E Task 3：帧构造（纯函数）+ 段发送（只经 IEubTransport，mock 注入）。
+                    # 只编 eub_protocol.cpp —— 本目标**不碰 libusb**（故不进下方 libusb 链接名单）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp)
                 elseif(_test_stem STREQUAL "test_samsung_plan_dialog")
                     # Phase C Task 9：三星计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
                     # + 计划层/PIT/tar 索引。Qt6::Widgets 与 offscreen 见下方 if 块。
