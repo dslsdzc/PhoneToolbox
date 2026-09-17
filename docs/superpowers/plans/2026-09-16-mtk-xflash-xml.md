@@ -3274,7 +3274,10 @@ git commit -m "feat(mtk): XML 载荷①（CMD:START 握手 + setup_env/setup_hw_
   //   → ⑥ 数据补零到 512 → ⑦ 逐包：ackValue(0) → 读 "OK" → xsend(块) → 读 "OK"
   //   → ⑧ ack() → 读 CMD:END(OK) → ack() → 读 CMD:START
   // mem_offset 恒 0x8000000（`XFL` 无关；`XC:461` 的默认值），source_file = MEM://0x<mem_offset>:0x<length>
-  bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
+  // ⚠️ 实施期新增形参 `addr`（T12，默认 0 → T10 的既有调用点/断言零改动）：XML 的 `<partition>` 是**存储描述符**
+  //    （"EMMC-USER" 一类，`storage.py:216-241`），**写地址必须由调用方给**（上游 `addr = partition.sector × pagesize`，
+  //    `mtk_da_handler.py:544-548` / `v6.py:1095-1097`）。传分区名或漏地址 = 写到偏移 0（分区表区）——真机毁表。
+  bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data, quint64 addr = 0,
                          QStringList *log = nullptr, QString *error = nullptr);
   // 数据帧读取（**上游 download_raw 形状**，`XL:508-589`）：读 "OK@0x<len>" → ack → 读 "OK" → ack
   //   → 循环{ 收一帧 → ack → 读 "OK" → ack } → 返回数据。**不要**复用 `XmlSession::readCommandResult` 的裸 OK@ 路径
