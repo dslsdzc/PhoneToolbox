@@ -95,8 +95,11 @@ struct QcFileSpec
     QByteArray plaintext;     // 明文载荷；清单 SizeInByteInSrc 取其长度
     quint32 offsetPages = 0;  // FileOffsetInSrc（页单位）。0 = 从 firstDataPage 起自动顺序分配；
                               // 非 0 = 按该值写入清单（可故意越界以测拒绝路径，包体不为其扩容）
-    QString sha256;           // 清单 sha256 属性（可空）
-    QString md5;              // 清单 md5 属性（可空）
+    // 这两个成员带 DMI：聚合初始化里省略它们时不再触发 -Wmissing-field-initializers
+    // （GCC 对带 DMI 的成员不告警）。取值与省略时完全一致 —— 都是 QString 的默认构造，
+    // 即 null QString（isNull()==true）；仓外探针逐位核过，非推测。
+    QString sha256 = QString(); // 清单 sha256 属性（可空）
+    QString md5 = QString();    // 清单 md5 属性（可空）
     bool sparse = false;      // 清单 sparse 属性
     bool omitSizeInByteAttr = false;  // 不写 SizeInByteInSrc（测长度回退扇区数 ×页尺寸）
 };
