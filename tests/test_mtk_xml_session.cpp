@@ -97,6 +97,9 @@ private slots:
     void sendCommandFailsOnUnlistedCommandWithoutResultSink();
     void sendCommandFailsOnUnparseableFollowUp();
     void readCommandResultKeepsUnknownNamedCommandForCaller();
+    void xreadHeaderRejectsOversizedAnnouncedLength();
+    void nullChannelFailsSessionEntryPoints();
+    void sendCommandNoackLeavesEndStartFramesUnconsumed();
 };
 
 // XC:18-25 create_cmd：`<da><version>v</version><command>CMD:<name></command>[<arg>…</arg>]</da>`；
@@ -423,6 +426,73 @@ void TestMtkXmlSession::readCommandResultKeepsUnknownNamedCommandForCaller()
     QVERIFY2(s.readCommandResult(r, nullptr, &err), qPrintable(err));
     QCOMPARE(r.command, QStringLiteral("CMD:CUSTOM"));
     QVERIFY(r.text.isEmpty());
+}
+
+// XL:112-135：宣布长度超上限（本层 kMaxFrameLength = 4 MB，private）→ 必须**在读载荷之前**拒绝。
+// 否则一句 0x7FFFFFFF 的宣布值就会让 readPayload 去要 2 GB。判别力：拒绝文案要点出**宣布值**
+// —— 只判"读失败"（把载荷读崩）的实现不会产出这个数字。
+void TestMtkXmlSession::xreadHeaderRejectsOversizedAnnouncedLength()
+{
+    MockUsbChannel m;
+    m.reads << (le32(0xFEEEEEEF) + le32(1) + le32(0x7FFFFFFFu));   // 12B 头，宣布 2 GiB
+    mtkbrom::XmlSession s(&m);
+    quint32 dt = 0, len = 0;
+    QString err;
+    QVERIFY(!s.xreadHeader(dt, len, &err));
+    QVERIFY2(err.contains(QStringLiteral("长度异常")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("2147483647")), qPrintable(err));   // 宣布值原样可诊断
+    QCOMPARE(m.reads.size(), 0);        // 载荷那一笔**未被**消费（拒绝发生在读载荷之前）
+}
+
+// 通道未设置（构造传 nullptr）→ 所有接触 m_usb 的入口都走同一文案 "XML：USB 通道未设置"。
+// 此前无用例构造 XmlSession(nullptr)：该分支的文案与"是否 fail-closed"都无判别器。
+void TestMtkXmlSession::nullChannelFailsSessionEntryPoints()
+{
+    mtkbrom::XmlSession s(nullptr);
+    QString err;
+    QVERIFY(!s.xsendText(QStringLiteral("OK"), &err));
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+
+    err.clear();
+    QString text;
+    QVERIFY(!s.getResponse(text, &err));
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+
+    err.clear();
+    quint32 dt = 0, len = 0;
+    QVERIFY(!s.xreadHeader(dt, len, &err));
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+
+    err.clear();
+    QByteArray payload;
+    QVERIFY(!s.readPayload(0x10, payload, &err));      // 非 0 长度才会碰通道（0 长度直接成功）
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+
+    err.clear();
+    QVERIFY(!s.ack(&err));
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+
+    err.clear();
+    QVERIFY(!s.ackValue(0x10, &err));
+    QVERIFY2(err.contains(QStringLiteral("USB 通道未设置")), qPrintable(err));
+}
+
+// noack = true 的语义（XL:188-219 的 `if noack: return`）：命令被接受（"OK"）后**就此收手** ——
+// 不读 CMD:END、不 ack、不读 CMD:START。判别力：设备已经把 CMD:END(OK) 与 CMD:START 发了过来，
+// 忽略 noack 的实现会把它们消费掉（m.reads.size() 变小）并多写一次 ack。
+void TestMtkXmlSession::sendCommandNoackLeavesEndStartFramesUnconsumed()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"))                    // 命令被接受（**只有这一帧该被消费**）
+            << textReads(QStringLiteral("<host><command>CMD:END</command>"
+                                        "<arg><result>OK</result></arg></host>"))
+            << textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY2(s.sendCommand(QStringLiteral("<da><command>CMD:WRITE-FLASH</command></da>"),
+                           nullptr, /*noack=*/true, &err), qPrintable(err));
+    QCOMPARE(m.reads.size(), 4);        // CMD:END 与 CMD:START 各剩两笔（头+载荷）：一帧都没被读
+    QCOMPARE(m.writeFrames.size(), 2);  // 只有命令帧的头与载荷：**没有** ack
 }
 QTEST_APPLESS_MAIN(TestMtkXmlSession)
 #include "test_mtk_xml_session.moc"
