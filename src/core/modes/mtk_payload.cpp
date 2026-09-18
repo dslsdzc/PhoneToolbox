@@ -997,7 +997,8 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         }
         refs = toPartitionRefs(deviceParts);
     } else if (gen == MtkGeneration::XFlash) {
-        // A-28 存储类型门：**任何设备读之前**先过（拒绝整条 XFlash 写路径，而不是读到一半再拒）
+        // A-28 存储类型门：在**任何分区表读与任何写之前**过（拒绝整条 XFlash 写路径，而不是读到一半再拒）。
+        // 注：门**不在**"任何设备读之前" —— 走到这里时引导链（握手/EMI/DA2 上传）已经跑完、做过大量设备读。
         if (!requireEmmcUserStorage(storageDescriptor(kXStorageEmmc, kXEmmcPartUser), say, error))
             return false;
         XPacketLength pl;
@@ -1032,7 +1033,8 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                                QStringLiteral("XFlash"), refs, partAddr, say, error))
             return false;
     } else {   // Xml
-        // A-28 存储类型门：**任何设备读之前**先过（拒绝整条 XML 写路径，而不是读到一半再拒）
+        // A-28 存储类型门：在**任何分区表读与任何写之前**过（拒绝整条 XML 写路径，而不是读到一半再拒）。
+        // 注：门**不在**"任何设备读之前" —— 走到这里时引导链（DA1 上传 / CMD:START 握手）已经跑完。
         if (!requireEmmcUserStorage(kXmlStoreEmmcUser, say, error))
             return false;
         // 分区表：**READ-FLASH + 同一个 mtkgpt**（T1 的解析器；spec §9 已核，`XC:474-484` 的区间读。

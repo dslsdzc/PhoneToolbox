@@ -107,8 +107,9 @@ bool xmlSetHostInfo(XmlSession &x, QString *error = nullptr);
 //   （`mtk_da_handler.py:537-541`），也是 T10 各调用点的默认（`addr` 由 T12 补出：逐分区写必须
 //   带 GPT 条目地址，否则会写到描述符的偏移 0 = 分区表区）。
 // 注：`addr` 排在两个默认形参**之后**是**有意**的 —— 调用点是按位置传 `addr` 的
-//（生产 1 处 `xmlWritePartition(xml, kXmlStoreEmmcUser, image, nullptr, error, it.value())`、
-// 用例 5 处按 `nullptr, &err` 的姿态），重排会同时改生产与全部用例，与本次改动无关。
+//（生产 1 处 `xmlWritePartition(xml, kXmlStoreEmmcUser, image, nullptr, error, it.value())`；
+// 用例 8 处：7 处按 `nullptr, &err`、1 处按 `&log, &err`），重排会同时改生产与全部用例，
+// 与本次改动无关。
 bool xmlWritePartition(XmlSession &x, const QString &partition, const QByteArray &data,
                        QStringList *log = nullptr, QString *error = nullptr, quint64 addr = 0);
 

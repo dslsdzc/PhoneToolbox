@@ -980,7 +980,9 @@ void TestMtkPayload::storageGateAcceptsOnlyEmmcUser()
     // ① 归一化：XFlash 的 (0x1, 0x8) 与 XML 的 "EMMC-USER" 是同一描述符
     QCOMPARE(mtkbrom::storageDescriptor(mtkbrom::kXStorageEmmc, mtkbrom::kXEmmcPartUser),
              mtkbrom::kXmlStoreEmmcUser);
-    // UFS 的 DaStorage=0x30 / UFSPartitionType::USER=3（facts §…）→ 不得归一成 eMMC
+    // UFS 的 DaStorage=0x30 / UFSPartitionType::USER=3（`ST:17` / `ST:48`
+    // —— `mtkclient/mtkclient/Library/DA/storage.py:17` 的 MTK_DA_STORAGE_UFS 与 :48 的
+    //    UFSPartitionType.USER；事实报告 §storage/parttype 取值 亦转录）→ 不得归一成 eMMC
     QVERIFY(mtkbrom::storageDescriptor(0x30, 0x3) != mtkbrom::kXmlStoreEmmcUser);
 
     // ② eMMC 用户区放行，且把"本期只支持 eMMC 用户区"写进日志（不静默）
