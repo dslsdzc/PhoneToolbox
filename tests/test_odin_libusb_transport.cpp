@@ -136,6 +136,13 @@ void TestOdinLibusbTransport::pinsAltSettingWiringInProductionSource()
     // ③ 记入与复位：open() 从巡检结果记一次、close() 复位一次（不留上次的 altsetting）
     QCOMPARE(int(src.count(QStringLiteral("m_altSetting = insp.altSetting;"))), 1);
     QCOMPARE(int(src.count(QStringLiteral("m_altSetting = 0;"))), 1);
+    // ④ 顺序：切换调用必须在**首次 claim 之后**（libusb 契约：接口未认领时切换不生效，真机症状
+    //    与 A-40 要修的完全一样）。这条钉的是"文件内出现顺序"。
+    //    ⚠️ 取材边界：把整块**原样搬**到 claim 之前会被这条挡下，但"挪进一个在 claim 之前调用的
+    //    helper"仍能绕过（那要真机/行为用例）。
+    QVERIFY2(src.indexOf(QStringLiteral("libusb_set_interface_alt_setting("))
+                 > src.indexOf(QStringLiteral("libusb_claim_interface(")),
+             "切换调用出现在首次 claim 之前：libusb 要求接口已认领，否则切换不生效");
 
     QString hdr;
     QVERIFY2(readAll(QStringLiteral(PT_SRC_ROOT "/src/core/odin/odin_libusb_transport.h"), &hdr),
