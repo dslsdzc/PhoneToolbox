@@ -370,13 +370,21 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 
 排队中 (特殊模式)
 ------------------------------------------------------------
-[ ] 高通 9006 / crashdump 类 (诊断/转储端口, **非刷写**)
+[ ] 高通 crashdump (Sahara MEMORY_DEBUG / 900E; 诊断/转储端口, **非刷写**)
+[ ] 高通 9006 (待真机 PID 证据; 本地无协议描述/抓包/实现材料)
 [ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
 [ ] 三星非 Odin 变体 (EUB 已单列; 其余候选待列)
-[ ] 华为 HiSuite 升级模式 (与已交付的 Kirin VCOM 强刷链是两条不同通道)
 [ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (现为拒绝并说明原因)
-[ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」)
+[ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」;
+    上游只到进门握手, 校准命令表本地零材料; 与 IMEI/NV 改写同一条通道)
 [ ] 高通 Diag / DM 端口 (QXDM/QPST 诊断与日志; 属诊断非刷写)
-[ ] MTK DOWNLOAD / UPLOAD / FORMAT_PARTITION (上游零调用, 需真实抓包样本才谈得上实现)
+[ ] MTK 擦除/格式化 (上游等价物 CMD:ERASE-FLASH / X_CMD_FORMAT; 材料齐全, 破坏性路径需二次确认)
+[ ] MTK XML 零调用命令 15 个 (RAM-TEST / DRAM-REPAIR / WRITE-EFUSE / FLASH-ALL / GET-DA-INFO 等; 应答格式无材料, 需真实抓包)
 [ ] BROM 漏洞利用 (kamakiri / carbonara)
 [ ] DA 二进制提取/生成、签名绕过、熔丝类 (QFuse)
+
+
+待材料 (缺协议材料/真机抓包)
+------------------------------------------------------------
+[ ] 华为 HiSuite 升级模式 (需真机 USB 抓包方可立项; 本地无协议材料 —— hisuite-proxy 仅伪造服务端, 不碰 USB;
+    与已交付的 Kirin VCOM 强刷链是两条不同通道)
