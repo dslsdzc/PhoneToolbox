@@ -10,13 +10,17 @@
 // 两类缺陷都必须在**本文件**变红（逐条变异留档：.superpowers/sdd/w2-task-2-logs/）。
 //
 // 做法：**期望值独立于实现**。用例直接往临时 ini 里写键值（键名逐字手写，不从实现反推），再问
-// store 的判据；以及 store 写完之后**另一把 QSettings 直读该 ini** 复核写入内容与落盘 —— 只测
-// "同一对象读回自己刚写的东西"会漏掉"留痕根本没落盘 / 落在别的键上"这两类。
+// store 的判据；store 写完之后再由**另一把 QSettings 直读该 ini** 复核写入内容（键名与值逐字）。
+//
+// ⚠️ 但"另一把 QSettings 直读"**证明不了落盘**（W2-T2 复审实测）：构造或销毁第二个指向同一路径
+// 的 QSettings 时，Qt 会把前一个实例还没落盘的待写值刷到磁盘 —— 于是删掉 `sync()` 它照样读得到。
+// 落盘由 **QFile 读裸字节**单独钉（写者仍活着、未销毁时读），见 readRawIni 与两处 "sync() 的钉子"。
 //
 // 隔离：全程用 QTemporaryDir 里的临时 ini（显式 `QSettings(path, IniFormat)` 注入）。
 // **不碰真实用户配置** —— 默认构造分支（`settings == nullptr` → UserScope 真实路径）本文件
 // **刻意不构造**：那会写进本机用户配置目录；该分支的覆盖缺口见文件末「未覆盖」。
 #include <QtTest>
+#include <QFile>
 #include <QSettings>
 #include <QTemporaryDir>
 
@@ -43,6 +47,38 @@ const VersionRow kVersionRows[] = {
     {legal::kAgreementVersion, true},       // 正好当前版本
     {legal::kAgreementVersion + 1, true},   // 更高版本号不得回退（用户已接受更新版）
 };
+
+// 读**裸字节**。必须用 QFile，不能换成"第二把 QSettings"：构造（或销毁）第二个指向同一路径的
+// QSettings 时，Qt 会把前一个实例**还没落盘的待写值**刷到磁盘 —— 于是"没 sync()"也能从它读到值。
+// 那样测的是"某个实例记得",不是"落盘"，而本类对用户的承诺恰恰是后者（进程被杀也要留下这次确认）。
+// 写者仍活着且未销毁时读裸文件，有内容就只可能是 sync() 写的。
+struct RawIni {
+    bool opened = false;   // 文件是否存在且可读（无 sync() 时通常是 false：文件压根没建出来）
+    QString text;
+};
+
+RawIni readRawIni(const QString &path)
+{
+    RawIni raw;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return raw;
+    raw.opened = true;
+    raw.text = QString::fromUtf8(f.readAll());
+    return raw;
+}
+
+// INI 文本里"该键被写成了当前版本"的样子（QSettings::IniFormat 把 `a/b` 写成 `[a]` 段 +
+// `b=值`）。用**常量**拼，不把版本号抄成字面量（常量升版而实现写死旧值 → 这里跟着红）。
+QString agreementNeedle()
+{
+    return QStringLiteral("agreementVersion=%1").arg(legal::kAgreementVersion);
+}
+
+QString tierNeedle(int tier)
+{
+    return QStringLiteral("tier%1Version=%2").arg(tier).arg(legal::kAgreementVersion);
+}
 
 // 造一个"上一次运行留下的留痕"：ini 里只有指定键 = 指定值，返回其路径。
 QString writeIni(const QTemporaryDir &dir, const QString &name, const QString &key, int value)
@@ -114,6 +150,17 @@ private slots:
             QVERIFY2(!store.hasAcceptedAgreement(), "前置条件被破坏：新 ini 在 accept 之前就判为已接受");
             store.acceptAgreement();
             QVERIFY2(store.hasAcceptedAgreement(), "acceptAgreement() 之后同一 store 必须判为已接受");
+
+            // **sync() 的钉子**（此刻写者 s 仍活着、且从未销毁）：磁盘上就该有这次留痕。
+            // 变异（删掉 acceptAgreement 里的 sync()）→ 文件根本不存在 → 这里红。
+            const RawIni raw = readRawIni(path);
+            QVERIFY2(raw.opened,
+                     qPrintable(QStringLiteral("acceptAgreement() 返回后磁盘上还没有 ini 文件 —— "
+                                               "说明留痕没落盘（缺 sync()）：%1")
+                                    .arg(path)));
+            QVERIFY2(raw.text.contains(agreementNeedle()),
+                     qPrintable(QStringLiteral("磁盘 ini 里没有 %1；实际内容：%2")
+                                    .arg(agreementNeedle(), raw.text)));
         }
         {
             QSettings s(path, QSettings::IniFormat);
@@ -158,9 +205,33 @@ private slots:
         QVERIFY2(!store.hasAcceptedTier(riskui::RiskTier::Tier3Diagnostic),
                  "接受 Tier2 不得顺带放行 Tier3 —— 两个 tier 是两次独立确认");
 
+        // **sync() + 键独立性**的磁盘级钉子（此刻写者 s 仍活着、未销毁，见 readRawIni 注释）：
+        // 接受 Tier2 之后，磁盘上必须**已有** tier2Version，且**没有** tier3Version。
+        const RawIni afterTier2 = readRawIni(path);
+        QVERIFY2(afterTier2.opened,
+                 qPrintable(QStringLiteral("acceptTier(Tier2Boot) 返回后磁盘上还没有 ini 文件 —— "
+                                           "说明留痕没落盘（缺 sync()）：%1")
+                                    .arg(path)));
+        QVERIFY2(afterTier2.text.contains(tierNeedle(2)),
+                 qPrintable(QStringLiteral("磁盘 ini 里没有 %1；实际内容：%2")
+                                    .arg(tierNeedle(2), afterTier2.text)));
+        QVERIFY2(!afterTier2.text.contains(tierNeedle(3)),
+                 qPrintable(QStringLiteral("接受 Tier2 之后磁盘上就出现了 %1 —— 两个 tier 必须各写各的键")
+                                    .arg(tierNeedle(3))));
+
         store.acceptTier(riskui::RiskTier::Tier3Diagnostic);
         QVERIFY2(store.hasAcceptedTier(riskui::RiskTier::Tier3Diagnostic), "接受后的 Tier3 必须判为已接受");
         QVERIFY2(store.hasAcceptedTier(riskui::RiskTier::Tier2Boot), "接受 Tier3 不得把 Tier2 的留痕弄丢");
+
+        // acceptTier 的 sync() 同款：两次接受都要**各自落盘**，不能只有第一次落了盘。
+        const RawIni afterTier3 = readRawIni(path);
+        QVERIFY2(afterTier3.opened, "接受两个 tier 后磁盘 ini 必须存在");
+        QVERIFY2(afterTier3.text.contains(tierNeedle(2)),
+                 qPrintable(QStringLiteral("磁盘 ini 里 tier2 的留痕不见了；实际内容：%1")
+                                .arg(afterTier3.text)));
+        QVERIFY2(afterTier3.text.contains(tierNeedle(3)),
+                 qPrintable(QStringLiteral("磁盘 ini 里没有 %1（第二次 acceptTier 没落盘？）；实际内容：%2")
+                                .arg(tierNeedle(3), afterTier3.text)));
 
         // 落盘复核：两把键各写各的，写入的都是**当前协议版本**（不是 0/1 之类的手抄值）。
         QSettings check(path, QSettings::IniFormat);
