@@ -37,9 +37,12 @@ const riskui::RiskTier kExpected[] = {
     riskui::RiskTier::Tier2Boot,  // 11 MODE_SAMSUNG_EUB
 };
 
-// 表长钉在枚举上：DeviceMode 追加取值而本表没跟着长 → **编译期**红（不必等运行期才发现漏登记）。
-// 注意本用例的循环只跑到 MODE_SAMSUNG_EUB，所以"新增取值"这件事不可能靠运行期发现 —— 就靠这里
-// 与实现里的 -Wswitch（变异②验的就是后者）。
+// 表长钉在**最后一个枚举项的值**上（不是"项数"）：kExpected 必须正好覆盖 0..MODE_SAMSUNG_EUB。
+// ⚠️ 它**兜不住"追加取值"** —— `MODE_TMP = 12` 时本 static_assert 依然成立（12 == 12）：
+//    变异⑧（.superpowers/sdd/w2-task-1-mutation-logs/）实测，追加取值时本 TU 照常编过（零报错）。
+//    "追加取值"唯一的编译期防线是实现里的 -Wswitch，而那道防线**只在 GCC/Clang 生效**
+//    （MSVC 上静默返回 None，见 risk_ui.cpp 的 ⚠️ 注释）。故本表与实现的登记靠人 + 评审，
+//    这里**没有哨兵**；本用例的循环也只跑到 MODE_SAMSUNG_EUB，运行期同样发现不了新增取值。
 static_assert(sizeof(kExpected) / sizeof(kExpected[0]) == DeviceDetector::MODE_SAMSUNG_EUB + 1,
               "DeviceMode 新增时同步更新本文件的 kExpected / kModeNames");
 
@@ -144,7 +147,9 @@ private slots:
     }
 
     // 风险要点：逐条逐字 + 非空 + 关键短语。
-    // 变异③（留档）：把 Tier2Boot 的要点表改成空表 → 本槽 red（非空/条数/逐字三处都会红）。
+    // 变异③（留档）：把 Tier2Boot 的要点表改成空表 → 本槽 red。
+    // 红在**第一处**断言 —— QCOMPARE 是致命断言，失败即从本槽 return，后面的逐字/关键短语断言
+    // 都不会执行：留档日志里只有 `t2.size()` 那一条（不是"三处都会红"，那是想当然）。
     void tierWarningsCarryTheExactRiskPoints()
     {
         const QStringList t2 = riskui::tierWarnings(riskui::RiskTier::Tier2Boot);

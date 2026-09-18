@@ -12,6 +12,12 @@ RiskTier riskTierForMode(DeviceDetector::DeviceMode mode)
     // 且下面把它升级为**编译错误**（漏登记 = 该入口静默不弹确认，正是本特性要防的缺陷，
     // 不能让它在运行期才显形）。变异②（.superpowers/sdd/w2-task-1-mutation-logs/）就是对
     // "临时追加一个模式取值 → 编译失败"的实测留档。
+    // ⚠️ **这道编译期防线只在 GCC/Clang 上生效**（`#if defined(__GNUC__)` 之外无此 pragma）：
+    //    MSVC 上追加取值**不报错**，switch 直接落到函数末尾的 `return RiskTier::None`
+    //    —— 即"新增的危险模式静默不弹二次确认"（复审者已在非 GCC 链上变异实测；MSVC 的 C4062
+    //    默认也不是错误）。故本机制**不是**全平台保证，MSVC 构建（build_windows.ps1）与任何
+    //    未开 -Wswitch 的构建下都兜不住，缓解只有流程：新增危险模式必须同时改这里与
+    //    tests/test_risk_tiers.cpp 的期望表（本项目惯例：危险默认值宁可显式登记）。
 #if defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic error "-Wswitch"
@@ -33,14 +39,16 @@ RiskTier riskTierForMode(DeviceDetector::DeviceMode mode)
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif
-    // 不可达（上面的 switch 已穷尽枚举）；保留以免"漏登记 + 编译器未把 -Wswitch 当错"时 UB。
-    // 走到这里 = 有模式没登记，保守取 None 会静默放行，故这条路径只应出现在下面的变异实验里。
+    // 在 GCC/Clang 上不可达（上面的 switch 已穷尽枚举，且漏登记会被 -Wswitch 拦成编译错误）；
+    // 保留以免"漏登记 + 编译器未把 -Wswitch 当错"时落到函数末尾 UB —— **MSVC 上这条路径可达**
+    // （见上条注释），届时返回 None = 该模式静默不弹确认。
     return RiskTier::None;
 }
 
 RiskTier riskTierForFeature(RiskFeature f)
 {
     // 与 riskTierForMode 同款编译期防线（新增 RiskFeature 未登记 → 编译错误）。
+    // ⚠️ 同一道边界：**只在 GCC/Clang 生效，MSVC 上不报错并静默返回 None**（见上条注释）。
 #if defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic error "-Wswitch"
@@ -64,7 +72,7 @@ RiskTier riskTierForFeature(RiskFeature f)
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif
-    return RiskTier::None;   // 不可达（枚举已穷尽）
+    return RiskTier::None;   // GCC/Clang 上不可达（枚举已穷尽）；MSVC 上漏登记会落到这里
 }
 
 QString tierTitle(RiskTier t)

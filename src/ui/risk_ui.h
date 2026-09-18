@@ -30,12 +30,13 @@ enum class RiskFeature {
 
 // 设备模式 → tier。**全枚举覆盖**：除 MODE_UNKNOWN 外全部 Tier2Boot —— FlashPanel 在每个协议
 // 通道（含 ADB / Recovery 模式下的刷入、擦除）都是底层写路径。
-// 新增 DeviceMode 而未在本函数登记 → **编译错误**（switch 无 default + `-Wswitch` 升级为 error），
-// 不会静默落到"不弹确认"的 None。机制验证见
-// .superpowers/sdd/w2-task-1-mutation-logs/mutation-2-*。
+// 新增 DeviceMode 而未在本函数登记：**GCC/Clang 上是编译错误**（switch 无 default + `-Wswitch`
+// 升级为 error，机制验证见 .superpowers/sdd/w2-task-1-mutation-logs/mutation-2-*），
+// **MSVC 上不报错并静默返回 None**（= 新危险模式不弹二次确认）—— 详见 risk_ui.cpp 里的 ⚠️ 注释。
 RiskTier   riskTierForMode(DeviceDetector::DeviceMode mode);
 
-// 功能入口 → tier（分组见枚举注释）。新增 RiskFeature 同样必须显式登记（同款编译期机制）。
+// 功能入口 → tier（分组见枚举注释）。新增 RiskFeature 同样必须显式登记（同款编译期机制，
+// 同款 MSVC 边界）。
 RiskTier   riskTierForFeature(RiskFeature f);
 
 // 对话框标题：Tier2Boot="底层引导与写操作" Tier3Diagnostic="诊断与安全研究" None=""（空 = 不弹）。
