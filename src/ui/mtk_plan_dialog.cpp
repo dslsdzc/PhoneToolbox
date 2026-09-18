@@ -33,7 +33,9 @@ void MtkPlanDialog::buildUi(const mtkplan::MtkFlashPlan &plan)
     connect(m_preview, &PlanPreviewWidget::cancelRequested, this, &MtkPlanDialog::reject);
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(m_preview);
-    resize(760, 520);
+    // 与同族两个计划对话框（EDL / Odin）同款：初始尺寸即最小尺寸（初始小于最小会被布局钳制）
+    setMinimumSize(880, 520);
+    resize(880, 520);
 }
 
 void MtkPlanDialog::accept()

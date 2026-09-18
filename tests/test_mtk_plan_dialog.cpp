@@ -19,6 +19,7 @@ private slots:
     void rejectLeavesConfirmedFalse();
     void previewsEntriesAndWarnings();
     void buildAndShowRejectsEmptyPlanBeforeShowing();
+    void minimumSizeMatchesDialogFamily();
 };
 
 static mtkplan::MtkFlashPlan oneEntryPlan()
@@ -75,6 +76,16 @@ void TestMtkPlanDialog::previewsEntriesAndWarnings()
     auto *warn = dlg.findChild<QListWidget *>(QStringLiteral("warningsList"));
     QVERIFY(warn);
     QCOMPARE(warn->count(), 1);              // 告警不静默
+}
+
+// 同族三个计划对话框（EDL / Odin / MTK）装同一个 PlanPreviewWidget：最小尺寸必须一致，
+// 且初始尺寸不小于它（否则用户在 760 宽的初始窗口里看到被钳制的预览）。
+void TestMtkPlanDialog::minimumSizeMatchesDialogFamily()
+{
+    MtkPlanDialog dlg(oneEntryPlan());
+    QCOMPARE(dlg.minimumSize(), QSize(880, 520));
+    QVERIFY(dlg.size().width() >= dlg.minimumSize().width());
+    QVERIFY(dlg.size().height() >= dlg.minimumSize().height());
 }
 
 // 空计划 = 必须**弹窗前**失败且写出 *error（"err != 初值"证明结论是本次写的，不是赖调用方的老值；
