@@ -34,7 +34,8 @@ EubLoadout make8890()
     lo.sourceNote = QStringLiteral(
         "reference/exynos-usbdl/scripts/split-sboot-8890.sh:2-5（四行 dd，单源）；"
         "实战佐证：reference/exynos8890-exynos-usbdl-recovery/exynos-usbdl-recover.sh:87-93"
-        "（按同序逐段发送）+ README.md:45 —— 该包直接引用同一脚本，**不构成独立第二源**（facts §C3）；"
+        "（按同序逐段发送）+ reference/exynos8890-exynos-usbdl-recovery/README.md:45"
+        " —— 该包直接引用同一脚本，**不构成独立第二源**（facts §C3）；"
         "sboot 修订与 sha1 出处：split-sboot-8890.sh:1");
     lo.sbootSha1 = QByteArray("9322ccb4e9b382b8cc67ff9ef989c459a763621f");
     lo.style = zeroStyle();   // exynos-usbdl 路径（facts §B4 头 00 00 00 00 / §B5 尾 00 00）
