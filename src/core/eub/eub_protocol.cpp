@@ -31,8 +31,9 @@ EubFrameStyle dnwStyle()
 
 bool payloadFitsFrame(quint64 payloadBytes)
 {
-    // 长度字段 = 数据长 + kFrameOverhead，要与 u32 上限比 —— 先把常量提到 quint64 再减，
-    // 免得 `quint32::max() - 10` 与 quint64 比较时的整型提升把边界搞错（原来就是 quint32 减法）。
+    // 长度字段 = 数据长 + kFrameOverhead，要与 u32 上限比（边界值 = 4294967285）。两处写成同一种
+    // 宽度只是可读性取舍：原式 `quint32::max() - quint32(kFrameOverhead)` 与 quint64 比较属无损
+    // 提升、值相同 —— 这里没有修 bug，改的只是写法（边界由用例 payloadFitsFrameBoundaryIsExact 钉住）。
     return payloadBytes <= std::numeric_limits<quint32>::max() - quint64(kFrameOverhead);
 }
 

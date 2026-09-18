@@ -304,6 +304,9 @@ private slots:
         QVERIFY(!eub::loadSbootBytes(path, out, &src, &err));
         QVERIFY(out.isEmpty());                                  // 绝不交出半份载荷
         QVERIFY(err.contains(QStringLiteral("按 tar 解析")));      // 走 tar 路径且 fail-closed
+        // 内层原因也要钉：只查包装前缀"按 tar 解析"，索引层的**任何**失败都会满足 —— 越界被
+        // 放宽/换成别的拒绝路径（例如"魔数不对"）时，上面那句照样绿。
+        QVERIFY2(err.contains(QStringLiteral("越界")), qPrintable(err));
         QVERIFY(err.contains(QStringLiteral("BL_CUT.tar.md5")));
         QVERIFY(src.description.isEmpty());                      // 失败时来源描述一并复位
     }
