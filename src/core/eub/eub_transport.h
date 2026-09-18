@@ -50,7 +50,8 @@ public:
     // 一次写整帧（facts §B7：hubble/dltool 都是整帧一次写；libusb 内部按包长切分）。
     // **空数组不是合法帧**（本协议没有 ZLP 语义，见文件头差异 ②）→ 实现拒绝并置 error。
     virtual bool writeBulk(const QByteArray &data, QString *error) = 0;
-    // 读回显（仅 responseSupport 的表项会调，facts §C7/§C8）；超时/无数据 → 空返回 + error。
+    // 读回显（仅 responseSupport 的表项会调，facts §C7/§C8）；入参非法（maxBytes <= 0）/未打开/
+    // 超时/无数据 → 空返回 + error（**每条早退都留原因**）。
     virtual QByteArray readBulk(int maxBytes, int timeoutMs, QString *error) = 0;
 
     // 打开过程中的非致命说明（如端点回退），会话把它转发到日志。默认空。

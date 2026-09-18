@@ -397,8 +397,12 @@ QByteArray LibusbEubTransport::readBulk(int maxBytes, int timeoutMs, QString *er
         setErr(error, QStringLiteral("读取失败：EUB 设备未打开"));
         return {};
     }
-    if (maxBytes <= 0)
+    if (maxBytes <= 0) {
+        // 与上面那条早退同款：本函数的两条早退都不产出字节，**都要**留下原因（调用方拿 error
+        // 区分"谁没 open"/"入参写错了"，空返回不带 error 会被读成"设备没回显"）。
+        setErr(error, QStringLiteral("读取失败：maxBytes 必须为正（当前 %1）").arg(maxBytes));
         return {};
+    }
 
     QByteArray buf(maxBytes, Qt::Uninitialized);
     int transferred = 0;
