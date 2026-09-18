@@ -66,6 +66,9 @@ QString listingOf(const QList<imgpac::PacPartition> &parts)
 
 // 把包内名字洗成文件名：只取基名（QFileInfo 去掉路径成分，顺带处理 "a/../x" 这类），
 // 再把路径分隔/控制字符与 Windows 保留字符替换为 '_' —— 名字来自外部包，不假设它干净。
+// 末尾还要剥掉尾随的点与空格：Windows 会替我们剥（"fdl1.bin." 与 "fdl1.bin" 在那里是同一
+// 文件），不先剥就是同一路径被后写的盖掉 —— 与重名判据同属"静默发错数据"（见 writeExtractedFdls）。
+// 剥完为空的（"." / ".." / "   " 这类）由调用方的空值检查回退到下一候选或兜底名。
 QString sanitizeFileName(const QString &raw)
 {
     QString out;
@@ -76,11 +79,13 @@ QString sanitizeFileName(const QString &raw)
             || u == u'?' || u == u'"' || u == u'<' || u == u'>' || u == u'|';
         out.append(bad ? QLatin1Char('_') : c);
     }
+    while (!out.isEmpty() && (out.back() == u'.' || out.back() == u' '))
+        out.chop(1);
     return out;
 }
 
 // 落盘文件名用的条目名：优先容器内文件名（用户在包里看得到的名字），为空回退分区 ID；
-// 两者都不可用（空 / "." / ".."）时用 fdl.bin —— 此时调用方"两份重名"的分支会再加前缀区分。
+// 两者都不可用（空 / 剥掉尾随点与空格后为空）时用 fdl.bin —— 此时调用方"两份重名"的分支会再加前缀区分。
 QString tempFileNameFor(const ExtractedFdl &fdl)
 {
     for (const QString &raw : {fdl.fileName, fdl.name}) {
