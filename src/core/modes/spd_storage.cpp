@@ -200,13 +200,6 @@ bool SpdFlasher::writePartition(const QString &name, const QByteArray &data,
     return sendAndExpectAck(BSL_CMD_END_DATA, QByteArray(), error);
 }
 
-bool isFdlPartition(const QString &partitionName)
-{
-    const QString n = partitionName.toLower();
-    return n == QStringLiteral("fdl") || n == QStringLiteral("fdl1")
-        || n == QStringLiteral("fdl2");
-}
-
 bool runSpdFlash(const QString &pacPath, const QString &fdl1Path, const QString &fdl2Path,
                  std::function<void(const QString &, int)> progress, QString *error)
 {

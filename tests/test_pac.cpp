@@ -1,33 +1,17 @@
 #include <QtTest>
 #include "image_engine/pac_image.h"
+#include "pac_test_helpers.h"
 
-// 按社区参考实现构造真实布局（两源独立确认）:
-//   divinebird/pacextractor (C)          —— 旧格式, 头 1220B 无魔数
-//   HemanthJabalapuri/pacextractor (Java/Python) —— 新格式 BP_R1.0.0/BP_R2.0.1
-// 注: .pac 实为 Spreadtrum/Unisoc (SPD ResearchDownload) 容器; MTK 侧 SP Flash Tool
-//     使用 scatter 文件而非 pac。社区所有 pac 解包工具均针对 SPD, 字段级布局以其为准。
-//
-// 新格式 (BP_R1.0.0 / BP_R2.0.1), 头 2124B, 全部小端:
-//   version u16[22]@0(UTF-16LE) + hiSize@44 + loSize@48 + productName@52(512B)
-//   + firmwareName@564(512B) + partitionCount@1076 + partitionsListStart@1080
-//   + mode/flashType/nandStrategy/isNvBackup/nandPageType@1084..1100 + prdAlias@1104(200B)
-//   + omaDmPrdFlag@1304 + isOmaDM@1308 + isPreload@1312 + reserved@1316(800B)
-//   + magic 0xfffafffa@2116 + CRC1@2120 + CRC2@2122
-//   分区项固定 2580B, 从 partitionsListStart 连续排布:
-//   length@0(==2580) + partitionName@4(512B) + fileName@516(512B) + szFileName@1028(504B)
-//   + hiPartitionSize@1532 + hiDataOffset@1536 + loPartitionSize@1540 + nFileFlag@1544
-//   + nCheckFlag@1548 + loDataOffset@1552 + dwCanOmitFlag@1556 + dwAddrNum@1560
-//   + dwAddr[5]@1564 + dwReserved[249]@1584
-//   partitionSize  = hiPartitionSize<<32 | loPartitionSize（64 位）
-//   partitionAddrInPac = hiDataOffset<<32 | loDataOffset（64 位）
-//
-// 旧格式 (divinebird C), 头 1220B 无魔数:
-//   someField u16[24]@0 + someInt@48 + productName@52(512B) + firmwareName@564(512B)
-//   + partitionCount@1076 + partitionsListStart@1080 + 其余保留
-//   分区项变长, 以 length@0 链式步进（固定部分 1568B, 尾随 dataArray[]）:
-//   length(4) + partitionName@4(512B) + fileName@516(1024B) + partitionSize@1540
-//   + 保留@1544(8B) + partitionAddrInPac@1552 + 保留@1556(12B)
-//   字符串为 UTF-16LE 单元数组（旧工具 getString 只取低字节, 对 ASCII 等价）
+// 合成夹具（新/老两代布局的字段级偏移说明、put* 原语、buildNew/buildLegacy）在
+// tests/pac_test_helpers.h —— test_spd_pac 用同一份夹具造含 FDL1/FDL2 的样本，
+// 不再各留一份副本（夹具与解析器共用原语会自洽通过，见该头注释）。
+using pactest::buildPacLegacy;
+using pactest::buildPacNew;
+using pactest::put32;
+using pactest::putEntryNew;
+using pactest::putEntryOld;
+using pactest::utf16le;
+
 class TestPac : public QObject
 {
     Q_OBJECT
@@ -39,84 +23,6 @@ private slots:
     void parseLegacyVariableLength();
     void invalidInput();
 };
-
-static QByteArray utf16le(const QString &s)
-{
-    QByteArray out;
-    out.reserve(s.size() * 2);
-    for (const QChar c : s) {
-        out.append(char(c.unicode() & 0xFF));
-        out.append(char((c.unicode() >> 8) & 0xFF));
-    }
-    return out;
-}
-static void put16(QByteArray &d, int off, quint32 v)
-{
-    d[off] = char(v & 0xFF); d[off + 1] = char((v >> 8) & 0xFF);
-}
-static void put32(QByteArray &d, int off, quint32 v)
-{
-    for (int i = 0; i < 4; ++i) d[off + i] = char((v >> (i * 8)) & 0xFF);
-}
-static void put64(QByteArray &d, int off, quint64 v)
-{
-    for (int i = 0; i < 8; ++i) d[off + i] = char((v >> (i * 8)) & 0xFF);
-}
-
-// 新格式分区项（2580B 固定）。注意: 字符串以实际 UTF-16LE 字节写入定宽字段
-// （QByteArray::replace 遇更短数据会收缩数组, 必须只替换实际字节数）
-static void putEntryNew(QByteArray &d, int off, const QString &name, const QString &file,
-                        quint64 size, quint64 dataOffset, quint32 fileFlag)
-{
-    put32(d, off + 0, 2580);                       // length == SIZE_OF_PARTITION_HEADER
-    const QByteArray n = utf16le(name), f = utf16le(file);
-    d.replace(off + 4, n.size(), n);
-    d.replace(off + 516, f.size(), f);
-    put32(d, off + 1532, quint32(size >> 32));     // hiPartitionSize
-    put32(d, off + 1536, quint32(dataOffset >> 32)); // hiDataOffset
-    put32(d, off + 1540, quint32(size & 0xFFFFFFFF)); // loPartitionSize
-    put32(d, off + 1544, fileFlag);                // nFileFlag: 1 = 需要文件
-    put32(d, off + 1552, quint32(dataOffset & 0xFFFFFFFF)); // loDataOffset
-}
-
-// 旧格式分区项（最小 1568B）
-static void putEntryOld(QByteArray &d, int off, const QString &name, const QString &file,
-                        quint32 size, quint32 dataOffset)
-{
-    put32(d, off + 0, 1568);                       // length
-    const QByteArray n = utf16le(name), f = utf16le(file);
-    d.replace(off + 4, n.size(), n);
-    d.replace(off + 516, f.size(), f);
-    put32(d, off + 1540, size);                    // partitionSize
-    put32(d, off + 1552, dataOffset);              // partitionAddrInPac
-}
-
-// 新格式样本: 1 分区 boot/boot.img, 数据 4096B 位于 2124+2580=4704; dwSize = 8800
-static QByteArray buildPacNew(const QString &version = QStringLiteral("BP_R1.0.0"))
-{
-    QByteArray pac(2124 + 2580, 0);
-    pac.replace(0, utf16le(version).size(), utf16le(version));
-    const quint32 total = quint32(pac.size() + 4096);
-    put32(pac, 44, 0);           // dwHiSize
-    put32(pac, 48, total);       // dwLoSize
-    put32(pac, 1076, 1);         // partitionCount
-    put32(pac, 1080, 2124);      // partitionsListStart
-    put32(pac, 2116, 0xfffafffa); // dwMagic
-    putEntryNew(pac, 2124, "boot", "boot.img", 4096, 4704, 1);
-    pac.append(QByteArray(4096, '\x5a'));
-    return pac;
-}
-
-// 旧格式样本: 1 分区 boot/boot.img, 数据 4096B 位于 1220+1568=2788
-static QByteArray buildPacLegacy()
-{
-    QByteArray pac(1220 + 1568, 0);
-    put32(pac, 1076, 1);         // partitionCount
-    put32(pac, 1080, 1220);      // partitionsListStart
-    putEntryOld(pac, 1220, "boot", "boot.img", 4096, 2788);
-    pac.append(QByteArray(4096, '\x5a'));
-    return pac;
-}
 
 void TestPac::detect()
 {

@@ -25,6 +25,9 @@
 #include <functional>
 
 #include "core/modes/spd_flash.h"
+// FDL 名判定 isFdlPartition 落在 spd_pac.{h,cpp}（判定与提取同一件事，避免第二套判据；
+// 也让它对纯解析单测目标可用而不拖进 libusb）。此处转出，既有调用方无需改 include。
+#include "core/modes/spd_pac.h"
 
 namespace spd {
 
@@ -75,8 +78,6 @@ private:
 bool runSpdFlash(const QString &pacPath, const QString &fdl1Path, const QString &fdl2Path,
                  std::function<void(const QString &name, int percent)> progress,
                  QString *error = nullptr);
-// 纯函数（单测）：fdl/fdl1/fdl2 分区名判定（诚实边界用——FDL 单独上传不参与普通刷写）
-bool isFdlPartition(const QString &partitionName);
 // 分区选择包（行为观察：分区选择/加载/擦除流程）：name 36×UTF-16LE + size LE32
 // （mode64 时另含 size_hi LE32 + dummy 8B）——载荷 76B 或 88B。
 // 纯函数（单测覆盖 mode64 88B 布局）；mode64 由调用方按 size 高位判定

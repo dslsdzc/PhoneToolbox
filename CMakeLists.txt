@@ -288,6 +288,7 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_brom.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_payload.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_spd_flash.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_spd_pac.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pipeline.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_crypto.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oppo_keys.cpp
@@ -392,9 +393,18 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xml_session.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xml_payload.cpp)
                 elseif(_test_stem STREQUAL "test_spd_flash")
+                    # spd_pac.cpp：FDL 名判定 isFdlPartition 落在这里（判定与提取同一件事），
+                    # spd_storage.cpp 的 runSpdFlash 与 test_spd_flash 都调它 —— 不补此源
+                    # 会在链接期炸（undef）。该源只依赖 Qt Core + imgpac，纯解析。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_pac.cpp)
+                elseif(_test_stem STREQUAL "test_spd_pac")
+                    # 纯解析目标：只编 spd_pac.cpp（+ image_engine 里的 imgpac 解析器）。
+                    # **不**补 spd_storage/spd_flash —— 那会把 libusb 拖进本目标（无此需要）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_pac.cpp)
                 elseif(_test_stem STREQUAL "test_image_worker")
                     # Task 6：ImageWorker 属 UI 层（src/ui，不编入任何静态库），且
                     # 识别入口 doDetect 为私有槽 —— OFP/OPS 尾页探测顺序（A11）只能
@@ -442,6 +452,9 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_download_qt.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_flash.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_storage.cpp
+                        # Task 1（pac 内 FDL 提取）：isFdlPartition 移入 spd_pac.cpp —— 不补此源
+                        # 会在链接期炸（undef）。
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/spd_pac.cpp
                         # Phase B Task 7：edl_handler.cpp 退化为薄封装（持有 LibusbEdlTransport +
                         # EdlSession）后依赖 src/core/edl 整链 —— 不补这些源会在链接期炸（undef）。
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/edl/edl_libusb_transport.cpp
