@@ -478,9 +478,13 @@ void TestOppoOps::parseOpsKeyCandidates()
     for (int idx = 0; idx < 3; ++idx) {
         OpsBuildOptions opts;
         opts.mboxIndex = idx;
+        // 每条 OpsFileSpec 显式写全中间成员：夹具对 offsetPages/nested/sha256 的默认分别是
+        // 0/false/空（结构体注释），显式写出与省略等价，只为满足 -Wmissing-field-initializers。
         const OpsPackage pkg = buildOpsPackage(
-            {{QStringLiteral("SAHARA"), QStringLiteral("prog_ufs_firehose_test.elf"), ctByMbox[idx], 41},
-             {QStringLiteral("UFS_PROVISION"), QStringLiteral("provision.xml"), provision, 0}},
+            {{QStringLiteral("SAHARA"), QStringLiteral("prog_ufs_firehose_test.elf"), ctByMbox[idx], 41,
+              0, /*nested=*/false, QString()},
+             {QStringLiteral("UFS_PROVISION"), QStringLiteral("provision.xml"), provision, 0,
+              0, /*nested=*/false, QString()}},
             opts);
         QVERIFY(pkg.isValid());
         const QString path = writePkg(dir.path(), QStringLiteral("key%1.ops").arg(idx), pkg.blob);
@@ -517,7 +521,8 @@ void TestOppoOps::parseOpsKeyCandidates()
         OpsBuildOptions bad;
         bad.blobOverride = QByteArray(62, '\x5A');   // 不在候选表里的密钥材料
         const OpsPackage badPkg = buildOpsPackage(
-            {{QStringLiteral("SAHARA"), QStringLiteral("prog.elf"), ctByMbox[0], 41}}, bad);
+            {{QStringLiteral("SAHARA"), QStringLiteral("prog.elf"), ctByMbox[0], 41,
+              0, /*nested=*/false, QString()}}, bad);
         QVERIFY(badPkg.isValid());
         const QString badPath = writePkg(dir.path(), QStringLiteral("bad%1.ops").arg(idx), badPkg.blob);
         QVERIFY(!badPath.isEmpty());
@@ -537,7 +542,8 @@ void TestOppoOps::parseOpsSkipsEntryWithoutOffset()
     QVERIFY(dir.isValid());
     const QByteArray payload = pseudoRandom(0x80, 0x44u);
     const OpsPackage pkg = buildOpsPackage(
-        {{QStringLiteral("UFS_PROVISION"), QStringLiteral("good.bin"), payload, 0},
+        {{QStringLiteral("UFS_PROVISION"), QStringLiteral("good.bin"), payload, 0,
+          0, /*nested=*/false, QString()},
          {QStringLiteral("UFS_PROVISION"), QStringLiteral("nofield.bin"), payload, 0, 0,
           /*nested=*/false, QString(), /*sparse=*/false, /*omitSizeInByte=*/false,
           /*omitOffsetAttr=*/true}});
@@ -569,11 +575,14 @@ void TestOppoOps::extractOpsEndToEnd()
 
     const OpsBuildOptions opts;   // mbox5
     const OpsPackage pkg = buildOpsPackage(
-        {{QStringLiteral("SAHARA"), QStringLiteral("prog_ufs_firehose_test.elf"), saharaCipher, 41},
-         {QStringLiteral("UFS_PROVISION"), QStringLiteral("provision.xml"), provisionPlain, 0},
-         {QStringLiteral("Program"), QStringLiteral("boot.img"), programPlain, 0},
+        {{QStringLiteral("SAHARA"), QStringLiteral("prog_ufs_firehose_test.elf"), saharaCipher, 41,
+          0, /*nested=*/false, QString()},
+         {QStringLiteral("UFS_PROVISION"), QStringLiteral("provision.xml"), provisionPlain, 0,
+          0, /*nested=*/false, QString()},
+         {QStringLiteral("Program"), QStringLiteral("boot.img"), programPlain, 0,
+          0, /*nested=*/false, QString()},
          {QStringLiteral("Program"), QStringLiteral("system.img"), nestedPlain, 0, 0,
-          /*nested=*/true}},
+          /*nested=*/true, QString()}},
         opts);
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("test.ops"), pkg.blob);
@@ -634,7 +643,8 @@ void TestOppoOps::extractOpsProgramHash()
 
     // ---- 2) 不补零口径（= extractOFP 的整段口径）→ 必须失败：证明 OPS 侧走的是补零口径 ----
     const OpsPackage badPkg = buildOpsPackage(
-        {{QStringLiteral("Program"), QStringLiteral("recovery.img"), payload, 0},
+        {{QStringLiteral("Program"), QStringLiteral("recovery.img"), payload, 0,
+          0, /*nested=*/false, QString()},
          {QStringLiteral("Program"), QStringLiteral("boot.img"), payload, 0, 0, /*nested=*/false,
           unpadded}});
     QVERIFY(badPkg.isValid());
@@ -675,10 +685,14 @@ void TestOppoOps::extractOpsRejectsUnsafeNames()
     const QByteArray legit = pseudoRandom(0x180, 0x5AFEu);
     const QByteArray evil(0x40, 'E');
     const OpsPackage pkg = buildOpsPackage(
-        {{QStringLiteral("Program"), QStringLiteral("../evil.img"), evil, 0},
-         {QStringLiteral("Program"), QStringLiteral("/abs/evil.img"), evil, 0},
-         {QStringLiteral("Program"), QStringLiteral("sub/evil.img"), evil, 0},
-         {QStringLiteral("Program"), QStringLiteral("boot.img"), legit, 0}});
+        {{QStringLiteral("Program"), QStringLiteral("../evil.img"), evil, 0,
+          0, /*nested=*/false, QString()},
+         {QStringLiteral("Program"), QStringLiteral("/abs/evil.img"), evil, 0,
+          0, /*nested=*/false, QString()},
+         {QStringLiteral("Program"), QStringLiteral("sub/evil.img"), evil, 0,
+          0, /*nested=*/false, QString()},
+         {QStringLiteral("Program"), QStringLiteral("boot.img"), legit, 0,
+          0, /*nested=*/false, QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("unsafe.ops"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -699,7 +713,8 @@ void TestOppoOps::extractOpsRejectsUnsafeNames()
 
     // 全部条目名不安全 → 无任何产物 → false（A10 第二条）
     const OpsPackage only = buildOpsPackage(
-        {{QStringLiteral("Program"), QStringLiteral("../evil.img"), evil, 0}});
+        {{QStringLiteral("Program"), QStringLiteral("../evil.img"), evil, 0,
+          0, /*nested=*/false, QString()}});
     QVERIFY(only.isValid());
     const QString onlyPath = writePkg(dir.path(), QStringLiteral("only-evil.ops"), only.blob);
     QVERIFY(!onlyPath.isEmpty());
@@ -715,7 +730,8 @@ void TestOppoOps::extractOpsRejectsBadPackages()
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QByteArray payload = pseudoRandom(0x100, 0x1234u);
-    const OpsFileSpec spec{QStringLiteral("Program"), QStringLiteral("boot.img"), payload, 0};
+    const OpsFileSpec spec{QStringLiteral("Program"), QStringLiteral("boot.img"), payload, 0,
+                           0, /*nested=*/false, QString()};
 
     // 包不存在 → 明确中文错误
     QString err;
@@ -776,7 +792,7 @@ void TestOppoOps::extractOpsRejectsBadPackages()
     OpsBuildOptions oob;
     const OpsPackage oobPkg = buildOpsPackage(
         {{QStringLiteral("Program"), QStringLiteral("boot.img"), payload, 0,
-          /*offsetPages=*/quint64(0x10000)}},
+          /*offsetPages=*/quint64(0x10000), /*nested=*/false, QString()}},
         oob);
     QVERIFY(oobPkg.isValid());
     const QString oobPath = writePkg(dir.path(), QStringLiteral("oob.ops"), oobPkg.blob);
@@ -800,7 +816,7 @@ void TestOppoOps::extractOpsRejectsBadPackages()
     // 路径守卫：outDir = 包所在目录 且 条目名 == 包文件名 → 拒绝且"先判后开"（包不被截断）
     const QString pkgName = QStringLiteral("guard.ops");
     const OpsPackage guardPkg = buildOpsPackage(
-        {{QStringLiteral("Program"), pkgName, payload, 0}});
+        {{QStringLiteral("Program"), pkgName, payload, 0, 0, /*nested=*/false, QString()}});
     QVERIFY(guardPkg.isValid());
     const QString guardPath = writePkg(dir.path(), pkgName, guardPkg.blob);
     QVERIFY(!guardPath.isEmpty());
@@ -823,7 +839,7 @@ void TestOppoOps::parseRejectsOversizedXmlLength()
     // 9 MiB 条目 → 包体 > 8 MiB 上限（让"区域越界"检查不再是唯一防线）
     const OpsPackage pkg = buildOpsPackage(
         {{QStringLiteral("UFS_PROVISION"), QStringLiteral("big.bin"),
-          QByteArray(9 * 1024 * 1024, 'B')}});
+          QByteArray(9 * 1024 * 1024, 'B'), 0, 0, /*nested=*/false, QString()}});
     QVERIFY(pkg.isValid());
 
     // 尾页 +0x14 改指扇区 0（settings 起点移到包首）+ +0x18 声明 8 MiB + 1：
