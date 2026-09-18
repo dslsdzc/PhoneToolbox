@@ -1,5 +1,8 @@
 # EUB 两条 backlog 实施计划（extraFiles 发送 + FlashPanel 文案纯函数化）
 
+> **状态：已执行完毕**（2026-09-18）—— Task 1 / 1b / 2 / 3 全部落地，各自通过独立审查 + 修复波，整批终审通过（无 Critical/Important）。
+> 本文件是**计划当时**的文本；其中"真样本"相关的表述以文首"事实依据"段的现行口径与 `exynos-eub-facts.md` §H 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development 逐任务执行。
 > Steps 用 `- [ ]` 勾选跟踪。
 
@@ -9,7 +12,9 @@
 
 **事实依据：** `reference/hubble/hubble.py:152-185`（extract+解压）、`:310-341`（分段后按序发送 extraFiles）、
 `:102-110`（同一 `send_part_to_device` = 与分段相同的帧风格）、`ExynosData/Exynos9830.json:3`（仅 9830 有 `files_to_send`）。
-证据等级：**单源**（hubble）；"9830 需要这两个文件"是**参照流程的要求**，本仓无真机真样本可验证。
+证据等级：**单源**（hubble）；"9830 需要这两个文件"是**参照流程的要求**。**真机仍未验证**；真样本已就位
+（`reference/eub-samples/` 的 5 个官方 BL 包，`exynos-eub-facts.md` §H）并由本计划的 Task 1b 实跑核对：
+已证实 9830 包内确有 `ldfw.img.lz4`/`tzsw.img.lz4`、7580 的 sha1 逐字符一致、41 段偏移落在与表无关的结构地标上。
 
 **架构：** 复用既有分层 —— `eub_payload`（按名取条目 + lz4）、`eub_session`（把 extraFiles 当作段之后的新阶段）、
 `eub_recovery_dialog`（源校验与文案）；FlashPanel 侧新增一个**不依赖 Widgets/libusb** 的纯函数层。

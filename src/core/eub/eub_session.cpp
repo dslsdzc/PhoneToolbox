@@ -301,7 +301,10 @@ bool EubSession::run(const EubLoadout &lo, const QByteArray &sboot,
             m_t.close();        // 失败也要收干净句柄
             setErr(error, QStringLiteral("额外文件 %1/共 %2「%3」（%4 字节）写入失败：%5")
                               .arg(j + 1).arg(m).arg(name).arg(data.size()).arg(err));
-            return false;       // 失败即停、不续传（与段阶段同款语义）
+            // 与参照的**有意分歧**：hubble 把 extra 的发送包在 try/except 里**忽略失败**（hubble.py:339-341），
+            // 本仓改为**硬失败中止** —— 救援流程里"某个文件没发出去"会让设备停在半完成状态，
+            // 静默继续比报错危险（与段阶段同款语义：失败即停、不续传）。
+            return false;
         }
 
         const QString echoNote = echoNoteText(lo);
