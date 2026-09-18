@@ -19,9 +19,22 @@ public:
     QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
     QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
     int pktSize = 0x400;
+    // 写失败注入：第 N 次 write() **调用**失败一次（0 基，按**含失败在内**的调用序计；
+    // 失败的那次不进 writes/writeFrames），-1 = 不注入。writeCalls = 已发生的调用数（含失败）。
+    // 与 mock_eub_transport.h 的 failWriteAt（按**成功**数计、且粘性）不同：这里是一次性的，
+    // 后续写入照常成功 —— "写坏一次就够"的用例不需要复位动作。
+    int failWriteAt = -1;
+    int writeCalls = 0;
 
     bool open(QString *) override { return true; }
-    bool write(const QByteArray &data, QString *) override { writes += data; writeFrames << data; return true; }
+    bool write(const QByteArray &data, QString *error) override
+    {
+        if (writeCalls++ == failWriteAt) {
+            if (error) *error = QStringLiteral("注入的写入失败（第 %1 次 write）").arg(writeCalls);
+            return false;
+        }
+        writes += data; writeFrames << data; return true;
+    }
     bool read(QByteArray &out, int maxLen, int, QString *) override
     {
         if (reads.isEmpty()) { out.clear(); return false; }
@@ -65,6 +78,7 @@ private slots:
     void sendDataChunksByMaxPacketSize();
     void readStatusRejectsShortPayloadAndBadMagic();
     void readStatusFallsBackToFirstU32ForOtherLengths();
+    void sendParamFailsOnChunkWriteFailure();
 };
 
 // 帧头一次写、载荷第二次写（铁律 3；xflash_lib.py:112-115）
@@ -272,6 +286,26 @@ void TestMtkXflashSession::readStatusFallsBackToFirstU32ForOtherLengths()
     QString err;
     QVERIFY2(s.readStatus(code, &err), qPrintable(err));
     QCOMPARE(code, quint32(0x12345678));        // 首个 u32，且**不**做 magic 归一化（只有 length==4 才归一化）
+}
+
+// send_param 分块循环内的**写失败**（XFL:172 的 for 循环）：必须当场失败，
+// **不**继续写后续块、**不**去读那一次 status（status 留在设备侧 = 下一次读错位一帧）。
+// 判别力：status 已备好且为 0 —— 吞掉写返回值的实现会把剩余块写完再读 status 成功返回 true。
+void TestMtkXflashSession::sendParamFailsOnChunkWriteFailure()
+{
+    MockUsbChannel m;
+    m.reads << statusReads(0);                              // 若被读掉 → 说明实现吞了写失败
+    m.failWriteAt = 2;                                      // 第 3 次 write = 第 2 块（头、块1、**块2**）
+    mtkbrom::XFlashSession s(&m, 0x6765);
+    const QByteArray big(0x300, '\x5A');                    // 0x200 + 0x100 两块
+    QString err;
+    QVERIFY(!s.sendParam({big}, &err));
+    QVERIFY2(err.contains(QStringLiteral("注入的写入失败")), qPrintable(err));
+    QCOMPARE(m.writeCalls, 3);                              // 写完帧头与首块后，在第 2 块上失败
+    QCOMPARE(m.writeFrames.size(), 2);                      // 失败的那次不进 writeFrames
+    QCOMPARE(m.writeFrames.at(0), le32(0xFEEEEEEF) + le32(1) + le32(0x300));
+    QCOMPARE(m.writeFrames.at(1).size(), 0x200);
+    QCOMPARE(m.reads.size(), 2);                            // status 帧的两笔（头+载荷）都还在：**未**被消费
 }
 QTEST_APPLESS_MAIN(TestMtkXflashSession)
 #include "test_mtk_xflash_session.moc"

@@ -42,9 +42,22 @@ public:
     QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
     QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
     int pktSize = 0x400;
+    // 写失败注入：第 N 次 write() **调用**失败一次（0 基，按**含失败在内**的调用序计；
+    // 失败的那次不进 writes/writeFrames），-1 = 不注入。writeCalls = 已发生的调用数（含失败）。
+    // 与 mock_eub_transport.h 的 failWriteAt（按**成功**数计、且粘性）不同：这里是一次性的，
+    // 后续写入照常成功 —— "写坏一次就够"的用例不需要复位动作。
+    int failWriteAt = -1;
+    int writeCalls = 0;
 
     bool open(QString *) override { return true; }
-    bool write(const QByteArray &data, QString *) override { writes += data; writeFrames << data; return true; }
+    bool write(const QByteArray &data, QString *error) override
+    {
+        if (writeCalls++ == failWriteAt) {
+            if (error) *error = QStringLiteral("注入的写入失败（第 %1 次 write）").arg(writeCalls);
+            return false;
+        }
+        writes += data; writeFrames << data; return true;
+    }
     bool read(QByteArray &out, int maxLen, int, QString *) override
     {
         if (reads.isEmpty()) { out.clear(); return false; }
@@ -119,6 +132,7 @@ private slots:
     void readDataRejectsNonZeroFinalFlag();
     void readDataAbortsOnFlagFrameFlood();
     void readDataZeroLengthReadsFinalFrameOnly();
+    void readDataFailsWhenDataFrameAckWriteFails();
 };
 
 // 七步握手：SYNC 帧 → SETUP_ENV（命令帧 + 20B）→ SETUP_HW_INIT（命令帧 + 4B）→ 读回 "SYNC"
@@ -852,7 +866,8 @@ void TestMtkXflashPayload::readDataRejectsUnknownFrameLength()
     QString err;
     QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x100, 0x1, 0x8, got, &err));
     QVERIFY2(err.contains(QStringLiteral("未知长度")), qPrintable(err));   // 失败原因是"长度"而不是别的
-    QVERIFY2(err.contains(QStringLiteral("2")), qPrintable(err));         // 带上实际长度
+    // 带上实际长度：点名字面量 `（2 字节）` —— 裸 contains("2") 对任何含数字 2 的文案都成立（含码值、偏移）
+    QVERIFY2(err.contains(QStringLiteral("（2 字节）")), qPrintable(err));
     QCOMPARE(m.writeFrames.size(), 4);   // 只有命令与参数两帧（4 笔），没有 ack
     QCOMPARE(m.reads.size(), 0);         // 出错帧已读掉，不留给下一次读
 }
@@ -927,6 +942,30 @@ void TestMtkXflashPayload::readDataZeroLengthReadsFinalFrameOnly()
     QVERIFY(got.isEmpty());
     QCOMPARE(m.writeFrames.size(), 4);    // 命令 2 + 参数 2（0 字节没有 ack）
     QCOMPARE(m.reads.size(), 0);
+}
+
+// 读循环里**数据帧的 ack 写失败**（XFL:750-757 的 ack(rstatus=False)）：必须当场失败 ——
+// 吞掉 ack 返回值会让"设备没收到 ack 却继续被喂下一帧"的错位状态静默通过。
+// 判别力：数据帧恰好凑满 length（0x40），收尾帧 flag = 0 已备好 —— 吞掉 ack 返回值的实现
+// 会走完循环、读到收尾帧后**返回 true**，并多消费掉那两笔读。
+void TestMtkXflashPayload::readDataFailsWhenDataFrameAckWriteFails()
+{
+    MockUsbChannel m;
+    const QByteArray blk(0x40, '\x5A');
+    m.reads << statusReads(0) << statusReads(0) << statusReads(0)
+            << frameReads(1, blk)                             // 数据帧恰好凑满 0x40
+            << frameReads(1, le32(0));                        // 收尾帧（正确实现不该读到它）
+    // 写序：命令 2 笔（#0 头 / #1 载荷）+ 56B 参数 2 笔（#2 头 / #3 载荷）+ ack 头（#4）→ 注入点
+    m.failWriteAt = 4;
+    mtkbrom::XFlashSession x(&m, 0x6765);
+    QByteArray got;
+    QString err;
+    QVERIFY(!mtkbrom::xflashReadData(x, 0, 0x40, 0x1, 0x8, got, &err));
+    QVERIFY2(err.contains(QStringLiteral("注入的写入失败")), qPrintable(err));
+    QCOMPARE(got, blk);                   // 数据先收下、再 ack（顺序契约）
+    QCOMPARE(m.writeCalls, 5);            // 到 ack 的头那一笔为止
+    QCOMPARE(m.writeFrames.size(), 4);    // 命令 2 + 参数 2：ack 的**两笔**都没写成
+    QCOMPARE(m.reads.size(), 2);          // 收尾帧**未**被消费（失败在它之前）
 }
 
 QTEST_APPLESS_MAIN(TestMtkXflashPayload)
