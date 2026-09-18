@@ -234,7 +234,12 @@ bool LibusbEdlTransport::claimAndDiscoverEndpoints(QString *error)
                         m_outEp = ep->bEndpointAddress;
                         m_outMaxPacket = int(ep->wMaxPacketSize);   // ZLP 判据
                     }
-                    // 端点取自这一份设置（A-40）：claim 只认接口号，非 0 时须显式切换（见下）
+                    // 端点取自这一份设置（A-40）：claim 只认接口号，非 0 时须显式切换（见下）。
+                    // ⚠️ 记录口径与 odin 侧的"同款"**不同**：这行在**逐端点循环内**、不要求
+                    // IN+OUT 成对，故记的是"**最后一个含批量端点的 altsetting**"；odin 记的是
+                    // "同时提供 IN 与 OUT 的那一个"。IN/OUT 分落不同 altsetting 的极端形态下两者
+                    // 会分叉 —— 该形态下端点本来就跨设置混用，切换只能选一份（真机设备通常是
+                    // 单 altsetting，不触发）。
                     m_altSetting = alt->bAlternateSetting;
                 }
             }
