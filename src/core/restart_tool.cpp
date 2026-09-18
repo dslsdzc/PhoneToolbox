@@ -90,6 +90,11 @@ QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::Devi
         case MODE_EDL:
             emit outputMessage("设备将进入EDL模式，请谨慎操作");
             break;
+        case MODE_SYSTEM:
+        case MODE_SHUTDOWN:
+            // 这两种目标无需额外提示（重启回系统 / 关机本身就是目的，命令已在上面发出）。
+            // 显式列出而不写 default: —— 保留 -Wswitch 对将来新增枚举值的提醒能力。
+            break;
         }
     }
     
