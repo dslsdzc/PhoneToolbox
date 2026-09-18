@@ -607,6 +607,7 @@ void VulnPanel::onEngineOutput(const QString &line)
 
 void VulnPanel::onProgressChanged(const QString &entryId, ExploitPhase phase)
 {
+    Q_UNUSED(entryId) // 进度文案只按阶段显示；参数保留以匹配 ExploitEngine::progressChanged 信号签名
     QString phaseName;
     switch (phase) {
     case ExploitPhase::DETECT:  phaseName = QStringLiteral("检测"); break;
