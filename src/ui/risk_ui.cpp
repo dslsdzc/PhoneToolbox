@@ -40,8 +40,11 @@ RiskTier riskTierForMode(DeviceDetector::DeviceMode mode)
 #  pragma GCC diagnostic pop
 #endif
     // 在 GCC/Clang 上不可达（上面的 switch 已穷尽枚举，且漏登记会被 -Wswitch 拦成编译错误）；
-    // 保留以免"漏登记 + 编译器未把 -Wswitch 当错"时落到函数末尾 UB —— **MSVC 上这条路径可达**
-    // （见上条注释），届时返回 None = 该模式静默不弹确认。
+    // 保留以免"漏登记 + 编译器未把 -Wswitch 当错"时落到函数末尾 UB。
+    // ⚠️ **这条兜底是 fail-open**：返回 None = **不弹二次确认、直接执行**。它与设计里"默认保守
+    //    （未列出的功能不打扰用户）"是同一处设计、方向相反 —— 对"未登记的新危险功能"而言，
+    //    不打扰 = 无门控。GCC/Clang 上漏登记被 -Wswitch 挡在编译期，但 **MSVC 上会真落到这里**
+    //    （见上方 switch 外的 pragma 说明）。
     return RiskTier::None;
 }
 
@@ -72,7 +75,9 @@ RiskTier riskTierForFeature(RiskFeature f)
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif
-    return RiskTier::None;   // GCC/Clang 上不可达（枚举已穷尽）；MSVC 上漏登记会落到这里
+    // 同 riskTierForMode 的兜底：**fail-open**（不弹）。GCC/Clang 上不可达（枚举已穷尽 + -Wswitch），
+    // MSVC 上漏登记会真落到这里 —— 见上方 pragma 说明。
+    return RiskTier::None;
 }
 
 QString tierTitle(RiskTier t)
