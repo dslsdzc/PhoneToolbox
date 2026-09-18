@@ -32,6 +32,10 @@ struct EubLoadout {
     QString evidence;          // 上面四档之一
     QString sourceNote;        // 出处（reference/<repo>/<file>:<line>）
     QByteArray sbootSha1;      // 参照所用 sboot 修订的 sha1（hex 文本；无记录则为空）
+    // **另一源**（未被采信其切法的那一源）记录的修订 sha1（hex 文本）；空 = 无此信息。
+    // 与 sbootSha1 的语义必须分清：sbootSha1 是"本表所用修订"，可作一致判据；本字段**不是**
+    //（两源切法本身不一致，拿它报"一致"会给出方向相反的保证）—— 只供人工比对，展示时必须标注来源。
+    QByteArray unverifiedSourceSha1;
     EubFrameStyle style;       // 帧头/尾风格（facts §B4/§B5）
     QList<EubSegment> segments;// 按序发送；重发段照列（facts §C5）
     // 参照流程要求"段之后另发"的 BL 包内文件（9830：ldfw.img/tzsw.img，facts §C7；发送逻辑见

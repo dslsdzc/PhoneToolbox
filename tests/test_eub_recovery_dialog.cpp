@@ -257,6 +257,19 @@ private slots:
         QVERIFY(unknown.contains(QStringLiteral("未记录")));
         QVERIFY(unknown.contains(QStringLiteral("b1d57811")));   // 仍要给出用户文件的前 8 位
         QVERIFY(!unknown.contains(QStringLiteral("一致")));
+        // A-15：表未记录修订、但表里留了**另一源（未被采信）**的修订 → 把它当人工比对线索给出，
+        // 且必须标注来源，不得混进"一致/不一致"的判定（7580 的 466852d1… 就是这一格）。
+        const QByteArray other = QByteArray("466852d13fa02d51729d21633f47708308579f58");
+        const QString withOther = EubRecoveryDialog::sha1CompareText(QByteArray(), b, other);
+        QVERIFY2(withOther.contains(QStringLiteral("466852d1")), qPrintable(withOther));
+        QVERIFY2(withOther.contains(QStringLiteral("未采信")), qPrintable(withOther));
+        QVERIFY(!withOther.contains(QStringLiteral("一致")));
+        // 另一源的串**不得**被当成"表记录"（否则 unknown 那半就白写了）：仍要有"未记录"这句
+        QVERIFY(withOther.contains(QStringLiteral("未记录")));
+        // 表自己有修订时（8890/8895）不追另一源那句：那是另一套切法的记录，出现在这里只会误导
+        const QString hasTable = EubRecoveryDialog::sha1CompareText(a, b, other);
+        QVERIFY2(!hasTable.contains(QStringLiteral("466852d1")), qPrintable(hasTable));
+        QVERIFY(!hasTable.contains(QStringLiteral("未采信")));
     }
 
     void prepareIdentifiesDeviceAndPreviewsSegments()
@@ -518,6 +531,26 @@ private slots:
                  qPrintable(err));
         QVERIFY2(dlgOn.runRescue(&err), qPrintable(err));
         QCOMPARE(mockOn.calls.count(QStringLiteral("read")), segments);
+    }
+
+    void statusTextOffersTheUnverifiedSourceAsAManualClue()   // A-15：接线（不只是纯函数）
+    {
+        // 7580 是唯一"双源分歧"表：本表未记录修订（sbootSha1 空），另一源（未被采信其切法）记了
+        // 466852d1…。纯函数对了不等于接对了 —— 这条线索必须真的出现在状态行上，
+        // 否则用户仍要自己从"来源"那一大段文字里挑出 8 位十六进制来比对。
+        eub::MockEubTransport mock;
+        mock.info.socName = QStringLiteral("Exynos7580");
+        EubRecoveryDialog dlg(mock, nullptr);
+        QString err;
+        const QByteArray sboot = sbootWithMarker(QByteArray("EXYNOS7580"));
+        QVERIFY2(dlg.prepare(sboot, QString(), QStringLiteral("合成 sboot（Exynos7580）"), &err),
+                 qPrintable(err));
+        QCOMPARE(dlg.loadout().soc, QStringLiteral("Exynos7580"));
+        const QString status = dlg.statusText();
+        QVERIFY2(status.contains(QStringLiteral("未记录")), qPrintable(status));      // 本表仍未记录修订
+        QVERIFY2(status.contains(QStringLiteral("466852d1")), qPrintable(status));    // 另一源的前 8 位
+        QVERIFY2(status.contains(QStringLiteral("未采信")), qPrintable(status));      // 来源必须标注
+        QVERIFY(!status.contains(QStringLiteral("一致")));                            // 不得报成一致
     }
 
     void prepareRejectsUnsupportedSoc()

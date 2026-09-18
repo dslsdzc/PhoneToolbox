@@ -87,7 +87,9 @@ EubLoadout make8895()
 // 其 bl2=0x7D10 正被本表的 0x8000 否决）；拿被否决源的修订当"本表所用修订"是**方向相反**的
 // 保证 —— 用户文件若与它相符，UI 会报"sha1 一致：你的固件与该表所用修订相同"，而两表的切法
 // 本身就不一致。hubble（本表采信方）未记录所用 sboot 修订，故本表**不记 sha1**（facts §C9），
-// 分歧与另一源的修订只留在 sourceNote 里（比较两边前 8 位仍可人工核对）。
+// 分歧与另一源的修订只留在 sourceNote 里（比较两边前 8 位仍可人工核对）—— 另一源那条 sha1
+// 另存进 unverifiedSourceSha1：它不再埋在"来源"长文里，UI 可以在表未记录修订时把它作为
+// **未被采信**的线索呈现出来（语义与 sbootSha1 分清，见 eub_loadout.h）。
 EubLoadout make7580()
 {
     EubLoadout lo;
@@ -101,6 +103,7 @@ EubLoadout make7580()
         "作 0x7D10（其后留 752B 空隙），其第 1 行记录修订 A510FXXS8CTI7 / sha1 "
         "466852d13fa02d51729d21633f47708308579f58 —— 该 sha1 属**另一源**，与本表采信的切法不构成"
         "同源对应，仅供人工比对；facts §C4 记录该分歧，谁对未定");
+    lo.unverifiedSourceSha1 = QByteArray("466852d13fa02d51729d21633f47708308579f58");   // 同 sourceNote 内那条
     lo.style = dnwStyle();    // hubble 路径（facts §B4 头 1B 44 4E 57 / §B5 尾 FF FF）
     lo.segments = {
         {QStringLiteral("fwbl1"),  0x0,    0x2000},

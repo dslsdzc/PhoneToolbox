@@ -195,7 +195,8 @@ void EubRecoveryDialog::refreshPreview(const QString &deviceLine, const QString 
     // 传 m_extras 而不是空表：段表里的字节数只能是**实际取出的**载荷大小（backlog Task 2）
     m_segmentView->setPlainText(segmentTableText(m_loadout, m_extras));
     m_shaLabel->setText(QStringLiteral("sboot 修订对照：%1")
-        .arg(sha1CompareText(m_loadout.sbootSha1, eub::sha1Hex(m_sboot).toLatin1())));
+        .arg(sha1CompareText(m_loadout.sbootSha1, eub::sha1Hex(m_sboot).toLatin1(),
+                             m_loadout.unverifiedSourceSha1)));
 }
 
 bool EubRecoveryDialog::prepare(const QByteArray &sboot, const QString &sourcePath,
@@ -469,13 +470,21 @@ QString EubRecoveryDialog::segmentTableText(const eub::EubLoadout &lo,
     return lines.join(QLatin1Char('\n'));
 }
 
-QString EubRecoveryDialog::sha1CompareText(const QByteArray &tableSha1, const QByteArray &fileSha1)
+QString EubRecoveryDialog::sha1CompareText(const QByteArray &tableSha1, const QByteArray &fileSha1,
+                                           const QByteArray &unverifiedSourceSha1)
 {
     const QString filePrefix = QString::fromLatin1(fileSha1.left(8));
     if (tableSha1.isEmpty()) {
-        // 表未记录修订（hubble 系 JSON 无修订字段）：明说"不知道"，**不得**报成一致
-        return QStringLiteral("该表未记录固件修订（无法对照）；你的文件 sha1 前 8 位 %1")
-            .arg(filePrefix);
+        // 表未记录修订（hubble 系 JSON 无修订字段）：明说"不知道"，**不得**报成一致。
+        // 表里若留了**另一源**（未被采信其切法）的修订，把它作为人工比对的线索一并给出 ——
+        // 标注来源，且不参与任何"一致/不一致"判定（它属于另一套切法，见 EubLoadout 字段注释）。
+        QString text = QStringLiteral("该表未记录固件修订（无法对照）；你的文件 sha1 前 8 位 %1")
+                           .arg(filePrefix);
+        if (!unverifiedSourceSha1.isEmpty()) {
+            text += QStringLiteral("；另一源（未采信其切法）记录的 sha1 前 8 位 %1 —— 仅供人工比对")
+                        .arg(QString::fromLatin1(unverifiedSourceSha1.left(8)));
+        }
+        return text;
     }
     const QString tablePrefix = QString::fromLatin1(tableSha1.left(8));
     if (tableSha1 == fileSha1) {

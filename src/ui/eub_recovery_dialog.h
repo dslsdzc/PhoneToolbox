@@ -67,7 +67,10 @@ public:
     // 传空表 = 未加载形态（只列名字、不给字节数）—— 字节数一律取自**实际取出的载荷**，不硬编。
     static QString segmentTableText(const eub::EubLoadout &lo,
                                     const QList<QByteArray> &extras = QList<QByteArray>());
-    static QString sha1CompareText(const QByteArray &tableSha1, const QByteArray &fileSha1);
+    // unverifiedSourceSha1 = 表里**另一源（未被采信）**记录的修订（EubLoadout 的同名字段）：
+    // 只在表自身未记录修订时作为线索追加一句，且必须标注"未被采信"—— 它不能当一致判据用。
+    static QString sha1CompareText(const QByteArray &tableSha1, const QByteArray &fileSha1,
+                                   const QByteArray &unverifiedSourceSha1 = QByteArray());
     // 救援成功后的交接文案（facts §D1/§F5：只发 RAM 镜像、**未写任何存储**，设备仍需正常刷写）。
     // 抽成纯函数是为了让这段**强制文案**能被离线钉住：成功路径只有模态弹窗这一个展示面，
     // 用例没法（也不该）去点模态框。

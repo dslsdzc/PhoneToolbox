@@ -139,6 +139,12 @@ private slots:
         QVERIFY(lo.sbootSha1.isEmpty());
         QVERIFY(lo.sourceNote.contains(QStringLiteral("466852d1")));      // 另一源的修订号仍可查
         QVERIFY(lo.sourceNote.contains(QStringLiteral("A510FXXS8CTI7")));
+        // 另一源的修订另存为**独立字段**（A-15）：语义与 sbootSha1 分清 —— sbootSha1 空（本表不记
+        // 修订）、unverifiedSourceSha1 = 另一源那条，UI 才能在"表未记录"时把它作为线索给出来。
+        QCOMPARE(lo.unverifiedSourceSha1,
+                 QByteArray("466852d13fa02d51729d21633f47708308579f58"));
+        QVERIFY(lo.unverifiedSourceSha1 != lo.sbootSha1);                 // 两者不是同一个东西
+        QVERIFY(lo.sourceNote.contains(QString::fromLatin1(lo.unverifiedSourceSha1.left(8))));
     }
 
     void table7885()   // spec §5.4 行 4；出处 reference/hubble/ExynosData/Exynos7885.json:5-28
@@ -236,6 +242,18 @@ private slots:
         QCOMPARE(socs, QStringList({"Exynos8890", "Exynos8895", "Exynos7580", "Exynos7885",
                                     "Exynos9610", "Exynos9810", "Exynos9820", "Exynos9830"}));
         QCOMPARE(totalSegs, qsizetype(41));   // 8 张表共 41 段（4+6+4+5+6+6+5+5）
+        // unverifiedSourceSha1 的形态契约：空，或 40 位小写 hex（与 sbootSha1 同格式 —— 长度/大小写
+        // 写错会让 UI 的"前 8 位"给出不可比对的串）。只有 7580 记了另一源的修订（facts §C4 的分歧）。
+        int withUnverified = 0;
+        for (const eub::EubLoadout &lo : all) {
+            if (lo.unverifiedSourceSha1.isEmpty())
+                continue;
+            ++withUnverified;
+            QVERIFY2(QRegularExpression(QStringLiteral("^[0-9a-f]{40}$"))
+                         .match(QString::fromLatin1(lo.unverifiedSourceSha1)).hasMatch(),
+                     qPrintable(lo.soc + QStringLiteral(": ") + QString::fromLatin1(lo.unverifiedSourceSha1)));
+        }
+        QCOMPARE(withUnverified, 1);          // 目前只有 7580（双源分歧）有"另一源"可记
         for (const QString &e : evidence)
             QVERIFY2(legalEvidence().contains(e), qPrintable(e));   // 证据等级只有这四档，写错即红
         // 每张表都能被自己的 SoC 名（大小写不敏感）原样查回
