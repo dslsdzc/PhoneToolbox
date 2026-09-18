@@ -326,7 +326,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_payload.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_session.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_recovery_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_button_labels.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_button_labels.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_tiers.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -718,6 +719,11 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xml_payload.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_xml_session.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
+                elseif(_test_stem STREQUAL "test_risk_tiers")
+                    # W2 Task 1：riskui 分级映射纯函数（src/ui，不编入任何静态库；只依赖
+                    # DeviceDetector::DeviceMode 这个枚举）。无 Widgets / 无 libusb。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 # A-40 结构钉：把**仓库根目录**编进这两个用例 —— 它们读传输层生产源文件，把
