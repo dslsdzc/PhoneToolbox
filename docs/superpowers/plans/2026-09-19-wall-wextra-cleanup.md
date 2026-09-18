@@ -65,7 +65,7 @@
 |---|---|---|
 | **W5-T1** | 打开开关：`CMakeLists.txt` 顶层加 `-Wall -Wextra`（不区分语言的形态；**本仓只有 C++**，见「口径」） | ✅ 已完成（`74fb0ca`）：395/395 编译规则带开关、全新全量 111 条与基线一致。**先记账再修**已完成，逐文件分布见下 |
 | **W5-T2** | OPPO 测试三件套（30 + 29 + 18 = **77 条**） | 单一最大块；多半是同一类模式（未使用参数 / 有符号比较），修法要**逐类核**而不是照抄 |
-| **W5-T3** | 其余测试目标（`test_image_worker` 12 + `test_hisi_update` 1 + `test_fs_ext4` 1 = 14 条） | `test_image_worker` 那 12 条要看是不是同一处模板/夹具引出来的 |
+| **W5-T3** | 其余测试目标（`test_image_worker` 12 + `test_hisi_update` 1 + `test_fs_ext4` 1 = 14 条） | **根因已查明（W5-T2 逐条核过）**：`test_image_worker` 那 12 条与 OPPO 三测试同根因 —— 同一个 `QcFileSpec`（`tests/oppo_test_helpers.h:91`）。**走 DMI 路线**：给该结构体的 `sha256`/`md5` 各加 `= QString()`（2 行消 12 条，治根因），**不要**按站点逐个补 |
 | **W5-T4** | `src/image_engine`（`ext4_reader` 4 + `fs_image` 2 + `bspatch_image` 2 = 8 条） | **仓内无 `.c`**（见「口径」）→ C 路径已由仓外合成工程验证过，**本任务不重复验证**，只管修这 8 条 |
 | **W5-T5** | `src/core` + `src/ui` + `src/vuln_db`（`flash_tool` 4 + `mtk_payload` 3 + `restart_tool` 2 + `local_importer` 2 + `vuln_panel` 1 = 12 条） | 这些是**生产**代码，修法要更保守：优先 `[[maybe_unused]]`/`Q_UNUSED`，动到逻辑就单列 |
 | **W5-T6** | 终验 + 文档 | 全新目录全量构建（**0 警告 / 0 error + 步数 + 退出码**）、全量 `ctest` 全绿、`功能清单.txt` 与 README 的"构建"段补一句"默认开启 `-Wall -Wextra`" |
