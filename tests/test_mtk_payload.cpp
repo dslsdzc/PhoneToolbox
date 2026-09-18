@@ -11,6 +11,7 @@
 #include "core/modes/mtk_emmc.h"
 #include "core/modes/mtk_gpt.h"
 #include "core/modes/mtk_payload.h"
+#include "mtk_bytes.h"      // 测试侧独立的小端助手（**不**复用生产头，见该文件头注释）
 #include "core/modes/mtk_preloader_fetch.h"
 #include "core/modes/mtk_xflash_payload.h"
 #include "core/modes/mtk_xflash_session.h"
@@ -59,13 +60,8 @@ namespace {
 // 默认 `IBromUsb::readExact` 是"单次读 + 严格长度"（mtk_brom.cpp:219-231）：XFlash 层先读 12B 帧头、
 // 再读载荷，每次 readExact 消耗**一笔**队列项。把整帧塞成一笔会让"读头"吃掉载荷、后续读全部错位。
 // 本文件 D1 的 LEGACY 夹具（逐字节 read）不受此约束，保持原样。
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
+using mtkbytes::le32;
+
 // 12B 帧头（小端：magic + datatype + length）+ 载荷 = 两笔。**载荷为空时只有一笔**（xread 的
 // `len > 0` 前置判断不发第二次读）—— 需要"空回包"时别用本函数（那会留下一笔不被消耗的队列项）。
 QList<QByteArray> frameReads(quint32 dt, const QByteArray &payload)

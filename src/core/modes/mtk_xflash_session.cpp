@@ -1,18 +1,11 @@
 #include "core/modes/mtk_xflash_session.h"
+#include "core/modes/mtk_le_bytes.h"     // le32（三层帧格式共用一份）
 
 namespace mtkbrom {
 namespace {
 
 constexpr int kParamChunk = 0x200;      // XFL:172（send_param 的载荷分块）
 constexpr int kStatusTimeoutMs = 3000;  // 传输层约定（上游 usbread 由传输层决定超时，无此常量）
-
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
 
 QByteArray le64(quint64 v) { return le32(quint32(v & 0xFFFFFFFFu)) + le32(quint32(v >> 32)); }
 

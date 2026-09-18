@@ -1,4 +1,5 @@
 #include "core/modes/mtk_xml_session.h"
+#include "core/modes/mtk_le_bytes.h"     // le32 / le32At（三层帧格式共用一份）
 
 namespace mtkbrom {
 namespace {
@@ -8,20 +9,6 @@ constexpr quint32 kDtProtocolFlow = 1;      // 协议流（文本响应 / 数据
 constexpr quint32 kDtMessage = 2;           // DA 日志（16B 头，XL:124-127）
 constexpr int kTimeoutMs = 5000;            // 传输层约定（上游 usbread 自带 maxtimeout，本层无对应常量）
 constexpr quint32 kMaxFrameLength = 1u << 22;   // 单帧上限 4 MB（防御性；上游无校验）
-
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
-
-quint32 le32At(const QByteArray &b, int off)
-{
-    return quint32(quint8(b.at(off))) | (quint32(quint8(b.at(off + 1))) << 8)
-         | (quint32(quint8(b.at(off + 2))) << 16) | (quint32(quint8(b.at(off + 3))) << 24);
-}
 
 // 通道未设置（构造时传 nullptr）—— 唯一文案来源；与 XFlashSession 同姿态
 bool noUsb(QString *error)

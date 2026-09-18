@@ -33,6 +33,7 @@
 #include "core/modes/mtk_xflash_payload.h"
 #include "core/modes/mtk_xflash_session.h"
 #include "core/modes/mtk_brom.h"
+#include "mtk_bytes.h"      // 测试侧独立的小端助手（**不**复用生产头，见该文件头注释）
 
 // mock 与 T2 同款（从 T2 的测试文件复制一份到本文件；两个测试文件各自独立，符合既有惯例）
 class MockUsbChannel : public mtkbrom::IBromUsb
@@ -70,13 +71,8 @@ public:
 };
 
 namespace {
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
+using mtkbytes::le32;
+
 QByteArray le16(quint16 v) { QByteArray b(2, '\0'); b[0] = char(v & 0xFF); b[1] = char(v >> 8); return b; }
 // ⚠️ **一帧应答 = 两笔队列项**：12B 帧头 + 载荷（见文件头夹具约定）。
 QList<QByteArray> frameReads(quint32 dt, const QByteArray &payload)

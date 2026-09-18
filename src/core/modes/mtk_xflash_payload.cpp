@@ -1,4 +1,5 @@
 #include "core/modes/mtk_xflash_payload.h"
+#include "core/modes/mtk_le_bytes.h"     // le32 / le16At / le32At（三层帧格式共用一份）
 
 #include <QThread>
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
@@ -8,18 +9,11 @@
 namespace mtkbrom {
 namespace {
 
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
-
-// 与 session.cpp 的实现同款（跨文件不共享匿名命名空间，各留一份）
 QByteArray le64(quint64 v) { return le32(quint32(v & 0xFFFFFFFFu)) + le32(quint32(v >> 32)); }
 
-// 错误码统一以**大写**零填充十六进制出现（同 session.cpp:26-32 的 hexCode；同样是各留一份）。
+// 错误码统一以**大写**零填充十六进制出现（同 session 层 checkStatus 的 hexCode；那是另一份实现，
+// 与本层的理由相同：错误码文案的拼法是**跨层契约**，各自独立成文才不会一处改动另一处漂移 ——
+// 两份都由 `0x00001234` 这类字面量断言钉住）。
 // 与 session 层的 checkStatus 文案同一拼法 —— 用户按码值 grep 时全仓只有一种写法
 // （上游 error.py 的 hex() 是小写，本仓不跟）。本层用到它的是 boot_to 的终判状态字
 // 与读数据路径的 flag 值（T6；后者的码值同样要能按字面 grep）。
@@ -29,17 +23,6 @@ QString hexCode(quint32 v)
     while (hex.size() < 8)
         hex.prepend(QLatin1Char('0'));
     return QStringLiteral("0x") + hex;
-}
-
-quint16 le16At(const QByteArray &b, int off)
-{
-    return quint16(quint8(b.at(off))) | (quint16(quint8(b.at(off + 1))) << 8);
-}
-
-quint32 le32At(const QByteArray &b, int off)
-{
-    return quint32(quint8(b.at(off))) | (quint32(quint8(b.at(off + 1))) << 8)
-         | (quint32(quint8(b.at(off + 2))) << 16) | (quint32(quint8(b.at(off + 3))) << 24);
 }
 
 // 无参 devctrl 查询的统一形状：DEVICE_CTRL → status → 子命令 → status → 读回包

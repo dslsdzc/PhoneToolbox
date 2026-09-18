@@ -18,6 +18,7 @@
 
 #include "core/modes/mtk_xml_session.h"
 #include "core/modes/mtk_brom.h"
+#include "mtk_bytes.h"      // 测试侧独立的小端助手（**不**复用生产头，见该文件头注释）
 
 class MockUsbChannel : public mtkbrom::IBromUsb   // 与 T2/T4 同款
 {
@@ -41,13 +42,7 @@ public:
 };
 
 namespace {
-QByteArray le32(quint32 v)
-{
-    QByteArray b(4, '\0');
-    b[0] = char(v & 0xFF); b[1] = char((v >> 8) & 0xFF);
-    b[2] = char((v >> 16) & 0xFF); b[3] = char((v >> 24) & 0xFF);
-    return b;
-}
+using mtkbytes::le32;
 
 // 文本/日志帧载荷 = utf8 字节 + **NUL**（XL:146-153：str 载荷 length = len+1）
 QByteArray textBody(const QString &s) { return s.toUtf8() + QByteArray(1, '\0'); }
