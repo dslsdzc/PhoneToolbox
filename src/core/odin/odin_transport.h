@@ -18,8 +18,9 @@ namespace odin {
 //     Odin 模式便于用户重试），句柄的释放由 `close()` 负责。
 //
 // 生命周期契约（与 src/core/edl/edl_transport.h 同款措辞，语义逐条对齐）：
-//   * `close()` **幂等**；`close()` 之后**允许再次 `open()`**（会话失败后用户重试：
-//     句柄必须能重新拿到，否则"失败不结束会话、留在 Odin 模式便于重试"的语义就是空话）。
+//   * `close()` **幂等**（含"从未打开/已关闭" —— 那时是 no-op）；`close()` 之后**允许再次 `open()`**
+//     （会话失败后用户重试：句柄必须能重新拿到，否则"失败不结束会话、留在 Odin 模式便于重试"
+//     的语义就是空话）。
 //   * `write(data)`：**裸写 OUT 端点**，data **原样**；`data` 为空 = **ZLP**（zero-length packet）：
 //     真机传输**必须**真的发出一个 0 长度 bulk 传输。
 //   * `read(maxBytes, timeoutMs)`：**裸读 IN 端点**，最多 maxBytes 字节（真实 USB 语义：
@@ -31,7 +32,7 @@ class IOdinTransport
 public:
     virtual ~IOdinTransport() = default;
     virtual bool       open(QString *error) = 0;                             // 打开 Odin 下载模式设备；close 后可再开
-    virtual void       close() = 0;                                          // 幂等
+    virtual void       close() = 0;                                          // 幂等；未打开时是 no-op
     virtual bool       write(const QByteArray &data, QString *error) = 0;    // 裸写 OUT；**空数组 = ZLP**
     virtual QByteArray read(int maxBytes, int timeoutMs, QString *error) = 0; // 裸读 IN；0 = 非阻塞轮询（空返回不置 error）
 };
