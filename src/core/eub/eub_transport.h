@@ -3,12 +3,16 @@
 // EUB 传输抽象：设备自述信息 + 纯字节管道（唯一设备依赖点是它的 libusb 实现）。
 // 语义与措辞对齐 src/core/odin/odin_transport.h（同款分层：会话只经本接口碰设备）。
 //
-// 与 Odin 传输的三处差异：
+// 与 Odin 传输的差异（五处）：
 //   ① 多一个 readDeviceInfo：EUB 设备用字符串描述符自报 SoC 名 / SoC ID / Chip ID /
 //      USB Booting Version（facts §A2/§A3），会话靠它选布局表；
 //   ② 没有 ZLP 语义：EUB 的下载是一段一帧、发完即走（facts §B7），不存在"空写表示结束"；
 //   ③ open() 会**重新枚举并打开**设备 —— EUB 设备在段间可能重枚举（facts §B8/§B9），
-//      所以每次 open 都是全新查找，"打开后再打开"必须先 close（实现里这么做）。
+//      所以每次 open 都是全新查找，"打开后再打开"必须先 close（实现里这么做）；
+//   ④ 多一个 notes()：打开过程的非致命说明（如端点回退）由会话转进日志（Odin 无此出参）；
+//   ⑤ readBulk **没有** timeout<=0 的"非阻塞轮询、空返回不置 error"分支（Odin 的该语义见
+//      odin_transport.h 的 read 契约）—— EUB 的超时一律空返回 + error：本接口的读只有
+//      "段后回显"一种用途，实现里 effectiveTimeoutMs 把 <=0 换成 1 ms（0 = 无限等待，见那里）。
 //
 // ⚠️ 真机路径未验证：本机没有任何 Exynos 设备（facts §F1），本文件的实现与注释只到
 // "对齐参照实现"这一层证据；枚举/claim/时序/回显的真机行为留持机人。

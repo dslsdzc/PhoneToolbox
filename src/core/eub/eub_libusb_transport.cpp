@@ -2,7 +2,8 @@
 //
 // 结构照抄 Phase C 的 src/core/odin/odin_libusb_transport.cpp（本仓已过审的同款真机实现：
 // open 的枚举→筛选→打开→claim 骨架、claim→detach 内核驱动→再 claim、短写拒绝、超时判定），
-// 差异只有头文件所列三处（readDeviceInfo / 无 ZLP / open 重新枚举设备）。
+// 差异只有头文件所列五处（readDeviceInfo / 无 ZLP / open 重新枚举设备 / notes /
+// readBulk 无 timeout<=0 的轮询分支）。
 //
 // ⚠️ 真机行为（枚举顺序 / claim / 端点发现 / 时序 / 回显）**离线无法验证**：本机无任何
 // Exynos 设备（facts §F1）。本文件只到"逐条对齐参照实现"这一层证据，真机留给持机人。
