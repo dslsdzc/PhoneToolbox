@@ -347,6 +347,19 @@ private slots:
         QByteArray noDigits(0x100, '\0');
         noDigits.replace(0x10, 6, QByteArray("EXYNOS"));
         QCOMPARE(eub::detectSocFromImage(noDigits), QString());
+        // 首个**匹配**（不是首个 "EXYNOS" 字样）：前面那处后面没有数字 → 继续往后找
+        QByteArray skip(0x2000, '\0');
+        skip.replace(0x10, 8, QByteArray("EXYNOS X"));       // 这一处不是匹配
+        skip.replace(0x100, 12, QByteArray("EXYNOS9610xx"));
+        QCOMPARE(eub::detectSocFromImage(skip), QStringLiteral("Exynos9610"));
+        // 大小写敏感（参照只认大写 EXYNOS）：小写一处都不该命中
+        QByteArray lower(0x100, '\0');
+        lower.replace(0x10, 12, QByteArray("exynos9610xx"));
+        QCOMPARE(eub::detectSocFromImage(lower), QString());
+        // 数字串恰好顶到缓冲区末尾（扫描的边界：不得越界读，也不能因此丢掉这一处匹配）
+        const QByteArray tail = QByteArray(16, '\0') + QByteArrayLiteral("EXYNOS12345678");
+        QCOMPARE(tail.size(), 30);
+        QCOMPARE(eub::detectSocFromImage(tail), QStringLiteral("Exynos12345678"));
     }
 
     // ---- 真样本硬断言（reference/eub-samples/，gitignored；缺失时 QSKIP/FAIL）----

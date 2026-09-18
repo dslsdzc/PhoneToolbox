@@ -14,7 +14,6 @@
 #include "eub_loadout.h"
 
 #include <QCryptographicHash>
-#include <QRegularExpression>
 
 namespace eub {
 namespace {
@@ -284,12 +283,21 @@ QString detectSocFromImage(const QByteArray &sboot)
 {
     // facts §A4（hubble.py:192-202）：b'EXYNOS[0-9]+' 的**首个**匹配，再 .title() 成 "Exynos9610"。
     // 照抄两处行为：①大小写敏感（参照只认大写 EXYNOS）；②取首个匹配（findall()[0]）。
-    static const QRegularExpression re(QStringLiteral("EXYNOS[0-9]+"));
-    const QRegularExpressionMatch m = re.match(QString::fromLatin1(sboot));
-    if (!m.hasMatch())
-        return QString();
-    // 参照用 Python 的 .title()；对 "EXYNOS" + 数字而言，其结果等价于固定前缀 "Exynos" + 数字
-    return QStringLiteral("Exynos") + m.captured(0).mid(6);
+    // 按**字节**扫描而不是先把整份镜像转成 QString：sboot 是用户选的整包镜像（BL 包里的 sboot.bin
+    // 可达数 MB～数十 MB），fromLatin1 会整份复制一遍（UTF-16 通常再翻倍）——判据只涉及 ASCII 字节，
+    // 不需要解码。循环是必需的：正则是"首个**匹配**"，`EXYNOS` 后面没数字的那一处不是匹配，
+    // 要继续往后找（"EXYNOS X … EXYNOS9610" 的答案是 9610）。
+    const QByteArray needle = QByteArrayLiteral("EXYNOS");
+    for (qsizetype at = sboot.indexOf(needle); at >= 0; at = sboot.indexOf(needle, at + 1)) {
+        qsizetype end = at + needle.size();
+        while (end < sboot.size() && sboot[end] >= '0' && sboot[end] <= '9')
+            ++end;
+        if (end > at + needle.size())   // [0-9]+ 至少一位，否则这一处不是匹配
+            // 参照用 Python 的 .title()；对 "EXYNOS" + 数字而言，其结果等价于固定前缀 "Exynos" + 数字
+            return QStringLiteral("Exynos")
+                   + QString::fromLatin1(sboot.constData() + at + needle.size(), end - at - needle.size());
+    }
+    return QString();
 }
 
 QString sha1Hex(const QByteArray &data)
