@@ -41,6 +41,9 @@ QString stepFailure(const QString &step, const QString &inner)
     QString msg = inner;
     if (msg.startsWith(layer))
         msg.remove(0, layer.size());
+    if (msg.isEmpty())
+        msg = QStringLiteral("(无详情)");   // 纯防御：当前不可达（三个调用点的 inner 都是 sendCommand 的
+                                            // error 出参，它每条 false 路径都会置 error），兜住"失败（）"空括号
     return QStringLiteral("XML：%1 失败（%2）").arg(step, msg);
 }
 
