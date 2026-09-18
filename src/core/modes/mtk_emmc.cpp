@@ -1,5 +1,7 @@
 #include "core/modes/mtk_emmc.h"
 
+#include <limits>       // std::numeric_limits（readMemory 的长度上限）
+
 namespace mtkbrom {
 namespace {
 
@@ -56,6 +58,14 @@ constexpr quint64 kPacketsize = 0x100000; // 对照 sdmmc_write_data/readflash
 
 bool BromSession::readMemory(quint32 addr, quint32 dwords, QByteArray &out, QString *error)
 {
+    // 长度先自证：`dwords × 4` 必须落在 int 内。下面的 `bytes` 是 int，短读文案也用它 ——
+    // `dwords > INT_MAX/4` 时 `int(dwords) * 4` 是**有符号溢出（UB）**，文案会打印出负数/乱值。
+    // 早拒在**任何设备 I/O 之前**（这个请求无论如何都发不出去）。
+    constexpr quint32 kMaxDwords = quint32(std::numeric_limits<int>::max()) / 4u;
+    if (dwords > kMaxDwords) {
+        if (error) *error = QStringLiteral("READ32 长度超限：%1 dwords（上限 %2）").arg(dwords).arg(kMaxDwords);
+        return false;
+    }
     // 对照 read()：echo 0xD1 → echo addr → echo dwords → status(2B) → 数据 → status2(2B)
     if (!echoCmd(CMD_READ32, error))
         return false;

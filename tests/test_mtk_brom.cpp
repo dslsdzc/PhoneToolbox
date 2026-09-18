@@ -50,6 +50,7 @@ private slots:
     // ---- F1-2: 内存协议 ----
     void readMemoryFrame();
     void readMemoryShortReplyFails();
+    void readMemoryRejectsOverlongRequest();
     void writeMemoryFrame();
     // ---- F1-2: DA 存储 ----
     void daStorageRequiresActiveDa();
@@ -402,6 +403,47 @@ void TestMtkBrom::connectOpenFailure()
     QString err;
     QVERIFY(!s.connect(&err));
     QVERIFY(err.contains("无权限"));
+}
+
+// M6：`dwords × 4` 会溢出 int 的请求必须**在任何设备 I/O 之前**被拒。
+// `int(dwords) * 4` 对 dwords > INT_MAX/4 是有符号溢出（UB），溢出后短读文案会打印负数/乱值；
+// 且这种请求无论如何都发不出去 —— 故断言**零设备写、零设备读**（不是"发出去再失败"）。
+// 边界两侧都钉：恰好 INT_MAX/4（= 536870911，×4 = 2147483644 仍在 int 内）**不**拒绝、
+// 只多一个 dwords 就拒 —— 把守卫写成 `>=` 会在前一格红。
+void TestMtkBrom::readMemoryRejectsOverlongRequest()
+{
+    constexpr quint32 kLimit = 536870911u;              // = INT_MAX / 4
+    {   // ① 超一个 → 早拒，零 I/O，出参不动
+        auto usb = std::make_unique<MockUsbChannel>();
+        MockUsbChannel *m = usb.get();
+        mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+        mtkbrom::BromSession s(std::move(usb), dev);
+        QByteArray out("\xAA\xBB", 2);
+        QString err;
+        QVERIFY(!s.readMemory(0x00100000, kLimit + 1u, out, &err));
+        QVERIFY2(err.contains(QStringLiteral("长度超限")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("536870911")), qPrintable(err));   // 上限原值可诊断
+        QCOMPARE(out, QByteArray("\xAA\xBB", 2));
+        QCOMPARE(m->writes.size(), 0);                  // 零设备写（早拒在 echoCmd 之前）
+        QCOMPARE(m->readRequests.size(), 0);            // 零设备读
+    }
+    {   // ② 恰好在限内 → **不**触发长度门，命令照常发到设备（失败在数据段，不是长度门）
+        auto usb = std::make_unique<MockUsbChannel>();
+        MockUsbChannel *m = usb.get();
+        mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+        mtkbrom::BromSession s(std::move(usb), dev);
+        // 命令回显 + addr 回显 + dwords 回显 + status（**不给**数据段：那一步是 2 GiB 请求，
+        // 队列空 → mock 直接失败，不会真的分配）
+        m->reads << QByteArray(1, char(0xD1))
+                 << QByteArray("\x00\x10\x00\x00", 4)
+                 << QByteArray("\x1F\xFF\xFF\xFF", 4)
+                 << QByteArray("\x00\x00", 2);
+        QByteArray out;
+        QString err;
+        QVERIFY(!s.readMemory(0x00100000, kLimit, out, &err));
+        QVERIFY2(!err.contains(QStringLiteral("长度超限")), qPrintable(err));
+        QCOMPARE(m->writes.size(), 9);                  // 命令 + addr + dwords 都发出去了
+    }
 }
 
 void TestMtkBrom::readMemoryFrame()
