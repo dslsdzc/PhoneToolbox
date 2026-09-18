@@ -77,10 +77,10 @@ PhoneToolbox 是一个**面向设备所有者与维修人员**的 Android 设备
 **纯函数映射**（可单测，不碰 Widgets/libusb —— 与 `flashui::flashButtonLabelsFor` 同款分层）：
 ```cpp
 namespace riskui {
-enum class RiskTier { None = 0, Tier2Boot, Tier3Diagnostic };
+enum class RiskTier { None = 0, Tier2Boot = 2, Tier3Diagnostic = 3 };   // 2/3 与 §4 的 legal/tier2Version 键名对齐
 RiskTier riskTierForMode(DeviceDetector::DeviceMode mode);   // 按设备模式（协议通道/EDL/…）
-enum class RiskFeature { DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot,
-                         VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool, MtkUnlock };
+enum class RiskFeature { DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot, MtkUnlock,   // → Tier 2
+                         VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool };           // → Tier 3
 RiskTier riskTierForFeature(RiskFeature f);                  // 按功能入口
 QString tierTitle(RiskTier t);                               // "底层引导与写操作" / "诊断与安全研究"
 QStringList tierWarnings(RiskTier t);                        // 该 tier 的具体风险要点（进二次确认对话框）
@@ -148,4 +148,12 @@ public:
 
 - 这是**意图留痕与风险告知**，不是法律许可、也不能把违法变合规（正文第四条已明写）。
 - 门控是**客户端**的：删除配置或改源码即可绕过 —— 它的价值在"提醒与留痕"，不在"强制"。
+- **"漏登记枚举即编译红"这道机制只在 GCC/Clang 上成立**（`#pragma GCC diagnostic error "-Wswitch"` 被
+  `#if defined(__GNUC__)` 包住）。在 **MSVC**（本仓 `build_windows.ps1` 用的那条链）上，新增 `DeviceMode`
+  取值而 `riskTierForMode` 没登记 → **编译通过、静默返回 `None`**（= 新危险功能不弹二次确认）。
+  用例里的表长 `static_assert` 钉的是**最后一个枚举项的值**而非项数，因此对"**追加**取值"同样兜不住
+  （2026-09-19 由 W2-T1 复审独立变异实测，见 `.superpowers/sdd/w2-task-1-report.md` 与本 spec 修订记录）。
+  缓解：**这是流程约束**（新增危险模式必须登记，靠审查而非编译器），以及本文件把口径写明。
+  未采用哨兵 `MODE_COUNT` 方案的理由：全仓有 12 处 `switch(DeviceMode)`，加哨兵会让每处在 `-Wall` 下都报
+  `-Wswitch`，把注释级问题扩散成跨波次的 12 处改动（**取舍已记，可复议**）。
 - 真机行为：本特性全部可离线验证（纯函数 + settings + offscreen 对话框），**无真机依赖**（这是本特性与刷写链的区别）。
