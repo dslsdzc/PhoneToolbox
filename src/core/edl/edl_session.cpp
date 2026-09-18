@@ -603,7 +603,9 @@ bool EdlSession::writeEntry(const PlanEntry &e, const FlashOptions &opt, QString
         if (got.compare(e.sha256, Qt::CaseInsensitive) != 0) {
             if (error)
                 *error = entryFailText(e, 0, 0,
-                                       QStringLiteral("刷前完整校验不符（计算 %1…，期望 %2…）—— 未写入任何数据")
+                                       QStringLiteral("刷前完整校验不符（计算 %1…，期望 %2…）—— 未写入任何数据；"
+                                                      "若该条目为 sparse（稀疏镜像），请核对包的 Sha256 口径"
+                                                      "（部分包按展开后的原始镜像给校验值）")
                                            .arg(got.left(12), e.sha256.left(12)));
             return false;
         }
@@ -736,7 +738,9 @@ bool EdlSession::writeEntry(const PlanEntry &e, const FlashOptions &opt, QString
             if (error)
                 *error = entryFailText(e, pusher.pushedBytes / sectorSize, pusher.pushedBytes,
                                        QStringLiteral("sha256 校验不符（计算 %1…，期望 %2…）；"
-                                                      "数据已写入设备，本工具不回滚（覆盖写可重刷）")
+                                                      "数据已写入设备，本工具不回滚（覆盖写可重刷）；"
+                                                      "若该条目为 sparse（稀疏镜像），请核对包的 Sha256 口径"
+                                                      "（部分包按展开后的原始镜像给校验值）")
                                            .arg(got.left(12), e.sha256.left(12)));
             return false;
         }
