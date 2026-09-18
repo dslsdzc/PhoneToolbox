@@ -31,7 +31,12 @@ constexpr int kFrameOverhead = 10;
 EubFrameStyle zeroStyle();   // exynos-usbdl 路径（8890/8895 的表用它，facts §B4/§B5）
 EubFrameStyle dnwStyle();    // hubble 路径（其余 6 个 SoC 的表用它）
 
-// 构造一帧。前提不满足（载荷为空 / 风格尺寸不为 4+2）→ 返回空 + 中文 *error（fail-closed）。
+// 载荷能否装进帧的长度字段：字节数 ≤ u32 上限 − kFrameOverhead（长度字段恒为 数据长 + 开销）。
+// 公开仅为单测：原判据要 ~4 GiB 载荷才可达（QByteArray 上限 2 GiB，结构上造不出来），
+// 抽成纯函数后边界（上限 / 上限+1）可断言。buildEubFrame 与它同源。
+bool payloadFitsFrame(quint64 payloadBytes);
+
+// 构造一帧。前提不满足（载荷为空 / 风格尺寸不为 4+2 / 载荷超出长度字段）→ 返回空 + 中文 *error（fail-closed）。
 QByteArray buildEubFrame(const QByteArray &payload, const EubFrameStyle &style, QString *error);
 
 // 发送一段：构造帧 → **一次** writeBulk（facts §B7：hubble/dltool 都是整帧一次写）。

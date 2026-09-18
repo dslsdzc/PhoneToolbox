@@ -7,6 +7,8 @@
 // "照抄自哪个实现"，不断言含义。
 #include <QtTest>
 
+#include <limits>
+
 #include "core/eub/eub_protocol.h"
 #include "mock_eub_transport.h"
 
@@ -73,6 +75,20 @@ private slots:
         QCOMPARE(le32At(f, 4), quint32(payload.size()) + quint32(eub::kFrameOverhead));
         QCOMPARE(f.mid(8, 1), QByteArray("A"));
         QCOMPARE(f.size(), 4 + 4 + payload.size() + 2);
+    }
+
+    // 长度字段的 u32 溢出守卫（A-09）：原判据要 ~4 GiB 载荷才可达（QByteArray 上限 2 GiB，
+    // 结构上造不出来），抽成纯函数后边界可断言 —— buildEubFrame 调的就是它（同一份算术）。
+    void payloadFitsFrameBoundaryIsExact()
+    {
+        constexpr quint64 kMaxFits =
+            quint64(std::numeric_limits<quint32>::max()) - quint64(eub::kFrameOverhead);
+        QCOMPARE(kMaxFits, 4294967285ull);            // u32 上限 4294967295 − 开销 10（写死，不跟着常量跑）
+        QVERIFY(eub::payloadFitsFrame(kMaxFits));     // 恰好装得下
+        QVERIFY(!eub::payloadFitsFrame(kMaxFits + 1));// 多 1 字节就装不下（长度字段进位到 u32 之外）
+        QVERIFY(!eub::payloadFitsFrame(quint64(std::numeric_limits<quint32>::max())));
+        // 0 通过本判据：它只管"装不装得下"，空载荷由 buildEubFrame 的空载荷分支单独拒（另一条文案）。
+        QVERIFY(eub::payloadFitsFrame(0));
     }
 
     void emptyPayloadFails()

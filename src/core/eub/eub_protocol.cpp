@@ -29,6 +29,13 @@ EubFrameStyle dnwStyle()
     return {QByteArray::fromHex("1b444e57"), QByteArray::fromHex("ffff")};   // facts §B4/§B5
 }
 
+bool payloadFitsFrame(quint64 payloadBytes)
+{
+    // 长度字段 = 数据长 + kFrameOverhead，要与 u32 上限比 —— 先把常量提到 quint64 再减，
+    // 免得 `quint32::max() - 10` 与 quint64 比较时的整型提升把边界搞错（原来就是 quint32 减法）。
+    return payloadBytes <= std::numeric_limits<quint32>::max() - quint64(kFrameOverhead);
+}
+
 QByteArray buildEubFrame(const QByteArray &payload, const EubFrameStyle &style, QString *error)
 {
     if (payload.isEmpty()) {
@@ -40,7 +47,7 @@ QByteArray buildEubFrame(const QByteArray &payload, const EubFrameStyle &style, 
                           .arg(style.header.size()).arg(style.trailer.size()));
         return {};
     }
-    if (payload.size() > std::numeric_limits<quint32>::max() - quint32(kFrameOverhead)) {
+    if (!payloadFitsFrame(quint64(payload.size()))) {
         setErr(error, QStringLiteral("EUB 帧载荷过大：%1 字节超出长度字段上限").arg(payload.size()));
         return {};
     }
