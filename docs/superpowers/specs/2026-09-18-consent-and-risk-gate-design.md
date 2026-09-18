@@ -129,7 +129,7 @@ public:
 | 目标 | 覆盖 |
 |---|---|
 | `test_risk_tiers.cpp`（新，纯函数） | `riskTierForMode` 逐枚举（**含"全枚举覆盖"断言**：`DeviceMode` 每个值都有明确判定，新增模式必须显式登记）；`riskTierForFeature` 逐项；`tierWarnings` 非空且含关键风险词 |
-| `test_consent_store.cpp`（新） | 未接受 → false；接受 → true；**版本升级语义**（把 store 里写入 `kAgreementVersion+1` 的旧值 → `hasAcceptedAgreement()` 应为 false 的反向断言）；tier 独立记录（接受 Tier2 不影响 Tier3）；用临时 ini（`QTemporaryDir`） |
+| `test_consent_store.cpp`（新） | 未接受 → false；接受 → true；**版本升级语义**（存储值 = `kAgreementVersion - 1` → **false**；= 版本 → true；= 版本 + 1 → true。⚠️ **原句写过 "写入 kAgreementVersion+1 应为 false"，方向是反的** —— 判据是 `>=`，更高版本号意味着"已接受更新版"，2026-09-19 按实现与判据更正）；tier 独立记录（接受 Tier2 不影响 Tier3）；`acceptTier(None)` **不写任何键**；用临时 ini（`QTemporaryDir`） |
 | `test_agreement_dialog.cpp`（新，Widgets + offscreen） | 勾选两个框前"接受"禁用；勾选后可用；拒绝关闭 → 返回 Rejected；**协议资源存在且含"版本 1"**（与常量一致） |
 | `test_risk_confirm_dialog.cpp`（新，同上） | 未勾选 → 继续禁用；勾选 → Accept；展示的要点来自 `tierWarnings()` |
 | `test_flash_button_labels.cpp`（backlog 任务 3，已有计划） | 不受影响 |
