@@ -68,7 +68,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] XML 写读: WRITE-FLASH (FileSysOp key=FILE-SIZE → ackValue(length) ×2 → 逐包 ack/数据) / READ-FLASH (**逐帧 ack** 的 download_raw 形状, 独立于单次尾 ack 分支) / REBOOT 收尾
 [√] XML 链整合: CMD:START 引导 + READ-FLASH 读 GPT (与 XFlash/LEGACY 共用同一解析器) + 逐分区 WRITE-FLASH (写地址 = 分区条目 first_lba, 存储描述符 "EMMC-USER") + REBOOT 收尾
 [√] 刷机通道文案: 日志/按钮提示写明按设备代际自动选链 (LEGACY / XFLASH / XML)
-[√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储暂只 eMMC user (0x1/0x8); 0x6781 的 16B ack 仅按上游实现 (无该芯片真机复核)
+[√] 诚实边界: **真机全链未验证 (三代都没有)**; XML 侧**无真实设备样本** (帧与命令全部来自上游代码); GPT 样本来自第三方仓库 (MPL-2.0, 只读离线、不进构建); XFlash/XML 都只走**主 GPT** (diskSectors=0, 备份兜底不可用且如实说明); 存储只 eMMC user (0x1/0x8) —— 这是**编译期常量** (XFlash 走数值对, XML 走 "EMMC-USER" 文本), XFlash/XML 两条链**没有设备侧存储类型来源** (命令表无 GET_EMMC_INFO/GET_UFS_INFO), 故**不检测 UFS**: 真机 UFS 机型**不会被拦**, 写入按 eMMC 用户区偏移; 写出前的 fail-closed 门只在描述符被改成非 eMMC 时触发; 0x6781 的 16B ack 仅按上游实现 (无该芯片真机复核)
 
 --- 华为 Kirin USB Update 刷写 (插件, 独立 .so) ---
 [√] USB Update (VCOM) 协议: 0x7E HDLC 帧 / CRC16-X25 / 转义
