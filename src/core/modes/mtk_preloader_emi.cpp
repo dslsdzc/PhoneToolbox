@@ -32,6 +32,9 @@
 
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
+#include "mtk_err.h"       // setErr（与 mtk_da_file.cpp 共用一份）
+#include "mtk_le_bytes.h"  // le32At（小端解码，与各帧层共用一份）
+
 namespace mtkbrom {
 namespace {
 
@@ -46,14 +49,6 @@ constexpr int kMmmMlenOff = 0x20;        // DC:124 mlen（<u32，小端）
 constexpr int kMmmSiglenOff = 0x2C;      // DC:125 siglen（<u32，小端）
 constexpr int kMtkBinSkip = 0xC;         // DC:142 LEGACY 切片起点 = MTK_BIN+0xC
 constexpr int kDramRetry = 0x800;        // DC:129 dramsize==0 时的重读步长
-
-quint32 rdLe32(const QByteArray &d, int off)
-{
-    return quint32(quint8(d.at(off))) | (quint32(quint8(d.at(off + 1))) << 8)
-         | (quint32(quint8(d.at(off + 2))) << 16) | (quint32(quint8(d.at(off + 3))) << 24);
-}
-
-void setErr(QString *error, const QString &msg) { if (error) *error = msg; }
 
 } // namespace
 
@@ -80,8 +75,8 @@ bool emiCommon(const QByteArray &preloader, EmiData &out, QByteArray &window, QS
                               .arg(data.size()).arg(kMmmSiglenOff + 4));
             return false;
         }
-        const quint32 mlen = rdLe32(data, kMmmMlenOff);        // DC:124（小端）
-        const quint32 siglen = rdLe32(data, kMmmSiglenOff);    // DC:125（小端）
+        const quint32 mlen = le32At(data, kMmmMlenOff);        // DC:124（小端）
+        const quint32 siglen = le32At(data, kMmmSiglenOff);    // DC:125（小端）
         if (mlen < siglen) {                                   // 偏差 1
             setErr(error, QStringLiteral("MMM 分支 mlen(%1) < siglen(%2)，头部自相矛盾")
                               .arg(mlen).arg(siglen));
@@ -96,7 +91,7 @@ bool emiCommon(const QByteArray &preloader, EmiData &out, QByteArray &window, QS
                               .arg(data.size()));
             return false;
         }
-        quint32 dramsize = rdLe32(data, int(data.size()) - 4);  // DC:127 data[-4:]
+        quint32 dramsize = le32At(data, int(data.size()) - 4);  // DC:127 data[-4:]
         if (dramsize == 0) {
             // DC:128-130：末 4B 为 0 → 砍掉 0x800 再读一次（偏差 3：不足 0x800 时上游必抛异常）
             if (data.size() <= kDramRetry) {
@@ -105,7 +100,7 @@ bool emiCommon(const QByteArray &preloader, EmiData &out, QByteArray &window, QS
                 return false;
             }
             data = data.left(data.size() - kDramRetry);
-            dramsize = rdLe32(data, int(data.size()) - 4);
+            dramsize = le32At(data, int(data.size()) - 4);
         }
         // DC:131 data = data[-dramsize-4:-4]：取回内层 EMI 块（丢掉尾部 4B dramsize）
         const quint64 take = quint64(dramsize) + 4;

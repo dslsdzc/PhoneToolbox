@@ -14,6 +14,9 @@
 #include <climits>   // INT_MAX（>2GiB 切片守卫）
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
+#include "mtk_err.h"       // setErr（与 mtk_preloader_emi.cpp 共用一份）
+#include "mtk_le_bytes.h"  // le16At / le32At（小端解码，与各帧层共用一份）
+
 namespace mtkbrom {
 namespace {
 
@@ -22,19 +25,6 @@ constexpr int kEntryStepDc = 0xDC;     // 现代表目步长
 constexpr int kEntryStepD8 = 0xD8;     // 老格式步长（**无真实样本**，仅合成夹具覆盖）
 constexpr quint16 kEntryMagic = 0xDADA;
 constexpr int kMaxRegions = 64;        // 防 count 损坏导致的天量分配
-
-quint16 rdLe16(const QByteArray &d, int off)
-{
-    return quint16(quint8(d.at(off)) | (quint16(quint8(d.at(off + 1))) << 8));
-}
-
-quint32 rdLe32(const QByteArray &d, int off)
-{
-    return quint32(quint8(d.at(off))) | (quint32(quint8(d.at(off + 1))) << 8)
-         | (quint32(quint8(d.at(off + 2))) << 16) | (quint32(quint8(d.at(off + 3))) << 24);
-}
-
-void setErr(QString *error, const QString &msg) { if (error) *error = msg; }
 
 // 该条目的 region 是否可用于两阶段（regionCount>=3 且 region[1]/region[2] 非空）。
 // 真实文件里大量 region[1].m_len == 0（da_parse_report.json 的 warnings）—— DA1/DA2 缺一不可，
@@ -80,7 +70,7 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
     out.raw = data;      // selectDaEntry 据 raw 切 region 载荷（避免后再读一次文件）
 
     // P9 count_da 不可信：先按最小步长与 EOF 交叉校验
-    const quint32 count = rdLe32(data, 0x68);
+    const quint32 count = le32At(data, 0x68);
     if (count == 0) {                       // 0 条目的 DA 文件没有任何可用条目 —— 明确拒绝
         setErr(error, QStringLiteral("DA 文件声明 0 个条目（count_da == 0）—— 无可用 DA 条目，拒绝解析")
                           + QStringLiteral("（独立基准 parse_da.py 同样把 count_da==0 记为 error）"));
@@ -125,19 +115,19 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
     for (quint32 i = 0; i < count; ++i) {
         const int o = 0x6C + int(i) * step;
         DaEntry e;
-        e.magic = rdLe16(data, o + 0x00);
+        e.magic = le16At(data, o + 0x00);
         if (e.magic != kEntryMagic) {   // 条目边界的唯一锚点 → fail-closed
             setErr(error, QStringLiteral("第 %1 条目的 magic 不是 0xDADA（读到 0x%2）—— 条目表可能错位")
                               .arg(i).arg(e.magic, 4, 16, QLatin1Char('0')));
             return false;
         }
-        e.hwCode           = rdLe16(data, o + 0x02);
-        e.hwSubCode        = rdLe16(data, o + 0x04);
-        e.hwVersion        = rdLe16(data, o + 0x06);
-        e.swVersion        = rdLe16(data, o + 0x08);
-        e.pagesize         = rdLe16(data, o + 0x0C);   // P1 不做常量校验（实测 {0,1,4096,12288}）
-        e.entryRegionIndex = rdLe16(data, o + 0x10);
-        e.regionCount      = rdLe16(data, o + 0x12);
+        e.hwCode           = le16At(data, o + 0x02);
+        e.hwSubCode        = le16At(data, o + 0x04);
+        e.hwVersion        = le16At(data, o + 0x06);
+        e.swVersion        = le16At(data, o + 0x08);
+        e.pagesize         = le16At(data, o + 0x0C);   // P1 不做常量校验（实测 {0,1,4096,12288}）
+        e.entryRegionIndex = le16At(data, o + 0x10);
+        e.regionCount      = le16At(data, o + 0x12);
         if (e.regionCount > kMaxRegions) {
             setErr(error, QStringLiteral("第 %1 条目的 region 数异常（%2）").arg(i).arg(e.regionCount));
             return false;
@@ -150,11 +140,11 @@ bool parseDaFile(const QByteArray &data, DaFile &out, QString *error)
         for (int r = 0; r < e.regionCount; ++r) {
             const int ro = o + 0x14 + r * 20;
             DaRegion reg;
-            reg.fileOffset  = rdLe32(data, ro + 0);
-            reg.len         = rdLe32(data, ro + 4);
-            reg.startAddr   = rdLe32(data, ro + 8);
-            reg.startOffset = rdLe32(data, ro + 12);   // P3 原样读取，不得推导
-            reg.sigLen      = rdLe32(data, ro + 16);
+            reg.fileOffset  = le32At(data, ro + 0);
+            reg.len         = le32At(data, ro + 4);
+            reg.startAddr   = le32At(data, ro + 8);
+            reg.startOffset = le32At(data, ro + 12);   // P3 原样读取，不得推导
+            reg.sigLen      = le32At(data, ro + 16);
             // P11 m_buf + m_len 必须落在文件内（0 长度 region 合法：真实文件里存在）
             const quint64 end = quint64(reg.fileOffset) + quint64(reg.len);
             if (end > quint64(data.size())) {
