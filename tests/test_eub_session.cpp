@@ -373,6 +373,40 @@ private slots:
         }
     }
 
+    void injectedReadFailureIsNotedNotFatal()   // A-12：mock 的读失败注入点 + 会话的处置
+    {
+        // 读回显失败（注入）→ 会话**不判失败**（best-effort，spec §7），但注入的原因必须逐段落日志
+        // —— 否则真机上"读失败"与"设备没回话"两条线索分不开（后者是空回显、无 error）。
+        const eub::EubLoadout lo = runnable9830ForEchoTest();
+        const int n = int(lo.segments.size());
+        QStringList failed;
+        {
+            eub::MockEubTransport t;
+            t.info = info9610(); t.info.socName = QStringLiteral("Exynos9830");
+            t.readResult = false;
+            t.readError = QStringLiteral("注入的读失败：端点 STALL");
+            eub::EubSession s(t, fastOptions(), [&](const eub::EubProgress &p) { failed << p.detail; });
+            QString err;
+            QVERIFY2(s.run(lo, syntheticSboot(0x400000), &err), qPrintable(err));   // 读失败不判失败
+            QCOMPARE(t.calls.count(QStringLiteral("read")), n);                     // 每段都试过读
+        }
+        QCOMPARE(countDetails(failed, QStringLiteral("回显读取失败")), n);              // 逐段注明"读失败"
+        QCOMPARE(countDetails(failed, QStringLiteral("端点 STALL")), n);               // 且带上注入的原因
+        QCOMPARE(countDetails(failed, QStringLiteral("未读到回显")), 0);                // 不得与"没回话"混同
+
+        // 反面对照：设备没回话（空回显、无 error）→ 走"未读到回显"，且**不得**报成读失败
+        QStringList silent;
+        {
+            eub::MockEubTransport t;
+            t.info = info9610(); t.info.socName = QStringLiteral("Exynos9830");
+            eub::EubSession s(t, fastOptions(), [&](const eub::EubProgress &p) { silent << p.detail; });
+            QString err;
+            QVERIFY2(s.run(lo, syntheticSboot(0x400000), &err), qPrintable(err));
+        }
+        QCOMPARE(countDetails(silent, QStringLiteral("未读到回显")), n);
+        QCOMPARE(countDetails(silent, QStringLiteral("回显读取失败")), 0);
+    }
+
     void identifyReportsUnknownSocWithoutWriting()
     {
         eub::MockEubTransport t;

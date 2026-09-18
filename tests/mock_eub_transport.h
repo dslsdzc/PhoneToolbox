@@ -29,6 +29,8 @@ public:
     bool infoResult = true;
     EubDeviceInfo info;            // readDeviceInfo 返回内容
     QByteArray    response;        // readBulk 返回内容
+    bool    readResult = true;     // false = readBulk 失败（注入）：空返回 + error，同真机超时/读错路径
+    QString readError;             // 注入的失败原因；空 = 用默认文案
     QStringList   noteList;        // notes() 返回内容
 
     bool open(QString *error) override {
@@ -69,8 +71,14 @@ public:
         return true;
     }
     QByteArray readBulk(int maxBytes, int timeoutMs, QString *error) override {
-        Q_UNUSED(maxBytes) Q_UNUSED(timeoutMs) Q_UNUSED(error)
+        Q_UNUSED(maxBytes) Q_UNUSED(timeoutMs)
         calls << QStringLiteral("read");
+        // 读失败注入：真机上同形（超时/端点错都是空返回 + error，见 eub_libusb_transport.cpp 的
+        // readBulk）→ 会话对"读失败"与"设备没回话（空回显、无 error）"两种情形必须分得开。
+        if (!readResult) {
+            if (error) *error = readError.isEmpty() ? QStringLiteral("注入的读失败") : readError;
+            return {};
+        }
         return response;
     }
     QStringList notes() const override { return noteList; }
