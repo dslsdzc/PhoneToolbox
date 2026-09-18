@@ -177,8 +177,8 @@ inline bool sampleFileAvailable(const QString &fileName)
     return !d.isEmpty() && QFile::exists(QDir(d).filePath(fileName));
 }
 
-// 目录级判可用性：**留给后续任务（T5/T7 的 brief 会用），勿删**。
-// 新用例请优先用 sampleFileAvailable()（按文件判，见上）。
+// 目录级判可用性：**当前无调用方**；新用例请优先用 sampleFileAvailable()（按文件判，见上），
+// 本函数保留为"只问目录在不在"的便利探测（目录在而样本缺失时它会误报可用）。
 inline bool samplesAvailable()
 {
     const QString d = samplesDir();
