@@ -37,6 +37,17 @@ void setErr(QString *error, const QString &msg)
     if (error) *error = msg;
 }
 
+// 候选级失败的报告串（B-12）：`候选 usb-<bus>-<addr>：<原因>`。
+// 用途：把"身份认得出但用不了"（无批量接口 / 打开失败）与"一台都没找到"分开 —— 两者原先
+// 共用 noDeviceError()，用户无法区分"插错设备"与"权限/被占用"（真机路径，无自动化覆盖）。
+QString candidateNote(libusb_device *dev, const QString &why)
+{
+    return QStringLiteral("候选 usb-%1-%2：%3")
+        .arg(int(libusb_get_bus_number(dev)))
+        .arg(int(libusb_get_device_address(dev)))
+        .arg(why);
+}
+
 // 一次描述符巡检的结果。
 // 候选接口的选择口径（三家一致）：优先 **class 0x0A(CDC_DATA) 且同时具备批量 IN/OUT** 的接口；
 // 没有这样的接口时退回第一个同时具备批量 in/out 的接口 —— 老 PID 兜底的机型可能不按 CDC 类
@@ -187,6 +198,7 @@ bool LibusbOdinTransport::open(QString *error)
     }
 
     bool found = false;
+    QStringList candidateNotes;   // 见 candidateNote()：!found 时拼在 noDeviceError() 主句之后
     for (ssize_t i = 0; i < count && !found; ++i) {
         libusb_device_descriptor desc{};
         if (libusb_get_device_descriptor(list[i], &desc) != LIBUSB_SUCCESS)
@@ -196,8 +208,11 @@ bool LibusbOdinTransport::open(QString *error)
         const DeviceInspection insp = inspectDevice(list[i]);
         if (!isOdinDevice(desc.idVendor, desc.idProduct, insp.classes, insp.hasBulkInOut))
             continue;
-        if (insp.iface < 0)
-            continue;    // 身份认得出但没有可用的批量接口（传不了）→ 试下一个候选
+        if (insp.iface < 0) {
+            // 身份认得出但没有可用的批量接口（传不了）→ 记下原因，试下一个候选
+            candidateNotes << candidateNote(list[i], QStringLiteral("无可用批量接口（描述符缺 in/out 对）"));
+            continue;
+        }
         if (libusb_open(list[i], &m_dev) == LIBUSB_SUCCESS) {
             m_iface = insp.iface;
             m_altSetting = insp.altSetting;
@@ -205,13 +220,17 @@ bool LibusbOdinTransport::open(QString *error)
             m_outEp = insp.epOut;
             found = true;
         } else {
-            m_dev = nullptr;   // 该设备打不开（权限/被占用）→ 继续找下一个
+            m_dev = nullptr;   // 该设备打不开（权限/被占用）→ 记下原因，继续找下一个
+            candidateNotes << candidateNote(list[i], QStringLiteral("打开失败（权限/被占用）"));
         }
     }
     libusb_free_device_list(list, 1);
 
     if (!found) {
-        setErr(error, noDeviceError());
+        QString msg = noDeviceError();          // 主句不变
+        if (!candidateNotes.isEmpty())          // 有候选失败 → 附上逐候选原因（B-12）
+            msg += QLatin1Char('\n') + candidateNotes.join(QStringLiteral("；"));
+        setErr(error, msg);
         libusb_exit(m_ctx);
         m_ctx = nullptr;
         return false;
