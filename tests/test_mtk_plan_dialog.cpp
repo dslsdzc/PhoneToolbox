@@ -21,6 +21,7 @@ private slots:
     void previewsEntriesAndWarnings();
     void buildAndShowRejectsEmptyPlanBeforeShowing();
     void minimumSizeMatchesDialogFamily();
+    void pinsInitialSizeMatchesMinimumInProductionSource();
 };
 
 static mtkplan::MtkFlashPlan oneEntryPlan()
@@ -83,18 +84,26 @@ void TestMtkPlanDialog::previewsEntriesAndWarnings()
 // ⚠️ **不要**在这里补 `dlg.size() >= dlg.minimumSize()` 之类的断言：Qt 本就保证 size() ≥
 // minimumSize()，只要下面那条 QCOMPARE 成立，那类断言对任何实现都**恒真**（实测：把实现里的
 // `resize(880,520)` 改成 `resize(1200,800)`，它们照样全绿）。
+// ⚠️ 也**不要**写严格相等 `QCOMPARE(dlg.size(), QSize(880,520))`：虽有甄别力，但有平台脆弱性
+//（Qt 只把 size() 钳到 min 以上、**不保证等于**；任何环境下 sizeHint 把窗口撑过 880x520 就误红）。
+// "初始尺寸 == 最小尺寸"这个事实由**源文件钉**负责 —— 见本文件
+// `pinsInitialSizeMatchesMinimumInProductionSource`，它不受 DPI/sizeHint 影响。
 void TestMtkPlanDialog::minimumSizeMatchesDialogFamily()
 {
     MtkPlanDialog dlg(oneEntryPlan());
-    QCOMPARE(dlg.minimumSize(), QSize(880, 520));     // 运行期判据
+    QCOMPARE(dlg.minimumSize(), QSize(880, 520));     // 运行期判据（只钉最小尺寸）
+}
 
-    // "初始尺寸 == 最小尺寸"这条**代码事实**用**结构钉**（先例：test_flash_button_labels 的
-    // flashPanelSetsFlashButtonLabelsExactlyOnce）—— 读生产源文件，断言两处字面都在。
-    // 为什么不用 `QCOMPARE(dlg.size(), QSize(880,520))`：严格相等虽有甄别力，但有**平台脆弱性**
-    //（Qt 把 size() 钳到 min 以上、不保证等于；任何环境下 sizeHint 把窗口撑过 880x520 就误红），
-    // 维护噪声高于这条用例的价值。结构钉不受 DPI/sizeHint 影响。
-    // ⚠️ 取材边界（同 flash_button_labels）：只数**字面出现次数** —— 把调用包进 `if (false)`
-    //    仍然绿（唯一逃逸形态）；反向地，注释里写出该字面量或把调用换行书写会误红。
+// A-35 的结构钉：「初始尺寸 == 最小尺寸」= 生产源码里 `setMinimumSize(880, 520)` 与
+// `resize(880, 520)` **两处都在**。这一事实在运行期测不出（上面那条注释写了两个失败方案），
+// 故钉**代码事实**（先例：test_flash_button_labels 的 flashPanelSetsFlashButtonLabelsExactlyOnce；
+// 以及 test_odin_libusb_transport / test_edl_libusb_transport 的源文件钉）。
+// ⚠️ 取材边界：只数**字面出现次数** —— 把调用包进 `if (false)` 仍然绿（唯一逃逸形态，已实测：
+//    m1-struct-mut-b-*）；反向地，注释里写出该字面量或把调用换行书写会误红。
+// ⚠️ 契约：要求源码树原地存在（路径被编进二进制）—— 读不到即**硬 FAIL**、不 QSKIP
+//    （"钉在缺文件时静默失效"正是本仓反复吃亏的形态）。
+void TestMtkPlanDialog::pinsInitialSizeMatchesMinimumInProductionSource()
+{
     QFile f(QStringLiteral(QT_TESTCASE_SOURCEDIR "/src/ui/mtk_plan_dialog.cpp"));
     QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(f.fileName()));
     const QString src = QString::fromUtf8(f.readAll());
