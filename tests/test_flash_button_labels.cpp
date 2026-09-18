@@ -13,6 +13,8 @@
 // 组合钉死（含"非协议模式必须文案与 tooltip 一并复位"这条 I3 回归钉）。
 #include <QtTest>
 
+#include <QFile>
+
 #include "ui/flash_button_labels.h"
 
 namespace {
@@ -59,6 +61,15 @@ const DeviceDetector::DeviceMode kNonProtocolModes[] = {
     DeviceDetector::MODE_MTK_DA,  DeviceDetector::MODE_RECOVERY,
     DeviceDetector::MODE_UNKNOWN,
 };
+
+// 表内查名（失败信息用）：避免在循环槽里再抄一份模式清单，也让"谁红了"一眼可见。
+const char *nameOf(DeviceDetector::DeviceMode mode)
+{
+    for (int i = 0; i < kModeCount; ++i)
+        if (kModes[i].mode == mode)
+            return kModes[i].name;
+    return "?";
+}
 
 QString describe(const char *modeName, const flashui::ButtonLabels &lb)
 {
@@ -113,12 +124,12 @@ private slots:
             const flashui::ButtonLabels lb = flashui::flashButtonLabelsFor(mode);
             QVERIFY2(lb.text == QStringLiteral("刷入"),
                      qPrintable(QStringLiteral("非协议模式的文案必须是「刷入」—— %1")
-                                    .arg(describe("non-protocol", lb))));
+                                    .arg(describe(nameOf(mode), lb))));
             // 空字符串 = 无提示。非空即意味着这条提示会漂到别的模式上（I3）。
             QVERIFY2(lb.tooltip.isEmpty(),
                      qPrintable(QStringLiteral("非协议模式的 tooltip 必须为空（I3：只复位 text 不复位 "
                                                "tooltip 会让按钮顶着救援承诺执行不可逆写入）—— %1")
-                                    .arg(describe("non-protocol", lb))));
+                                    .arg(describe(nameOf(mode), lb))));
         }
     }
 
@@ -134,21 +145,17 @@ private slots:
                                 .arg(describe("MODE_SAMSUNG_EUB", lb))));
     }
 
-    // 协议模式的 tooltip 必须非空（空 = 复位态，会与 I3 的"文案/提示与动作不符"混在一起分不清）,
-    // 且协议模式**不能**共用同一个空值 —— 这条与上面两条一起把"复位态"与"协议态"划开。
-    void protocolModesCarryTheirOwnTooltip()
+    // 结构钉（T3 审查 Minor 4）：上面各槽只测**纯函数**，钉不住 I3 的**实际发生地**（生产文件）——
+    // 将来某个分支重新"只置其一"（例如新协议入口只 setText），那些槽会全绿。
+    // 这里对生产源文件做**计数断言**：只允许一处 setText 与一处 setToolTip（收口后的唯一无条件调用点）。
+    // 不锁死行号（太脆），锁"只有一处"——任何分支再动它即红，迫使改动者回来读 I3 的教训。
+    void flashPanelSetsFlashButtonLabelsExactlyOnce()
     {
-        const DeviceDetector::DeviceMode protocolModes[] = {
-            DeviceDetector::MODE_MTK_BROM, DeviceDetector::MODE_HUAWEI_USB_UPDATE,
-            DeviceDetector::MODE_SPD,      DeviceDetector::MODE_SAMSUNG_ODIN,
-            DeviceDetector::MODE_SAMSUNG_EUB,
-        };
-        for (const DeviceDetector::DeviceMode mode : protocolModes) {
-            const flashui::ButtonLabels lb = flashui::flashButtonLabelsFor(mode);
-            QVERIFY2(!lb.tooltip.isEmpty(),
-                     qPrintable(QStringLiteral("协议模式的 tooltip 不应为空（那是复位态的样子）—— %1")
-                                    .arg(describe("protocol", lb))));
-        }
+        QFile f(QStringLiteral(QT_TESTCASE_SOURCEDIR "/src/ui/flash_panel.cpp"));
+        QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(f.fileName()));
+        const QString src = QString::fromUtf8(f.readAll());
+        QCOMPARE(src.count(QStringLiteral("m_flashBtn->setText(")), 1);
+        QCOMPARE(src.count(QStringLiteral("m_flashBtn->setToolTip(")), 1);
     }
 };
 
