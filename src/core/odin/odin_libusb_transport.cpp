@@ -12,6 +12,7 @@
 
 #include <libusb.h>
 
+#include <QDebug>       // qWarning（altsetting 切换失败只落日志，不改失败语义）
 #include <QStringList>
 #include <limits>   // std::numeric_limits（write 的 int 长度上限判定）
 
@@ -39,6 +40,8 @@ struct DeviceInspection {
     QList<quint8> classes;          // 全部接口（含各 altsetting）的 bInterfaceClass → isOdinDevice
     bool hasBulkInOut = false;      // 存在某个接口同时具备批量 IN 与批量 OUT（设备级事实，同上）
     int  iface  = -1;               // 候选接口号（-1 = 没有任何接口带批量 in/out）
+    int  altSetting = 0;            // **端点取自哪一份** altsetting（bAlternateSetting）——
+                                    // claim 只按接口号认领，非 0 时须显式切换（A-40，见头文件）
     int  epIn   = 0;
     int  epOut  = 0;
 };
@@ -73,12 +76,14 @@ DeviceInspection inspectDevice(libusb_device *dev)
             out.hasBulkInOut = true;
             if (out.iface < 0) {            // 第一个"带批量 in/out 的接口"作为退路
                 out.iface = alt->bInterfaceNumber;
+                out.altSetting = alt->bAlternateSetting;
                 out.epIn  = epIn;
                 out.epOut = epOut;
             }
             if (alt->bInterfaceClass == kCdcDataClass && !haveCdc) {
                 // CDC_DATA 命中即覆盖退路（且不被后续的非 CDC 接口覆盖：iface<0 的退路只走一次）
                 out.iface = alt->bInterfaceNumber;
+                out.altSetting = alt->bAlternateSetting;
                 out.epIn  = epIn;
                 out.epOut = epOut;
                 haveCdc = true;
@@ -92,7 +97,7 @@ DeviceInspection inspectDevice(libusb_device *dev)
 } // namespace
 
 // ---------------------------------------------------------------------------
-// 纯函数：设备身份与超时换算
+// 纯函数：设备身份、超时换算与 altsetting 判定
 // ---------------------------------------------------------------------------
 
 bool LibusbOdinTransport::isOdinDevice(quint16 vid, quint16 pid,
@@ -119,6 +124,20 @@ QString LibusbOdinTransport::noDeviceError()
     return QStringLiteral("未找到三星 Odin 下载模式设备（期望 VID %1：接口类 0a/CDC_DATA + 批量 in/out 端点，"
                           "或老机型 PID %2）")
         .arg(hex4(kSamsungVid), pids.join(QLatin1Char('/')));
+}
+
+bool LibusbOdinTransport::needsAltSettingSwitch(int altSetting)
+{
+    // 0 = 默认设置：claim 之后即是它，无需切换。非 0 必须显式切（端点取自那一份）。
+    return altSetting != 0;
+}
+
+QString LibusbOdinTransport::altSettingSwitchNote(int iface, int altSetting,
+                                                 const QString &libusbErrorName)
+{
+    return QStringLiteral("显式选中接口 %1 的 altsetting %2 失败（%3）—— 端点取自该 altsetting，"
+                          "后续读写可能不成立")
+        .arg(iface).arg(altSetting).arg(libusbErrorName);
 }
 
 int LibusbOdinTransport::effectiveTimeoutMs(int requested)
@@ -176,6 +195,7 @@ bool LibusbOdinTransport::open(QString *error)
             continue;    // 身份认得出但没有可用的批量接口（传不了）→ 试下一个候选
         if (libusb_open(list[i], &m_dev) == LIBUSB_SUCCESS) {
             m_iface = insp.iface;
+            m_altSetting = insp.altSetting;
             m_inEp  = insp.epIn;
             m_outEp = insp.epOut;
             found = true;
@@ -214,6 +234,17 @@ bool LibusbOdinTransport::claimInterface(QString *error)
                           .arg(m_iface).arg(QString::fromLatin1(libusb_error_name(ret))));
         return false;
     }
+
+    // claim 只按接口号认领，**不会**切到端点所属的那一份设置（A-40）：端点取自
+    // bAlternateSetting != 0 的 altsetting 时显式选中它（首次 bulk 之前）。
+    // 失败**不判失败**（不改失败语义）：换一份设置失败不代表设备不可用 —— 后续 bulk 传输的
+    // 结果自会裁定；这里只把现场写进日志，免得真机上只有一句对不上的端点错误。
+    if (needsAltSettingSwitch(m_altSetting)) {
+        const int altRet = libusb_set_interface_alt_setting(m_dev, m_iface, m_altSetting);
+        if (altRet != LIBUSB_SUCCESS)
+            qWarning().noquote() << altSettingSwitchNote(m_iface, m_altSetting,
+                                                         QString::fromLatin1(libusb_error_name(altRet)));
+    }
     return true;
 }
 
@@ -231,6 +262,7 @@ void LibusbOdinTransport::close()
     }
     // 接口/端点回到"未知"：open() 的候选选择必须每次重新从描述符取，不能留着上次的值
     m_iface = -1;
+    m_altSetting = 0;
     m_inEp  = 0;
     m_outEp = 0;
 }

@@ -24,6 +24,8 @@ private slots:
     void rejectsOtherVendorsAndMtpOnly();
     void noDeviceErrorMentionsVidAndClasses();
     void zeroTimeoutBecomesPollTimeout();
+    void switchesAltSettingOnlyWhenNonZero();
+    void altSettingFailureNoteNamesInterfaceAndSetting();
     void closedTransportFailsWithoutTouchingDevice();
 };
 
@@ -74,6 +76,28 @@ void TestOdinLibusbTransport::zeroTimeoutBecomesPollTimeout()
     QCOMPARE(LibusbOdinTransport::effectiveTimeoutMs(0), 1);
     QCOMPARE(LibusbOdinTransport::effectiveTimeoutMs(-5), 1);
     QCOMPARE(LibusbOdinTransport::effectiveTimeoutMs(3000), 3000);
+}
+
+// A-40：端点取自 `bAlternateSetting != 0` 的那一份时，claim 之后必须显式
+// `libusb_set_interface_alt_setting` —— `libusb_claim_interface` 只按**接口号**认领，不会替你
+// 选中端点所属的设置；不切则首次 bulk 打在默认设置上（真机表现为设备无响应）。真机上的切换
+// 调用要真句柄、离线执行不了，但"何时该切"这条判定可以离线钉住（与 effectiveTimeoutMs 同款）。
+void TestOdinLibusbTransport::switchesAltSettingOnlyWhenNonZero()
+{
+    QVERIFY(!LibusbOdinTransport::needsAltSettingSwitch(0));    // 默认设置：claim 之后即是它
+    QVERIFY(LibusbOdinTransport::needsAltSettingSwitch(1));
+    QVERIFY(LibusbOdinTransport::needsAltSettingSwitch(2));
+    QVERIFY(LibusbOdinTransport::needsAltSettingSwitch(255));   // bAlternateSetting 是 quint8
+}
+
+// 切换失败的说明要能直接落日志：点名接口号、目标 altsetting 与底层错误 —— 真机上"传输打在别的
+// 设置上"只表现为设备无响应，这条说明是唯一线索（失败**不判失败**，故它必须自带上下文）。
+void TestOdinLibusbTransport::altSettingFailureNoteNamesInterfaceAndSetting()
+{
+    const QString note = LibusbOdinTransport::altSettingSwitchNote(2, 3, QStringLiteral("BUSY"));
+    QVERIFY2(note.contains(QStringLiteral("接口 2")), qPrintable(note));
+    QVERIFY2(note.contains(QStringLiteral("altsetting 3")), qPrintable(note));
+    QVERIFY2(note.contains(QStringLiteral("BUSY")), qPrintable(note));
 }
 
 // 任务书 5 例之外的**唯一**新增（reason 写在这里，防审查以为是漏读任务书）：本实现里有"未打开

@@ -17,6 +17,7 @@
 //   4. resetDevice() 只做句柄退场，不调用 libusb_reset_device（理由见实现处注释）。
 #include "edl_libusb_transport.h"
 
+#include <QDebug>       // qWarning（altsetting 切换失败只落日志，不改失败语义）
 #include <QElapsedTimer>
 #include <QThread>
 #include <libusb.h>
@@ -97,6 +98,20 @@ QString LibusbEdlTransport::noDeviceError(EdlUsbStage stage)
 int LibusbEdlTransport::effectiveTimeoutMs(int requested)
 {
     return requested > 0 ? requested : 1;
+}
+
+bool LibusbEdlTransport::needsAltSettingSwitch(int altSetting)
+{
+    // 0 = 默认设置：claim 之后即是它，无需切换。非 0 必须显式切（端点取自那一份）。
+    return altSetting != 0;
+}
+
+QString LibusbEdlTransport::altSettingSwitchNote(int iface, int altSetting,
+                                                 const QString &libusbErrorName)
+{
+    return QStringLiteral("显式选中接口 %1 的 altsetting %2 失败（%3）—— 端点取自该 altsetting，"
+                          "后续读写可能不成立")
+        .arg(iface).arg(altSetting).arg(libusbErrorName);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +212,7 @@ bool LibusbEdlTransport::claimAndDiscoverEndpoints(QString *error)
     m_outEp = outEndpoint(m_stage);
     m_inEp  = inEndpoint(m_stage);
     m_outMaxPacket = 0;
+    m_altSetting = 0;      // 描述符读不到 → 常量端点按默认设置用，不做切换（见下方 A-40 段）
 
     libusb_config_descriptor *cfg = nullptr;
     if (libusb_get_active_config_descriptor(libusb_get_device(m_dev), &cfg) == LIBUSB_SUCCESS && cfg) {
@@ -215,6 +231,8 @@ bool LibusbEdlTransport::claimAndDiscoverEndpoints(QString *error)
                         m_outEp = ep->bEndpointAddress;
                         m_outMaxPacket = int(ep->wMaxPacketSize);   // ZLP 判据
                     }
+                    // 端点取自这一份设置（A-40）：claim 只认接口号，非 0 时须显式切换（见下）
+                    m_altSetting = alt->bAlternateSetting;
                 }
             }
         }
@@ -222,6 +240,17 @@ bool LibusbEdlTransport::claimAndDiscoverEndpoints(QString *error)
     }
     if (m_outMaxPacket <= 0)
         m_outMaxPacket = kFallbackMaxPacket;
+
+    // claim 只按接口号认领，**不会**切到端点所属的那一份设置（A-40）：端点取自
+    // bAlternateSetting != 0 的 altsetting 时显式选中它（首次 bulk 之前）。
+    // 失败**不判失败**（不改失败语义）：换一份设置失败不代表设备不可用 —— 后续 bulk 传输的
+    // 结果自会裁定；这里只把现场写进日志，免得真机上只有一句对不上的端点错误。
+    if (needsAltSettingSwitch(m_altSetting)) {
+        const int altRet = libusb_set_interface_alt_setting(m_dev, iface, m_altSetting);
+        if (altRet != LIBUSB_SUCCESS)
+            qWarning().noquote() << altSettingSwitchNote(iface, m_altSetting,
+                                                         QString::fromLatin1(libusb_error_name(altRet)));
+    }
     return true;
 }
 
@@ -239,6 +268,7 @@ void LibusbEdlTransport::close()
     }
     // 端点/包长回到"未知"：maxPacketSize() 必须如实反映"未打开"（0），不能留着上次的值
     m_iface = -1;
+    m_altSetting = 0;
     m_outEp = 0;
     m_inEp = 0;
     m_outMaxPacket = 0;

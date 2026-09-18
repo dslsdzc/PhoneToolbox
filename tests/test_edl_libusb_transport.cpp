@@ -22,6 +22,8 @@ private slots:
     void pinsStageInterfaceAndEndpoints();
     void buildsChineseNoDeviceError();
     void mapsZeroTimeoutToPollInsteadOfInfinite();
+    void switchesAltSettingOnlyWhenNonZero();
+    void altSettingFailureNoteNamesInterfaceAndSetting();
     void closedTransportFailsWithoutTouchingDevice();
 };
 
@@ -102,6 +104,30 @@ void TestEdlLibusbTransport::mapsZeroTimeoutToPollInsteadOfInfinite()
     QCOMPARE(T::effectiveTimeoutMs(1), 1);
     QCOMPARE(T::effectiveTimeoutMs(1000), 1000);    // 正值原样透传
     QCOMPARE(T::effectiveTimeoutMs(30000), 30000);
+}
+
+// A-40：端点取自 `bAlternateSetting != 0` 的那一份时，claim 之后必须显式
+// `libusb_set_interface_alt_setting` —— `libusb_claim_interface` 只按**接口号**认领，不会替你
+// 选中端点所属的设置；不切则首次 bulk 打在默认设置上（真机表现为设备无响应）。真机上的切换
+// 调用要真句柄、离线执行不了，但"何时该切"这条判定可以离线钉住（与 effectiveTimeoutMs 同款）。
+void TestEdlLibusbTransport::switchesAltSettingOnlyWhenNonZero()
+{
+    using T = edl::LibusbEdlTransport;
+    QVERIFY(!T::needsAltSettingSwitch(0));    // 默认设置：claim 之后即是它
+    QVERIFY(T::needsAltSettingSwitch(1));
+    QVERIFY(T::needsAltSettingSwitch(2));
+    QVERIFY(T::needsAltSettingSwitch(255));   // bAlternateSetting 是 quint8
+}
+
+// 切换失败的说明要能直接落日志：点名接口号、目标 altsetting 与底层错误 —— 真机上"传输打在别的
+// 设置上"只表现为设备无响应，这条说明是唯一线索（失败**不判失败**，故它必须自带上下文）。
+void TestEdlLibusbTransport::altSettingFailureNoteNamesInterfaceAndSetting()
+{
+    using T = edl::LibusbEdlTransport;
+    const QString note = T::altSettingSwitchNote(2, 3, QStringLiteral("BUSY"));
+    QVERIFY2(note.contains(QStringLiteral("接口 2")), qPrintable(note));
+    QVERIFY2(note.contains(QStringLiteral("altsetting 3")), qPrintable(note));
+    QVERIFY2(note.contains(QStringLiteral("BUSY")), qPrintable(note));
 }
 
 // 未打开句柄时：7 个方法都不得触碰 USB 栈（构造/lclose/read/write 里不能有 libusb 调用），

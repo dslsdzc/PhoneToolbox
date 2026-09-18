@@ -75,6 +75,16 @@ public:
     // 有回归保护（真机行为无法离线验证，但"换算存在且正确"可以）。公开仅为单测（Phase B 同款）。
     static int effectiveTimeoutMs(int requested);
 
+    // ---- 纯函数：端点所属 altsetting 的显式选中（A-40；离线只能钉住判定与文案）----
+    // `libusb_claim_interface` 只按**接口号**认领，**不会**替你切到端点所在的那一份设置；
+    // 而 inspectDevice 是遍历各 altsetting 取端点的，候选可能来自 bAlternateSetting != 0 的
+    // 那一份 —— 此时 claim 之后必须显式 libusb_set_interface_alt_setting，否则首次 bulk 打在
+    // 默认设置上（真机表现为设备无响应）。取值域 0..255（bAlternateSetting 是 quint8）。
+    static bool needsAltSettingSwitch(int altSetting);
+    // 切换失败时的说明文案（进日志用；**不判失败** —— 换一份设置失败不等于设备不可用，
+    // 由后续 bulk 传输的结果裁定）。`libusbErrorName` 传 libusb_error_name(ret)。
+    static QString altSettingSwitchNote(int iface, int altSetting, const QString &libusbErrorName);
+
     // ---- IOdinTransport ----
     bool open(QString *error) override;        // close 后可再 open（契约，odin_transport.h:20-25）
     void close() override;                     // 幂等；未打开时是 no-op
@@ -98,6 +108,7 @@ private:
     libusb_context       *m_ctx = nullptr;
     libusb_device_handle *m_dev = nullptr;
     int m_iface = -1;          // 候选接口号（open() 里从描述符选定，-1 = 未打开）
+    int m_altSetting = 0;      // 端点所属的 altsetting（同上；0 = 默认设置，claim 后即生效）
     int m_outEp = 0;
     int m_inEp  = 0;
 };
