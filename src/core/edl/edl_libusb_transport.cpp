@@ -15,6 +15,9 @@
 //   2. maxPacketSize() 未打开时返回 0（既有实现无此方法；0 = 包长未知，会话据此不发 ZLP）。
 //   3. 未打开句柄时：write/read 报中文错误而不是静默失败（read(timeoutMs==0) 的 drain 语义见下）。
 //   4. resetDevice() 只做句柄退场，不调用 libusb_reset_device（理由见实现处注释）。
+//   5. claim 之后按**端点所属的 altsetting** 显式选中（A-40；旧实现端点写死、从不切换）：
+//      bAlternateSetting != 0 时才调 libusb_set_interface_alt_setting，失败只落日志
+//      （判定与文案由离线用例钉住，调用本身在真机路径上 —— 见 claimAndDiscoverEndpoints）。
 #include "edl_libusb_transport.h"
 
 #include <QDebug>       // qWarning（altsetting 切换失败只落日志，不改失败语义）
