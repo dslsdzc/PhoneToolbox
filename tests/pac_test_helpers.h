@@ -71,7 +71,11 @@ inline void put32(QByteArray &d, int off, quint32 v)
 }
 
 // 新格式分区项（2580B 固定）。注意: 字符串以实际 UTF-16LE 字节写入定宽字段
-// （QByteArray::replace 遇更短数据会收缩数组, 必须只替换实际字节数）
+// （QByteArray::replace 遇更短数据会收缩数组, 必须只替换实际字节数）。
+// nFileFlag 恒写 1, 与真包不符: 真包里 0 字节的操作型条目（如 "FLASH"）flag=0
+//（字段表见 src/image_engine/pac_image.cpp:38, 行为观察见 src/core/modes/spd_storage.cpp:262）。
+// 今天零影响 —— imgpac 解析器与提取/刷写链都不读该字段; 将来若有层依赖 nFileFlag,
+// 先在这里按 payload 是否为空写 0/1（test_pac.cpp 的样本同样传 1, 要一并核）。
 inline void putEntryNew(QByteArray &d, int off, const QString &name, const QString &file,
                         quint64 size, quint64 dataOffset, quint32 fileFlag)
 {

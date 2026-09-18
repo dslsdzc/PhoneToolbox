@@ -22,7 +22,9 @@ private slots:
     void orderIndependentNew();
     void orderIndependentLegacy();
     void duplicateFdlKeepsFirst();
+    void duplicateFdlSameNameAndFileKeepsFirst();
     void zeroByteEntryThenDataEntry();
+    void zeroByteEntryThenDataEntryLegacy();
     void mixedCaseFdlNames();
     // ---- 失败路径 ----
     void missingFdl2ListsEntries();
@@ -37,6 +39,8 @@ private slots:
     void writeExtractedFdlsRoundTrip();
     void writeExtractedFdlsNameCollision();
     void writeExtractedFdlsNameCollisionCaseInsensitive();
+    void writeExtractedFdlsNameTrailingDotCollision();
+    void writeExtractedFdlsNameStrippedToEmptyFallsBack();
     void writeExtractedFdlsMissingDirFails();
     void writeExtractedFdlsRejectsEmptyData();
     void writeExtractedFdlsFirstWriteFailureLeavesNoFile();
@@ -45,8 +49,10 @@ private slots:
     void writeExtractedFdlsPartialWriteCleansSecondPath();
 
 private:
-    static QString writeSample(const QTemporaryDir &dir, const QByteArray &bytes,
-                               const QString &name = QStringLiteral("sample.pac"));
+    QString writeSample(const QTemporaryDir &dir, const QByteArray &bytes,
+                        const QString &name = QStringLiteral("sample.pac"));
+    // writeSample 最近一次失败的原因（磁盘满/权限…）—— 断言消息用，免得只看"路径是空的"
+    QString m_sampleError;
     // 落盘失败用例的"写不完整"构造：在 linkPath 建符号链接指向 /dev/full（写入必 ENOSPC）。
     // QFile 带缓冲 —— open 成功、write() 返回满额，失败在 flush() 现形，正是 writeFileChecked
     // 里"可能已写出部分内容"要清理的那条分支。平台无 /dev/full 或建不出符号链接时返回 false。
@@ -92,11 +98,17 @@ QByteArray patternedBytes(int n, quint32 seed)
 QString TestSpdPac::writeSample(const QTemporaryDir &dir, const QByteArray &bytes,
                                 const QString &name)
 {
+    m_sampleError.clear();
     const QString path = dir.filePath(name);
     QFile f(path);
-    if (!f.open(QIODevice::WriteOnly))
+    if (!f.open(QIODevice::WriteOnly)) {
+        m_sampleError = QStringLiteral("无法写入样本 %1：%2").arg(path, f.errorString());
         return QString();
-    if (f.write(bytes) != bytes.size()) {
+    }
+    const qint64 written = f.write(bytes);
+    if (written != qint64(bytes.size())) {
+        m_sampleError = QStringLiteral("样本 %1 只写入 %2/%3 字节：%4")
+                            .arg(path).arg(written).arg(bytes.size()).arg(f.errorString());
         f.close();
         return QString();
     }
@@ -124,7 +136,7 @@ void TestSpdPac::extractNewFormat()
     QCOMPARE(s.data.mid(qsizetype(s.offsets[0]), kFdl1Bytes.size()), kFdl1Bytes);
     QCOMPARE(s.data.mid(qsizetype(s.offsets[2]), kFdl2Bytes.size()), kFdl2Bytes);
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -147,7 +159,7 @@ void TestSpdPac::extractLegacyFormat()
     QCOMPARE(s.data.mid(qsizetype(s.offsets[0]), kFdl1Bytes.size()), kFdl1Bytes);
     QCOMPARE(s.data.mid(qsizetype(s.offsets[2]), kFdl2Bytes.size()), kFdl2Bytes);
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -167,7 +179,7 @@ void TestSpdPac::orderIndependentNew()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     const pactest::PacSample s = pactest::buildNew({fdl2Entry(), fdl1Entry(), bootEntry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -184,7 +196,7 @@ void TestSpdPac::orderIndependentLegacy()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     const pactest::PacSample s = pactest::buildLegacy({bootEntry(), fdl2Entry(), fdl1Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -206,13 +218,36 @@ void TestSpdPac::duplicateFdlKeepsFirst()
         {QStringLiteral("FDL1"), QStringLiteral("fdl1_alt.bin"), second},
         fdl2Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
     QVERIFY2(spd::extractFdlsFromPac(path, fdl1, fdl2, &err), qPrintable(err));
     QCOMPARE(fdl1.fileName, QStringLiteral("fdl1.bin"));
     QCOMPARE(fdl1.data, kFdl1Bytes);
+    QCOMPARE(fdl2.data, kFdl2Bytes);
+}
+
+// 同分区名 **且** 同容器内文件名的重复条目（打包工具并列两次/重跑残迹）：规则同
+// duplicateFdlKeepsFirst —— 取先出现者；fileName 不参与去重，两份同不同名都一样。
+void TestSpdPac::duplicateFdlSameNameAndFileKeepsFirst()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray second(512, '\x66');
+    const pactest::PacSample s = pactest::buildNew({
+        fdl1Entry(),
+        {QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"), second},
+        fdl2Entry()});
+    const QString path = writeSample(dir, s.data);
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
+
+    spd::ExtractedFdl fdl1, fdl2;
+    QString err;
+    QVERIFY2(spd::extractFdlsFromPac(path, fdl1, fdl2, &err), qPrintable(err));
+    QCOMPARE(fdl1.name, QStringLiteral("FDL1"));
+    QCOMPARE(fdl1.fileName, QStringLiteral("fdl1.bin"));
+    QCOMPARE(fdl1.data, kFdl1Bytes);   // 取先出现者；若"后者胜"→ 此槽读到 second 必红
     QCOMPARE(fdl2.data, kFdl2Bytes);
 }
 
@@ -226,13 +261,33 @@ void TestSpdPac::zeroByteEntryThenDataEntry()
         {QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"), QByteArray()},
         fdl1Entry(), fdl2Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
     QVERIFY2(spd::extractFdlsFromPac(path, fdl1, fdl2, &err), qPrintable(err));
     QCOMPARE(fdl1.fileName, QStringLiteral("fdl1.bin"));
     QCOMPARE(fdl1.data, kFdl1Bytes);
+    QCOMPARE(fdl2.data, kFdl2Bytes);
+}
+
+// 0 字节条目不占位在**旧格式**同规则：提取层是同一段代码，但旧格式的 size 来自另一条解析
+// 路径（32 位 partitionSize 字段，见 parseLegacyFormat）—— 这里钉住两种格式端到端一致。
+void TestSpdPac::zeroByteEntryThenDataEntryLegacy()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const pactest::PacSample s = pactest::buildLegacy({
+        {QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"), QByteArray()},
+        fdl1Entry(), fdl2Entry()});
+    const QString path = writeSample(dir, s.data);
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
+
+    spd::ExtractedFdl fdl1, fdl2;
+    QString err;
+    QVERIFY2(spd::extractFdlsFromPac(path, fdl1, fdl2, &err), qPrintable(err));
+    QCOMPARE(fdl1.fileName, QStringLiteral("fdl1.bin"));
+    QCOMPARE(fdl1.data, kFdl1Bytes);   // 空占位被当成"找到了"→ 数据为空，此槽必红
     QCOMPARE(fdl2.data, kFdl2Bytes);
 }
 
@@ -250,7 +305,7 @@ void TestSpdPac::mixedCaseFdlNames()
     QCOMPARE(s.data.mid(qsizetype(s.offsets[0]), kFdl1Bytes.size()), kFdl1Bytes);
     QCOMPARE(s.data.mid(qsizetype(s.offsets[2]), kFdl2Bytes.size()), kFdl2Bytes);
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -269,7 +324,7 @@ void TestSpdPac::missingFdl2ListsEntries()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     const pactest::PacSample s = pactest::buildNew({fdl1Entry(), bootEntry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -287,7 +342,7 @@ void TestSpdPac::missingBothFdls()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     const pactest::PacSample s = pactest::buildNew({bootEntry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -306,7 +361,7 @@ void TestSpdPac::bareFdlNameIsNotGuessed()
     const pactest::PacSample s = pactest::buildNew({
         {QStringLiteral("FDL"), QStringLiteral("fdl1.bin"), kFdl1Bytes}, fdl2Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -324,7 +379,7 @@ void TestSpdPac::zeroByteFdlRejected()
     const pactest::PacSample s = pactest::buildNew({
         {QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"), QByteArray()}, fdl2Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -339,14 +394,16 @@ void TestSpdPac::notAPacFails()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     // 2048 字节 'x'：长度够旧格式头，但分区数/表结构不符（同 test_pac 的 invalidInput 口径）
     const QString path = writeSample(dir, QByteArray(2048, 'x'));
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
     QVERIFY(!spd::extractFdlsFromPac(path, fdl1, fdl2, &err));
     QVERIFY(!err.isEmpty());
     // 文案要指向"pac 解析"这一步（parsePac 的失败文案都含 PAC）—— 钉住失败来自解析，
-    // 而不是"提取器自己坏了"或别的路径
+    // 而不是"提取器自己坏了"或别的路径。
+    // 脆耦合：靠的是 pac_image.cpp 里各失败文案都以 "PAC" 开头（"PAC 分区数异常" 等）——
+    // 将来只改那边的文案，会以与本模块无关的原因弄红本槽（届时改这里或那边补个公共前缀）。
     QVERIFY2(err.contains(QStringLiteral("PAC")), qPrintable(err));
 }
 
@@ -370,7 +427,7 @@ void TestSpdPac::outputsClearedOnFailure()
     QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
     const pactest::PacSample s = pactest::buildNew({fdl1Entry()});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     fdl1.name = QStringLiteral("旧名1");
@@ -409,7 +466,7 @@ void TestSpdPac::listingTruncatesAfterEightEntries()
         {QStringLiteral("p8"), QStringLiteral("p8.img"), QByteArray()},
         {QStringLiteral("p9"), QStringLiteral("p9.img"), QByteArray()}});
     const QString path = writeSample(dir, s.data);
-    QVERIFY(!path.isEmpty());
+    QVERIFY2(!path.isEmpty(), qPrintable(m_sampleError));
 
     spd::ExtractedFdl fdl1, fdl2;
     QString err;
@@ -506,6 +563,63 @@ void TestSpdPac::writeExtractedFdlsNameCollisionCaseInsensitive()
     QVERIFY(r1.open(QIODevice::ReadOnly));
     QVERIFY(r2.open(QIODevice::ReadOnly));
     QCOMPARE(r1.readAll(), f1.data);   // 漏判时 p1 读回 FDL2 的字节 → 此槽必红
+    QCOMPARE(r2.readAll(), f2.data);
+}
+
+// 两份条目的容器内文件名差在**尾随点/空格**（"fdl1.bin." / "fdl1.bin"）：Windows 会把尾随的
+// 点与空格替我们剥掉，两份在那里是同一路径 —— 与大小写不敏感同属"落盘名要按文件系统口径判重"
+// （症状同样是后写的盖掉先写的、通道把 FDL2 的字节按 FDL1 的地址上传）。落盘名必须先自己剥干净。
+void TestSpdPac::writeExtractedFdlsNameTrailingDotCollision()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl1.bin."),
+                               patternedBytes(1024, 0x7777)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl1.bin"),
+                               patternedBytes(2048, 0x8888)};
+
+    QString p1, p2, err;
+    QVERIFY2(spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err), qPrintable(err));
+    QVERIFY2(p1 != p2, "两份 FDL 落到了同一路径");
+    // 落盘名不得以点/空格结尾：Windows 替我们剥掉后两份就同名，Linux 上"名字不同"
+    // 只是恰好掩盖了这一点
+    QVERIFY2(!QFileInfo(p1).fileName().endsWith(QLatin1Char('.')),
+             qPrintable(QFileInfo(p1).fileName()));
+    QVERIFY2(!QFileInfo(p1).fileName().endsWith(QLatin1Char(' ')),
+             qPrintable(QFileInfo(p1).fileName()));
+    QVERIFY2(!QFileInfo(p2).fileName().endsWith(QLatin1Char('.')),
+             qPrintable(QFileInfo(p2).fileName()));
+    QVERIFY2(QString::compare(QFileInfo(p1).fileName(), QFileInfo(p2).fileName(),
+                              Qt::CaseInsensitive) != 0,
+             qPrintable(QStringLiteral("两份落盘名忽略大小写后相同：%1 / %2")
+                            .arg(QFileInfo(p1).fileName(), QFileInfo(p2).fileName())));
+    QCOMPARE(QDir(dir.path()).entryList(QDir::Files).size(), qsizetype(2));
+    QFile r1(p1), r2(p2);
+    QVERIFY(r1.open(QIODevice::ReadOnly));
+    QVERIFY(r2.open(QIODevice::ReadOnly));
+    QCOMPARE(r1.readAll(), f1.data);   // 漏剥时 p1 读回 FDL2 的字节（Windows）→ 此槽必红
+    QCOMPARE(r2.readAll(), f2.data);
+}
+
+// 剥掉尾随点/空格后为空（"." / ".." / "..." / "   " 这类）：回退到下一候选（分区 ID）——
+// 不能落出空文件名（空路径），也不能两份挤到同一个兜底名上。
+void TestSpdPac::writeExtractedFdlsNameStrippedToEmptyFallsBack()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("..."),
+                               patternedBytes(64, 0x9999)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("  "),
+                               patternedBytes(128, 0xAAAA)};
+
+    QString p1, p2, err;
+    QVERIFY2(spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err), qPrintable(err));
+    QCOMPARE(QFileInfo(p1).fileName(), QStringLiteral("FDL1"));   // 回退到分区 ID
+    QCOMPARE(QFileInfo(p2).fileName(), QStringLiteral("FDL2"));
+    QFile r1(p1), r2(p2);
+    QVERIFY(r1.open(QIODevice::ReadOnly));
+    QVERIFY(r2.open(QIODevice::ReadOnly));
+    QCOMPARE(r1.readAll(), f1.data);
     QCOMPARE(r2.readAll(), f2.data);
 }
 
