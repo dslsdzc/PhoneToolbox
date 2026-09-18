@@ -180,6 +180,7 @@ void TestHisiUpdate::sendCommandTimeoutFails()
 {
     auto usb = std::make_unique<MockUsbChannel>();
     MockUsbChannel *m = usb.get();
+    Q_UNUSED(m)  // 本用例故意不排任何响应（队列空 → read 返回 false），故无 m->reads 写入
     hisi::HisiDevice dev; dev.vid = 0x12D1; dev.pid = 0x0000;
     hisi::HisiSession s(std::move(usb), dev);
     // 无响应（队列空 → read 返回 false）
