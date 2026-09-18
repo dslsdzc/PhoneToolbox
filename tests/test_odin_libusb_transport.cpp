@@ -11,6 +11,7 @@
 //   ④ 未打开句柄时 write/read/close 的行为（构造/close 不触碰 USB 栈，故无需真机、也无需 mock）。
 // 不测：open()/枚举/候选接口选择/claim/短写拒绝的真机路径 —— 见 phaseC-task-7-report.md §边界。
 #include <QtTest>
+#include <QFile>       // A-40 结构钉：读生产源文件
 #include <QList>
 
 #include "core/odin/odin_libusb_transport.h"
@@ -26,6 +27,7 @@ private slots:
     void zeroTimeoutBecomesPollTimeout();
     void switchesAltSettingOnlyWhenNonZero();
     void altSettingFailureNoteNamesInterfaceAndSetting();
+    void pinsAltSettingWiringInProductionSource();
     void closedTransportFailsWithoutTouchingDevice();
 };
 
@@ -100,7 +102,48 @@ void TestOdinLibusbTransport::altSettingFailureNoteNamesInterfaceAndSetting()
     QVERIFY2(note.contains(QStringLiteral("BUSY")), qPrintable(note));
 }
 
-// 任务书 5 例之外的**唯一**新增（reason 写在这里，防审查以为是漏读任务书）：本实现里有"未打开
+// A-40 结构钉（复审要求）：离线用例只钉得住"判定 + 文案"，而真正干活的三处在**真机路径**上 ——
+// 巡检记录 altsetting、claim 后的切换调用、句柄收尾的复位；删掉它们不会有行为用例变红。这里读
+// **生产源文件**、按字面把这三处钉住（任一处消失、或复制成多份，用例即红）。
+//
+// ⚠️ 取材边界（如实标注）：断的是**文本计数**，不是行为 —— 把整块包进 `if (false)`、或换成恒假
+// 的开关，本用例仍绿（那要靠真机用例，本阶段无真机）。计数口径**有意收窄**：在 .cpp 的注释里
+// 再写一次 `libusb_set_interface_alt_setting(` 也会让计数变 2 而变红 —— 宁可逼注释换措辞，
+// 也不把口径放宽成"至少出现一次"。
+void TestOdinLibusbTransport::pinsAltSettingWiringInProductionSource()
+{
+    const auto readAll = [](const QString &path, QString *out) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return false;
+        *out = QString::fromUtf8(f.readAll());
+        return !out->isEmpty();
+    };
+
+    QString src;
+    QVERIFY2(readAll(QStringLiteral(PT_SRC_ROOT "/src/core/odin/odin_libusb_transport.cpp"), &src),
+             qPrintable(QStringLiteral("读不到生产源文件：%1").arg(QStringLiteral(PT_SRC_ROOT))));
+
+    // ① 巡检结果带上端点所属的 altsetting：**两条候选选择路径都记录**（缺一条 = 那条路径丢失）
+    QCOMPARE(int(src.count(QStringLiteral("out.altSetting = alt->bAlternateSetting;"))), 2);
+    // ② claim 成功后的显式切换：守卫与调用各一处，且调用紧跟在守卫之后（同一语句块内）
+    QCOMPARE(int(src.count(QStringLiteral("needsAltSettingSwitch(m_altSetting)"))), 1);
+    QCOMPARE(int(src.count(QStringLiteral("libusb_set_interface_alt_setting("))), 1);
+    const qsizetype guard = src.indexOf(QStringLiteral("needsAltSettingSwitch(m_altSetting)"));
+    QVERIFY(guard >= 0);
+    QVERIFY2(src.mid(guard, 200).contains(QStringLiteral("libusb_set_interface_alt_setting(")),
+             qPrintable(src.mid(guard, 200)));
+    // ③ 记入与复位：open() 从巡检结果记一次、close() 复位一次（不留上次的 altsetting）
+    QCOMPARE(int(src.count(QStringLiteral("m_altSetting = insp.altSetting;"))), 1);
+    QCOMPARE(int(src.count(QStringLiteral("m_altSetting = 0;"))), 1);
+
+    QString hdr;
+    QVERIFY2(readAll(QStringLiteral(PT_SRC_ROOT "/src/core/odin/odin_libusb_transport.h"), &hdr),
+             "读不到生产头文件");
+    QCOMPARE(int(hdr.count(QStringLiteral("int m_altSetting = 0;"))), 1);   // 成员声明只有一处
+}
+
+// 任务书 5 例之外的新增（A-40 的三格见上；本格的 reason 写在这里，防审查以为是漏读任务书）：本实现里有"未打开
 // 直接拒"的分支（EDL 同款：write/read 不得静默失败），不留成无测试覆盖的行为；且它同时钉住
 // "构造/close 不触碰 USB 栈"（未打开时是纯内存对象，可无真机运行）。对照 Phase B 的
 // tests/test_edl_libusb_transport.cpp::closedTransportFailsWithoutTouchingDevice。

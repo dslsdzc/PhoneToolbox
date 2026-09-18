@@ -720,6 +720,15 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
+                # A-40 结构钉：把**仓库根目录**编进这两个用例 —— 它们读传输层生产源文件，把
+                # "巡检记录 altsetting / claim 后的切换调用 / 句柄收尾的复位"三处钉成字面存在
+                # 且成对（这三处在真机路径上，删掉不会有行为用例变红；取材边界见用例内注释）。
+                # 只编路径，不编内容。
+                if(_test_stem STREQUAL "test_odin_libusb_transport"
+                   OR _test_stem STREQUAL "test_edl_libusb_transport")
+                    target_compile_definitions(${_test_target} PRIVATE
+                        PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+                endif()
                 if(_test_stem STREQUAL "test_pit" OR _test_stem STREQUAL "test_samsung_plan")
                     # 真样本在 reference/（gitignored）：只把**路径**编进来，用例内 QSKIP 兜底
                     target_compile_definitions(${_test_target} PRIVATE

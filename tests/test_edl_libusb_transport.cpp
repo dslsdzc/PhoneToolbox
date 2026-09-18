@@ -10,6 +10,7 @@
 //      故无需真机、也无需 mock）。
 // 不测：open()/枚举/claim/重枚举轮询节奏/maxPacketSize 的真机取值 —— 见 task-7-report.md。
 #include <QtTest>
+#include <QFile>       // A-40 结构钉：读生产源文件
 #include "core/edl/edl_libusb_transport.h"
 
 class TestEdlLibusbTransport : public QObject
@@ -24,6 +25,7 @@ private slots:
     void mapsZeroTimeoutToPollInsteadOfInfinite();
     void switchesAltSettingOnlyWhenNonZero();
     void altSettingFailureNoteNamesInterfaceAndSetting();
+    void pinsAltSettingWiringInProductionSource();
     void closedTransportFailsWithoutTouchingDevice();
 };
 
@@ -128,6 +130,47 @@ void TestEdlLibusbTransport::altSettingFailureNoteNamesInterfaceAndSetting()
     QVERIFY2(note.contains(QStringLiteral("接口 2")), qPrintable(note));
     QVERIFY2(note.contains(QStringLiteral("altsetting 3")), qPrintable(note));
     QVERIFY2(note.contains(QStringLiteral("BUSY")), qPrintable(note));
+}
+
+// A-40 结构钉（复审要求）：离线用例只钉得住"判定 + 文案"，而真正干活的三处在**真机路径**上 ——
+// 端点发现记录 altsetting、claim 后的切换调用、句柄收尾的复位；删掉它们不会有行为用例变红。这里
+// 读**生产源文件**、按字面把这三处钉住（任一处消失、或复制成多份，用例即红）。
+//
+// ⚠️ 取材边界（如实标注）：断的是**文本计数**，不是行为 —— 把整块包进 `if (false)`、或换成恒假
+// 的开关，本用例仍绿（那要靠真机用例，本阶段无真机）。计数口径**有意收窄**：在 .cpp 的注释里
+// 再写一次 `libusb_set_interface_alt_setting(` 也会让计数变 2 而变红 —— 宁可逼注释换措辞，
+// 也不把口径放宽成"至少出现一次"。
+void TestEdlLibusbTransport::pinsAltSettingWiringInProductionSource()
+{
+    const auto readAll = [](const QString &path, QString *out) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return false;
+        *out = QString::fromUtf8(f.readAll());
+        return !out->isEmpty();
+    };
+
+    QString src;
+    QVERIFY2(readAll(QStringLiteral(PT_SRC_ROOT "/src/core/edl/edl_libusb_transport.cpp"), &src),
+             qPrintable(QStringLiteral("读不到生产源文件：%1").arg(QStringLiteral(PT_SRC_ROOT))));
+
+    // ① 端点发现处记录端点取自哪一份设置（描述符读不到时退回阶段常量、不做切换的那条路径
+    //    不记录 —— 常量本来就对应默认设置）
+    QCOMPARE(int(src.count(QStringLiteral("m_altSetting = alt->bAlternateSetting;"))), 1);
+    // ② claim 成功后的显式切换：守卫与调用各一处，且调用紧跟在守卫之后（同一语句块内）
+    QCOMPARE(int(src.count(QStringLiteral("needsAltSettingSwitch(m_altSetting)"))), 1);
+    QCOMPARE(int(src.count(QStringLiteral("libusb_set_interface_alt_setting("))), 1);
+    const qsizetype guard = src.indexOf(QStringLiteral("needsAltSettingSwitch(m_altSetting)"));
+    QVERIFY(guard >= 0);
+    QVERIFY2(src.mid(guard, 200).contains(QStringLiteral("libusb_set_interface_alt_setting(")),
+             qPrintable(src.mid(guard, 200)));
+    // ③ 复位**两处**：进入端点发现前先置 0（描述符异常路径不清上次的值）+ close() 收尾复位
+    QCOMPARE(int(src.count(QStringLiteral("m_altSetting = 0;"))), 2);
+
+    QString hdr;
+    QVERIFY2(readAll(QStringLiteral(PT_SRC_ROOT "/src/core/edl/edl_libusb_transport.h"), &hdr),
+             "读不到生产头文件");
+    QCOMPARE(int(hdr.count(QStringLiteral("int m_altSetting = 0;"))), 1);   // 成员声明只有一处
 }
 
 // 未打开句柄时：7 个方法都不得触碰 USB 栈（构造/lclose/read/write 里不能有 libusb 调用），
