@@ -24,12 +24,15 @@
 #include <QThread>
 #include <utility>      // std::as_const（遍历 Qt 容器）
 
+// fastboot flash-all 脚本名（平台条件编译，两条分支互为对方平台的脚本）。
+// 当前全仓无调用点（W5-T5 核对：只有这 4 行定义）—— 用 [[maybe_unused]] 保留常量本身，
+// 不删：将来接线 flash-all 时两个平台的名字都要在，删了就得重新考据。
 #ifdef Q_OS_WIN
-static const char *kPlatformScript = "flash-all.bat";
-static const char *kOtherScript = "flash-all.sh";
+[[maybe_unused]] static const char *kPlatformScript = "flash-all.bat";
+[[maybe_unused]] static const char *kOtherScript = "flash-all.sh";
 #else
-static const char *kPlatformScript = "flash-all.sh";
-static const char *kOtherScript = "flash-all.bat";
+[[maybe_unused]] static const char *kPlatformScript = "flash-all.sh";
+[[maybe_unused]] static const char *kOtherScript = "flash-all.bat";
 #endif
 
 FlashTool::FlashTool(QObject *parent)
