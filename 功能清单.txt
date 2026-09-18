@@ -379,7 +379,6 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [ ] BROM 漏洞利用 (kamakiri / carbonara)
 [ ] DA 二进制提取/生成、签名绕过、熔丝类 (QFuse)
 
-
 待材料 (缺协议材料/真机抓包)
 ------------------------------------------------------------
 [ ] 华为 HiSuite 升级模式 (需真机 USB 抓包方可立项; 本地无协议材料 —— hisuite-proxy 仅伪造服务端, 不碰 USB;
