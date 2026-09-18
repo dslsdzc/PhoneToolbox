@@ -47,6 +47,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] DA 文件解析与选择: AllInOne 头/条目/region 5 字段 (真样本 6 文件 161 条目硬断言 + 独立 Python 解析器对拍)
 [√] DA 两阶段: DA1 (region[1] 地址/长度/签名长度) → 0xC0 就绪 → 存储信息交换 → EMI/DRAM → DA2 (保留尾部签名) → read_flash_info
 [√] EMI/DRAM 初始化: LEGACY 逐版本档位 (0x00/0x0A/0x0B/0x0C/0x0D/0x0F/0x10/0x11/0x14/0x15) + M_EXT_RAM_* 回包判定
+    (含两处比上游更严的 fail-closed: EMI 应答非 ACK/NACK / 档 C/D 的 dramlength 超长; 见 mtk-brom-facts.md §4.2 附注)
 [√] preloader 两路径: 显式指定 / 固件目录自动导入 (唯一命中才用) / 网络获取 (**默认关闭**, 来源清单 + sha256 校验, fail-closed)
 [√] 刷写计划: 镜像 ↔ 分区匹配 (精确/前缀 preloader) + 大小校验 (镜像 > 分区 = 跳过不写) + 预览 (复用通用预览控件)
 [√] 逐分区写入 + FINISH (0xD9) 收尾; 失败即停、不复位

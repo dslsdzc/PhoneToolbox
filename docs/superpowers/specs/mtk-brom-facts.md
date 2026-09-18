@@ -149,6 +149,12 @@ XFlash（`xflash/xflash_lib.py:903/909/926/989-990`）与 XML（`xmlflash/xml_li
 | `{0x00}` | 读 `>I dramlength`（注释 `# 0x000000B0`）→ 写 `ACK` → `emi = emi[:dramlength]` → 写 `>I dramlength` | DLL:363-369 |
 | 其它 | `"Unknown emi version: %d"` 告警（**不中止**），随后仍写 EMI 本体 | DLL:370-372 |
 
+> **本层与上游的两处 fail-closed 偏差（有意）**（本层实现 = `src/core/modes/mtk_payload.cpp` 的
+> `sendEmiLegacy`；上表与本节其余部分只记上游事实）：
+> ① EMI 应答不是 ACK/NACK 时上游既不报错也不进发送分支（DLL:339-344 只判 NACK；非 ACK 时整段
+>    EMI 发送被跳过），本层判失败；
+> ② 档 C/D 的 `dramlength > len` 上游不判（Python 切片 `emi[:dramlength]` 超长时等于不截断），本层判失败。
+
 ## 5. DA2 上传（`brom_send`，DLL:907-940）与 FINISH
 
 | 步 | 动作 | 出处 |
