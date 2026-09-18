@@ -55,6 +55,17 @@ private slots:
         // 光查"有 error"钉不住这条判据：把空帧检查放回 !m_dev 守卫**之后**，本用例照样全绿
         // （两条路都是 false + 非空 error，离线复现过）。必须断言命中的是**空帧**分支。
         QVERIFY(err.contains(QStringLiteral("空帧")));
+        // 空帧分支与 !m_dev 分支的**文案**都要钉：只钉正面（含"空帧"）挡不住"两分支都报空帧"
+        // 这类退化（例如把未打开分支的文案抄成同一句）；这条负向断言要求它**不**是未打开那条。
+        QVERIFY(!err.contains(QStringLiteral("未打开")));
+
+        // 另一半：非空帧 + 未打开 → 必须报"未打开"。两条断言合起来才说明两分支确实分得开
+        // （只有负向那条时，把未打开分支的文案改成同一句会让"守卫顺序错了"反而测不出来）。
+        // 走的是 !m_dev 早退，不触碰 USB 栈（与上面同款，无需设备）。
+        QString errClosed;
+        QVERIFY(!t.writeBulk(QByteArray("A"), &errClosed));
+        QVERIFY2(errClosed.contains(QStringLiteral("未打开")), qPrintable(errClosed));
+        QVERIFY(!errClosed.contains(QStringLiteral("空帧")));
     }
 };
 
