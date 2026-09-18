@@ -699,6 +699,9 @@ void TestSpdPac::writeExtractedFdlsPartialWriteCleansFirstPath()
     QString p1, p2, err;
     QVERIFY(!spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err));
     QVERIFY2(err.contains(QStringLiteral("fdl1.bin")), qPrintable(err));
+    // 刷盘失败要如实说"刷盘失败"：QFile 带缓冲，这条分支上 write() 的返回值仍是满额 ——
+    // 照"写入…不完整（N 字节，实写 N 字节）"写会自相矛盾（复审 M6）
+    QVERIFY2(err.contains(QStringLiteral("刷盘失败")), qPrintable(err));
     QVERIFY(p1.isEmpty());
     QVERIFY(p2.isEmpty());
     QVERIFY2(!QFileInfo(path1).isSymLink(), "第一轮写失败后 path1 仍留着条目（清理未执行）");

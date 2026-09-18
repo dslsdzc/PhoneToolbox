@@ -107,15 +107,20 @@ bool writeFileChecked(const QString &path, const QByteArray &data, QString *erro
         return false;
     }
     const qint64 written = f.write(data);
-    if (written != qint64(data.size()) || !f.flush() || f.error() != QFileDevice::NoError) {
+    const bool shortWrite = written != qint64(data.size());
+    if (shortWrite || !f.flush() || f.error() != QFileDevice::NoError) {
         const QString why = f.errorString();
         f.close();
-        if (error)
-            *error = QStringLiteral("写入 FDL 文件 %1 不完整（%2 字节，实写 %3 字节）：%4")
-                         .arg(path)
-                         .arg(data.size())
-                         .arg(written)
-                         .arg(why);
+        if (error) {
+            // 两种失败分开说：QFile 带缓冲，flush()/error() 才失败的场合 write() 的返回值
+            // 仍是满额（数据停在用户态缓冲），照"实写 N 字节"写会自相矛盾（"128 字节，实写
+            // 128 字节"）—— 那种情况要说清是没落盘。
+            *error = shortWrite
+                ? QStringLiteral("写入 FDL 文件 %1 不完整（应写 %2 字节，实写 %3 字节）：%4")
+                      .arg(path).arg(data.size()).arg(written).arg(why)
+                : QStringLiteral("FDL 文件 %1 刷盘失败（%2 字节未能落盘）：%3")
+                      .arg(path).arg(data.size()).arg(why);
+        }
         return false;
     }
     f.close();
@@ -232,8 +237,10 @@ bool writeExtractedFdls(const ExtractedFdl &fdl1, const ExtractedFdl &fdl2, cons
 
     // 容器内文件名相同（两份都叫 fdl.bin）时加 FDL1-/FDL2- 前缀区分：同一路径会被后写的盖掉，
     // 通道随后把 FDL2 的字节按 FDL1 的时序/加载地址上传 —— 静默发错数据，比失败更糟。
-    // 判重按大小写不敏感比较：为大小写不敏感文件系统（Windows/macOS，本仓有 Windows 目标）而比较 ——
+    // 判重按大小写不敏感比较：为大小写不敏感文件系统（Windows，本仓有 Windows 目标）而比较 ——
     // "fdl.bin" 与 "FDL.BIN" 在那里落到同一路径，精确比较会漏判，症状同上。
+    // 这条只覆盖大小写差异：macOS 另按 Unicode 归一化（NFC/NFD）判同，两个仅归一化不同的名字
+    // 在那里也是同一路径 —— 不在判据内（真实 pac 条目名是 ASCII，ASCII 无归一化差异，撞不上）。
     QString name1 = tempFileNameFor(fdl1);
     QString name2 = tempFileNameFor(fdl2);
     if (name1.compare(name2, Qt::CaseInsensitive) == 0) {
