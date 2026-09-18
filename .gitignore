@@ -7,3 +7,6 @@ vulndb.json
 
 
 reference/
+
+# 构建目录（含 build-h1/ build-release/ build-final-fw/ build-windows/ 等历史/临时目录）
+build*/

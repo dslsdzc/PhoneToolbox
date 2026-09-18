@@ -149,6 +149,8 @@ private slots:
     // 将来某个分支重新"只置其一"（例如新协议入口只 setText），那些槽会全绿。
     // 这里对生产源文件做**计数断言**：只允许一处 setText 与一处 setToolTip（收口后的唯一无条件调用点）。
     // 不锁死行号（太脆），锁"只有一处"——任何分支再动它即红，迫使改动者回来读 I3 的教训。
+    // ⚠️ 取材边界（终审 Minor 4）：本钉只数**字面出现次数** —— 把两条调用一起包进 `if(...)` 仍绿（唯一逃逸形态）；
+    //    反向地，注释里提到该字面量或把调用换行书写会误红，改时按字形对齐即可。
     void flashPanelSetsFlashButtonLabelsExactlyOnce()
     {
         QFile f(QStringLiteral(QT_TESTCASE_SOURCEDIR "/src/ui/flash_panel.cpp"));
