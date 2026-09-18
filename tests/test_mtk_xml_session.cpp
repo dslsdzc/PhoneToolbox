@@ -301,19 +301,23 @@ void TestMtkXmlSession::dataPathSkipsLogFramesMidRead()
     QCOMPARE(logged.at(0), QStringLiteral("[DA] erase progress 50%"));
 }
 
-// 跳帧有上限（kMaxLogFramesToSkip = 64，private 故此处写死 65）：设备刷屏不能把我们钉死
+// 跳帧有上限（kMaxLogFramesToSkip，public 供单测读）：设备刷屏不能把我们钉死。
+// 帧数按常量 +1 构造 —— 写死数字会在上限被调大时变成"够不到上限"的假绿。
 void TestMtkXmlSession::dataPathBoundsSkippedLogFrames()
 {
+    const int limit = mtkbrom::XmlSession::kMaxLogFramesToSkip;
     MockUsbChannel m;
     m.reads << textReads(QStringLiteral("OK@0x10"))
             << textReads(QStringLiteral("OK"));
-    for (int i = 0; i <= 64; ++i)                                   // 65 连续日志帧 > 上限 64
+    for (int i = 0; i <= limit; ++i)                                // limit+1 连续日志帧 > 上限
         m.reads << logReads(QStringLiteral("spam %1").arg(i));
     mtkbrom::XmlSession s(&m);
     mtkbrom::XmlSession::Result r;
     QString err;
     QVERIFY(!s.readCommandResult(r, nullptr, &err));
     QVERIFY2(err.contains(QStringLiteral("连续跳过")), qPrintable(err));
+    // 触发时刻必须是**恰好在 limit+1 帧**（不是更早/更晚）：只在越界那帧判失败
+    QVERIFY2(err.contains(QStringLiteral("连续跳过 %1 帧").arg(limit + 1)), qPrintable(err));
 }
 
 // 数据路径遇**未知 datatype**：上游 `xread` 的 `while True:` 对其它类型什么都不做（= 空转），本层 fail-closed

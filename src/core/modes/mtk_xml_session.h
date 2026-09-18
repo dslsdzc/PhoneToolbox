@@ -84,9 +84,12 @@ public:
                             const QString &version = QStringLiteral("1.0"));
     static QString field(const QString &xml, const QString &name);
 
-private:
-    static constexpr int kMaxLogFramesToSkip = 64;   // 连续日志帧上限（防御设备刷屏；上游无上限，我们只加上界）
+    // 连续日志帧上限（防御设备刷屏；上游无上限，我们只加上界）。公开**仅为单测**：
+    // 用例要按本值构造"恰好越界"的帧数，写死数字会在调整上限时静默变成恒真断言
+    //（同 LibusbEubTransport::effectiveTimeoutMs 的先例）。
+    static constexpr int kMaxLogFramesToSkip = 64;
 
+private:
     LogSink m_logSink;
     IBromUsb *m_usb;
 };
