@@ -47,18 +47,6 @@ quint64 rdU64(const QByteArray &b, int off)
     return quint64(rdU32(b, off)) | (quint64(rdU32(b, off + 4)) << 32);
 }
 
-// CRC-32/ISO-HDLC（与 zlib.crc32 同参数；Qt 的 qChecksum 是 CRC-16，不能用）
-quint32 crc32(const QByteArray &data)
-{
-    quint32 crc = 0xFFFFFFFFu;
-    for (const char ch : data) {
-        crc ^= quint8(ch);
-        for (int i = 0; i < 8; ++i)
-            crc = (crc >> 1) ^ (0xEDB88320u & (quint32(0) - (crc & 1u)));
-    }
-    return ~crc;
-}
-
 bool guidAllZero(const QByteArray &g) { return g.size() == 16 && g == QByteArray(16, '\0'); }
 
 QString nameOf(const QByteArray &entry)
@@ -183,6 +171,19 @@ bool parseAt(const QByteArray &raw, quint32 sectorSize, int headerPos, int entri
 }
 
 } // namespace
+
+// CRC-32/ISO-HDLC（与 zlib.crc32 同参数；Qt 的 qChecksum 是 CRC-16，不能用）。
+// 放在匿名命名空间外是**为单测复用**（理由与边界见 mtk_gpt.h 的声明处注释）。
+quint32 crc32(const QByteArray &data)
+{
+    quint32 crc = 0xFFFFFFFFu;
+    for (const char ch : data) {
+        crc ^= quint8(ch);
+        for (int i = 0; i < 8; ++i)
+            crc = (crc >> 1) ^ (0xEDB88320u & (quint32(0) - (crc & 1u)));
+    }
+    return ~crc;
+}
 
 quint64 offsetBytes(const Partition &p, quint32 sectorSize) { return p.firstLba * quint64(sectorSize); }
 

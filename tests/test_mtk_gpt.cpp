@@ -55,6 +55,7 @@ private slots:
     void parsesSyntheticGpt();
     void logsExtensionReadFailureInsteadOfSwallowingIt();
     void primaryExtensionCapIsCountedInSectorsNotBytes();
+    void crc32MatchesStandardCheckValue();
 
 private:
     bool samplesReady(QString *why)
@@ -283,6 +284,17 @@ void TestMtkGpt::primaryExtensionCapIsCountedInSectorsNotBytes()
         if (c.expectedReads == 2)
             QCOMPARE(requests.at(1).second, c.expectedLen);   // 补读长度 = ceil(needBytes/512)×512
     }
+}
+
+// crc32 的**已知答案**：CRC-32/ISO-HDLC 的标准 check 值（"123456789" → 0xCBF43926）。
+// 为什么必须有这条：自 A-30 起合成 GPT 夹具改用**生产的** mtkgpt::crc32 来算双 CRC
+//（夹具构造器，两边同源才不会造出"生产不认"的盘），代价是"夹具-解析器"之间不再互为交叉校验
+// ——crc32 本身算错时两边一起错、盘照样"合法"。本用例把**绝对值**钉在外参照上补回这条判据：
+// 多项式/初值/反射方向任一改动都会让它红（而 GPT 用例与夹具那侧不会）。
+void TestMtkGpt::crc32MatchesStandardCheckValue()
+{
+    QCOMPARE(mtkgpt::crc32(QByteArray("123456789", 9)), quint32(0xCBF43926));
+    QCOMPARE(mtkgpt::crc32(QByteArray()), quint32(0));       // 空输入 = 0（初值取反后）
 }
 QTEST_APPLESS_MAIN(TestMtkGpt)
 #include "test_mtk_gpt.moc"

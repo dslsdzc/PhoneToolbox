@@ -208,23 +208,17 @@ QByteArray emptyGptFixture()
     const int hdrPos = 512;
     const int entriesPos = 1024;
     raw.replace(entriesPos, 512, QByteArray(512, '\0'));
-    auto crc32Ieee = [](const QByteArray &data) {
-        quint32 crc = 0xFFFFFFFFu;                       // 与 mtk_gpt.cpp 的 crc32 同算法（反射 IEEE）
-        for (const char ch : data) {
-            crc ^= quint8(ch);
-            for (int i = 0; i < 8; ++i)
-                crc = (crc >> 1) ^ (0xEDB88320u & (quint32(0) - (crc & 1u)));
-        }
-        return ~crc;
-    };
+    // CRC 用**生产的** mtkgpt::crc32（此前是本文件里手抄的一份"同算法"实现）：这是**夹具构造器**
+    // ——两边同源才不会造出"生产不认"的盘；与 tests/mtk_bytes.h 里刻意各留一份的 le32 家族不同
+    //（那份构造的是**期望帧字节**，同源会让编码方向失去判据）。
     auto wrU32 = [&raw](int off, quint32 v) {
         raw[off] = char(v & 0xFF); raw[off + 1] = char((v >> 8) & 0xFF);
         raw[off + 2] = char((v >> 16) & 0xFF); raw[off + 3] = char((v >> 24) & 0xFF);
     };
-    wrU32(hdrPos + 0x58, crc32Ieee(raw.mid(entriesPos, 512)));
+    wrU32(hdrPos + 0x58, mtkgpt::crc32(raw.mid(entriesPos, 512)));
     QByteArray hdrForCrc = raw.mid(hdrPos, 92);
     hdrForCrc.replace(0x10, 4, QByteArray(4, '\0'));
-    wrU32(hdrPos + 0x10, crc32Ieee(hdrForCrc));
+    wrU32(hdrPos + 0x10, mtkgpt::crc32(hdrForCrc));
     return raw;
 }
 
@@ -401,6 +395,7 @@ private slots:
     void xmlSectorReaderRoundTripsDeviceBytes();
     void bromFlashOnSessionRoutesXmlEndToEnd();
     void bromFlashOnSessionRejectsEmptyXmlGptTable();
+    void bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -1540,6 +1535,56 @@ void TestMtkPayload::bromFlashOnSessionRoutesXmlEndToEnd()
                  "<?xml version=\"1.0\" encoding=\"utf-8\"?><da><version>1.0</version>"
                  "<command>CMD:REBOOT</command><arg><action>IMMEDIATE</action></arg></da>"))),
              "收尾 REBOOT 必须是 IMMEDIATE（不是 DISCONNECT）");
+}
+
+// XML 链**失败路径**的日志刷新：写到一半失败时，此前 say(...) 的行必须已经在调用方手里。
+// 判别力：读队列在"写入分区…"那一行之后**恰好断掉** —— 失败是可预期的，此时若实现把日志
+// 攒在内部、成功才吐（或直接 return false 吞掉上下文），断言就会红。
+// 注意与上一条的区别：上一条测**成功**路径的输出，这条只钉"失败也看得到卡在哪一步"。
+void TestMtkPayload::bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray image("\xAB\xCD", 2);
+    const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), image);
+    QVERIFY(!imgPath.isEmpty());
+
+    const QByteArray gpt = mtkgpt::testBuildSyntheticGpt(512, 16, /*firstLba=*/40);
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    // 引导链 + 读表与 end-to-end 用例逐笔相同（走到"计划"为止）；**写路径的读一律不给**
+    m->reads << prologueReads(kFlashHwCode)
+             << da1UploadReads(sel)
+             << xmlDeviceStartReads()
+             << xmlCommandReads() << xmlCommandReads()
+             << xmlCommandReads() << xmlCommandReads()
+             << textReads(QStringLiteral("OK"))
+             << xmlUploadFileReads()
+             << textReads(QStringLiteral("OK@0x2000"))
+             << textReads(QStringLiteral("OK"))
+             << frameReads(1, gpt)
+             << textReads(QStringLiteral("OK"))
+             << xmlDeviceStartReads();
+    // 到这里读队列为空 → 逐分区写的第一步就失败
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode, /*v6=*/true);
+    req.daLabel = QStringLiteral("合成 DA（v6 → XML 代）");
+    req.imagePaths << imgPath;
+
+    SessionCapture cap;
+    QVERIFY(!mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err));
+    const QString joined = cap.joined();
+    QVERIFY2(joined.contains(QStringLiteral("XML：GPT 读出 1 个分区")), qPrintable(joined));
+    QVERIFY2(joined.contains(QStringLiteral("计划：1 个分区")), qPrintable(joined));
+    QVERIFY2(joined.contains(QStringLiteral("写入分区 boot（2 字节）")), qPrintable(joined));
+    QCOMPARE(cap.progress.size(), 0);            // 一个分区都没写成
 }
 
 // XML 分支的空表显式门（T11 在 XFlash 分支补的同款）：GPT 合法但**零个有效条目** →

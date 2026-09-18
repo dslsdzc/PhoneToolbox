@@ -71,4 +71,10 @@ quint64 sizeBytes(const Partition &p, quint32 sectorSize);
 // 用于钉住"写入地址取自分区条目的 first_lba，而不是头里的 first_usable_lba"（T11 审查 Minor 4）。
 QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount, quint64 firstLba = 34);
 
+// CRC-32/ISO-HDLC（与 zlib.crc32 同参数）。公开**仅为单测复用**：用例要造"带正确双 CRC 的
+// 合成 GPT"（改一个头字段后必须重算头部 CRC，否则解析会先被 CRC 挡下、测不到想说的事）。
+// ⚠️ 与 tests/mtk_bytes.h 里"刻意各留一份"的 le32 家族不同：那份是**期望帧字节**的构造器，
+// 与生产共用会让编码方向失去判据；这里是**夹具构造器**，两边同源才不会造出两边都不认的盘。
+quint32 crc32(const QByteArray &data);
+
 } // namespace mtkgpt
