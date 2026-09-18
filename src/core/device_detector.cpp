@@ -603,8 +603,14 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
                 eub::samsungModeFor(desc.idVendor, desc.idProduct, classes, hasBulkInOut);
             if (sm != eub::SamsungMode::NotSamsung) {
                 // 认领顺序（EUB 先于 Odin）由 samsungModeFor 固化并单测覆盖（samsung_mode.h 头注释）
-                const DeviceMode claimed = (sm == eub::SamsungMode::Eub) ? MODE_SAMSUNG_EUB
-                                                                        : MODE_SAMSUNG_ODIN;
+                // 用 switch 而不是三元：将来给 SamsungMode 添第四态时，-Wswitch 会在**编译期**
+                // 点出这里未覆盖，三元则把它静默算成 Odin（用户被引到一条注定失败的刷写链上）。
+                DeviceMode claimed;
+                switch (sm) {
+                case eub::SamsungMode::Eub:        claimed = MODE_SAMSUNG_EUB;  break;
+                case eub::SamsungMode::Odin:       claimed = MODE_SAMSUNG_ODIN; break;
+                case eub::SamsungMode::NotSamsung: continue;   // 上面的 if 已排除；防御性早退
+                }
                 const QString devId = QStringLiteral("usb-%1-%2")
                                           .arg(libusb_get_bus_number(list[i]))
                                           .arg(libusb_get_device_address(list[i]));
