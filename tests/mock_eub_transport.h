@@ -1,6 +1,7 @@
 // tests/mock_eub_transport.h
 //
-// 脚本化 EUB 传输：写入全量记录、调用顺序保留、open 可注入连续失败
+// 脚本化 EUB 传输：写入全量记录（成功的 + 试过但失败的）、调用顺序保留、open 可注入连续失败、
+// 带"打开状态"（未打开时的写/读按真机文案失败，见 isOpen）
 // （模拟"设备还没出现"与"段间重枚举"两种时序，facts §B8/§B9）。
 // 本线无真机（facts §F1），断言手段 = **写出的帧逐字节比对**。
 #pragma once
@@ -16,7 +17,10 @@ namespace eub {
 class MockEubTransport : public IEubTransport
 {
 public:
-    QList<QByteArray> writes;      // 每次 writeBulk 追加（一帧一条）
+    QList<QByteArray> writes;      // 每次**成功**的 writeBulk 追加（一帧一条）
+    // 每次**交到设备手上**的 writeBulk 追加（= 过了"非空 + 已打开"两道请求校验之后，含随后在
+    // 注入点失败的那次）。与 writes 的差集就是"写过但失败"—— 那一段以前在 mock 里完全不可观测。
+    QList<QByteArray> attemptedWrites;
     QStringList       calls;       // "open"/"close"/"info"/"write"/"read"
     int  openFailures = 0;         // 前 N 次 open 失败（0 = 一次就成功）
     // 从第 N 次 open 调用**起**全部失败（0 基，按已发生的 open 数计；-1 = 不注入）。与 openFailures
@@ -26,6 +30,9 @@ public:
     // 一旦命中，本次 mock 对象的后续所有 writeBulk 都会失败。需要"只失败一次"的用例请自行
     // 在失败后把 failWriteAt 复位为 -1（或改用只读断言）。
     int  failWriteAt = -1;         // 第 N 次**成功**写入之前插入失败（0 基），-1 = 不失败
+    // 打开状态模型（A-13）：真机的 writeBulk/readBulk 都以 !m_dev 守卫打头并报"未打开"，
+    // 而 mock 以前在从未 open 时也照常收下写、返回回显 —— 会话用例里"忘了 open"会静默通过。
+    bool isOpen = false;           // open 成功置真、close 置假（open 先复位：失败时 = 未打开，同真机）
     bool infoResult = true;
     EubDeviceInfo info;            // readDeviceInfo 返回内容
     QByteArray    response;        // readBulk 返回内容
@@ -35,6 +42,7 @@ public:
 
     bool open(QString *error) override {
         calls << QStringLiteral("open");
+        isOpen = false;         // 与真机同形：open 先收尾旧句柄；任一失败路径出来后都是"未打开"
         const int openIndex = int(calls.count(QStringLiteral("open"))) - 1;   // 含本次
         if (failOpenFromOpenIndex >= 0 && openIndex >= failOpenFromOpenIndex) {
             if (error) *error = QStringLiteral("注入的打开失败（按序号）");
@@ -45,9 +53,10 @@ public:
             if (error) *error = QStringLiteral("注入的打开失败");
             return false;
         }
+        isOpen = true;
         return true;
     }
-    void close() override { calls << QStringLiteral("close"); }
+    void close() override { calls << QStringLiteral("close"); isOpen = false; }
     bool readDeviceInfo(EubDeviceInfo &out, QString *error) override {
         calls << QStringLiteral("info");
         if (!infoResult) { if (error) *error = QStringLiteral("注入的信息读取失败"); return false; }
@@ -62,17 +71,27 @@ public:
             if (error) *error = QStringLiteral("空帧");
             return false;
         }
+        if (!isOpen) {   // 真机同款守卫与文案（eub_libusb_transport.cpp 的 writeBulk）
+            if (error) *error = QStringLiteral("写入失败：EUB 设备未打开");
+            return false;
+        }
+        // 过了请求校验：这一次确实交到了设备手上（之后失败也要留痕 —— 见 attemptedWrites 的注释）
+        calls << QStringLiteral("write");
+        attemptedWrites << data;
         if (failWriteAt >= 0 && writes.size() == failWriteAt) {
             if (error) *error = QStringLiteral("注入的写失败");
             return false;
         }
-        calls << QStringLiteral("write");
         writes.append(data);
         return true;
     }
     QByteArray readBulk(int maxBytes, int timeoutMs, QString *error) override {
         Q_UNUSED(maxBytes) Q_UNUSED(timeoutMs)
         calls << QStringLiteral("read");
+        if (!isOpen) {   // 真机同款守卫与文案（eub_libusb_transport.cpp 的 readBulk 第一条早退）
+            if (error) *error = QStringLiteral("读取失败：EUB 设备未打开");
+            return {};
+        }
         // 读失败注入：真机上同形（超时/端点错都是空返回 + error，见 eub_libusb_transport.cpp 的
         // readBulk）→ 会话对"读失败"与"设备没回话（空回显、无 error）"两种情形必须分得开。
         if (!readResult) {

@@ -123,20 +123,25 @@ private slots:
     {
         eub::MockEubTransport t;
         QString err;
+        // mock 带"打开状态"（A-13）：未打开时写会被真机同款守卫拒掉 —— 先打开再发
+        QVERIFY(t.open(&err));
         QVERIFY2(eub::sendSegment(t, QByteArray("AB"), eub::dnwStyle(), &err), qPrintable(err));
         QCOMPARE(t.writes.size(), 1);
         QCOMPARE(t.writes.first(), eub::buildEubFrame(QByteArray("AB"), eub::dnwStyle(), &err));
-        QCOMPARE(t.calls, QStringList{QStringLiteral("write")});
+        QCOMPARE(t.calls, QStringList({QStringLiteral("open"), QStringLiteral("write")}));
     }
 
     void sendSegmentPropagatesWriteFailure()
     {
         eub::MockEubTransport t;
+        QString oerr;
+        QVERIFY(t.open(&oerr));   // 同上：先打开，否则命中的会是"未打开"守卫而非注入的写失败
         t.failWriteAt = 0;
         QString err;
         QVERIFY(!eub::sendSegment(t, QByteArray("AB"), eub::zeroStyle(), &err));
         QVERIFY(!err.isEmpty());
         QCOMPARE(t.writes.size(), 0);
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));   // 命中的是**写失败**，不是"未打开"
     }
 
     void sendSegmentRejectsEmptyPayloadBeforeWriting()
@@ -189,6 +194,55 @@ private slots:
         QVERIFY(err.contains(QStringLiteral("空帧")));   // 命中空帧分支，而非注入式失败
         QVERIFY(t.writes.isEmpty());                     // 空帧不进写入记录
         QVERIFY(t.calls.isEmpty());                      // 也不留 "write" 调用痕迹
+    }
+
+    // A-13：mock 的"打开状态"与真机同判（真机见 eub_libusb_transport.cpp 的 !m_dev 守卫）。
+    // 以前 mock 在从未 open 时也照常收写、照常返回回显 —— 会话用例里"忘了 open"这类接线错误
+    // 会被静默放过（mock 比真机宽松，是假绿的经典来源）。
+    void mockRejectsReadAndWriteWhileClosed()
+    {
+        eub::MockEubTransport t;
+        QString err;
+        QVERIFY(!t.writeBulk(QByteArray("A"), &err));
+        QVERIFY2(err.contains(QStringLiteral("未打开")), qPrintable(err));   // 文案取自真机
+        QVERIFY(t.writes.isEmpty());
+        QVERIFY(t.attemptedWrites.isEmpty());   // 请求校验没过 = 没交到设备手上
+        err.clear();
+        QVERIFY(t.readBulk(512, 50, &err).isEmpty());
+        QVERIFY2(err.contains(QStringLiteral("未打开")), qPrintable(err));
+
+        QVERIFY(t.open(&err));                  // 打开后照常
+        err.clear();
+        QVERIFY(t.writeBulk(QByteArray("A"), &err));
+        t.response = QByteArray("echo");
+        QCOMPARE(t.readBulk(512, 50, &err), QByteArray("echo"));
+
+        t.close();                              // close 之后再回到"未打开"
+        err.clear();
+        QVERIFY(!t.writeBulk(QByteArray("B"), &err));
+        QVERIFY2(err.contains(QStringLiteral("未打开")), qPrintable(err));
+        // 打开失败时也留在"未打开"（与真机"open 失败后对象状态 = 未打开"同款）
+        t.openFailures = 1;
+        QVERIFY(!t.open(&err));
+        QVERIFY(!t.writeBulk(QByteArray("C"), &err));
+    }
+
+    // A-13：注入式写失败的那一次以前在 mock 里完全不可观测（writes 只记成功的，
+    // 且失败路径在 calls << "write" 之前就 return 了）—— "写到了但设备侧失败"与"压根没写"
+    // 因此分不开。attemptedWrites 让这个差集可见。
+    void mockRecordsAttemptedWriteWhenInjectedFailureHits()
+    {
+        eub::MockEubTransport t;
+        QString err;
+        QVERIFY(t.open(&err));
+        t.failWriteAt = 1;                       // 第 1 次**成功**写入之前插入失败
+        QVERIFY2(t.writeBulk(QByteArray("first"), &err), qPrintable(err));
+        QVERIFY(!t.writeBulk(QByteArray("second"), &err));
+        QVERIFY2(err.contains(QStringLiteral("注入的写失败")), qPrintable(err));
+        QCOMPARE(t.writes.size(), 1);                        // 只有成功的进 writes
+        QCOMPARE(t.attemptedWrites.size(), 2);               // 失败的那次也留痕
+        QCOMPARE(t.attemptedWrites.last(), QByteArray("second"));
+        QCOMPARE(t.calls.count(QStringLiteral("write")), 2);  // 失败的那次同样算"调用过"
     }
 };
 
