@@ -243,17 +243,18 @@ private slots:
                                     "Exynos9610", "Exynos9810", "Exynos9820", "Exynos9830"}));
         QCOMPARE(totalSegs, qsizetype(41));   // 8 张表共 41 段（4+6+4+5+6+6+5+5）
         // unverifiedSourceSha1 的形态契约：空，或 40 位小写 hex（与 sbootSha1 同格式 —— 长度/大小写
-        // 写错会让 UI 的"前 8 位"给出不可比对的串）。只有 7580 记了另一源的修订（facts §C4 的分歧）。
-        int withUnverified = 0;
+        // 写错会让 UI 的"前 8 位"给出不可比对的串）。带该字段的表**点名列出**（不写成计数，
+        // 将来有新表合法地记录另一源时，红的是"集合不符"并直接告诉你是哪张表变了）。
+        QStringList withUnverified;
         for (const eub::EubLoadout &lo : all) {
             if (lo.unverifiedSourceSha1.isEmpty())
                 continue;
-            ++withUnverified;
+            withUnverified << lo.soc;
             QVERIFY2(QRegularExpression(QStringLiteral("^[0-9a-f]{40}$"))
                          .match(QString::fromLatin1(lo.unverifiedSourceSha1)).hasMatch(),
                      qPrintable(lo.soc + QStringLiteral(": ") + QString::fromLatin1(lo.unverifiedSourceSha1)));
         }
-        QCOMPARE(withUnverified, 1);          // 目前只有 7580（双源分歧）有"另一源"可记
+        QCOMPARE(withUnverified, QStringList({QStringLiteral("Exynos7580")}));   // facts §C4 的双源分歧表
         for (const QString &e : evidence)
             QVERIFY2(legalEvidence().contains(e), qPrintable(e));   // 证据等级只有这四档，写错即红
         // 每张表都能被自己的 SoC 名（大小写不敏感）原样查回

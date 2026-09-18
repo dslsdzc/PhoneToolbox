@@ -197,9 +197,9 @@ private slots:
     }
 
     // A-13：mock 的"打开状态"与真机同判（真机见 eub_libusb_transport.cpp 的 !m_dev 守卫）。
-    // 以前 mock 在从未 open 时也照常收写、照常返回回显 —— 会话用例里"忘了 open"这类接线错误
-    // 会被静默放过（mock 比真机宽松，是假绿的经典来源）。
-    void mockRejectsReadAndWriteWhileClosed()
+    // 以前 mock 在从未 open 时也照常收写、照常返回回显/自述 —— 会话用例里"忘了 open"这类接线
+    // 错误会被静默放过（mock 比真机宽松，是假绿的经典来源）。三条数据面（info/write/read）都钉。
+    void mockRejectsInfoReadAndWriteWhileClosed()
     {
         eub::MockEubTransport t;
         QString err;
@@ -209,6 +209,10 @@ private slots:
         QVERIFY(t.attemptedWrites.isEmpty());   // 请求校验没过 = 没交到设备手上
         err.clear();
         QVERIFY(t.readBulk(512, 50, &err).isEmpty());
+        QVERIFY2(err.contains(QStringLiteral("未打开")), qPrintable(err));
+        err.clear();
+        eub::EubDeviceInfo info;                 // 第三条路：读设备自述（真机同款守卫，复审 N4）
+        QVERIFY(!t.readDeviceInfo(info, &err));
         QVERIFY2(err.contains(QStringLiteral("未打开")), qPrintable(err));
 
         QVERIFY(t.open(&err));                  // 打开后照常

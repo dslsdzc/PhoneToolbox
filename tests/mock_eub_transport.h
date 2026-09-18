@@ -1,7 +1,12 @@
 // tests/mock_eub_transport.h
 //
 // 脚本化 EUB 传输：写入全量记录（成功的 + 试过但失败的）、调用顺序保留、open 可注入连续失败、
-// 带"打开状态"（未打开时的写/读按真机文案失败，见 isOpen）
+// 带"打开状态"（未打开时 describe/write/read 都按真机文案失败，见 isOpen）
+//
+// 记账口径（不对称，用之前先读这一条）：`calls`/`attemptedWrites` 只记**过了请求校验**的调用 ——
+// 空帧、未打开这两类"请求本身不合法"的拒绝**不留痕**（也不进 attemptedWrites），与真机上"压根
+// 没碰设备"一致；而"已交到设备手上但失败"（failWriteAt 注入）**会**记 calls 与 attemptedWrites。
+// 故判断"调用方是否真的发起过写"要用 attemptedWrites（或 calls 里的 "write"），不要用 writes。
 // （模拟"设备还没出现"与"段间重枚举"两种时序，facts §B8/§B9）。
 // 本线无真机（facts §F1），断言手段 = **写出的帧逐字节比对**。
 #pragma once
@@ -59,6 +64,10 @@ public:
     void close() override { calls << QStringLiteral("close"); isOpen = false; }
     bool readDeviceInfo(EubDeviceInfo &out, QString *error) override {
         calls << QStringLiteral("info");
+        if (!isOpen) {   // 真机同款守卫与文案（eub_libusb_transport.cpp 的 readDeviceInfo）
+            if (error) *error = QStringLiteral("读取设备信息失败：EUB 设备未打开");
+            return false;
+        }
         if (!infoResult) { if (error) *error = QStringLiteral("注入的信息读取失败"); return false; }
         out = info;
         return true;

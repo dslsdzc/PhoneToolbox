@@ -13,6 +13,7 @@
 #include <QtTest>
 #include <QFile>
 #include <QFileInfo>
+#include <QStorageInfo>
 #include <QTemporaryDir>
 #include <limits>
 #include <utility>
@@ -267,7 +268,17 @@ private slots:
     {
         // 裸路径的 512 MiB 上限（端到端）：先看 size() 再读 —— 超限必须在**读之前**失败。
         // 用稀疏文件造 512 MiB+1（resize 只改元数据，不真占盘），故本槽代价与文件大小无关。
+        // **前提**：文件系统支持稀疏（本机 ext4/tmpfs 实测 ~0 占盘）。FAT/exFAT 一类不支持稀疏的
+        // 介质、或配额紧的临时目录上，这一步会实占 512 MiB 并可能让 QVERIFY(resize) 假红 ——
+        // 空间不足时明确 QSKIP（该环境下的等价判据由 payloadCapBoundaryIsInclusiveAt512MiB 覆盖，
+        // 缺口记在 .superpowers/sdd/w4-task-1-report.md）。
         constexpr qint64 kOver = qint64(512ull * 1024 * 1024) + 1;
+        const QStorageInfo storage(m_dir.path());
+        if (storage.isValid() && storage.bytesAvailable() >= 0 && storage.bytesAvailable() < kOver) {
+            QSKIP(qPrintable(QStringLiteral("临时目录可用空间 %1 字节 < %2（512 MiB+1）："
+                                            "无法保证构造超限文件不成假红")
+                                 .arg(storage.bytesAvailable()).arg(kOver)));
+        }
         const QString path = m_dir.filePath("huge.img");
         QFile f(path);
         QVERIFY(f.open(QIODevice::ReadWrite));
