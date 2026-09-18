@@ -817,7 +817,9 @@ void FlashPanel::onFlashClicked()
                 QStringList scatterLog;
                 if (!mtkplan::parseScatterAnyDialect(QString::fromUtf8(sf.readAll()), refs, &scatterLog, &parseErr)) {
                     emit outputMessage(QStringLiteral("scatter 解析失败：%1").arg(parseErr), true);
-                    // 解析失败即中止（有意）：降级到"按文件名推导"会把选错的文件静默放过。
+                    // 解析失败即中止（有意）：降级到"按文件名推导"会放过选错的文件
+                    //（那条路径会在预览里留一条 warning —— `mtk_flash_plan.cpp` 的"未提供分区参照表"
+                    //  提示 —— 但选错的 scatter 与"根本没给 scatter"在预览上难以分辨，故不降级）。
                     return;
                 }
                 for (const QString &line : std::as_const(scatterLog))
