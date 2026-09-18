@@ -64,6 +64,7 @@ private slots:
     void sendParamRejectsHardErrorCodes();
     void sendDataChunksByMaxPacketSize();
     void readStatusRejectsShortPayloadAndBadMagic();
+    void readStatusFallsBackToFirstU32ForOtherLengths();
 };
 
 // 帧头一次写、载荷第二次写（铁律 3；xflash_lib.py:112-115）
@@ -258,6 +259,19 @@ void TestMtkXflashSession::readStatusRejectsShortPayloadAndBadMagic()
         QVERIFY(!s.readStatus(code, &err));
         QVERIFY(err.contains(QStringLiteral("magic 不符")));
     }
+}
+
+// 铁律 6 的第三条分支（XFL:138-158）：长度既非 2 也非 4、且 ≥ 4 → 取**载荷首个 u32**。
+// 判别力：载荷第二字特意非 0 —— 取末字 / 取偏移 4 / 只认 2 与 4 两种长度的实现都会红。
+void TestMtkXflashSession::readStatusFallsBackToFirstU32ForOtherLengths()
+{
+    MockUsbChannel m;
+    m.reads << frameReads(1, le32(0x12345678) + le32(0xDEADBEEF));   // 8 字节：既非 2 也非 4
+    mtkbrom::XFlashSession s(&m, 0x6765);
+    quint32 code = 0;
+    QString err;
+    QVERIFY2(s.readStatus(code, &err), qPrintable(err));
+    QCOMPARE(code, quint32(0x12345678));        // 首个 u32，且**不**做 magic 归一化（只有 length==4 才归一化）
 }
 QTEST_APPLESS_MAIN(TestMtkXflashSession)
 #include "test_mtk_xflash_session.moc"
