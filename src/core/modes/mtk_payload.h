@@ -203,7 +203,7 @@ mtkgpt::ReadFn xmlSectorReader(XmlSession &x, const QString &partition = kXmlSto
 //   → 版本口径（0xFC）→ resolvePreloader → **按代际引导**（bromBringUpDa / xflashBringUpDa /
 //   xmlBringUpDa）→ **按代际取设备分区表**（LEGACY = PMT；XFlash/XML = GPT，PMT 明确拒绝；
 //   XML 经 READ-FLASH 读、diskSectors = 0 → 只走主 GPT）
-//   → buildMtkPlan → 逐分区写（flashPartition / xflashWriteData / xmlWritePartition）
+//   → buildMtkPlan → 逐分区写（flashPartitionWithTable / xflashWriteData / xmlWritePartition）
 //   → 收尾（LEGACY = FINISH 0xD9；XFlash = SHUTDOWN；XML = REBOOT；失败**只告警**）
 // 请求级前置（DA 为空 / 无镜像）在本函数入口检查（runBromFlash 不再重复）。
 // log/progress 可空；error 可空。成功返回 true。
@@ -218,5 +218,11 @@ bool patchPreloaderSecurity(QByteArray &preloader);
 // 刷写分区：listPartitions 查名 → emmcWrite(分区偏移, 镜像)。未找到返回明确错误。
 bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
                     const QByteArray &image, QString *error = nullptr);
+
+// 同上，但分区表由调用方传入（会话级读一次、逐分区复用 —— read_pmt 是设备往返，
+// 逐分区各读一次会变成 N+1 次）。未找到返回明确错误。
+bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
+                             const QString &name, const QByteArray &image,
+                             QString *error = nullptr);
 
 } // namespace mtkbrom

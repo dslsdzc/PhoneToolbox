@@ -629,13 +629,11 @@ bool patchPreloaderSecurity(QByteArray &preloader)
     return any;
 }
 
-bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
-                    const QByteArray &image, QString *error)
+bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
+                             const QString &name, const QByteArray &image, QString *error)
 {
-    // listPartitions（规格 §3.6 分区表）查名 → emmcWrite（规格 §3.5 Legacy 命令集）
-    QList<EmPartition> parts;
-    if (!st.listPartitions(parts, error))
-        return false;
+    // 查名（规格 §3.6 分区表）→ emmcWrite（规格 §3.5 Legacy 命令集）。表由调用方一次读好传进来：
+    // read_pmt 是**设备往返**，逐分区各读一次是 N+1 次（会话级已有一份权威表）。
     for (const EmPartition &p : parts) {
         if (p.name == name) {
             if (!st.emmcWrite(p.offsetBytes, image, kEmmcPartUser, error))
@@ -646,6 +644,16 @@ bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
     if (error) *error = QStringLiteral("未找到分区 %1（分区表 %2 条）")
                             .arg(name).arg(parts.size());
     return false;
+}
+
+bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
+                    const QByteArray &image, QString *error)
+{
+    // 单发入口（表不在手时的便利包装）；会话内逐分区写请用 flashPartitionWithTable
+    QList<EmPartition> parts;
+    if (!st.listPartitions(parts, error))
+        return false;
+    return flashPartitionWithTable(st, parts, name, image, error);
 }
 
 namespace {
@@ -976,11 +984,11 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     QHash<QString, quint64> partAddr;                 // 分区名 → 写入地址（XFlash/XML 用；LEGACY 用不上）
     quint32 xWritePacketLength = 0;                   // XFlash 写分块（GET_PACKET_LENGTH）
     std::optional<DaStorage> storage;                 // LEGACY 专用（另两代不构造）
+    QList<EmPartition> deviceParts;                   // LEGACY：设备分区表（**整会话读一次**，逐分区写复用）
 
     if (gen == MtkGeneration::Legacy) {
         storage.emplace(session);
         storage->setDaActive(true);
-        QList<EmPartition> deviceParts;
         if (!storage->listPartitions(deviceParts, error))
             return false;
         if (deviceParts.isEmpty()) {
@@ -1045,7 +1053,7 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     }
     say(QStringLiteral("计划：%1 个分区，合计 %2 字节").arg(plan.entries.size()).arg(plan.totalBytes));
 
-    // 逐分区写（失败即停；错误含分区名与已写字节 —— 由 flashPartition 填）
+    // 逐分区写（失败即停；错误含分区名与已写字节 —— 由 flashPartitionWithTable 填）
     quint64 written = 0;
     for (const mtkplan::PlanEntry &e : std::as_const(plan.entries)) {
         QFile f(e.imagePath);
@@ -1062,7 +1070,8 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         }
         say(QStringLiteral("写入分区 %1（%2 字节）…").arg(e.partition).arg(image.size()));
         if (gen == MtkGeneration::Legacy) {
-            if (!flashPartition(session, *storage, e.partition, image, error))
+            // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt
+            if (!flashPartitionWithTable(*storage, deviceParts, e.partition, image, error))
                 return false;
         } else if (gen == MtkGeneration::XFlash) {
             const auto it = partAddr.constFind(e.partition);

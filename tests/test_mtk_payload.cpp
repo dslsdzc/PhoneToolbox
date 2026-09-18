@@ -220,7 +220,7 @@ QByteArray pmtEntry60(const QByteArray &name, quint64 size, quint64 offset)
 }
 
 // 引导链 + 刷写段（prologue 之后的全部；无 preloader、errorcode == 0、单分区写 + FINISH）。
-// ⚠️ PMT **读两次**：计划层一次 + flashPartition 内部再读一次（T6 既有语义：每个分区重读设备表）。
+// ⚠️ PMT **只读一次**（A-37：会话级读到的表逐分区复用）—— 少给一份会让"按分区重读"的实现读空失败。
 // answerFinish=false → 省掉 FINISH 的两个 ACK（测"收尾失败只告警、仍返回 true"）。
 QList<QByteArray> chainAndFlashReads(const mtkbrom::DaSelection &sel, const QByteArray &pmt,
                                      bool answerFinish = true)
@@ -228,8 +228,7 @@ QList<QByteArray> chainAndFlashReads(const mtkbrom::DaSelection &sel, const QByt
     QList<QByteArray> r;
     r << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
       << stage2Reads(0) << bootToReads() << flashInfoReads();
-    r << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（计划）
-      << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（flashPartition 内）
+    r << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt        // read_pmt（整会话仅此一次）
       << QByteArray("\x5A", 1) << QByteArray(1, char(0x69));              // 写命令 ACK + 块 CONT
     if (answerFinish)
         r << QByteArray("\x5A", 1) << QByteArray("\x5A", 1);
@@ -344,6 +343,7 @@ private slots:
     void bringUpAbortsBeforeDa2WhenSyncIsWrong();
     // ---- D1-T9 审查 I1: 刷写主体（bromFlashOnSession）的四道安全门 + 收尾 ----
     void bromFlashOnSessionWritesPlanAndFinishes();
+    void bromFlashOnSessionReadsDeviceTableOnce();
     void bromFlashOnSessionRejectsEmptyPlanBeforeAnyWrite();
     void bromFlashOnSessionRejectsUnknownHwCode();
     void bromFlashOnSessionRoutesXflashEndToEnd();
@@ -1346,6 +1346,58 @@ void TestMtkPayload::bromFlashOnSessionWritesPlanAndFinishes()
     QVERIFY2(m->writes.contains(image), "镜像字节必须真的写出去");
     QVERIFY2(m->writes.contains(QByteArray(1, char(0x62))), "必须发过 EMMC 写命令(0x62)");
     QVERIFY2(m->writes.contains(QByteArray(1, char(0xD9))), "必须发过 FINISH(0xD9)");
+}
+
+// **设备分区表整会话只读一次**（A-37）：写 3 个分区只允许 1 次 read_pmt（0xA5 单字节命令帧）。
+// 判据有两重：① 计数器 == 1；② 读队列里只排了**一份** PMT 应答 —— 回退成"逐分区重读"时
+// 第二个分区就会读到空队列而失败（两重都红，见报告的变异证据）。
+void TestMtkPayload::bromFlashOnSessionReadsDeviceTableOnce()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QByteArray img1("\xAB\xCD", 2), img2("\xEF\x01", 2), img3("\x23\x45", 2);
+    const QString p1 = writeTempImage(dir, QStringLiteral("boot.img"), img1);
+    const QString p2 = writeTempImage(dir, QStringLiteral("system.img"), img2);
+    const QString p3 = writeTempImage(dir, QStringLiteral("userdata.img"), img3);
+    QVERIFY(!p1.isEmpty() && !p2.isEmpty() && !p3.isEmpty());
+
+    // 一份 PMT 应答里放三个分区（0x60 条目，名字/大小/偏移三字段齐全）
+    const QByteArray pmt = pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000)
+                         + pmtEntry60(QByteArray("system", 6), 0x20000, 0x2000)
+                         + pmtEntry60(QByteArray("userdata", 8), 0x30000, 0x3000);
+    QList<QByteArray> reads = prologueReads(sel.entry.hwCode);
+    reads << da1UploadReads(sel) << QByteArray("\xC0", 1) << storageExchangeReads()
+          << stage2Reads(0) << bootToReads() << flashInfoReads();
+    reads << QByteArray("\x5A", 1) << be32(quint32(pmt.size())) << pmt;   // read_pmt（**仅此一次**）
+    for (int i = 0; i < 3; ++i)
+        reads << QByteArray("\x5A", 1) << QByteArray(1, char(0x69));      // 每分区：写命令 ACK + 块 CONT
+    reads << QByteArray("\x5A", 1) << QByteArray("\x5A", 1);              // FINISH 的两个 ACK
+
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+    m->reads << reads;
+
+    mtkbrom::BromFlashRequest req;
+    req.daFile = daBytesForHw(kFlashHwCode);
+    req.daLabel = QStringLiteral("合成 DA");
+    req.imagePaths << p1 << p2 << p3;
+
+    SessionCapture cap;
+    QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err),
+             qPrintable(err));
+    int pmtReads = 0;
+    for (const QByteArray &f : std::as_const(m->writeFrames)) {
+        if (f == QByteArray(1, char(0xA5)))
+            ++pmtReads;
+    }
+    QCOMPARE(pmtReads, 1);                        // 3 个分区 → 1 次 read_pmt（不是 N+1）
+    QCOMPARE(cap.progress.size(), 3);             // 三个分区都写了
+    QVERIFY2(m->writes.contains(img1) && m->writes.contains(img2) && m->writes.contains(img3),
+             "三个镜像的字节都要写出去");
 }
 
 // **空计划早拒**：设备分区表与所选镜像**全不匹配** → 写任何字节之前返回 false。
