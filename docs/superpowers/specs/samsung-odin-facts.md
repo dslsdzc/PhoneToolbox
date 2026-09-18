@@ -498,6 +498,8 @@ sed -n '55,62p'  reference/odin4-llucs/src/core/odin_types.h
 
 **未裁定、留给持机人**：D13（`0x64/0x01` 在 Thor 是 ResetFlashCount、在 odin4 里既当机型查询
 又是 ResetFlashCount —— 本期只做一次 best-effort 机型查询、刷完**不发**重置）。
+本期实现见 `src/core/odin/odin_session.cpp` 的 `queryDeviceType()`（:217 起；D13 注释在 :222-223）
+—— 只查询、不重置；持机人裁定后回填此行。
 
 **一处被真样本推翻的设计预期（交叉引用，供终审注意）**：设计 spec
 `docs/superpowers/specs/2026-09-14-samsung-heimdall-design.md` §6 的真样本一行把 **`lu_count` 非 0**
