@@ -177,7 +177,9 @@ quint64 le64p(const uchar *p)
     return v;
 }
 
-bool readU16(const QByteArray &img, qint64 off, quint16 &v)
+// readU16/readU64 目前无调用点（只有 readU32 在用）。与 readU32 同族的取数
+// 原语，留着备用；标注 [[maybe_unused]] 而不是删除（修警告不改行为）。
+[[maybe_unused]] bool readU16(const QByteArray &img, qint64 off, quint16 &v)
 {
     if (!inBounds(img, off, 2))
         return false;
@@ -191,7 +193,7 @@ bool readU32(const QByteArray &img, qint64 off, quint32 &v)
     v = le32p(reinterpret_cast<const uchar *>(img.constData()) + off);
     return true;
 }
-bool readU64(const QByteArray &img, qint64 off, quint64 &v)
+[[maybe_unused]] bool readU64(const QByteArray &img, qint64 off, quint64 &v)
 {
     if (!inBounds(img, off, 8))
         return false;
@@ -1070,7 +1072,8 @@ void updateFreeCounts(QByteArray &img, const SuperBlock &sb,
     sbLo += total;
     if (sb.featureIncompat & kIncompat64Bit) {
         // 低 32 位溢出进位到高 32 位
-        while (sbLo < 0 || sbLo > 0xFFFFFFFFull) {
+        // （转 qint64 只为同符号比较：0xFFFFFFFF 远在 qint64 值域内，`< 0` 已在 || 前半判否）
+        while (sbLo < 0 || sbLo > static_cast<qint64>(0xFFFFFFFFull)) {
             if (sbLo < 0) { sbLo += 0x100000000ull; --sbHi; }
             else { sbLo -= 0x100000000ull; ++sbHi; }
         }
@@ -1525,7 +1528,9 @@ bool replaceFile(QByteArray &image, const SuperBlock &sb,
         }
     }
     // 2) 占用新块
-    quint32 lblock = 0;
+    // 注：lblock 与下方重建 extent 树用的 pos 同步累加，但本函数从不读它（死存储）。
+    // 按"修警告不改行为"保留原样，仅标注 [[maybe_unused]]（可另行清理）。
+    [[maybe_unused]] quint32 lblock = 0;
     for (const Extent &run : runs) {
         for (quint32 i = 0; i < run.len; ++i) {
             const quint64 block = run.pblock + i;
