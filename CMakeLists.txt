@@ -724,6 +724,10 @@ if(ENABLE_IMAGE_TESTS)
                 # "巡检记录 altsetting / claim 后的切换调用 / 句柄收尾的复位"三处钉成字面存在
                 # 且成对（这三处在真机路径上，删掉不会有行为用例变红；取材边界见用例内注释）。
                 # 只编路径，不编内容。
+                # ⚠️ 契约：这两条用例**要求源码树原地存在**（绝对路径被编进二进制）—— 检出目录被
+                # 移动/改名、或拿旧 build 目录在别处跑，都会以"读不到生产源文件"**硬 FAIL**；
+                # 与样本目录那条（QSKIP + 可命令行覆盖）**不同**，且**有意不改成 QSKIP**：
+                # 钉在缺文件时静默失效，正是本仓反复吃亏的形态。
                 if(_test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_edl_libusb_transport")
                     target_compile_definitions(${_test_target} PRIVATE
