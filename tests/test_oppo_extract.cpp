@@ -99,9 +99,13 @@ void TestOppoExtract::extractQcSynthetic()
     QVERIFY(dir.isValid());
     const QByteArray elfPlain = pseudoRandom(0x800, 0xE1Fu);   // Sahara：整段解密
     const QByteArray bootPlain(4096, '\xAA');                  // Firmware：明文拷贝
+    // 每条 QcFileSpec 显式写全 sha256/md5：夹具对二者的默认就是空（结构体注释"可空"），
+    // 显式写出与省略等价，只为满足 -Wmissing-field-initializers（本文件其余条目同）。
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"), elfPlain, 0},
-         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), bootPlain, 0}});
+        {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"), elfPlain, 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), bootPlain, 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("test.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -141,7 +145,8 @@ void TestOppoExtract::extractQcPartialDecrypt()
     QVERIFY(dir.isValid());
     const QByteArray plain = pseudoRandom(int(ofptest::kQcPartialDecryptSize) + 0x300, 0xC0FFEEu);
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Config"), QStringLiteral("config.bin"), plain, 0}});
+        {{QStringLiteral("Config"), QStringLiteral("config.bin"), plain, 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("partial.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -174,7 +179,8 @@ void TestOppoExtract::extractCrossChunkDecrypt()
     constexpr int kBigSize = 0x120000;   // 1.125 MiB = 块 1（0x100000）+ 块 2（0x20000）
     const QByteArray plain = pseudoRandom(kBigSize, 0x1CEBu);
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog_big.elf"), plain, 0}});
+        {{QStringLiteral("Sahara"), QStringLiteral("prog_big.elf"), plain, 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("big.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -271,10 +277,12 @@ void TestOppoExtract::extractRejectsBadChecksum()
     QByteArray flipped = bad;
     flipped[0] = char(flipped.at(0) ^ 0xFF);
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), QStringLiteral("recovery.img"), good, 0},
+        {{QStringLiteral("Firmware"), QStringLiteral("recovery.img"), good, 0,
+          QString(), QString()},
          {QStringLiteral("Firmware"), QStringLiteral("boot.img"), bad, 0,
-          hexOf(flipped, QCryptographicHash::Sha256)},
-         {QStringLiteral("Firmware"), QStringLiteral("vendor.img"), good, 0}});
+          hexOf(flipped, QCryptographicHash::Sha256), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("vendor.img"), good, 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("badsha.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -334,10 +342,14 @@ void TestOppoExtract::extractRejectsUnsafeNames()
     QVERIFY(dir.isValid());
     const QByteArray legit = pseudoRandom(0x180, 0x5AFEu);
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0},
-         {QStringLiteral("Firmware"), QStringLiteral("/abs/evil.img"), QByteArray(0x40, 'A'), 0},
-         {QStringLiteral("Firmware"), QStringLiteral("sub/evil.img"), QByteArray(0x40, 'S'), 0},
-         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), legit, 0}});
+        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("/abs/evil.img"), QByteArray(0x40, 'A'), 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("sub/evil.img"), QByteArray(0x40, 'S'), 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), legit, 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("unsafe.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -359,7 +371,8 @@ void TestOppoExtract::extractRejectsUnsafeNames()
 
     // 全部条目名不安全 → 无任何产物 → false（error 保留逐条原因）
     const ofptest::QcPackage only = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0}});
+        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0,
+          QString(), QString()}});
     QVERIFY(only.isValid());
     const QString onlyPath = writePkg(dir.path(), QStringLiteral("only-evil.ofp"), only.blob);
     QVERIFY(!onlyPath.isEmpty());
@@ -388,8 +401,10 @@ void TestOppoExtract::extractKeepsSkipNotesWhenFatal()
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0},
-         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x80, 'B'), 0}});
+        {{QStringLiteral("Firmware"), QStringLiteral("../evil.img"), QByteArray(0x40, 'E'), 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x80, 'B'), 0,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), QStringLiteral("notes.ofp"), pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
@@ -411,7 +426,7 @@ void TestOppoExtract::extractRejectsSamePathAndMissing()
     const QByteArray payload = pseudoRandom(0x100, 0x600Du);
     const QString pkgName = QStringLiteral("guard-pkg.ofp");
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), pkgName, payload, 0}});
+        {{QStringLiteral("Firmware"), pkgName, payload, 0, QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString pkgPath = writePkg(dir.path(), pkgName, pkg.blob);
     QVERIFY(!pkgPath.isEmpty());
