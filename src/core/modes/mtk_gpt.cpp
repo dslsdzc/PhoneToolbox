@@ -1,5 +1,7 @@
 #include "core/modes/mtk_gpt.h"
 
+#include <limits>       // std::numeric_limits（parsePrimary 的窄化前守卫）
+
 namespace mtkgpt {
 namespace {
 
@@ -204,6 +206,15 @@ bool parsePrimary(const QByteArray &raw, quint32 sectorSize, Table &out, QString
         return false;
     }
     const quint64 entryLba = rdU64(raw.mid(int(sectorSize), 0x5C), 0x48);
+    // entryLba 是**完全由镜像内容控制**的 64 位字段：`entryLba × sectorSize` 一旦越过 int，
+    // 下面 `int()` 的窄化会折成**任意**偏移 —— 可能恰好落进 raw 里，于是拿一个错误的位置当
+    // 条目区解析（双 CRC 都对着那段错误数据算，全部"校验通过"）。故在窄化**之前**按扇区口径拒。
+    // sectorSize == 0 时除法无意义（会 SIGFPE），且 0 本就不是合法扇区大小 —— 那条留给
+    // parseAt 用它既有的判据与文案拒绝（判据不在这里分叉）。
+    if (sectorSize != 0 && entryLba > quint64(std::numeric_limits<int>::max()) / sectorSize) {
+        if (error) *error = QStringLiteral("主 GPT 条目区起始 LBA 异常（%1）—— 拒绝按此偏移解析").arg(entryLba);
+        return false;
+    }
     return parseAt(raw, sectorSize, int(sectorSize), int(entryLba * sectorSize), 0, false, out, error);
 }
 

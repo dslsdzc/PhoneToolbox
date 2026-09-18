@@ -56,6 +56,7 @@ private slots:
     void logsExtensionReadFailureInsteadOfSwallowingIt();
     void primaryExtensionCapIsCountedInSectorsNotBytes();
     void crc32MatchesStandardCheckValue();
+    void rejectsEntryLbaThatWouldWrapOnNarrowing();
 
 private:
     bool samplesReady(QString *why)
@@ -295,6 +296,33 @@ void TestMtkGpt::crc32MatchesStandardCheckValue()
 {
     QCOMPARE(mtkgpt::crc32(QByteArray("123456789", 9)), quint32(0xCBF43926));
     QCOMPARE(mtkgpt::crc32(QByteArray()), quint32(0));       // 空输入 = 0（初值取反后）
+}
+
+// 头部 `part_entry_start_lba` 的**窄化前**守卫：该字段由镜像内容完全控制，
+// `entryLba × sectorSize` 溢出 int 时 `int()` 会把条目区起点折成任意偏移。
+// 夹具特意让折出来的值**恰好等于本盘条目区的真实偏移**：
+//   entryLba = 0x800002（8388610）→ × 512 = 0x1_0000_0400，mod 2^32 = 0x400 = 1024 = 条目区真实位置
+//   → 没有守卫的实现**解析成功**（双 CRC 都对着这段正确数据算，全部"通过"），
+//     而不是失败 —— 这正是"静默错位"而非"报错"，也是本用例选择这个值的理由。
+// 头字段改动后必须重算头部 CRC，否则会先被 CRC 判据挡下、测不到守卫本身。
+void TestMtkGpt::rejectsEntryLbaThatWouldWrapOnNarrowing()
+{
+    QByteArray raw = mtkgpt::testBuildSyntheticGpt(512, 64);
+    const int hdrPos = 512;
+    auto wrU32 = [&raw](int off, quint32 v) {
+        raw[off] = char(v & 0xFF); raw[off + 1] = char((v >> 8) & 0xFF);
+        raw[off + 2] = char((v >> 16) & 0xFF); raw[off + 3] = char((v >> 24) & 0xFF);
+    };
+    wrU32(hdrPos + 0x48, 0x800002u);                 // 低 32 位足够（高 32 位保持 0）
+    QByteArray hdrForCrc = raw.mid(hdrPos, 92);
+    hdrForCrc.replace(0x10, 4, QByteArray(4, '\0'));
+    wrU32(hdrPos + 0x10, mtkgpt::crc32(hdrForCrc));
+
+    Table t;
+    QString err;
+    QVERIFY(!mtkgpt::parsePrimary(raw, 512, t, &err));
+    QVERIFY2(err.contains(QStringLiteral("条目区起始 LBA 异常")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("8388610")), qPrintable(err));   // 0x800002，原文可诊断
 }
 QTEST_APPLESS_MAIN(TestMtkGpt)
 #include "test_mtk_gpt.moc"
