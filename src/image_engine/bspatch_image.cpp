@@ -128,10 +128,11 @@ QByteArray applyBsdiff(const QByteArray &oldData, const QByteArray &patch, bool 
         const qint64 oldOffset = static_cast<qint64>(readU64(ctrlBuf, 16));
         // 边界（对照 FreeBSD bspatch.c）:
         // 1) 各段长度先按值限制在 newLen 内（newLen ≤ INT_MAX → 天然排除 INT 级回绕/负尺寸分配）；
+        //    转 quint64 只为与 newLen 同符号比较：`< 0` 已在同一条 || 链的前半判否；
         // 2) 再分段检查 newPos 推进不越界（此时 diffLenThis/extraLen ≤ newLen、newPos ≤ newLen，
         //    和 ≤ 3*newLen 无回绕）。
         if (diffLenThis < 0 || extraLen < 0
-            || diffLenThis > newLen || extraLen > newLen
+            || static_cast<quint64>(diffLenThis) > newLen || static_cast<quint64>(extraLen) > newLen
             || newPos + static_cast<quint64>(diffLenThis) > newLen
             || newPos + static_cast<quint64>(diffLenThis) + static_cast<quint64>(extraLen) > newLen) {
             ctrl.finish(); diff.finish(); extra.finish();
