@@ -77,7 +77,9 @@ static void put32(QByteArray &d, int off, quint32 v)
     for (int i = 0; i < 4; ++i)
         d[off + i] = char((v >> (i * 8)) & 0xFF);
 }
-static void put64(QByteArray &d, int off, quint64 v)
+// 当前无用例调用（put16/put32/rd16/rd32 已被用）——保留为与同族写入器对称的 64 位写入口子，
+// [[maybe_unused]] 只为消 -Wunused-function；删掉它则将来写 s_blocks_count_hi 一类字段时要重写。
+[[maybe_unused]] static void put64(QByteArray &d, int off, quint64 v)
 {
     for (int i = 0; i < 8; ++i)
         d[off + i] = char((v >> (i * 8)) & 0xFF);
