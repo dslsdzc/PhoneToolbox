@@ -31,12 +31,12 @@
 //
 // 超时语义（Phase B 同款红线）：libusb 的 `timeout=0` 是**无限等待**（sync.c "For an unlimited
 // timeout, use value 0"），而 `IOdinTransport::read(timeoutMs=0)` 的契约是**非阻塞轮询**
-// （清端点语义，odin_transport.h:25-28）—— 必须经 effectiveTimeoutMs() 换算（<=0 → 1 ms），
+// （清端点语义，odin_transport.h:26-29）—— 必须经 effectiveTimeoutMs() 换算（<=0 → 1 ms），
 // 否则会话的握手清端点（odin_session.cpp 的 `m_t.read(64, 0, nullptr)`）会在真机上**永久阻塞**，
 // 而 mock 把 0 当轮询、离线用例全绿也发现不了。
 //
 // 本类**不补 ZLP**（一条规则一处责任）：`write(QByteArray())` 的语义就是"真发一个 0 长度 bulk
-// 传输"（odin_transport.h:23-24），由会话在结束序列前显式发起（odin_session.cpp 的 D7 空写）；
+// 传输"（odin_transport.h:24-25），由会话在结束序列前显式发起（odin_session.cpp 的 D7 空写）；
 // 本层不按包长自行补包 —— 与 Phase B 的 LibusbEdlTransport 同款分工。
 //
 // 本类**不持有 wMaxPacketSize**：收窄后的接口没有 maxPacketSize()（odin_transport.h 头注释：

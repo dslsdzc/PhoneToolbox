@@ -1,11 +1,16 @@
 // src/core/odin/odin_libusb_transport.cpp
 //
 // 结构照抄 Phase B 的 src/core/edl/edl_libusb_transport.cpp（本仓已验证的同款真机实现：
-// open/枚举/打开/认领/端点发现/短写拒绝/超时语义），差异只有三处：
+// open/枚举/打开/认领/端点发现/短写拒绝/超时语义），**主要**差异三处（另有 stage/reset/
+// reenumerate/maxPacketSize 等一批 EDL 专有 API 未移植，见 ④-⑦）：
 //   ① 身份判据换成本任务的 isOdinDevice（接口类 0x0A + 批量端点，老 PID 兜底；三方对照见头文件）；
 //   ② 接口号与端点**不写死**：Thor/odin4/samloader-rs 都是遍历描述符取，Heimdall 的固定端点值
 //      只适用于 2011 年的 3 个老机型（docs/superpowers/specs/samsung-odin-facts.md §1.5）；
-//   ③ 空写 = 真的发一个 0 长度 bulk 传输（ZLP，见 odin_transport.h:23-24），不按包长自行补包。
+//   ③ 空写 = 真的发一个 0 长度 bulk 传输（ZLP，见 odin_transport.h:24-25），不按包长自行补包；
+//   ④ 无 stage 概念（EDL 的 setStage/stage/isOpen 不适用：Odin 无 Sahara 式阶段机）；
+//   ⑤ 无 resetDevice / waitReenumerate（Odin 会话失败**故意**不复位，见 odin_transport.h:16-18）；
+//   ⑥ 无 maxPacketSize（写侧不分块，1 MiB 数据片由会话构造）；
+//   ⑦ 设备筛选从 isEdlId/matchesStage 换成 inspectDevice + isOdinDevice + fallbackPids。
 // 真机行为（枚举/claim 顺序/时序/ZLP）**离线无法验证**：本阶段无真机，见 tests 头注释与
 // phaseC-task-7-report.md §边界。
 #include "odin_libusb_transport.h"
@@ -278,7 +283,7 @@ bool LibusbOdinTransport::write(const QByteArray &data, QString *error)
         return false;
     }
     if (data.isEmpty()) {
-        // 空写 = ZLP：**真的**发一个 0 长度 bulk 传输（odin_transport.h:23-24）。odin4 同款：
+        // 空写 = ZLP：**真的**发一个 0 长度 bulk 传输（odin_transport.h:24-25）。odin4 同款：
         // send_empty_transfer()（odin_protocol.cpp:294-302）用 100 ms 超时；失败**在此返回 false**，
         // "失败是否致命"由发起方裁定（会话按 odin4 口径忽略它，见 odin_session.cpp 的 D7 空写）。
         int transferred = 0;
@@ -339,7 +344,7 @@ QByteArray LibusbOdinTransport::read(int maxBytes, int timeoutMs, QString *error
                                          effectiveTimeoutMs(timeoutMs));
     if (ret == LIBUSB_ERROR_TIMEOUT) {
         // 轮询（timeoutMs <= 0，已被换算成 1 ms）：端点静默不是错误 —— 清端点语义，
-        // 见 odin_transport.h:25-28（"立即返回端点里已有的字节，没有则空返回且不置 error"）
+        // 见 odin_transport.h:26-29（"立即返回端点里已有的字节，没有则空返回且不置 error"）
         if (timeoutMs <= 0)
             return {};
         setErr(error, QStringLiteral("读取 IN 端点超时（%1 ms）").arg(timeoutMs));
