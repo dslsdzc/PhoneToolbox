@@ -71,7 +71,7 @@ QString describe(const QString &fileName, const QString &entryInTar, bool compre
 bool readTarEntryBytes(QFile &f, const imgtar::TarIndexEntry &hit, const QString &fileName,
                        const QString &sizeGuardReason, QByteArray &out, QString *error)
 {
-    if (hit.size > kMaxPayloadBytes)
+    if (!payloadWithinCap(hit.size))
         return fail(error, QStringLiteral("%1 内的 %2 有 %3 字节 —— %4，疑为选错文件")
                                 .arg(fileName, hit.name).arg(hit.size).arg(sizeGuardReason));
     if (!f.seek(qint64(hit.offset)))
@@ -140,6 +140,13 @@ bool looksLikeTar(const QByteArray &head, const QString &fileName)
            || fileName.endsWith(QStringLiteral(".tar.md5"), Qt::CaseInsensitive);
 }
 
+bool payloadWithinCap(quint64 bytes)
+{
+    // 上限的**唯一**定义处（tar 条目与裸文件两条守卫都调它）：此前是散在两处的 `> kMaxPayloadBytes`，
+    // 边界值本身不可断（要 512 MiB 数据），故抽成纯函数、由单测钉住 512 MiB / +1 两侧。
+    return bytes <= kMaxPayloadBytes;
+}
+
 bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, QString *error)
 {
     out.clear();                       // 失败路径不留陈旧字节（见头文件注释）
@@ -184,7 +191,7 @@ bool loadSbootBytes(const QString &path, QByteArray &out, SbootSource *source, Q
         // QFile::size() 在异常路径可返回 -1：夹取后再进文案，否则会印出 18446744073709551615
         //（T5 审查 Minor 6；夹成 0 后下面的"读取不完整"守卫会给出诚实的失败文案）
         const qint64 fileSize = f.size() > 0 ? f.size() : 0;
-        if (quint64(fileSize) > kMaxPayloadBytes)
+        if (!payloadWithinCap(quint64(fileSize)))
             return fail(error, QStringLiteral("%1 有 %2 字节 —— 超出本函数单次读入上限，疑为选错文件")
                                     .arg(fileName)
                                     .arg(fileSize));

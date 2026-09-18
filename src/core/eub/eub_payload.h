@@ -58,4 +58,9 @@ bool looksLikeLz4Frame(const QByteArray &data);
 // 判"容器类型"，不解析内容：包内容的裁定仍由 loadSbootBytes / loadNamedEntriesFromTar 做。
 bool looksLikeTar(const QByteArray &head, const QString &fileName);
 
+// 单次读入上限判据：字节数 ≤ 512 MiB（上限的实现在 .cpp，两处守卫共用同一份）。
+// 公开仅为单测：判据的**边界**（恰好 512 MiB / 多 1 字节）要造 512 MiB 量级的数据才可达。
+// 注意它只管"太大"：0 通过本判据，交给后面独立的"空载荷无意义"分支拒绝（另一条文案、另一种原因）。
+bool payloadWithinCap(quint64 bytes);
+
 } // namespace eub

@@ -14,6 +14,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <limits>
 #include <utility>
 
 #include "core/eub/eub_loadout.h"   // eub::sha1Hex（真样本槽与 §H2 记录对拍用）
@@ -248,6 +249,63 @@ private slots:
         QVERIFY(!eub::loadSbootBytes(m_dir.filePath("does-not-exist.bin"), out, &src, &err));
         QVERIFY(!err.isEmpty());   // 打不开的文件也要给中文原因（含路径），不能只返回 false
         QVERIFY(out.isEmpty());
+    }
+
+    void payloadCapBoundaryIsInclusiveAt512MiB()
+    {
+        // 单次读入上限的**边界**：512 MiB 恰好可读、多 1 字节即拒（端到端造 512 MiB 载荷不现实
+        // —— 读一次就是 512 MiB 内存，故判据抽成纯函数后在这里钉边界值）。
+        constexpr quint64 kMiB = 1024ull * 1024;
+        QVERIFY(eub::payloadWithinCap(512 * kMiB));         // 恰好在上限 → 通过
+        QVERIFY(!eub::payloadWithinCap(512 * kMiB + 1));    // 越界一字节 → 拒
+        QVERIFY(!eub::payloadWithinCap(std::numeric_limits<quint64>::max()));
+        // 0 通过本判据：上限管的是"太大"，"太小（空载荷）"由后面独立的分支拒绝（另一条文案）。
+        QVERIFY(eub::payloadWithinCap(0));
+    }
+
+    void rawFileOverCapIsRejectedWithoutReadingIt()
+    {
+        // 裸路径的 512 MiB 上限（端到端）：先看 size() 再读 —— 超限必须在**读之前**失败。
+        // 用稀疏文件造 512 MiB+1（resize 只改元数据，不真占盘），故本槽代价与文件大小无关。
+        constexpr qint64 kOver = qint64(512ull * 1024 * 1024) + 1;
+        const QString path = m_dir.filePath("huge.img");
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadWrite));
+        QVERIFY(f.resize(kOver));
+        f.close();
+        QCOMPARE(QFileInfo(path).size(), kOver);   // 夹具自检：真的超了上限
+
+        eub::SbootSource src;
+        QByteArray out = QByteArrayLiteral("stale");
+        QString err;
+        QVERIFY(!eub::loadSbootBytes(path, out, &src, &err));
+        QVERIFY(out.isEmpty());                                    // 失败路径不留陈旧字节
+        QVERIFY(err.contains(QStringLiteral("单次读入上限")));        // 命中的是上限分支，不是"打不开"或"不完整"
+        QVERIFY(err.contains(QStringLiteral("huge.img")));
+    }
+
+    void truncatedTarFailsClosedWithoutPartialPayload()
+    {
+        // 真实场景：BL 包下载中断 → 文件短于条目头声明的长度。
+        // 磁盘行为（实跑核对）：tar 索引层在切段**之前**就按归档边界拒（tar_image.cpp 的
+        // "tar 条目数据越界"），loadSbootBytes 原样包进"按 tar 解析…失败"，一个字节都不产出
+        // —— readTarEntryBytes 的短读守卫（eub_payload.cpp 的"读取不完整"）在这条路径上走不到：
+        // 它要的是"索引通过、读时变短"，即索引与读之间的文件变化（TOCTOU/IO 错误），离线无注入点。
+        const QByteArray img = syntheticSboot();
+        const QString path = writeFile("BL_CUT.tar.md5", tarOf(QStringLiteral("sboot.bin"), img, true));
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadWrite));
+        QVERIFY(f.resize(512 + 0x40));   // 头块 + 64 字节数据（声明 0x8000 字节）
+        f.close();
+
+        eub::SbootSource src;
+        QByteArray out = QByteArrayLiteral("stale");
+        QString err;
+        QVERIFY(!eub::loadSbootBytes(path, out, &src, &err));
+        QVERIFY(out.isEmpty());                                  // 绝不交出半份载荷
+        QVERIFY(err.contains(QStringLiteral("按 tar 解析")));      // 走 tar 路径且 fail-closed
+        QVERIFY(err.contains(QStringLiteral("BL_CUT.tar.md5")));
+        QVERIFY(src.description.isEmpty());                      // 失败时来源描述一并复位
     }
 
     void lz4MagicDetection()
