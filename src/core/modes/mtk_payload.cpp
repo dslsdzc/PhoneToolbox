@@ -1076,6 +1076,11 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         say(QStringLiteral("写入分区 %1（%2 字节）…").arg(e.partition).arg(image.size()));
         if (gen == MtkGeneration::Legacy) {
             // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt（A-37）。
+            // ⚠️ 语义变更（控制方 2026-09-19 裁决接受）：由此**计划表 == 写表** —— 预览用的那张表
+            // 与逐分区写的偏移出自同一次读。旧实现是"计划用读#1、每个分区写各用一次新读"，
+            // 若某次写入覆盖了分区表存储区导致表漂移，旧实现会读到变化后的表（静默改变写入目标），
+            // 新实现继续按旧快照的偏移写。选新语义的理由：**用户批准的是预览里那张表**，
+            // 计划与写入必须同源。真机上"表漂移"这一场景未验证、无用例覆盖（mock 里表恒定）。
             if (!flashPartitionWithTable(*storage, deviceParts, e.partition, image, error))
                 return false;
         } else if (gen == MtkGeneration::XFlash) {
