@@ -68,9 +68,17 @@ bool sourceLooksLikeTar(const QString &path)
 } // namespace
 
 EubRecoveryDialog::EubRecoveryDialog(eub::IEubTransport &transport, QWidget *parent)
+    // 默认选项：段间 1s / 重试 20×500ms ≈ 10s，与 spec §D4 的"默认超时 10s"一致。
+    // 生产调用走这一条；用例要走短重试请用下面那个带 EubOptions 的重载。
+    : EubRecoveryDialog(transport, eub::EubOptions{}, parent)
+{
+}
+
+EubRecoveryDialog::EubRecoveryDialog(eub::IEubTransport &transport, const eub::EubOptions &opt,
+                                     QWidget *parent)
     : QDialog(parent)
     , m_transport(transport)
-      // m_opt 保持默认（段间 1s / 重试 20×500ms ≈ 10s，与 spec §D4 的"默认超时 10s"一致）。
+    , m_opt(opt)
       // 本对话框不跑在 worker 线程里：长等待靠下面的 processEvents 保活（见进度回调）。
     , m_session(transport, m_opt, [this](const eub::EubProgress &p) {
           log(QStringLiteral("[%1 %2%] %3")

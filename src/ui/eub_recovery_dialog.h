@@ -36,6 +36,11 @@ public:
     // 并注入（依赖契约由构建图钉住：CMakeLists 的 test_eub_recovery_dialog 分支不含任何 libusb 源）。
     explicit EubRecoveryDialog(eub::IEubTransport &transport, QWidget *parent = nullptr);
 
+    // 注入会话选项（与 EubSession 的 EubOptions 同一份语义，含 sleepFn 注入点）：用例用它把
+    // "设备从未出现"这类槽的重试压到瞬时（默认 20×500ms ≈ 10s）；生产调用仍走上面那条（默认值）。
+    EubRecoveryDialog(eub::IEubTransport &transport, const eub::EubOptions &opt,
+                      QWidget *parent = nullptr);
+
     // 主窗口日志汇（FlashPanel 接到 outputMessage）。会话的进度回调也走这条线（见 .cpp 构造）。
     void setLogSink(const std::function<void(const QString &, bool)> &sink) { m_logSink = sink; }
 

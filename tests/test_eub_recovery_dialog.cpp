@@ -485,6 +485,41 @@ private slots:
         QVERIFY2(mock.writes[segments + 1].contains(tzsw), "第 7 帧应是 tzsw.img 的载荷");
     }
 
+    void injectedOptionsReachTheSession()   // A-16：注入口必须把选项**真的**交给会话
+    {
+        // 只测"跑得快了"钉不住注入口：构造时把 opt 丢掉（m_session 仍用默认 EubOptions）时，
+        // "设备未出现"那个槽只会变慢、不会变红。这里用**可观测的选项差异**钉死接线：
+        // 9820 表 responseSupport = true → readResponse=false 时一次 read 都不该发（默认 true
+        // 时每段一次）。两半用同一份前置，差别只有构造时那一个参数。
+        const QByteArray sboot = syntheticSboot(0x264000);   // 够 9820 表（末段 0x224000 + 0x40000）
+
+        eub::MockEubTransport mockOff;
+        mockOff.info.socName = QStringLiteral("Exynos9820");
+        EubRecoveryDialog dlgOff(mockOff, eub::EubOptions{1, 1, 1, /*readResponse=*/false, [](int) {}},
+                                 nullptr);
+        QString err;
+        QVERIFY2(dlgOff.prepare(sboot, QString(), QStringLiteral("合成 sboot（Exynos9820）"), &err),
+                 qPrintable(err));
+        QCOMPARE(dlgOff.loadout().soc, QStringLiteral("Exynos9820"));
+        const int segments = int(dlgOff.loadout().segments.size());
+        QCOMPARE(segments, 5);                       // 前置：数量对不上时下面的断言无意义
+        QVERIFY2(dlgOff.loadout().responseSupport, "9820 表必须 responseSupport（本槽的前提）");
+        QVERIFY2(dlgOff.runRescue(&err), qPrintable(err));
+        QCOMPARE(mockOff.writes.size(), segments);   // 段照发：关掉的是读回显，不是整个会话
+        QCOMPARE(mockOff.calls.count(QStringLiteral("read")), 0);   // 注入的 readResponse=false 生效
+
+        // 对照：同样的路径、同样的注入参数，只把 readResponse 翻成 true → 每段读一次
+        //（这才说明上面那条 0 是**选项**造成的，而不是这条路径压根不读回显）
+        eub::MockEubTransport mockOn;
+        mockOn.info.socName = QStringLiteral("Exynos9820");
+        EubRecoveryDialog dlgOn(mockOn, eub::EubOptions{1, 1, 1, /*readResponse=*/true, [](int) {}},
+                                nullptr);
+        QVERIFY2(dlgOn.prepare(sboot, QString(), QStringLiteral("合成 sboot（Exynos9820）"), &err),
+                 qPrintable(err));
+        QVERIFY2(dlgOn.runRescue(&err), qPrintable(err));
+        QCOMPARE(mockOn.calls.count(QStringLiteral("read")), segments);
+    }
+
     void prepareRejectsUnsupportedSoc()
     {
         eub::MockEubTransport mock;
@@ -552,12 +587,13 @@ private slots:
         // 兜底对**任意** identify 失败生效 —— 设备根本没连上时同样走到这里。此时文案若一律说
         // "设备未自报 SoC 名"就是假话（设备压根没被读到），把用户的排查方向从"为什么连不上"
         // 带偏到"为什么不报名字"。真实原因要原样带出来。
-        // 注：对话框的 EubOptions 是构造时固定的默认值（revolveAttempts=20 / poll=500ms，且无
-        // 注入点）—— 本槽的"设备未出现"要真的走完重试，代价 ≈ 19×500ms = 9.5s。
+        // 走带 EubOptions 的重载：本槽的"设备未出现"会真的走完重试，默认值（revolveAttempts=20 /
+        // poll=500ms）代价 ≈ 19×500ms = 9.5s。注入短重试 + 空 sleepFn 后不依赖真实时间
+        //（字段序见 eub_session.h 的 EubOptions：间隔 / 次数 / 轮询 / 读回显 / sleep）。
         eub::MockEubTransport mock;
         mock.info.socName = QString();
         mock.openFailures = 99;                 // 设备一直没出现
-        EubRecoveryDialog dlg(mock, nullptr);
+        EubRecoveryDialog dlg(mock, eub::EubOptions{1, 1, 1, false, [](int) {}}, nullptr);
         QStringList sink;
         dlg.setLogSink([&sink](const QString &m, bool) { sink << m; });
         QString err;
