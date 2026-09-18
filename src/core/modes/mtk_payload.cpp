@@ -653,6 +653,7 @@ bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
     // ⚠️ **当前仅测试使用**（全仓调用点只有 tests/test_mtk_payload.cpp 两处）；生产路径
     //（bromFlashOnSession）读一次表后逐分区复用，直接走 flashPartitionWithTable。
     // 若要把它作为"表不在手"的对外入口，请先在调用侧接线（并加真机路径的用例）。
+    Q_UNUSED(s) // 会话对象本入口不使用（表经 st 读，传输在 DaStorage 内）；签名见 mtk_payload.h
     QList<EmPartition> parts;
     if (!st.listPartitions(parts, error))
         return false;
