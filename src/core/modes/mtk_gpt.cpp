@@ -263,8 +263,14 @@ bool readTable(const ReadFn &read, quint64 diskSectors, Table &out, QStringList 
         QByteArray bigger;
         QString extErr;
         if (read(0, int((needBytes + sectorSize - 1) / sectorSize * sectorSize), &bigger, &extErr)
-            && bigger.size() > head.size())
+            && bigger.size() > head.size()) {
             head = bigger;
+        } else if (!extErr.isEmpty()) {
+            // 补读**失败**不算致命（已读到的头部字段仍可用，交给 parsePrimary 判），但不能静默：
+            // 失败原因（越界/短读/通道错）是"为什么没读到"的唯一线索，丢掉它只剩一句泛泛的解析失败。
+            // 注：`bigger.size() <= head.size()` 而读成功时 extErr 为空 —— 那条不在此列（没有原因可报）。
+            say(QStringLiteral("GPT：按头部字段补读主 GPT 失败（%1）—— 按已读到的部分继续解析").arg(extErr));
+        }
     }
 
     QString primaryErr;

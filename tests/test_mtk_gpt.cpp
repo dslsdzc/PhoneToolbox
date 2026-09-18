@@ -53,6 +53,7 @@ private slots:
     void rejectsGarbageSignatureAndBadRevision();
     void rejectsBadCrc();
     void parsesSyntheticGpt();
+    void logsExtensionReadFailureInsteadOfSwallowingIt();
 
 private:
     bool samplesReady(QString *why)
@@ -215,6 +216,36 @@ void TestMtkGpt::parsesSyntheticGpt()
     QCOMPARE(t.partitions.at(0).name, QStringLiteral("boot"));
     QCOMPARE(t.partitions.at(0).firstLba, quint64(34));
     QCOMPARE(mtkgpt::sizeBytes(t.partitions.at(0), 512), quint64(2 * 512));
+}
+
+// 头部字段声明"条目区在探测窗口之外" → readTable 会按头部字段补读一次；**这次补读失败**时
+// 失败原因必须进日志。此前 `extErr` 取了地址却从未被读，失败原因整条被丢（-Wall 抓不到）。
+// 夹具：把 part_entry_start_lba 抬到 40（needBytes = 40×512 + 4×128 = 20992 > 探测窗口 0x2000），
+// 读回调**第一次**给窗口、**第二次**（补读）失败并带上可断言的注入原因。
+void TestMtkGpt::logsExtensionReadFailureInsteadOfSwallowingIt()
+{
+    const QByteArray head = mtkgpt::testBuildSyntheticGpt(512, 64).left(0x2000);
+    QByteArray probe = head;
+    probe[512 + 0x48] = char(40);            // part_entry_start_lba = 40（低字节；原值 2）
+    int calls = 0;
+    mtkgpt::ReadFn reader = [&probe, &calls](quint64 off, int len, QByteArray *out, QString *err) {
+        if (++calls == 1) {
+            *out = probe.mid(int(off), len);
+            return true;
+        }
+        if (err) *err = QStringLiteral("注入的补读失败（越界读）");
+        return false;
+    };
+    Table t;
+    QStringList log;
+    QString err;
+    // 整体仍失败（头字段被改坏 → 头部 CRC 不符；diskSectors=0 → 无备份兜底）——
+    // 本用例只钉**失败原因的可见性**，故不对返回值做正向断言。
+    QVERIFY(!mtkgpt::readTable(reader, 0, t, &log, &err));
+    QCOMPARE(calls, 2);                      // 确实发起了补读
+    const QString joined = log.join('\n');
+    QVERIFY2(joined.contains(QStringLiteral("按头部字段补读主 GPT 失败")), qPrintable(joined));
+    QVERIFY2(joined.contains(QStringLiteral("注入的补读失败")), qPrintable(joined));
 }
 QTEST_APPLESS_MAIN(TestMtkGpt)
 #include "test_mtk_gpt.moc"
