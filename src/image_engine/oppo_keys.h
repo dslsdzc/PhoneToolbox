@@ -14,7 +14,7 @@ namespace imgopp {
 // （即 md5(...).toHex().left(16) 的字节本身），直接作为 AES-128-CFB 的 key/iv。
 struct OppoKeyPair
 {
-    QString keyId;    // 速查表 KeyId（QC：V1.4.17…；MTK：MTK0…MTK8）
+    QString keyId;    // 速查表 KeyId（QC：V1.4.17/1.4.27；MTK：MTK0…MTK8）
     QByteArray key;   // 16B
     QByteArray iv;    // 16B
 };

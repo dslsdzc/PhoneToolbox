@@ -40,7 +40,7 @@ struct OfpFile
 struct OfpInfo
 {
     OfpVariant variant = OfpVariant::Unknown;
-    QString keyId;          // 命中的 key 候选 id（QC: V1.4.17…；MTK: MTK0…MTK8）
+    QString keyId;          // 命中的 key 候选 id（QC: V1.4.17/1.4.27；MTK: MTK0…MTK8）
     QByteArray key;         // 命中的 16B AES key（Task 4 提取用；内容为 16 个 ASCII 十六进制字符）
     QByteArray iv;          // 命中的 16B IV（同上）
     quint32 pageSize = 0;   // QC: 0x200/0x1000；MTK 恒为 0（无页概念）
