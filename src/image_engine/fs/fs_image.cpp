@@ -52,8 +52,13 @@ public:
         QString err;
         return imgerofs::extractFile(m_image, m_sb, path, data, &err);
     }
-    // EROFS 只读: 替换不支持
-    bool replace(const QString &path, const QByteArray &data) override { return false; }
+    // EROFS 只读: 替换不支持（path/data 仅为满足 FsImage 接口签名）
+    bool replace(const QString &path, const QByteArray &data) override
+    {
+        Q_UNUSED(path);
+        Q_UNUSED(data);
+        return false;
+    }
     // EROFS 只读: 原样返回当前镜像
     QByteArray repack() override { return m_image; }
 
