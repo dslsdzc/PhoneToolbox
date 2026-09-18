@@ -227,9 +227,11 @@ bool writeExtractedFdls(const ExtractedFdl &fdl1, const ExtractedFdl &fdl2, cons
 
     // 容器内文件名相同（两份都叫 fdl.bin）时加 FDL1-/FDL2- 前缀区分：同一路径会被后写的盖掉，
     // 通道随后把 FDL2 的字节按 FDL1 的时序/加载地址上传 —— 静默发错数据，比失败更糟。
+    // 判重按大小写不敏感比较：为大小写不敏感文件系统（Windows/macOS，本仓有 Windows 目标）而比较 ——
+    // "fdl.bin" 与 "FDL.BIN" 在那里落到同一路径，精确比较会漏判，症状同上。
     QString name1 = tempFileNameFor(fdl1);
     QString name2 = tempFileNameFor(fdl2);
-    if (name1 == name2) {
+    if (name1.compare(name2, Qt::CaseInsensitive) == 0) {
         name1.prepend(QStringLiteral("FDL1-"));
         name2.prepend(QStringLiteral("FDL2-"));
     }

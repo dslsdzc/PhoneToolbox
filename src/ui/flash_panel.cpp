@@ -756,12 +756,14 @@ void FlashPanel::onFlashClicked()
                 } else {
                     // 文案如实：提取是纯解析（逐字节来自包内切片）；提取出的 FDL 在真机上是否可用，
                     // 属既有 SPD 刷写链的未验证范围（见 功能清单.txt 展锐段落的诚实边界）。
+                    // 四个占位符用多参重载一次替换：条目名来自 pac（外部可控），链式 .arg() 会回头
+                    // 替换已插入文本里的 %2/%3（名字含 "%2" 时日志显示成字节数），多参重载只扫描模板。
                     emit outputMessage(QStringLiteral("已从 pac 自动提取 FDL1（%1，%2 字节）"
                                                       "与 FDL2（%3，%4 字节）")
-                                           .arg(spdEntryLabel(extracted1))
-                                           .arg(extracted1.data.size())
-                                           .arg(spdEntryLabel(extracted2))
-                                           .arg(extracted2.data.size()),
+                                           .arg(spdEntryLabel(extracted1),
+                                                QString::number(extracted1.data.size()),
+                                                spdEntryLabel(extracted2),
+                                                QString::number(extracted2.data.size())),
                                        false);
                     haveFdls = true;
                 }

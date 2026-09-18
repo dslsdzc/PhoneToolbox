@@ -38,7 +38,8 @@ bool extractFdlsFromPac(const QString &pacPath, ExtractedFdl &fdl1, ExtractedFdl
 
 // 把提取出的两份 FDL 落盘到目录 dir，供 SPD 通道按路径读（runSpdFlash 的 fdl1Path/fdl2Path）。
 // 文件名带条目名：优先容器内文件名（用户在包里看得到），为空回退分区 ID；两份重名时加
-// FDL1-/FDL2- 前缀区分。两个都写成功才 true 并填好 fdl1Path/fdl2Path；
+// FDL1-/FDL2- 前缀区分（重名按大小写不敏感判 —— 大小写不敏感文件系统上两份会落到同一路径）。
+// 两个都写成功才 true 并填好 fdl1Path/fdl2Path；
 // 任一失败 → false + 可行动 *error，且**不留半份产物**（本次已写出的文件删除）——
 // 只有 FDL1 落盘时若继续，通道会拿不到 FDL2 或把 FDL1 的字节发去 FDL2。
 // 出参在入口清空。空载荷（0 字节）拒写：空 FDL 发出去也起不了作用，失败点会被推到设备侧。
