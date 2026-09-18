@@ -95,6 +95,7 @@ private slots:
     void xreadHeaderRejectsOversizedAnnouncedLength();
     void nullChannelFailsSessionEntryPoints();
     void sendCommandNoackLeavesEndStartFramesUnconsumed();
+    void sendCommandRendersEmptyEndResultWithoutEmptyParentheses();
 };
 
 // XC:18-25 create_cmd：`<da><version>v</version><command>CMD:<name></command>[<arg>…</arg>]</da>`；
@@ -488,6 +489,23 @@ void TestMtkXmlSession::sendCommandNoackLeavesEndStartFramesUnconsumed()
                            nullptr, /*noack=*/true, &err), qPrintable(err));
     QCOMPARE(m.reads.size(), 4);        // CMD:END 与 CMD:START 各剩两笔（头+载荷）：一帧都没被读
     QCOMPARE(m.writeFrames.size(), 2);  // 只有命令帧的头与载荷：**没有** ack
+}
+
+// `CMD:END` + **空 `<result>`** + 无 `<message>`：文案必须点名"空结果"本身，
+// 不能渲染成 `…结果非 OK（）`（空括号：读者分不出"设备回了空结果"与"我们没解析出来"）。
+// ⚠️ 这一格**不**由"三空判据"覆盖 —— r.command == "CMD:END" 非空，走的是 CMD:END 专用分支；
+// 三空判据的命中者另有其人（见 sendCommandFailsOnEmptyResult 的 `OK@0x0`）。
+void TestMtkXmlSession::sendCommandRendersEmptyEndResultWithoutEmptyParentheses()
+{
+    MockUsbChannel m;
+    m.reads << textReads(QStringLiteral("OK"))
+            << textReads(QStringLiteral("<host><command>CMD:END</command>"
+                                        "<arg><result></result></arg></host>"));
+    mtkbrom::XmlSession s(&m);
+    QString err;
+    QVERIFY(!s.sendCommand(QStringLiteral("<da><command>CMD:FOO</command></da>"), nullptr, false, &err));
+    QVERIFY2(err.contains(QStringLiteral("(空 <result>)")), qPrintable(err));
+    QVERIFY2(!err.contains(QStringLiteral("（）")), "不得渲染出空括号文案");
 }
 QTEST_APPLESS_MAIN(TestMtkXmlSession)
 #include "test_mtk_xml_session.moc"

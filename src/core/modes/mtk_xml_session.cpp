@@ -375,7 +375,11 @@ bool XmlSession::sendCommand(const QString &xml, Result *out, bool noack, QStrin
     }
     if (r.command == QStringLiteral("CMD:END")) {              // XL:195
         if (r.text != QStringLiteral("OK")) {                  // XL:196-198
-            if (error) *error = QStringLiteral("XML：命令以 CMD:END 结束但结果非 OK（%1）").arg(r.text);
+            // `<result></result>` 且无 `<message>` 时 r.text 为空串 —— 直接插值会渲染成
+            // "结果非 OK（）"这种空括号文案（读者分不出"设备回了空结果"与"我们没解析出来"）。
+            // 三空判据**不覆盖**这一格：r.command == "CMD:END" 非空，走的就是本条。
+            const QString shown = r.text.isEmpty() ? QStringLiteral("(空 <result>)") : r.text;
+            if (error) *error = QStringLiteral("XML：命令以 CMD:END 结束但结果非 OK（%1）").arg(shown);
             return false;
         }
         if (!ack(error))                                       // XL:199
