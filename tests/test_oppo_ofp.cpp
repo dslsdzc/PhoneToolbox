@@ -58,9 +58,11 @@ static QString writePkg(QTemporaryDir &dir, const QString &name, const QByteArra
 // QC 判据：尾页 +0x10 LE32 == 0x7CEF（extract_xml() L119-123）
 void TestOppoOfp::detectQcFromTail()
 {
+    // 每条 QcFileSpec 显式写全 sha256/md5：夹具对二者的默认就是空（结构体注释"可空"），
+    // 显式写出与省略等价，只为满足 -Wmissing-field-initializers（本文件其余条目同）。
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
         {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"),
-          QByteArray(0x100, 'P'), 2}});
+          QByteArray(0x100, 'P'), 2, QString(), QString()}});
     QVERIFY(pkg.isValid());
 
     imgopp::OfpVariant v = imgopp::OfpVariant::Unknown;
@@ -77,7 +79,8 @@ void TestOppoOfp::detectQcFromTail()
     big.xmlOffsetPages = 1;
     big.firstDataPage = 4;
     const ofptest::QcPackage pkg4k = ofptest::buildQcPackage(
-        {{QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x200, 'B'), 0}}, big);
+        {{QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x200, 'B'), 0,
+          QString(), QString()}}, big);
     QVERIFY(pkg4k.isValid());
     v = imgopp::OfpVariant::Unknown;
     QVERIFY(imgopp::detectOFP(pkg4k.head, pkg4k.tail, quint64(pkg4k.blob.size()), v));
@@ -137,8 +140,9 @@ void TestOppoOfp::parseQcSynthetic()
     QVERIFY(dir.isValid());
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
         {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"),
-          QByteArray(0x100, 'P'), 2},
-         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x180, 'B'), 10}});
+          QByteArray(0x100, 'P'), 2, QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x180, 'B'), 10,
+          QString(), QString()}});
     QVERIFY(pkg.isValid());
     const QString path = writePkg(dir, QStringLiteral("qc.ofp"), pkg.blob);
     QVERIFY(!path.isEmpty());
@@ -181,7 +185,7 @@ void TestOppoOfp::parseQcContainerChildInheritsGroup()
     opts.wrapInContainer = true;
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
         {{QStringLiteral("Sahara"), QStringLiteral("prog_ufs_firehose_test.elf"),
-          QByteArray(0x100, 'P'), 2}}, opts);
+          QByteArray(0x100, 'P'), 2, QString(), QString()}}, opts);
     QVERIFY(pkg.isValid());
     const QString path = writePkg(dir, QStringLiteral("qc-container.ofp"), pkg.blob);
     QVERIFY(!path.isEmpty());
@@ -205,11 +209,16 @@ void TestOppoOfp::parseQcGroupPolicies()
     QVERIFY(dir.isValid());
     const QByteArray configPlain = pseudoRandom(int(ofptest::kQcPartialDecryptSize) + 0x100, 0xC0FFEEu);
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x300, 'A'), 0},
-         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x200, 'F'), 0},
-         {QStringLiteral("DigestsToSign"), QStringLiteral("digests.bin"), QByteArray(0x100, 'D'), 0},
-         {QStringLiteral("ChainedTableOfDigests"), QStringLiteral("chain.bin"), QByteArray(0x100, 'C'), 0},
-         {QStringLiteral("Config"), QStringLiteral("config.bin"), configPlain, 0},
+        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x300, 'A'), 0,
+          QString(), QString()},
+         {QStringLiteral("Firmware"), QStringLiteral("boot.img"), QByteArray(0x200, 'F'), 0,
+          QString(), QString()},
+         {QStringLiteral("DigestsToSign"), QStringLiteral("digests.bin"),
+          QByteArray(0x100, 'D'), 0, QString(), QString()},
+         {QStringLiteral("ChainedTableOfDigests"), QStringLiteral("chain.bin"),
+          QByteArray(0x100, 'C'), 0, QString(), QString()},
+         {QStringLiteral("Config"), QStringLiteral("config.bin"), configPlain, 0,
+          QString(), QString()},
          {QStringLiteral("Provision"), QStringLiteral("prov.bin"), QByteArray(0x280, 'V'), 0,
           QStringLiteral("sha256-deadbeef"), QStringLiteral("md5-cafebabe"), true},
          // 无 SizeInByteInSrc 属性 → 长度回退 SizeInSectorInSrc × 页尺寸（0x180 → 1 扇区）
@@ -266,7 +275,8 @@ void TestOppoOfp::parseQcA57XmlLengthHack()
     ofptest::QcBuildOptions opts;
     opts.a57XmlLengthHack = true;
     const ofptest::QcPackage pkg = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x180, 'P'), 0}}, opts);
+        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x180, 'P'), 0,
+          QString(), QString()}}, opts);
     QVERIFY(pkg.isValid());
     QVERIFY(pkg.xmlLength >= 200);   // 清单本身不短；短的是被写坏的 +0x18 字段
     const QString path = writePkg(dir, QStringLiteral("qc-a57.ofp"), pkg.blob);
@@ -345,7 +355,8 @@ void TestOppoOfp::parseRejectsUnknownKey()
     opts.keyOverride = QByteArrayLiteral("0123456789abcdef");  // 16B，不在 qcKeyCandidates() 内
     opts.ivOverride = QByteArrayLiteral("fedcba9876543210");
     const ofptest::QcPackage unknown = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x100, 'P'), 0}}, opts);
+        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x100, 'P'), 0,
+          QString(), QString()}}, opts);
     QVERIFY(unknown.isValid());
     const QString unknownPath = writePkg(dir, QStringLiteral("unknown.ofp"), unknown.blob);
     QVERIFY(!unknownPath.isEmpty());
@@ -364,7 +375,8 @@ void TestOppoOfp::parseRejectsUnknownKey()
 
     // 清单密文首字节翻转（密钥正确）→ 试解全部落空，同样归入密钥/损坏分支
     const ofptest::QcPackage good = ofptest::buildQcPackage(
-        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x100, 'P'), 0}});
+        {{QStringLiteral("Sahara"), QStringLiteral("prog.elf"), QByteArray(0x100, 'P'), 0,
+          QString(), QString()}});
     QVERIFY(good.isValid());
     QByteArray damaged = good.blob;
     damaged[qsizetype(good.xmlOffset)] = char(damaged.at(qsizetype(good.xmlOffset)) ^ 0xFF);
@@ -387,7 +399,8 @@ void TestOppoOfp::parseRejectsOutOfBounds()
 
     // QC：FileOffsetInSrc 指向包外（0x8000 页 × 0x200 = 16MiB）
     const ofptest::QcPackage qc = ofptest::buildQcPackage(
-        {{QStringLiteral("Config"), QStringLiteral("super.img"), QByteArray(0x100, 'X'), 0x8000}});
+        {{QStringLiteral("Config"), QStringLiteral("super.img"), QByteArray(0x100, 'X'), 0x8000,
+          QString(), QString()}});
     QVERIFY(qc.isValid());
     const QString qcPath = writePkg(dir, QStringLiteral("oob.ofp"), qc.blob);
     QVERIFY(!qcPath.isEmpty());
@@ -421,7 +434,7 @@ void TestOppoOfp::parseRejectsOversizedManifestLength()
     // 既有"清单越界"检查兜不住，只剩新加的上限防护能拦
     ofptest::QcPackage pkg = ofptest::buildQcPackage(
         {{QStringLiteral("Firmware"), QStringLiteral("boot.img"),
-          QByteArray(9 * 1024 * 1024, 'F'), 0}});
+          QByteArray(9 * 1024 * 1024, 'F'), 0, QString(), QString()}});
     QVERIFY(pkg.isValid());
     const qsizetype tailBase = pkg.blob.size() - qsizetype(pkg.pageSize);
     QVERIFY(quint64(0x800001) <= quint64(pkg.blob.size()) - pkg.xmlOffset); // 前提：不触发越界检查
