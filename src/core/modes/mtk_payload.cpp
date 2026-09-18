@@ -828,6 +828,29 @@ bool loadGptPartitions(const mtkgpt::ReadFn &read, const QString &label,
 }
 } // namespace
 
+// ---- A-28 存储类型门（声明与理由见 mtk_payload.h）----
+
+QString storageDescriptor(quint32 xflashStorage, quint32 xflashPartType)
+{
+    if (xflashStorage == kXStorageEmmc && xflashPartType == kXEmmcPartUser)
+        return kXmlStoreEmmcUser;                  // 与 XML 侧同一个描述符串（判据只有一处）
+    return QStringLiteral("XFlash(storage=0x%1, partType=0x%2)")
+        .arg(xflashStorage, 0, 16).arg(xflashPartType, 0, 16);
+}
+
+bool requireEmmcUserStorage(const QString &descriptor,
+                            const std::function<void(const QString &)> &say, QString *error)
+{
+    if (descriptor == kXmlStoreEmmcUser) {
+        if (say)
+            say(QStringLiteral("写入存储：%1（本期只支持 eMMC 用户区，UFS 机型未验证）").arg(descriptor));
+        return true;
+    }
+    if (error) *error = QStringLiteral("存储描述符 %1 不受支持 —— 本期只支持 eMMC 用户区，UFS 机型未验证；"
+                                       "拒绝按 eMMC 用户区的偏移写入").arg(descriptor);
+    return false;
+}
+
 bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                         const BromLogFn &log, const BromProgressFn &progress, QString *error)
 {
@@ -966,6 +989,9 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         }
         refs = toPartitionRefs(deviceParts);
     } else if (gen == MtkGeneration::XFlash) {
+        // A-28 存储类型门：**任何设备读之前**先过（拒绝整条 XFlash 写路径，而不是读到一半再拒）
+        if (!requireEmmcUserStorage(storageDescriptor(kXStorageEmmc, kXEmmcPartUser), say, error))
+            return false;
         XPacketLength pl;
         if (!xflashGetPacketLength(xflash, pl, error))     // 铁律 14：拿不到写分块就**不写**
             return false;
@@ -998,6 +1024,9 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                                QStringLiteral("XFlash"), refs, partAddr, say, error))
             return false;
     } else {   // Xml
+        // A-28 存储类型门：**任何设备读之前**先过（拒绝整条 XML 写路径，而不是读到一半再拒）
+        if (!requireEmmcUserStorage(kXmlStoreEmmcUser, say, error))
+            return false;
         // 分区表：**READ-FLASH + 同一个 mtkgpt**（T1 的解析器；spec §9 已核，`XC:474-484` 的区间读。
         // 上游 XML 侧没有"先问设备总扇区数"的命令 —— 分区表就是按字节偏移读回来的）
         if (!loadGptPartitions(xmlSectorReader(xml), QStringLiteral("XML"), refs, partAddr, say, error))

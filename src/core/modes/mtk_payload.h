@@ -169,6 +169,18 @@ mtkgpt::ReadFn xflashSectorReader(XFlashSession &x, quint32 storage = kXStorageE
 // 收敛口径）：`xmlSectorReader` 的默认值与 bromFlashOnSession 的逐分区写共用同一个串。
 inline const QString kXmlStoreEmmcUser = QStringLiteral("EMMC-USER");
 
+// ---- 存储类型门（A-28；控制方 2026-09-18 裁决 = 方案 1 fail-closed）----
+// 本期只支持 **eMMC 用户区**。两条链的存储描述符都是**常量**：XFlash 走 (storage, partType)
+// 数值对，XML 走 "EMMC-USER" 文本 —— 同一存储、同一分区类型的两种线上编码，故先归一到同一个
+// 描述符串、再由**一处**判据决定放行。
+// ⚠️ 引导链**拿不到设备侧存储类型**（GET_EMMC_INFO / GET_UFS_INFO 属"接上游存储枚举"的方案 2，
+//    本期不做）→ 这道门当前只能拦住"我们自己把描述符换成非 eMMC"这种改动；真正的 UFS 机型要靠
+//    方案 2 的设备侧枚举才能识别。**但姿态是明确的**：写出前必须过门，非 eMMC 用户区一律拒绝
+//    （**不**回退、**不**静默按 eMMC 用户区的偏移写），并把"本期只支持 eMMC 用户区"写进日志。
+QString storageDescriptor(quint32 xflashStorage, quint32 xflashPartType);
+bool requireEmmcUserStorage(const QString &descriptor,
+                            const std::function<void(const QString &)> &say, QString *error);
+
 // XML 引导链（D3-T9 的握手层 + BROM 级 DA1 串起来；**不含**枚举/打开 USB —— 故可用 mock 逐帧测）：
 //   sendDa1(region[1]，**含 JUMP_DA**，三代共用）→ xmlDa1Handshake（等设备发 **CMD:START**
 //   → setup_env / setup_hw_init / set_host_info 三步，XL:271-321）。

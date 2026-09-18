@@ -397,6 +397,7 @@ private slots:
     void bromFlashOnSessionRejectsEmptyXmlGptTable();
     void bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure();
     void readFlashInfoNandIdCountBranches();
+    void storageGateAcceptsOnlyEmmcUser();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -1003,6 +1004,40 @@ void TestMtkPayload::readFlashInfoNandIdCountBranches()
     }
 }
 
+// A-28 存储类型门：本期只支持 eMMC 用户区。两条链的描述符先归一到同一串再判（判据一处）。
+// 判别力：UFS 的 (storage=0x30, partType=3) 必须**拒绝**且文案点名"UFS 机型未验证" ——
+// 把门写成"总是 true"、或把 UFS 归一成 "EMMC-USER"，都会在这里红。
+// ⚠️ 这道门当前拦不住真机上的 UFS：引导链没有设备侧存储类型来源（方案 2 未做，见头文件注释）。
+void TestMtkPayload::storageGateAcceptsOnlyEmmcUser()
+{
+    // ① 归一化：XFlash 的 (0x1, 0x8) 与 XML 的 "EMMC-USER" 是同一描述符
+    QCOMPARE(mtkbrom::storageDescriptor(mtkbrom::kXStorageEmmc, mtkbrom::kXEmmcPartUser),
+             mtkbrom::kXmlStoreEmmcUser);
+    // UFS 的 DaStorage=0x30 / UFSPartitionType::USER=3（facts §…）→ 不得归一成 eMMC
+    QVERIFY(mtkbrom::storageDescriptor(0x30, 0x3) != mtkbrom::kXmlStoreEmmcUser);
+
+    // ② eMMC 用户区放行，且把"本期只支持 eMMC 用户区"写进日志（不静默）
+    {
+        QStringList logged;
+        QString err;
+        QVERIFY2(mtkbrom::requireEmmcUserStorage(
+                     mtkbrom::kXmlStoreEmmcUser,
+                     [&logged](const QString &m) { logged << m; }, &err), qPrintable(err));
+        QVERIFY2(logged.join('\n').contains(QStringLiteral("本期只支持 eMMC 用户区")), qPrintable(logged.join('\n')));
+    }
+    // ③ 非 eMMC（XFlash 归一化后的诊断串）必须拒绝，文案点名 UFS 未验证
+    {
+        const QString desc = mtkbrom::storageDescriptor(0x30, 0x3);
+        QStringList logged;
+        QString err;
+        QVERIFY(!mtkbrom::requireEmmcUserStorage(
+            desc, [&logged](const QString &m) { logged << m; }, &err));
+        QVERIFY2(err.contains(QStringLiteral("UFS 机型未验证")), qPrintable(err));
+        QVERIFY2(err.contains(QStringLiteral("拒绝按 eMMC 用户区的偏移写入")), qPrintable(err));
+        QVERIFY2(logged.isEmpty(), "拒绝路径不得先打\"放行\"日志");
+    }
+}
+
 // beginEmiDramInfo：4B + 16B draminfo + 回执必须 0xBC4 + nand id 数
 void TestMtkPayload::beginEmiDramInfoReadsDramInfoAndChecksBc4()
 {
@@ -1450,6 +1485,8 @@ void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
     QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err), qPrintable(err));
     QCOMPARE(m->reads.size(), 0);                 // 读队列必须正好清空（devctrl 尾部 status 漏读必错位）
     QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XFLASH")), qPrintable(cap.joined()));
+    // A-28 存储类型门确实跑在真实路径上（不是只在单测里存在），且不静默
+    QVERIFY2(cap.joined().contains(QStringLiteral("写入存储：EMMC-USER")), qPrintable(cap.joined()));
     QVERIFY2(cap.joined().contains(QStringLiteral("GPT 读出 1 个分区")), qPrintable(cap.joined()));
     QVERIFY2(cap.joined().contains(QStringLiteral("SHUTDOWN 收尾完成")), qPrintable(cap.joined()));
 
@@ -1548,6 +1585,8 @@ void TestMtkPayload::bromFlashOnSessionRoutesXmlEndToEnd()
     QVERIFY2(mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &err), qPrintable(err));
     QCOMPARE(m->reads.size(), 0);                 // 读队列必须**正好**清空（漏读/多读都是错位）
     QVERIFY2(cap.joined().contains(QStringLiteral("代际判定：XML")), qPrintable(cap.joined()));
+    // A-28 存储类型门确实跑在真实路径上（不是只在单测里存在），且不静默
+    QVERIFY2(cap.joined().contains(QStringLiteral("写入存储：EMMC-USER")), qPrintable(cap.joined()));
     QVERIFY2(cap.joined().contains(QStringLiteral("v6")), "日志必须点名 DA 是 v6（判定依据）");
     QVERIFY2(cap.joined().contains(QStringLiteral("XML：GPT 读出 1 个分区")), qPrintable(cap.joined()));
     QVERIFY2(cap.joined().contains(QStringLiteral("未发 EMI")), qPrintable(cap.joined()));
