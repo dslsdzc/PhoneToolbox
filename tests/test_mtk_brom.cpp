@@ -55,6 +55,7 @@ private slots:
     // ---- F1-2: DA 存储 ----
     void daStorageRequiresActiveDa();
     void emmcReadFrameAndDataLoop();
+    void emmcReadAbortsOnZeroByteBlock();
     void emmcWriteFrameAndDataLoop();
     void listPartitionsParses60ByteEntries();
     void listPartitionsParses58ByteEntries();
@@ -556,6 +557,33 @@ void TestMtkBrom::emmcReadFrameAndDataLoop()
     QCOMPARE(m->writes.mid(21, 4), QByteArray("\x00\x10\x00\x00", 4));
     QCOMPARE(m->writes.mid(25, 1), QByteArray(1, char(0x5A))); // 循环 ACK
     QCOMPARE(m->writes.size(), 26); // 帧 25B + 循环 ACK
+}
+
+// emmcRead 的**进度守卫**：通道"成功但 0 字节"时 `remaining -= 0` → while 原地打转（上游同形）。
+// 注入点用 mock 的 readEmptySuccessAt（第 N 次 read 返回 true + 0 字节；默认语义下非 0 maxLen
+// 收空条目是 false，故这条路径没有开关就测不到）。
+// 判据是**守卫的位置**：必须在 checksum 读之前中止 —— 未加守卫时循环会多转一轮
+//（多读一笔 checksum、多写一个 ACK），故断言读/写计数即可区分，且用例不会挂死。
+void TestMtkBrom::emmcReadAbortsOnZeroByteBlock()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    mtkbrom::DaStorage st(s);
+    st.setDaActive(true);
+    // switch_part 两个 ACK + READ_CMD 一个 ACK = 3 次 read；第 4 次（数据块）注入"成功但 0 字节"
+    m->reads << QByteArray(1, char(0x5A)) << QByteArray(1, char(0x5A))
+             << QByteArray(1, char(0x5A));
+    m->readEmptySuccessAt = 3;
+    QByteArray out;
+    QString err;
+    QVERIFY(!st.emmcRead(0x1000, 4, out, 0x08, &err));
+    QVERIFY2(err.contains(QStringLiteral("0 字节块")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("已读 0/4 字节")), qPrintable(err));   // 进度如实
+    QCOMPARE(out, QByteArray());                       // 0 字节块不得进 out
+    QCOMPARE(m->readRequests.size(), 4);               // 3 个 ACK + 数据块；**没有** checksum 那一读
+    QCOMPARE(m->writes.size(), 25);                    // 只有帧（switch_part 2B + READ_CMD 23B），无循环 ACK
 }
 
 void TestMtkBrom::emmcWriteFrameAndDataLoop()

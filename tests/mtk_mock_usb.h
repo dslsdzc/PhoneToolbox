@@ -35,6 +35,12 @@ public:
     int pktSize = 0x400;
     int failWriteAt = -1;
     int writeCalls = 0;
+    // 读注入：第 N 次 read() **返回 true 但 0 字节**（0 基，按 read() 调用序计；-1 = 不注入，一次性）。
+    // 默认语义下这不 reachable（非 0 maxLen 收空条目 → false），但真机通道可能"成功但没给数据"，
+    // 而 `emmcRead` 那类"按已收字节推进"的循环会因此**原地打转**—— 没有这个开关那条路径测不到。
+    // 注入的那次**不消耗** reads 队列（方便用例断言"队列没被动过"）。readCalls = 已发生的调用数。
+    int readEmptySuccessAt = -1;
+    int readCalls = 0;
 
     bool open(QString *error) override
     {
@@ -59,6 +65,7 @@ public:
         Q_UNUSED(timeoutMs)
         Q_UNUSED(error)
         readRequests << maxLen;
+        if (readCalls++ == readEmptySuccessAt) { out.clear(); return true; }   // 注入：成功但 0 字节
         if (reads.isEmpty()) { out.clear(); return false; }
         const QByteArray r = reads.takeFirst();
         out = r.left(maxLen);

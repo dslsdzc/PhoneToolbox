@@ -212,6 +212,14 @@ bool DaStorage::emmcRead(quint64 addr, quint64 length, QByteArray &out,
         QByteArray block;
         if (!m_session.usb()->read(block, want, 5000, error))
             return false;
+        // 进度守卫：通道**返回 true 但 0 字节**时下面 `remaining -= 0`，这个 while 会永远转下去
+        //（上游同形，本层 fail-closed）。守卫放在 checksum 读**之前** —— 0 字节块是协议错误，
+        // 没有理由再为它消费一笔 checksum 帧。
+        if (block.isEmpty()) {
+            if (error) *error = QStringLiteral("EMMC 读：收到 0 字节块（已读 %1/%2 字节）—— 中止（防死循环）")
+                                    .arg(length - remaining).arg(length);
+            return false;
+        }
         QByteArray chk;
         if (!m_session.usb()->read(chk, 2, 1000, error))
             return false;
