@@ -324,7 +324,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_loadout.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_payload.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_session.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_recovery_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_recovery_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_button_labels.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -607,6 +608,13 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp)
+                elseif(_test_stem STREQUAL "test_flash_button_labels")
+                    # backlog Task 3：FlashPanel「刷入」按钮的 (文案, tooltip) 纯函数（src/ui，
+                    # 不编入任何静态库）。只编被测源 —— 它只取 DeviceDetector::DeviceMode
+                    # （头文件），**不碰 Widgets/libusb**：这正是抽纯函数的目的（flash_panel.cpp
+                    # 的依赖闭包太大，仓内无法为它建用例）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/flash_button_labels.cpp)
                 elseif(_test_stem STREQUAL "test_samsung_plan_dialog")
                     # Phase C Task 9：三星计划对话框（src/ui，不编入任何静态库）+ 通用预览控件
                     # + 计划层/PIT/tar 索引。Qt6::Widgets 与 offscreen 见下方 if 块。

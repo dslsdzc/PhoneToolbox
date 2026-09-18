@@ -3,6 +3,7 @@
 #include "samsung_plan_dialog.h"        // Phase C Task 9：三星 Odin 刷写计划预览
 #include "mtk_plan_dialog.h"            // Phase D1 Task 11：MTK BROM 刷写计划预览
 #include "eub_recovery_dialog.h"        // Phase E Task 7：EUB 救援（Exynos USB Boot）
+#include "flash_button_labels.h"        // EUB backlog Task 3：「刷入」按钮文案/tooltip 的唯一来源
 #include "core/eub/eub_libusb_transport.h"  // 真机传输在本面板构造，对话框只认抽象（IEubTransport）
 #include "core/filename_parser.h"
 #include "core/mtk_flash_plan.h"        // D1 Task 11：MTK 入口的计划构建（scatter 参照表 + 镜像）
@@ -297,12 +298,17 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     // 不复位就会跟着按钮状态漂到别的模式（Fastboot/MTK 下它们是可用的）
     m_frpBtn->setToolTip(QString());
     m_brickRepairBtn->setToolTip(QString());
-    // 文案与提示**必须一起复位**：下面 EUB 分支把本按钮改成「EUB 救援…」并挂上救援 tooltip，
-    // 而其余模式分支（fastboot/ADB）两者都不写 —— 只复位其一会留下"文案/提示与动作不符"的组合：
-    // 例如 text 复位了、tooltip 还写着"只发 RAM 镜像、不写存储"，而按钮此时执行的是**不可逆的
-    // 分区写入**（用户按 tooltip 的保证去点，正是救援工具最不该给的错误保证）。
-    m_flashBtn->setText(QStringLiteral("刷入"));
-    m_flashBtn->setToolTip(QString());
+    // 文案与提示**必须一起设置、一起复位** —— 本函数是唯一来源（flashui::flashButtonLabelsFor）：
+    // 这里一次无条件赋值同时定下两者，各模式分支（EDL/MTK DA/协议通道/fastboot…）都不再自行设置。
+    // 只动其一会留下"文案/提示与动作不符"的组合：例如 EUB 设备离开后 text 复位了、tooltip 还写着
+    // "只发 RAM 镜像、不写存储"，而按钮此时执行的是**不可逆的分区写入**（用户按 tooltip 的保证去点，
+    // 正是救援工具最不该给的错误保证）。出处：EUB 终审 I3
+    //（.superpowers/sdd/eub-final-fix-report.md §I3 —— 当时的修复无自动化覆盖，回归钉见
+    // tests/test_flash_button_labels.cpp 的 nonProtocolModesAreFullyReset）。
+    const flashui::ButtonLabels lb = flashui::flashButtonLabelsFor(
+        static_cast<DeviceDetector::DeviceMode>(info.mode));   // DeviceInfo::mode 是 int
+    m_flashBtn->setText(lb.text);
+    m_flashBtn->setToolTip(lb.tooltip);
 
     if (info.mode == DeviceDetector::MODE_EDL_9008) {
         // EDL 模式: 显示连接控件
@@ -380,18 +386,9 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_partitionList->clear();
         m_partitions.clear();
         m_flashBtn->setEnabled(true);
-        if (m_deviceInfo.mode == DeviceDetector::MODE_SAMSUNG_EUB) {
-            m_flashBtn->setText(QStringLiteral("EUB 救援…"));
-            m_flashBtn->setToolTip(QStringLiteral(
-                "EUB 救援：用你自备的原厂 BL（sboot.bin / BL_*.tar.md5）按 SoC 布局表分段注入设备 RAM，"
-                "把设备引导进 Download 模式；本流程只发 RAM 镜像、不写存储，完成后请继续用三星刷写"));
-        } else {
-            m_flashBtn->setText(QStringLiteral("刷入"));
-            m_flashBtn->setToolTip(m_deviceInfo.mode == DeviceDetector::MODE_MTK_BROM
-                ? QStringLiteral("协议通道按计划刷写：DA + 镜像 → 计划预览 → 按设备代际自动选择 "
-                                 "LEGACY / XFLASH / XML 链（三代均已实现，实际链路见日志「代际判定」）")
-                : QStringLiteral("协议通道整包/按计划刷写（按模式选择 update.app / pac+FDL / DA+镜像 / 三星 tar.md5）"));
-        }
+        // 本档各模式的文案/tooltip 已经在上面的 flashui::flashButtonLabelsFor 一次定好
+        // （EUB → 「EUB 救援…」+ RAM-only 提示；本档其余 → 「刷入」+ 对应的协议通道提示）——
+        // 这里不再重复置位，避免出现"复位点/设置点各写一半"的第二处来源（I3 的成因）。
         return;
     }
 
