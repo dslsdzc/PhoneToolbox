@@ -8,13 +8,15 @@
 // 用户会被引到一条注定失败的刷写链上（facts §E2）。抽成纯函数后这条优先级被单测钉死。
 #pragma once
 #include <QList>
-#include <QString>
 
 namespace eub {
 
 enum class SamsungMode { NotSamsung, Eub, Odin };
 
-// 纯函数：不碰 libusb。参数与 odin::LibusbOdinTransport::isOdinDevice 同形
+// 纯函数：函数体不调 libusb（**链接期**仍会带进 libusb —— 本函数调用两个 transport TU 的判据
+// （LibusbEubTransport::isEubDevice / odin::LibusbOdinTransport::isOdinDevice），见 CMakeLists.txt
+// 的 libusb 链接名单）；不在本函数里做任何设备操作。
+// 参数与 odin::LibusbOdinTransport::isOdinDevice 同形
 // （interfaceClasses = 全部接口的 bInterfaceClass 扁平表；hasBulkInOut = 设备级事实）。
 SamsungMode samsungModeFor(quint16 vid, quint16 pid,
                            const QList<quint8> &interfaceClasses, bool hasBulkInOut);
