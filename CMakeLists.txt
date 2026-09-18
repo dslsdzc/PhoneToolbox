@@ -23,6 +23,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
+# ---- 警告开关：全库默认开启 -Wall -Wextra ----
+# 用户 2026-09-19 裁决"全库开 -Wall -Wextra + 修完既有警告"；
+# 计划 docs/superpowers/plans/2026-09-19-wall-wextra-cleanup.md，本开关落地见 W5-T1。
+# 用 add_compile_options（目录属性）：对本目录及其**之后** add_subdirectory 的所有目标生效
+# （主程序 / image_engine / root_patcher / phone_plugins / huawei_flash 插件及其用例）。
+# 不局限于 C++ —— 该属性对 C 编译器同样生效（合成工程实测：C_COMPILER 与 CXX_COMPILER
+# 两条规则的 FLAGS 均含这两个开关），故将来加入 .c 源不需要再改这里。
+# **有意不设 -Werror**：任何新警告不应变成别人构建失败的硬墙。
+# 存量警告由 W5-T2～T5 分批清零（逐文件分布见 .superpowers/sdd/w5-task-1-report.md）；
+# 在这几批完成前，本开关会让所有人的增量构建都报这批警告 —— 那是**预期内**的，不是构建坏了。
+add_compile_options(-Wall -Wextra)
+
 # 查找 Qt6
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
