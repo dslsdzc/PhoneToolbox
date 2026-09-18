@@ -11,9 +11,11 @@ constexpr quint64 kBackupWindowSectors = 34;
 //（4096 布局需要 0x1000 + 0x5C = 4188 字节）。
 constexpr int kProbeLen = 0x2000;
 
-// 一次读主 GPT 的上限 = GPT 保留区（上游按 0x22 个扇区读整张表：realtime.py:88-92 的 "gpt"
+// 一次读主 GPT 的上限 = GPT 保留区（上游按 0x22 **个扇区**读整张表：realtime.py:88-92 的 "gpt"
 // 特判 filesize = 0x22 × pagesize）—— 只作"头部字段异常时别发超大读"的护栏。
-constexpr quint64 kPrimaryAreaMax = 0x22ull * 4096;
+// ⚠️ 口径是**扇区数**，必须按本盘探测到的扇区大小折算：写死 `0x22 × 4096` 在 512B 扇区设备上
+// 等于把上限放宽到 272 扇区（比上游口径大 8 倍），护栏就形同虚设。
+constexpr quint64 kPrimaryAreaMaxSectors = 0x22;
 
 // 条目参数判据（UEFI：条目大小 ≥ 128、条数上限 4096；"2 的幂"这条不查 —— 与本模块的
 // 解析正确性无关）—— "读多少"（primaryExtent）与"解析多少"（parseAt）共用同一份，
@@ -259,7 +261,7 @@ bool readTable(const ReadFn &read, quint64 diskSectors, Table &out, QStringList 
     // parsePrimary 报精确原因）。设备侧读回调可能短读，短读结果原样收下由 parsePrimary 判尺寸。
     quint64 needBytes = 0;
     if (primaryExtent(head, sectorSize, &needBytes) && needBytes > quint64(head.size())
-        && needBytes <= kPrimaryAreaMax) {
+        && needBytes <= kPrimaryAreaMaxSectors * quint64(sectorSize)) {
         QByteArray bigger;
         QString extErr;
         if (read(0, int((needBytes + sectorSize - 1) / sectorSize * sectorSize), &bigger, &extErr)

@@ -54,6 +54,7 @@ private slots:
     void rejectsBadCrc();
     void parsesSyntheticGpt();
     void logsExtensionReadFailureInsteadOfSwallowingIt();
+    void primaryExtensionCapIsCountedInSectorsNotBytes();
 
 private:
     bool samplesReady(QString *why)
@@ -220,13 +221,14 @@ void TestMtkGpt::parsesSyntheticGpt()
 
 // 头部字段声明"条目区在探测窗口之外" → readTable 会按头部字段补读一次；**这次补读失败**时
 // 失败原因必须进日志。此前 `extErr` 取了地址却从未被读，失败原因整条被丢（-Wall 抓不到）。
-// 夹具：把 part_entry_start_lba 抬到 40（needBytes = 40×512 + 4×128 = 20992 > 探测窗口 0x2000），
+// 夹具：把 part_entry_start_lba 抬到 20（needBytes = 20×512 + 4×128 = 10752：既 > 探测窗口
+// 0x2000=8192，又在补读上限 0x22×512=17408 之内 —— 否则 A-20 的扇区口径护栏会先拦下、补读根本不发起），
 // 读回调**第一次**给窗口、**第二次**（补读）失败并带上可断言的注入原因。
 void TestMtkGpt::logsExtensionReadFailureInsteadOfSwallowingIt()
 {
     const QByteArray head = mtkgpt::testBuildSyntheticGpt(512, 64).left(0x2000);
     QByteArray probe = head;
-    probe[512 + 0x48] = char(40);            // part_entry_start_lba = 40（低字节；原值 2）
+    probe[512 + 0x48] = char(20);            // part_entry_start_lba = 20（低字节；原值 2）
     int calls = 0;
     mtkgpt::ReadFn reader = [&probe, &calls](quint64 off, int len, QByteArray *out, QString *err) {
         if (++calls == 1) {
@@ -246,6 +248,41 @@ void TestMtkGpt::logsExtensionReadFailureInsteadOfSwallowingIt()
     const QString joined = log.join('\n');
     QVERIFY2(joined.contains(QStringLiteral("按头部字段补读主 GPT 失败")), qPrintable(joined));
     QVERIFY2(joined.contains(QStringLiteral("注入的补读失败")), qPrintable(joined));
+}
+
+// 补读上限的口径是 `0x22 × sectorSize` **字节**，不是写死的 `0x22 × 4096`。
+// 512B 扇区盘上：needBytes = entryLba × 512 + 4 × 128。取 entryLba = 33 与 34 卡在
+// 0x22 × 512 = 17408 的**两侧**（33 → 17408 恰好等于上限，发起；34 → 17920 超限，不发起）。
+// 夹具按"请求范围"记录每一次读 —— 上下两侧各自的请求条数就是唯一判据。
+void TestMtkGpt::primaryExtensionCapIsCountedInSectorsNotBytes()
+{
+    const QByteArray full = mtkgpt::testBuildSyntheticGpt(512, 64);
+    QByteArray hdr = full.left(0x2000);
+    struct Case { int entryLba; int expectedReads; int expectedLen; };
+    // ① 恰好到上限 → 补读发起；② 超一扇区 → 不发起。（写死 0x22×4096 的实现两侧都会发起；
+    //    把比较写成 `<` 的实现会让 ① 变成"不发起"。）
+    const QList<Case> cases{ {33, 2, 17408}, {34, 1, 0} };
+    for (const Case &c : std::as_const(cases)) {
+        QByteArray probe = hdr;
+        probe[512 + 0x48] = char(c.entryLba);        // part_entry_start_lba（低字节；原值 2）
+        QByteArray backing = full;                   // 补读的**后端**同样带这个改动，
+        backing[512 + 0x48] = char(c.entryLba);      // 否则补读会拿回一份合法表、整体反而成功
+        QList<QPair<quint64, int>> requests;
+        mtkgpt::ReadFn reader = [&probe, &backing, &requests](quint64 off, int len, QByteArray *out, QString *) {
+            requests.append({off, len});
+            if (off == 0 && len <= probe.size()) { *out = probe.mid(int(off), len); return true; }
+            if (off + quint64(len) <= quint64(backing.size())) { *out = backing.mid(int(off), len); return true; }
+            return false;
+        };
+        Table t;
+        QStringList log;
+        QString err;
+        // 头字段被改坏 → 头部 CRC 不符，整体必然失败；本用例只钉**读请求的范围**
+        QVERIFY(!mtkgpt::readTable(reader, 0, t, &log, &err));
+        QCOMPARE(requests.size(), c.expectedReads);
+        if (c.expectedReads == 2)
+            QCOMPARE(requests.at(1).second, c.expectedLen);   // 补读长度 = ceil(needBytes/512)×512
+    }
 }
 QTEST_APPLESS_MAIN(TestMtkGpt)
 #include "test_mtk_gpt.moc"
