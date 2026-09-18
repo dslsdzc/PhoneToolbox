@@ -130,8 +130,8 @@ inline bool makeSelection(quint16 hwCode, mtkbrom::DaSelection &out, QString *er
 //   [0x40, 0x47) = "MTK_BIN"              LEGACY 切片 = 其后 0xC 起（= 0x4C）
 //   [0x4C, ...)  = emi                    载荷原样放进切片
 // **不含** MMM 魔术（否则 extractEmiLegacy 走 MMM 裁剪分支，切片就不是 emi 了）。
-// 注：test_mtk_preloader_emi.cpp 另有一份带自检的 file-local `buildPreloader(int)`（T5 产物，
-// 覆盖 MMM/零 dramsize 等分支）—— 统一合并留给终审 triage，本 helper 不取代它。
+// 注：test_mtk_preloader_emi.cpp 的 file-local `buildPreloader(int)` 是本函数的薄包装
+// （它额外构造可断言的周期 EMI 载荷；MMM/零 dramsize 分支的包装函数另在其同文件里）。
 inline QByteArray buildEmiPreloader(const QByteArray &verBytes, const QByteArray &emi)
 {
     QByteArray d(0x4C + emi.size(), '\0');

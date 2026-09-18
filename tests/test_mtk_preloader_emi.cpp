@@ -37,20 +37,15 @@ using namespace mtktest;
 // 方向性错误会自洽通过 —— 见 mtk_test_helpers.h 的头注释）
 static const char kMmmMagic[] = "\x4D\x4D\x4D\x01\x38\x00\x00\x00";
 
-// 造一个"偏移 0 处有 MTK_BLOADER_INFO_v 且含 MTK_BIN"的 preloader：
-//   [0, 18)  = "MTK_BLOADER_INFO_v"
-//   [18, 20) = "38"（版本 38）
-//   [0x40, 0x47) = "MTK_BIN"（上游从 MTK_BIN+0xC = 0x4C 起取 EMI）
-//   [0x4C, 0x4C+emiLen) = EMI 载荷（0xA1 起、16 周期递增）
+// 造一个"偏移 0 处有 MTK_BLOADER_INFO_v 且含 MTK_BIN"的 preloader（版本 "38"）。
+// 布局契约（标记@0 / 版本@0x12 / MTK_BIN@0x40 / EMI@0x4C）在 mtktest::buildEmiPreloader 里**只有一处**；
+// 本函数只负责 EMI 载荷：0xA1 起、16 周期递增 —— 调用方靠这个序列做逐字节断言。
 static QByteArray buildPreloader(int emiLen)
 {
-    QByteArray d(0x4C + emiLen, '\0');
-    d.replace(0, 18, QByteArray("MTK_BLOADER_INFO_v", 18));
-    d.replace(18, 2, "38");
-    d.replace(0x40, 7, QByteArray("MTK_BIN", 7));
+    QByteArray emi(emiLen, '\0');
     for (int i = 0; i < emiLen; ++i)
-        d[0x4C + i] = char(0xA1 + (i % 16));
-    return d;
+        emi[i] = char(0xA1 + (i % 16));
+    return mtktest::buildEmiPreloader(QByteArray("38"), emi);
 }
 
 // MMM 包装（正常路径）：[0,8) 魔术 + [0x40, 0x40+pay.size()) 内层载荷 + 尾部 4B dramsize。
