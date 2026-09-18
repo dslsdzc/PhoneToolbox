@@ -42,8 +42,9 @@ public:
     //     本实现**不采纳**：一次失败后再补一发 EndSession 会把设备踢出 Odin 模式，
     //     用户只能重新进下载模式才能重试（Phase B 的 EDL 会话同一口径）。
     //   * 收尾（0x67/0x00、0x67/0x01）失败**不判失败**，只落日志（Phase B 的 reset 同款口径）。
-    //   * 句柄：**所有路径都恰好在最后 close() 一次**（包括空计划提前返回 —— 那条路径不 open，
-    //     也不 close）。
+    //   * 句柄：**open 成功的路径都恰好在最后 close() 一次**；**open 失败的路径不 close**
+    //     （实现在 open() 内部自行收尾，见 odin_transport.h 的 close() 契约）；
+    //     空计划提前返回的路径既不 open 也不 close（一条命令都不发）。
     // 前置：plan 由 buildSamsungPlan 成功产出（plan.entries 非空）；失败后的 plan 不得传入。
     bool run(const SamsungPlan &plan, const OdinOptions &opt, QString *error);
 
@@ -62,7 +63,8 @@ private:
         Ok,                 // 读全 + 解析成功
         RejectedNoStream,   // **可回退**：设备未进入数据阶段（请求失败/被拒、回报大小不合理），
                             //   或数据流已按 size 对齐消费完而只剩内容问题（长度不符/解析失败）
-                            //   —— 这两种情况端点里都没有"设备还在发"的字节。
+                            //   —— 这两种情况端点里都没有"设备还在发"的字节（名里的 "NoStream"
+                            //   即此义，不是"设备从未进入过数据阶段"）。
         StreamInterrupted   // **不可回退**：已进入数据阶段后中断（分片请求写失败/分片读空/
                             //   结束请求或结束应答失败）→ run() 直接失败，错误文案写明需重试。
     };
