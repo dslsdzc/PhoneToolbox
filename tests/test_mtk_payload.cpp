@@ -396,6 +396,7 @@ private slots:
     void bromFlashOnSessionRoutesXmlEndToEnd();
     void bromFlashOnSessionRejectsEmptyXmlGptTable();
     void bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure();
+    void readFlashInfoNandIdCountBranches();
 };
 
 void TestMtkPayload::patchPreloaderSecurityReplacesPatterns()
@@ -917,9 +918,11 @@ void TestMtkPayload::stage2ConfigRejectsNonEmmcStorage()
 void TestMtkPayload::stage2ConfigAppendsHwCodeSpecificFields()
 {
     // 上游 :264 的字面量实测 **20 字节**（4646 + 00×14 + ff000000）—— 声明成 19 会截掉末尾 00，
-    // 发给 0x6580/0x8163/0x8127 时就少一字节（mock 逐帧断言也测不出"少一字节"，故此处钉住长度）
+    // 发给 0x6580/0x8163/0x8127 时就少一字节。
+    // ⚠️ 长度**不能**靠 `QCOMPARE(unk.size(), 20)` 钉：那是对本文件自己的常量自证（改短了常量就一起变），
+    //    而逐帧比对两侧用的是同一份 c.tail，也照样相等 —— 只有在循环里对**实际写出的帧**断言长度，
+    //    才连到生产行为上（20 是独立字面量，见下）。
     const QByteArray unk = QByteArray::fromHex("46460000000000000000000000000000ff000000");
-    QCOMPARE(unk.size(), 20);
     struct Case { quint16 hwCode; QList<QByteArray> tail; quint8 bmtFlag; quint32 bmtPart; };
     QList<Case> cases;
     cases << Case{0x6592, {be32(0)}, 1, 0x1500000};                    // is_gpt_solution = 0
@@ -933,6 +936,7 @@ void TestMtkPayload::stage2ConfigAppendsHwCodeSpecificFields()
     cases << Case{0x6571, {}, 1, 0x1500000};                           // 同上
     cases << Case{0x6572, {}, 0, 0xA8};                                // 上游把 blockcount 当 partsize（:266-273）
     cases << Case{0x6765, {}, 1, 0};                                   // 默认芯片（不上任何表）
+    int unkFramesChecked = 0;                                          // 防下面那条断言空跑（无人带 unk 时它会静默消失）
     for (const Case &c : std::as_const(cases)) {
         auto usb = std::make_unique<MockUsbChannel>();
         MockUsbChannel *m = usb.get();
@@ -946,13 +950,56 @@ void TestMtkPayload::stage2ConfigAppendsHwCodeSpecificFields()
                                            &emiNeeded, nullptr, &err), qPrintable(err));
         QVERIFY(!emiNeeded);
         QCOMPARE(m->writeFrames.size(), 11 + c.tail.size());
-        for (int i = 0; i < c.tail.size(); ++i)
+        for (int i = 0; i < c.tail.size(); ++i) {
             QCOMPARE(m->writeFrames.at(11 + i), c.tail.at(i));
+            if (c.tail.at(i) == unk) {                     // 该 hwCode 分支确实带了 20B 常量
+                ++unkFramesChecked;
+                QCOMPARE(m->writeFrames.at(11 + i).size(), 20);   // 对**线上实际字节**断言长度
+            }
+        }
         // bmtflag / bmtpartsize：**写出的字节** = `B flag` + `>I partSize`（emmc 分支，上游 :231-283）
         QCOMPARE(m->writeFrames.at(5), QByteArray(1, char(c.bmtFlag)));
         QCOMPARE(m->writeFrames.at(6), be32(c.bmtPart));
         // resetkeys：0x6583 为 0，其余为 1（上游 :243-247）
         QCOMPARE(m->writeFrames.at(8), QByteArray(1, char(c.hwCode == 0x6583 ? 0 : 1)));
+    }
+    QCOMPARE(unkFramesChecked, 3);       // 0x6580 / 0x8163 / 0x8127 三条分支带该常量
+}
+
+// NAND id 计数的分派（`read_flash_info` 的第二段）：此前只有"两级都为 0"一格被测（夹具注释自陈
+// "不塞任何哨兵"）。这里补上另外两格 —— 偏移 15 恒 0 → 走 NandInfo32 的偏移 11：
+//   ① count = 3（> 2）→ 读 `count×2 − 4 = 2` 字节（上游 `usbread(nandcount*2-4)`）
+//   ② count = 1（∈ {1,2}）→ **零读**，只打一行日志（上游 `usbread(-2)` 实读 0 字节）
+// 判据：读队列必须**正好清空** —— 多读一次会提前取走 info2 那笔并让后续整体错位（末尾会多剩一笔）。
+void TestMtkPayload::readFlashInfoNandIdCountBranches()
+{
+    struct Case { int count; int idBytes; };              // idBytes = 该分支应读的 NAND id 表字节数
+    const QList<Case> cases{ {3, 2}, {1, 0} };
+    for (const Case &c : std::as_const(cases)) {
+        auto usb = std::make_unique<MockUsbChannel>();
+        MockUsbChannel *m = usb.get();
+        mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+        QByteArray nand(0x11, '\0');                      // NandInfo64：count @15 恒 0 → 转 NandInfo32
+        nand[11] = char(0);
+        nand[12] = char(c.count);                         // be16 @11 = count
+        m->reads << QByteArray(0x1C, '\0')                // NOR info
+                 << nand;                                 // NAND info
+        if (c.idBytes > 0)
+            m->reads << QByteArray(c.idBytes, '\x42');    // NAND id 表：只有 count > 2 才会读
+        m->reads << QByteArray(9, '\0')                   // info2
+                 << QByteArray(0x5C, '\0')                // EMMC info
+                 << QByteArray(0x1C, '\0')                // SDC info
+                 << QByteArray(0x26, '\0')                // flashconfig
+                 << (QByteArray(0xA, '\0').replace(0, 1, QByteArray(1, char(0x5A))));   // PassInfo ack=0x5A
+        QStringList log;
+        QString err;
+        QVERIFY2(mtkbrom::readFlashInfoDa2(s, 0x6765, &log, &err), qPrintable(err));
+        QCOMPARE(m->reads.size(), 0);                     // 队列正好清空（读多/读少都会留下痕迹）
+        const QString joined = log.join('\n');
+        if (c.idBytes > 0)
+            QVERIFY2(!joined.contains(QStringLiteral("NAND id 计数")), qPrintable(joined));   // 读了就不该只打日志
+        else
+            QVERIFY2(joined.contains(QStringLiteral("NAND id 计数 1")), qPrintable(joined));  // 零读必须留痕
     }
 }
 
