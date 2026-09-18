@@ -86,6 +86,10 @@ ImportResult LocalImporter::importFromJsonData(const QByteArray &data, QList<Vul
 
 ImportResult LocalImporter::importFromZip(const QString &zipPath, QList<VulnEntry> &entries)
 {
+    // 桩：ZIP 路径尚未实现。两个参数是 VulnImporter/本类接口的一部分（见 local_importer.h），
+    // 实现补齐前先显式标注未用，避免 -Wunused-parameter。
+    Q_UNUSED(zipPath)
+    Q_UNUSED(entries)
     ImportResult result;
     result.error = "ZIP 导入暂未实现，请使用 JSON 文件";
     return result;
