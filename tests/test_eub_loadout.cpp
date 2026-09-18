@@ -270,14 +270,23 @@ private slots:
         QList<QPair<QString, QByteArray>> parts;
         QString err;
         QVERIFY2(eub::splitSboot(sboot, lo, parts, &err), qPrintable(err));
-        QCOMPARE(parts.size(), lo.segments.size());
-        // 逐段核对：名字 + 长度 + 内容与 `sboot.mid(offset, length)` 逐字节相同 ——
-        // 任意一段的 offset/length 错位都会在这里现形（夹具非周期，见文件头说明）
-        for (qsizetype i = 0; i < lo.segments.size(); ++i) {
-            const eub::EubSegment &s = lo.segments[i];
-            QCOMPARE(parts[i].first, s.name);
-            QCOMPARE(parts[i].second.size(), qsizetype(s.length));
-            QCOMPARE(parts[i].second, sboot.mid(qsizetype(s.offset), qsizetype(s.length)));
+        // 逐段核对：期望值**写死在这里**（9610 表 spec §5.4 行 5），与 lo.segments 无关。
+        // 从 lo.segments 反推期望是**自指**的：splitSboot 也按同一张表切，表本身写错时两侧一起错、
+        // 断言照样全绿（夹具非周期只能保证"内容比对能分辨偏移"，分辨不了"期望与切法同源"）。
+        const QList<Seg> kWant = {
+            {"fwbl1",   {0x0,     0x2000}},
+            {"epbl",    {0x2000,  0x13000}},
+            {"bl2",     {0x15000, 0x2F000}},
+            {"fwbl1",   {0x0,     0x2000}},   // 重发段（facts §C5）
+            {"u-boot",  {0x5A000, 0x180000}},
+            {"el3_mon", {0x1DA000, 0x40000}},
+        };
+        QCOMPARE(parts.size(), kWant.size());
+        for (qsizetype i = 0; i < kWant.size(); ++i) {
+            QCOMPARE(parts[i].first, kWant[i].first);
+            QCOMPARE(parts[i].second.size(), qsizetype(kWant[i].second.second));
+            QCOMPARE(parts[i].second,
+                     sboot.mid(qsizetype(kWant[i].second.first), qsizetype(kWant[i].second.second)));
         }
         QCOMPARE(parts[0].second, sboot.mid(0x0, 0x2000));
         QCOMPARE(parts[2].second, sboot.mid(0x15000, 0x2F000));
