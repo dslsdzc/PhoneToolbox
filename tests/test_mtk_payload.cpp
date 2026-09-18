@@ -16,43 +16,10 @@
 #include "core/modes/mtk_xflash_payload.h"
 #include "core/modes/mtk_xflash_session.h"
 #include "core/modes/mtk_xml_session.h"   // T12：xmlBringUpDa 的 XmlSession（mock 逐帧测）
+#include "mtk_mock_usb.h"    // 共享的 IBromUsb 假通道（本文件此前自带一份副本）
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
-
-// MockUsbChannel 与 test_mtk_brom.cpp 相同（复制；测试间不共享 TU）
-class MockUsbChannel : public mtkbrom::IBromUsb {
-public:
-    QByteArray writes;                 // 拼接（既有断言用）
-    QList<QByteArray> writeFrames;     // 逐笔（每次 write() 一笔，**含空包**）—— 帧级断言用
-    QList<QByteArray> reads;
-    bool failOpen = false;
-    QString openError;
-    int pktSize = 0x400;
-
-    bool open(QString *error) override
-    {
-        if (failOpen) { if (error) *error = openError; return false; }
-        return true;
-    }
-    bool write(const QByteArray &data, QString *error) override
-    {
-        Q_UNUSED(error)
-        writes += data;
-        writeFrames << data;
-        return true;
-    }
-    bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
-    {
-        Q_UNUSED(timeoutMs) Q_UNUSED(error)
-        if (reads.isEmpty()) { out.clear(); return false; }
-        QByteArray r = reads.takeFirst();
-        out = r.left(maxLen);
-        return !r.isEmpty() || maxLen == 0;
-    }
-    int maxPacketSize() const override { return pktSize; }
-    bool close() override { return true; }
-};
 
 namespace {
 

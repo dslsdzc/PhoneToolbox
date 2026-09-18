@@ -12,40 +12,7 @@
 #include "core/modes/mtk_xflash_session.h"
 #include "core/modes/mtk_brom.h"
 #include "mtk_bytes.h"      // 测试侧独立的小端助手（**不**复用生产头，见该文件头注释）
-
-class MockUsbChannel : public mtkbrom::IBromUsb
-{
-public:
-    QByteArray writes;              // 全部写入字节（拼接）
-    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
-    QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
-    int pktSize = 0x400;
-    // 写失败注入：第 N 次 write() **调用**失败一次（0 基，按**含失败在内**的调用序计；
-    // 失败的那次不进 writes/writeFrames），-1 = 不注入。writeCalls = 已发生的调用数（含失败）。
-    // 与 mock_eub_transport.h 的 failWriteAt（按**成功**数计、且粘性）不同：这里是一次性的，
-    // 后续写入照常成功 —— "写坏一次就够"的用例不需要复位动作。
-    int failWriteAt = -1;
-    int writeCalls = 0;
-
-    bool open(QString *) override { return true; }
-    bool write(const QByteArray &data, QString *error) override
-    {
-        if (writeCalls++ == failWriteAt) {
-            if (error) *error = QStringLiteral("注入的写入失败（第 %1 次 write）").arg(writeCalls);
-            return false;
-        }
-        writes += data; writeFrames << data; return true;
-    }
-    bool read(QByteArray &out, int maxLen, int, QString *) override
-    {
-        if (reads.isEmpty()) { out.clear(); return false; }
-        const QByteArray r = reads.takeFirst();
-        out = r.left(maxLen);
-        return !r.isEmpty();
-    }
-    int maxPacketSize() const override { return pktSize; }
-    bool close() override { return true; }
-};
+#include "mtk_mock_usb.h"   // 共享的 IBromUsb 假通道（本文件此前自带一份副本）
 
 namespace {
 using mtkbytes::le32;

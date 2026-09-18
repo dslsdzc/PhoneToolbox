@@ -61,27 +61,7 @@
 #include "core/modes/mtk_xml_payload.h"
 #include "core/modes/mtk_xml_session.h"
 #include "mtk_bytes.h"      // 测试侧独立的小端助手（**不**复用生产头，见该文件头注释）
-
-class MockUsbChannel : public mtkbrom::IBromUsb   // 与 T8 同款
-{
-public:
-    QByteArray writes;              // 全部写入字节（拼接）
-    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔）—— 帧级断言用
-    QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 → read 返回 false
-    int pktSize = 0x400;            // XML 层不使用（无分块写），保留接口语义
-
-    bool open(QString *) override { return true; }
-    bool write(const QByteArray &data, QString *) override { writes += data; writeFrames << data; return true; }
-    bool read(QByteArray &out, int maxLen, int, QString *) override
-    {
-        if (reads.isEmpty()) { out.clear(); return false; }
-        const QByteArray r = reads.takeFirst();
-        out = r.left(maxLen);
-        return !r.isEmpty();
-    }
-    int maxPacketSize() const override { return pktSize; }
-    bool close() override { return true; }
-};
+#include "mtk_mock_usb.h"   // 共享的 IBromUsb 假通道（本文件此前自带一份副本）
 
 namespace {
 using mtkbytes::le32;

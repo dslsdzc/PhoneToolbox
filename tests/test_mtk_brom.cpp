@@ -3,49 +3,12 @@
 
 #include "core/modes/mtk_brom.h"
 #include "core/modes/mtk_emmc.h"
+#include "mtk_mock_usb.h"    // 共享的 IBromUsb 假通道（本文件此前自带一份副本）
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
 
-// ---- MockUsbChannel：记录写入序列、预置读取队列（IBromUsb 注入）----
-class MockUsbChannel : public mtkbrom::IBromUsb {
-public:
-    QByteArray writes;              // 全部写入字节（含空包）
-    QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔，**含空包**）—— 帧级断言用
-    QList<QByteArray> reads;        // 按序弹出的读取响应；空表示返回空
-    bool failOpen = false;
-    QString openError;
-    int pktSize = 0x400;
-
-    bool open(QString *error) override
-    {
-        if (failOpen) {
-            if (error) *error = openError;
-            return false;
-        }
-        return true;
-    }
-    bool write(const QByteArray &data, QString *error) override
-    {
-        Q_UNUSED(error)
-        writes += data;
-        writeFrames << data;
-        return true;
-    }
-    bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
-    {
-        Q_UNUSED(timeoutMs)
-        Q_UNUSED(error)
-        if (reads.isEmpty()) { out.clear(); return false; }
-        QByteArray r = reads.takeFirst();
-        out = r.left(maxLen);
-        return !r.isEmpty() || maxLen == 0;
-    }
-    int maxPacketSize() const override { return pktSize; }
-    bool close() override { return true; }
-};
-
-// 注意：MockUsbChannel 所有权在 BromSession 构造时转移；
+// 注意：MockUsbChannel（tests/mtk_mock_usb.h）所有权在 BromSession 构造时转移；
 // 测试一律先保存裸指针 MockUsbChannel *m = usb.get() 再 move，后续经 m 访问。
 class TestMtkBrom : public QObject {
     Q_OBJECT
