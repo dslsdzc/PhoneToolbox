@@ -216,11 +216,15 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
 bool patchPreloaderSecurity(QByteArray &preloader);
 
 // 刷写分区：listPartitions 查名 → emmcWrite(分区偏移, 镜像)。未找到返回明确错误。
+// ⚠️ **当前仅测试使用**（全仓调用点只有 tests/test_mtk_payload.cpp 两处）：生产的逐分区写
+// 在 bromFlashOnSession 里读完表后直接调 flashPartitionWithTable（见其下方注释的 A-37 语义）。
+// 若要把它作为"表不在手"的对外入口，请先在调用侧接线。
 bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
                     const QByteArray &image, QString *error = nullptr);
 
 // 同上，但分区表由调用方传入（会话级读一次、逐分区复用 —— read_pmt 是设备往返，
 // 逐分区各读一次会变成 N+1 次）。未找到返回明确错误。
+// 调用方复用同一份 parts 时**计划表 == 写表**（A-37 的语义变更，理由见 .cpp 调用点注释）。
 bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
                              const QString &name, const QByteArray &image,
                              QString *error = nullptr);

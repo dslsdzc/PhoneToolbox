@@ -649,7 +649,10 @@ bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
 bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
                     const QByteArray &image, QString *error)
 {
-    // 单发入口（表不在手时的便利包装）；会话内逐分区写请用 flashPartitionWithTable
+    // 单发入口：内部先 listPartitions 再交给 flashPartitionWithTable。
+    // ⚠️ **当前仅测试使用**（全仓调用点只有 tests/test_mtk_payload.cpp 两处）；生产路径
+    //（bromFlashOnSession）读一次表后逐分区复用，直接走 flashPartitionWithTable。
+    // 若要把它作为"表不在手"的对外入口，请先在调用侧接线（并加真机路径的用例）。
     QList<EmPartition> parts;
     if (!st.listPartitions(parts, error))
         return false;
@@ -1072,7 +1075,7 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         }
         say(QStringLiteral("写入分区 %1（%2 字节）…").arg(e.partition).arg(image.size()));
         if (gen == MtkGeneration::Legacy) {
-            // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt
+            // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt（A-37）。
             if (!flashPartitionWithTable(*storage, deviceParts, e.partition, image, error))
                 return false;
         } else if (gen == MtkGeneration::XFlash) {
