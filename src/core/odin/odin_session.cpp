@@ -141,8 +141,8 @@ bool OdinSession::readAck(quint32 expectedId, bool allowProgressCodes,
     const QByteArray rsp = m_t.read(kAckSize, m_opt.controlTimeoutMs, &rerr);
     if (rsp.size() < kAckSize) {
         // 终审 I-1④：空返回有两种成因，**传输层可区分** ——
-        //   * 超时/传输错误 → 传输层**置 error**（rerr 非空；真机 odin_libusb_transport.cpp:222-227）；
-        //   * 读到 **0 长度包（ZLP）** → 空返回且**不置 error**（真机同文件 :229-235；mock 对队列里的
+        //   * 超时/传输错误 → 传输层**置 error**（rerr 非空；真机 odin_libusb_transport.cpp 的 read()：:369 超时 / :373 传输错误）；
+        //   * 读到 **0 长度包（ZLP）** → 空返回且**不置 error**（真机同文件 :377-378；mock 对队列里的
         //     空 QByteArray 同款）。后者说明设备**抢发**了一个空包而我们没消费掉它（典型场景：上一笔
         //     结束序列后设备回的空包 —— D8 本期不读），残留落在 IN 端点队头。
         // 只补文案、**不动控制流**：诊断指向真因，免得持机人往线材/硬件方向查。

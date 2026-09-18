@@ -263,7 +263,7 @@ bool LibusbEubTransport::open(QString *error)
 
 bool LibusbEubTransport::claimInterface(QString *error)
 {
-    // claim → 失败则 detach 内核驱动 → 再 claim（既有顺序，odin_libusb_transport.cpp:202-218 同款）：
+    // claim → 失败则 detach 内核驱动 → 再 claim（既有顺序，odin_libusb_transport.cpp:250-255 同款）：
     // EUB 接口在 Linux 上可能被内核驱动占用（hubble 的路径显式 detach，facts §B1 / hubble.py:304-308），
     // 第一次 claim 会 LIBUSB_ERROR_BUSY。
     int ret = libusb_claim_interface(m_dev, m_iface);
@@ -365,7 +365,7 @@ bool LibusbEubTransport::writeBulk(const QByteArray &data, QString *error)
 
     // 单帧长度必须塞得进 libusb 的 `int length`。今天这条由上游定表保证不可达（一帧 = 一段
     // sboot 切片，"切段"在载荷层完成），留着是因为将来若改大块/64 位缓冲，这里必须**拒绝**
-    // 而不是窄化（odin_libusb_transport.cpp:262-270 同款；Qt6 的 QByteArray::size() 是 qsizetype）。
+    // 而不是窄化（odin_libusb_transport.cpp:318-326 同款；Qt6 的 QByteArray::size() 是 qsizetype）。
     if (data.size() > std::numeric_limits<int>::max()) {
         setErr(error, QStringLiteral("写入失败：单帧 %1 字节超过 libusb 的 int 长度上限")
                           .arg(data.size()));
@@ -394,7 +394,7 @@ QByteArray LibusbEubTransport::readBulk(int maxBytes, int timeoutMs, QString *er
 {
     if (!m_dev) {
         // 未打开时**连读不到东西也报错**（调用方拿它诊断"谁没 open"，而不是把空返回当"设备没回显"）
-        // —— 与 odin_libusb_transport.cpp:290-297 同款。
+        // —— 与 odin_libusb_transport.cpp:346-353 同款。
         setErr(error, QStringLiteral("读取失败：EUB 设备未打开"));
         return {};
     }

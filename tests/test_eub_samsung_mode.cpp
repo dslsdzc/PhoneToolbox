@@ -67,7 +67,7 @@ private slots:
     void odinVerdictKeepsSharedPredicateBoundaries()
     {
         // ① 兜底 PID 表是**三星 VID 之内**的兜底：非三星带老 PID 也不算 Odin
-        //    （odin_libusb_transport.cpp:101-102 "非三星一律不认：高通 EDL（0x05C6）/Google（0x18D1）"）
+        //    （odin_libusb_transport.cpp:122-123 "非三星一律不认：高通 EDL（0x05C6）/Google（0x18D1）"）
         QCOMPARE(eub::samsungModeFor(0x18D1, 0x6601, {}, false), eub::SamsungMode::NotSamsung);
         // ② 类判据是"0x0A(CDC_DATA) 类 **且** 批量 in/out"（odin_libusb_transport.h:22）：
         //    只有类、没有批量端点对的不算（Thor Linux.cs:120-135 要求同接口内成对）
