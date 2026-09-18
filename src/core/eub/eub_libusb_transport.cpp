@@ -90,9 +90,10 @@ Endpoints resolveEndpoints(libusb_device *dev)
             // 第一个同时带批量 in/out 的接口作退路；interface 0 命中时**覆盖**它（接口 0 是
             // hubble 的认领对象）。描述符里的接口顺序不保证按号升序，故两个条件都留着。
             // 本判据**不锁存**首次命中的接口 0：接口 0 若带多个具备批量对的 altsetting，
-            // 后遍历到的那个生效。两者只可能在端点上不同，而认领对象始终是接口 0（hubble.py），
-            // 故"取哪个 altsetting 的端点"不影响认领哪个接口。本仓无真机（facts §F1）：
-            // 这段取舍的离线证据只到描述符遍历这一层。
+            // 后遍历到的那个生效（取到的是它的端点）。无论命中哪一个，认领对象都是接口 0
+            //（hubble.py）—— 差别只在端点参数。两个 altsetting 之间是否仅端点不同**不做保证**：
+            // USB 规范不要求如此，本仓也无真机与描述符样本可核（facts §F1），这段取舍的离线证据
+            // 只到"按描述符遍历"这一层。
             if (out.iface < 0 || alt->bInterfaceNumber == 0) {
                 out.iface = alt->bInterfaceNumber;
                 out.epOut = epOut;
