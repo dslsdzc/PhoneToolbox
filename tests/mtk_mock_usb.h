@@ -28,6 +28,8 @@ public:
     QByteArray writes;              // 全部写入字节（拼接；既有断言用）
     QList<QByteArray> writeFrames;  // 逐笔（每次 write() 一笔，**含空包**）—— 帧级断言用
     QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 / 空条目 → read 返回 false
+    QList<int> readRequests;        // 每次 read() 的请求长度（maxLen）—— 读侧可观测：欠读/超给
+                                    // 由用例拿请求长度与实际给出的字节对照（裸 read 无长度校验）
     bool failOpen = false;
     QString openError;
     int pktSize = 0x400;
@@ -56,6 +58,7 @@ public:
     {
         Q_UNUSED(timeoutMs)
         Q_UNUSED(error)
+        readRequests << maxLen;
         if (reads.isEmpty()) { out.clear(); return false; }
         const QByteArray r = reads.takeFirst();
         out = r.left(maxLen);

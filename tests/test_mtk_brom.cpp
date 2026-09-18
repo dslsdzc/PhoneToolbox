@@ -49,6 +49,7 @@ private slots:
     void connectOpenFailure();
     // ---- F1-2: 内存协议 ----
     void readMemoryFrame();
+    void readMemoryShortReplyFails();
     void writeMemoryFrame();
     // ---- F1-2: DA 存储 ----
     void daStorageRequiresActiveDa();
@@ -422,6 +423,33 @@ void TestMtkBrom::readMemoryFrame()
     QCOMPARE(out, QByteArray("\xDE\xAD\xBE\xEF\x01\x02\x03\x04", 8));
     QCOMPARE(m->writes,
              QByteArray("\xD1\x00\x10\x00\x00\x00\x00\x00\x02", 9));
+}
+
+// readMemory 走**裸 read**（不是 readExact）→ 设备少给字节时不许静默收下"短内存块"。
+// 读侧记账（mock 的 readRequests）同时钉住：数据段请求的确实是 dwords*4 字节。
+void TestMtkBrom::readMemoryShortReplyFails()
+{
+    auto usb = std::make_unique<MockUsbChannel>();
+    MockUsbChannel *m = usb.get();
+    mtkbrom::BromDevice dev; dev.vid = 0x0E8D; dev.pid = 0x0003;
+    mtkbrom::BromSession s(std::move(usb), dev);
+    // 帧同 readMemoryFrame，但数据段只回 4B（请求 2 dwords = 8B）
+    m->reads << QByteArray(1, char(0xD1))
+             << QByteArray("\x00\x10\x00\x00", 4)
+             << QByteArray("\x00\x00\x00\x02", 4)
+             << QByteArray("\x00\x00", 2)
+             << QByteArray("\xDE\xAD\xBE\xEF", 4)      // 短回 4B
+             << QByteArray("\x00\x00", 2);
+    QByteArray out("\xAA\xBB", 2);                    // 预置非零：失败不得把半截数据写回出参
+    QString err;
+    QVERIFY(!s.readMemory(0x00100000, 2, out, &err));
+    QVERIFY2(err.contains(QStringLiteral("短读")), qPrintable(err));
+    QCOMPARE(out, QByteArray("\xAA\xBB", 2));
+    // 读侧记账：1B 命令回显 + 4B addr + 4B dwords + 2B status + 8B 数据；短读在数据段就返回，
+    // 收尾的 status2 **不再读**（队列里那笔 2B 应答留着不动）
+    QCOMPARE(m->readRequests.size(), 5);
+    QCOMPARE(m->readRequests.at(4), 8);
+    QCOMPARE(m->reads.size(), 1);
 }
 
 void TestMtkBrom::writeMemoryFrame()

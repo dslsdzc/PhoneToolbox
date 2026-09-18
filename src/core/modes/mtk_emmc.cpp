@@ -72,6 +72,12 @@ bool BromSession::readMemory(quint32 addr, quint32 dwords, QByteArray &out, QStr
     QByteArray data;
     if (!m_usb->read(data, bytes, 2000, error))
         return false;
+    // 裸 read 不像 readExact 那样校验长度：设备/通道少给几字节会静默变成"短数据当读成功"
+    // （调用方按 bytes 用这块内存）→ 这里补上。
+    if (data.size() != bytes) {
+        if (error) *error = QStringLiteral("读内存短读：请求 %1 字节，实得 %2").arg(bytes).arg(data.size());
+        return false;
+    }
     quint16 status2 = 0;
     if (!readStatus(status2, error))
         return false;
