@@ -78,14 +78,14 @@ void TestMtkPlanDialog::previewsEntriesAndWarnings()
     QCOMPARE(warn->count(), 1);              // 告警不静默
 }
 
-// 同族三个计划对话框（EDL / Odin / MTK）装同一个 PlanPreviewWidget：最小尺寸必须一致，
-// 且初始尺寸不小于它（否则用户在 760 宽的初始窗口里看到被钳制的预览）。
+// 同族三个计划对话框（EDL / Odin / MTK）装同一个 PlanPreviewWidget：最小尺寸必须一致。
+// ⚠️ **不要**在这里补 `dlg.size() >= dlg.minimumSize()` 之类的断言：Qt 本就保证 size() ≥
+// minimumSize()，只要上面那条 QCOMPARE 成立，那类断言对任何实现都**恒真**（实测：把实现里的
+// `resize(880,520)` 改成 `resize(1200,800)`，它们照样全绿）。真要钉"初始尺寸"就写**严格相等**。
 void TestMtkPlanDialog::minimumSizeMatchesDialogFamily()
 {
     MtkPlanDialog dlg(oneEntryPlan());
     QCOMPARE(dlg.minimumSize(), QSize(880, 520));
-    QVERIFY(dlg.size().width() >= dlg.minimumSize().width());
-    QVERIFY(dlg.size().height() >= dlg.minimumSize().height());
 }
 
 // 空计划 = 必须**弹窗前**失败且写出 *error（"err != 初值"证明结论是本次写的，不是赖调用方的老值；
