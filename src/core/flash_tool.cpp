@@ -1492,6 +1492,8 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         // 此处不再重复输出，避免同一坏包出两行。
 
         // 多设备防护（同既有四通道）：LibusbOdinTransport::open 取首个匹配设备
+        // ⚠️ 计数口径是 **VID**（0x04E8 是三星公共 VID：正常开机/MTP/充电的手机同样命中），
+        // 故 ">1" 只说明"可能有别的同厂商设备"，不等于存在多台 Odin 模式设备。
         const int samsungCount = countDevicesOfVid(0x04E8, nullptr);
         if (samsungCount > 1)
             emit outputMessage(QStringLiteral(
