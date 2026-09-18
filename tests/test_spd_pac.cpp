@@ -1,5 +1,7 @@
 #include <QtTest>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 
 #include "core/modes/spd_pac.h"
@@ -29,6 +31,12 @@ private slots:
     void notAPacFails();
     void missingFileFails();
     void outputsClearedOnFailure();
+    // ---- 落盘（UI 接线：提取出的字节要先落盘，通道按路径读文件）----
+    void writeExtractedFdlsRoundTrip();
+    void writeExtractedFdlsNameCollision();
+    void writeExtractedFdlsMissingDirFails();
+    void writeExtractedFdlsRejectsEmptyData();
+    void writeExtractedFdlsSecondWriteFailureLeavesNoFile();
 
 private:
     static QString writeSample(const QTemporaryDir &dir, const QByteArray &bytes,
@@ -53,6 +61,21 @@ pactest::Entry fdl2Entry()
 pactest::Entry bootEntry()
 {
     return {QStringLiteral("boot"), QStringLiteral("boot.img"), kBootBytes};
+}
+
+// 落盘用例的载荷：非周期填充（xorshift32，同 test_eub_session 的做法）——`(i * k) & 0xFF` 一类
+// 256 周期图案会让"偏移错 256 的整数倍"漏检；逐字节对拍要能分辨错位/截断。
+QByteArray patternedBytes(int n, quint32 seed)
+{
+    QByteArray b(n, '\0');
+    quint32 x = seed;
+    for (int i = 0; i < n; ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        b[i] = char(x & 0xFF);
+    }
+    return b;
 }
 } // namespace
 
@@ -320,6 +343,121 @@ void TestSpdPac::outputsClearedOnFailure()
     QVERIFY(fdl2.name.isEmpty());
     QVERIFY(fdl2.fileName.isEmpty());
     QVERIFY(fdl2.data.isEmpty());
+}
+
+// ---- 落盘（供 UI 接线：SPD 通道按路径读 FDL，提取出的字节必须先落盘）----
+//
+// 诚实边界：本组用例证明的是"字节进出文件一致 + 命名/失败语义"，不是"提取出的 FDL 在真机上可用"
+//（后者属既有 SPD 刷写链的未验证范围）。UI 分支本身（跳过/回退手选对话框）无自动化覆盖 —— 见报告。
+
+// 两份 FDL 各写成一份文件（文件名带条目名），路径可直接读回原字节。
+void TestSpdPac::writeExtractedFdlsRoundTrip()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"),
+                               patternedBytes(1024, 0x12345678)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl2.bin"),
+                               patternedBytes(2048, 0x9ABCDEF0)};
+
+    QString p1, p2, err;
+    QVERIFY2(spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+    QVERIFY2(p1 != p2, "两份 FDL 写到了同一路径");
+    // 文件名带条目名（容器内文件名），落在调用方给的目录里；目录里恰好两份文件
+    QCOMPARE(QFileInfo(p1).fileName(), QStringLiteral("fdl1.bin"));
+    QCOMPARE(QFileInfo(p2).fileName(), QStringLiteral("fdl2.bin"));
+    QCOMPARE(QFileInfo(p1).absolutePath(), QDir(dir.path()).absolutePath());
+    QCOMPARE(QFileInfo(p2).absolutePath(), QDir(dir.path()).absolutePath());
+    QCOMPARE(QDir(dir.path()).entryList(QDir::Files).size(), qsizetype(2));
+    // 逐字节读回（不是"写了点什么"）：内容与长度都要对 —— 交换两份数据的实现在这里挂
+    QFile r1(p1), r2(p2);
+    QVERIFY(r1.open(QIODevice::ReadOnly));
+    QVERIFY(r2.open(QIODevice::ReadOnly));
+    QCOMPARE(r1.readAll(), f1.data);
+    QCOMPARE(r2.readAll(), f2.data);
+}
+
+// 两份条目的容器内文件名相同：落盘路径必须各自独立 —— 同一路径会被后写的盖掉，
+// 通道随后会把 FDL2 的字节按 FDL1 的时序/加载地址上传（静默发错数据）。
+void TestSpdPac::writeExtractedFdlsNameCollision()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl.bin"),
+                               patternedBytes(1024, 0x1111)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl.bin"),
+                               patternedBytes(2048, 0x2222)};
+
+    QString p1, p2, err;
+    QVERIFY2(spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err), qPrintable(err));
+    QVERIFY2(p1 != p2, "容器内文件名相同时两份 FDL 落到了同一路径");
+    QVERIFY2(QFileInfo(p1).fileName().contains(QStringLiteral("fdl.bin")),
+             qPrintable(QFileInfo(p1).fileName()));   // 区分用的前缀不该吃掉条目名
+    QFile r1(p1), r2(p2);
+    QVERIFY(r1.open(QIODevice::ReadOnly));
+    QVERIFY(r2.open(QIODevice::ReadOnly));
+    QCOMPARE(r1.readAll(), f1.data);
+    QCOMPARE(r2.readAll(), f2.data);
+}
+
+// 落盘目录不存在：false + 可行动文案（点名目录），且出参清空 —— 调用方不得拿到半个路径接着刷。
+void TestSpdPac::writeExtractedFdlsMissingDirFails()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QString nowhere = dir.filePath(QStringLiteral("没有这个目录"));
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"),
+                               patternedBytes(64, 1)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl2.bin"),
+                               patternedBytes(64, 2)};
+
+    QString p1 = QStringLiteral("旧路径1"), p2 = QStringLiteral("旧路径2"), err;
+    QVERIFY(!spd::writeExtractedFdls(f1, f2, nowhere, p1, p2, &err));
+    QVERIFY2(err.contains(QStringLiteral("目录不存在"), Qt::CaseInsensitive), qPrintable(err));
+    QVERIFY2(err.contains(nowhere), qPrintable(err));   // 可行动：哪条路径写不进去
+    QVERIFY(p1.isEmpty());
+    QVERIFY(p2.isEmpty());
+}
+
+// 空载荷拒写：0 字节 FDL 落盘后会被通道当"空 FDL"发出去，失败点被推到设备侧
+//（同提取层"0 字节不算找到"的取舍）；目录保持干净。
+void TestSpdPac::writeExtractedFdlsRejectsEmptyData()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"),
+                               patternedBytes(64, 3)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl2.bin"), QByteArray()};
+
+    QString p1, p2, err;
+    QVERIFY(!spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err));
+    QVERIFY2(err.contains(QStringLiteral("0 字节")), qPrintable(err));
+    QVERIFY(p1.isEmpty());
+    QVERIFY(p2.isEmpty());
+    QVERIFY2(QDir(dir.path()).entryList(QDir::Files).isEmpty(), "空载荷不该落盘");
+}
+
+// 第二个文件写不进去（同名位置被一个目录占住）：整次调用失败，**第一个文件也要删掉** ——
+// 留下半份产物会让调用方以为拿到了可用的 FDL1 路径（同提取层"失败不留半份数据"）。
+void TestSpdPac::writeExtractedFdlsSecondWriteFailureLeavesNoFile()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    // 占位目录：写同名普通文件必失败（QFile 打不开一个目录）
+    QVERIFY(QDir(dir.path()).mkdir(QStringLiteral("fdl2.bin")));
+    const spd::ExtractedFdl f1{QStringLiteral("FDL1"), QStringLiteral("fdl1.bin"),
+                               patternedBytes(128, 7)};
+    const spd::ExtractedFdl f2{QStringLiteral("FDL2"), QStringLiteral("fdl2.bin"),
+                               patternedBytes(256, 9)};
+
+    QString p1, p2, err;
+    QVERIFY(!spd::writeExtractedFdls(f1, f2, dir.path(), p1, p2, &err));
+    QVERIFY(!err.isEmpty());
+    QVERIFY(p1.isEmpty());
+    QVERIFY(p2.isEmpty());
+    QVERIFY2(!QFile::exists(dir.filePath(QStringLiteral("fdl1.bin"))),
+             "第一个文件没删：失败留下了半份产物");
 }
 
 QTEST_APPLESS_MAIN(TestSpdPac)

@@ -265,7 +265,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 三协议通道自动接入刷机管线 (用户指令: 自动集成, 非手动插件面板)
 [√] 设备检测: MTK BROM / 华为 USB Update / 展锐 新模式 (VID/PID 轮询)
 [√] 分派路由: 按设备模式自动分派 (FlashTool::flashFullPackage)
-[√] 模式感知 UI: 刷写按钮自动启用 + 文件参数对话框 (update.app/pac+FDL/DA)
+[√] 模式感知 UI: 刷写按钮自动启用 + 文件参数对话框 (update.app/pac[FDL 自动提取, 失败回退手选]/DA)
 [√] 多设备防护: 同厂商多设备警告 (刷写首个枚举设备提示)
 [√] 诚实边界: MTK BROM(LEGACY) 分区刷写**离线验证**(真 DA/preloader 样本 + mock 逐帧); 真机全链未验证; 0xD8 老格式/PMTv1/v3/MMM-EMI 分支无真实样本; VID 通配双列表已知行为 (展锐 0x1782)
 
@@ -302,7 +302,10 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] FDL 上传 (FDL1/FDL2 握手: CHECK_BAUD→REP_VER→CONNECT + FDL2 就绪等待)
 [√] 分区选择包 (name UTF-16LE + size + 64 位模式) + 分区擦除/写入 (4096 块)
 [√] .pac 固件刷写路由 (B8 解包复用: 解析 → FDL 上传 → 逐分区 → 复位)
-[√] 诚实边界: FDL 二进制需用户提供; FDL1 CRC16 模式等真机待验证
+[√] .pac 内 FDL1/FDL2 自动提取 (按名判据提取 + 落盘临时文件供通道按路径读; 刷写结束后删除;
+    提取失败或落盘失败都回退手选 FDL, 日志给出原因)
+[√] 诚实边界: FDL 默认来自用户所选 pac 的自动提取 (纯解析, 逐字节等于包内切片; 手选仍可用);
+    提取出的 FDL 真机可用性未验证 (既有刷写链为离线/mock 验证); FDL1 CRC16 模式等真机待验证
 
 --- OPPO/一加/realme EDL 刷写 (Phase B 自研) ---
 [√] EDL 刷写计划构建 (rawprogram/patch XML + OPS 元数据 + GPT 回填对账, 越界/重叠/扇区校验)
@@ -366,7 +369,6 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 
 排队中 (特殊模式)
 ------------------------------------------------------------
-[ ] 展锐 .pac 内 FDL 自动提取 (当前 FDL1/FDL2 需用户手选)
 [ ] 高通 9006 / crashdump 类 (诊断/转储端口, **非刷写**)
 [ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
 [ ] 三星非 Odin 变体 (EUB 已单列; 其余候选待列)

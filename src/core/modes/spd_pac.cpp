@@ -1,5 +1,6 @@
 #include "core/modes/spd_pac.h"
 
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
@@ -59,6 +60,66 @@ QString listingOf(const QList<imgpac::PacPartition> &parts)
         ? QStringLiteral("，等 %1 个条目").arg(parts.size())
         : QStringLiteral("，共 %1 个条目").arg(parts.size());
     return QStringLiteral("包内条目：%1%2").arg(shown.join(QStringLiteral("、")), tail);
+}
+
+// ---- 落盘（writeExtractedFdls）用的私有件 ----
+
+// 把包内名字洗成文件名：只取基名（QFileInfo 去掉路径成分，顺带处理 "a/../x" 这类），
+// 再把路径分隔/控制字符与 Windows 保留字符替换为 '_' —— 名字来自外部包，不假设它干净。
+QString sanitizeFileName(const QString &raw)
+{
+    QString out;
+    out.reserve(raw.size());
+    for (const QChar c : raw) {
+        const ushort u = c.unicode();
+        const bool bad = u < 0x20 || u == u'/' || u == u'\\' || u == u':' || u == u'*'
+            || u == u'?' || u == u'"' || u == u'<' || u == u'>' || u == u'|';
+        out.append(bad ? QLatin1Char('_') : c);
+    }
+    return out;
+}
+
+// 落盘文件名用的条目名：优先容器内文件名（用户在包里看得到的名字），为空回退分区 ID；
+// 两者都不可用（空 / "." / ".."）时用 fdl.bin —— 此时调用方"两份重名"的分支会再加前缀区分。
+QString tempFileNameFor(const ExtractedFdl &fdl)
+{
+    for (const QString &raw : {fdl.fileName, fdl.name}) {
+        const QString base = sanitizeFileName(QFileInfo(raw).fileName());
+        if (!base.isEmpty() && base != QLatin1String(".") && base != QLatin1String(".."))
+            return base;
+    }
+    return QStringLiteral("fdl.bin");
+}
+
+// 写文件并查到"落盘确实成功"这一层：write() 的返回值 + close() 后的错误状态都要看 ——
+// 磁盘满时数据可能先停在用户态缓冲，close() 才现形（本项就在 /tmp 满的机器上开发）。
+bool writeFileChecked(const QString &path, const QByteArray &data, QString *error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = QStringLiteral("无法写入 FDL 文件 %1：%2").arg(path, f.errorString());
+        return false;
+    }
+    const qint64 written = f.write(data);
+    if (written != qint64(data.size()) || !f.flush() || f.error() != QFileDevice::NoError) {
+        const QString why = f.errorString();
+        f.close();
+        if (error)
+            *error = QStringLiteral("写入 FDL 文件 %1 不完整（%2 字节，实写 %3 字节）：%4")
+                         .arg(path)
+                         .arg(data.size())
+                         .arg(written)
+                         .arg(why);
+        return false;
+    }
+    f.close();
+    if (f.error() != QFileDevice::NoError) {
+        if (error)
+            *error = QStringLiteral("关闭 FDL 文件 %1 失败：%2").arg(path, f.errorString());
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -148,6 +209,50 @@ bool extractFdlsFromPac(const QString &pacPath, ExtractedFdl &fdl1, ExtractedFdl
 
     fdl1 = found1;
     fdl2 = found2;
+    return true;
+}
+
+bool writeExtractedFdls(const ExtractedFdl &fdl1, const ExtractedFdl &fdl2, const QString &dir,
+                        QString &fdl1Path, QString &fdl2Path, QString *error)
+{
+    fdl1Path.clear();
+    fdl2Path.clear();
+    if (error)
+        error->clear();
+
+    if (fdl1.data.isEmpty() || fdl2.data.isEmpty())
+        return fail(error, QStringLiteral("不落盘：提取结果含空载荷（FDL1 %1 字节 / FDL2 %2 字节）"
+                                          "—— 空 FDL 无法上传")
+                               .arg(fdl1.data.size()).arg(fdl2.data.size()));
+
+    // 容器内文件名相同（两份都叫 fdl.bin）时加 FDL1-/FDL2- 前缀区分：同一路径会被后写的盖掉，
+    // 通道随后把 FDL2 的字节按 FDL1 的时序/加载地址上传 —— 静默发错数据，比失败更糟。
+    QString name1 = tempFileNameFor(fdl1);
+    QString name2 = tempFileNameFor(fdl2);
+    if (name1 == name2) {
+        name1.prepend(QStringLiteral("FDL1-"));
+        name2.prepend(QStringLiteral("FDL2-"));
+    }
+
+    const QDir outDir(dir);
+    if (!outDir.exists())
+        return fail(error, QStringLiteral("FDL 落盘目录不存在或不是目录：%1").arg(dir));
+    const QString path1 = outDir.filePath(name1);
+    const QString path2 = outDir.filePath(name2);
+
+    QString why;
+    if (!writeFileChecked(path1, fdl1.data, &why)) {
+        QFile::remove(path1);   // 可能已写出部分内容（写一半失败）——不留半份产物
+        return fail(error, why);
+    }
+    if (!writeFileChecked(path2, fdl2.data, &why)) {
+        QFile::remove(path1);
+        QFile::remove(path2);
+        return fail(error, why);
+    }
+
+    fdl1Path = path1;
+    fdl2Path = path2;
     return true;
 }
 

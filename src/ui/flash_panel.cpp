@@ -6,6 +6,7 @@
 #include "flash_button_labels.h"        // EUB backlog Task 3：「刷入」按钮文案/tooltip 的唯一来源
 #include "core/eub/eub_libusb_transport.h"  // 真机传输在本面板构造，对话框只认抽象（IEubTransport）
 #include "core/filename_parser.h"
+#include "core/modes/spd_pac.h"         // SPD 入口：pac 内 FDL1/FDL2 自动提取 + 落盘
 #include "core/mtk_flash_plan.h"        // D1 Task 11：MTK 入口的计划构建（scatter 参照表 + 镜像）
 #include "core/restart_tool.h"
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
@@ -682,6 +683,13 @@ bool FlashPanel::checkBootloaderUnlock(const QString &deviceId)
     return reply == QMessageBox::Yes;
 }
 
+// SPD 自动提取日志里的"条目名"：优先容器内文件名（用户在包里看得到的名字），
+// 为空回退分区 ID（裸 "fdl" 一类命名时仍能在日志里对上号）。
+static QString spdEntryLabel(const spd::ExtractedFdl &fdl)
+{
+    return fdl.fileName.isEmpty() ? fdl.name : fdl.fileName;
+}
+
 void FlashPanel::onFlashClicked()
 {
     // F5: 协议通道整包刷写（MTK BROM / 华为 USB Update / 展锐）——
@@ -710,6 +718,9 @@ void FlashPanel::onFlashClicked()
     if (FlashTool::isPackageChannelMode(deviceMode)) {
         const QString deviceId = m_deviceInfo.serialNumber;
         QVariantMap params;
+        // SPD 自动提取出的 FDL 落在这个临时目录里，须活过本次刷写（通道按路径读文件）。
+        // 本函数内刷写是同步一整趟，故它离开本块时（= 刷写返回后）析构 —— 即 best-effort 删除。
+        std::unique_ptr<QTemporaryDir> spdFdlTempDir;
         if (channel == QStringLiteral("huawei-usb-update")) {
             const QString appPath = QFileDialog::getOpenFileName(
                 this, QStringLiteral("选择 update.app"), QString(),
@@ -721,12 +732,50 @@ void FlashPanel::onFlashClicked()
                 this, QStringLiteral("选择 pac 固件"), QString(),
                 QStringLiteral("展锐固件 (*.pac)"));
             if (pacPath.isEmpty()) return;
-            const QString fdl1 = QFileDialog::getOpenFileName(
-                this, QStringLiteral("选择 FDL1 二进制"));
-            if (fdl1.isEmpty()) return;
-            const QString fdl2 = QFileDialog::getOpenFileName(
-                this, QStringLiteral("选择 FDL2 二进制"));
-            if (fdl2.isEmpty()) return;
+
+            // 自动优先：pac 内按名提取 FDL1/FDL2（纯解析）→ 落盘换路径，因为通道按**路径**读文件
+            //（runSpdFlash 的 fdl1Path/fdl2Path），提取出的字节必须先落盘才能交给通道。
+            // 失败即降级：提取失败（包内没有可用 FDL）或落盘失败（临时目录建不出/写不完整）都在
+            // 日志给出原因，然后照旧弹下面两个手选 —— 手选不依赖临时目录，仍是可用回路。
+            QString fdl1, fdl2;
+            bool haveFdls = false;
+            spd::ExtractedFdl extracted1, extracted2;
+            QString extractErr;
+            if (spd::extractFdlsFromPac(pacPath, extracted1, extracted2, &extractErr)) {
+                spdFdlTempDir.reset(new QTemporaryDir);   // 默认即 QDir::tempPath()（QStandardPaths::TempLocation）
+                QString writeErr;
+                if (!spdFdlTempDir->isValid()) {
+                    emit outputMessage(QStringLiteral("无法创建 FDL 临时目录（%1）：%2；"
+                                                      "请手动选择 FDL 文件")
+                                           .arg(QDir::tempPath(), spdFdlTempDir->errorString()), true);
+                    spdFdlTempDir.reset();
+                } else if (!spd::writeExtractedFdls(extracted1, extracted2, spdFdlTempDir->path(),
+                                                    fdl1, fdl2, &writeErr)) {
+                    emit outputMessage(QStringLiteral("%1；请手动选择 FDL 文件").arg(writeErr), true);
+                    spdFdlTempDir.reset();
+                } else {
+                    // 文案如实：提取是纯解析（逐字节来自包内切片）；提取出的 FDL 在真机上是否可用，
+                    // 属既有 SPD 刷写链的未验证范围（见 功能清单.txt 展锐段落的诚实边界）。
+                    emit outputMessage(QStringLiteral("已从 pac 自动提取 FDL1（%1，%2 字节）"
+                                                      "与 FDL2（%3，%4 字节）")
+                                           .arg(spdEntryLabel(extracted1))
+                                           .arg(extracted1.data.size())
+                                           .arg(spdEntryLabel(extracted2))
+                                           .arg(extracted2.data.size()),
+                                       false);
+                    haveFdls = true;
+                }
+            } else {
+                emit outputMessage(QStringLiteral("未从 pac 自动提取到 FDL：%1；"
+                                                  "改为手动选择 FDL1 与 FDL2")
+                                       .arg(extractErr), false);
+            }
+            if (!haveFdls) {
+                fdl1 = QFileDialog::getOpenFileName(this, QStringLiteral("选择 FDL1 二进制"));
+                if (fdl1.isEmpty()) return;
+                fdl2 = QFileDialog::getOpenFileName(this, QStringLiteral("选择 FDL2 二进制"));
+                if (fdl2.isEmpty()) return;
+            }
             params.insert(QStringLiteral("pacPath"), pacPath);
             params.insert(QStringLiteral("fdl1Path"), fdl1);
             params.insert(QStringLiteral("fdl2Path"), fdl2);
