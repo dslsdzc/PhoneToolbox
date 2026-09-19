@@ -350,8 +350,7 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_tiers.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_usb_ids.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -770,15 +769,6 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp)
-                elseif(_test_stem STREQUAL "test_risk_confirm_dialog")
-                    # W2 Task 4：二次确认对话框（RiskConfirmDialog）+ **唯一闸门** riskui::ensureAccepted。
-                    # 三个源：对话框与闸门本体、分级映射（tierTitle/tierWarnings 是文案唯一来源）、
-                    # 留痕层（闸门要 hasAcceptedTier/acceptTier）。无 libusb；Widgets/offscreen 与
-                    # 协议资源（闸门对话框里的协议入口要读 :/legal/user-agreement.md）见下方两个 if 块。
-                    set(_test_extra_sources
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_confirm_dialog.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 # A-40 结构钉（W6-T1 起 test_mtk_usb_ids 也用它读 device_detector.cpp）：把**仓库根
