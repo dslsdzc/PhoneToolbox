@@ -351,7 +351,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_usb_ids.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_gate_wiring.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -785,12 +786,22 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_confirm_dialog.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp)
+                elseif(_test_stem STREQUAL "test_risk_gate_wiring")
+                    # W2 Task 5：门控接线的**结构钉**（只读生产源文件的文本，不构造 UI、不开设备、
+                    # 不碰用户配置）。本用例自身不 include 任何项目头、不引用任何项目符号，故这两个源
+                    # 不是为了本用例的符号；保留它们是按 T5 brief 的约定（"也要给 _test_extra_sources
+                    # 以免链接期缺符号"）——将来若给它加上风险映射/留痕头的引用，链上就已就位。
+                    # 无 Widgets（QTEST_APPLESS_MAIN）、无 libusb；PT_SRC_ROOT 见下方按名命中。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 # A-40 结构钉（W6-T1 起 test_mtk_usb_ids 也用它读 device_detector.cpp）：把**仓库根
                 # 目录**编进这几个用例 —— odin/edl 那两个读传输层生产源文件，把
                 # "巡检记录 altsetting / claim 后的切换调用 / 句柄收尾的复位"三处钉成字面存在
                 # 且成对（这三处在真机路径上，删掉不会有行为用例变红；取材边界见用例内注释）。
+                # W2-T5 的 test_risk_gate_wiring 同款（读五个生产文件的闸门接线 + 设备模式文案）。
                 # 只编路径，不编内容。
                 # ⚠️ 契约：这几条用例**要求源码树原地存在**（绝对路径被编进二进制）—— 检出目录被
                 # 移动/改名、或拿旧 build 目录在别处跑，都会以"读不到生产源文件"**硬 FAIL**；
@@ -798,7 +809,8 @@ if(ENABLE_IMAGE_TESTS)
                 # 钉在缺文件时静默失效，正是本仓反复吃亏的形态。
                 if(_test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
-                   OR _test_stem STREQUAL "test_mtk_usb_ids")
+                   OR _test_stem STREQUAL "test_mtk_usb_ids"
+                   OR _test_stem STREQUAL "test_risk_gate_wiring")
                     target_compile_definitions(${_test_target} PRIVATE
                         PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
                 endif()
