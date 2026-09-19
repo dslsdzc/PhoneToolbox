@@ -68,6 +68,13 @@ const UsbId kOtherVendors[] = {
     { 0x1004, 0x2000, "表内 VID（LG）配表内别的 PID 数字" },
 };
 
+// 三张表的条数（**防空表空断言**）：逐条 QVERIFY 的循环在表为空时是"全绿"的 —— 故先把表本身钉住条数，
+// 免得将来把整表删空之后这三条用例静默退化成空断言。
+// 13 = kUsbIds 现有全部条目（BROM 1 + preloader 7 + Sony 5）；实现加行时这里也要跟着加，是有意的。
+constexpr int kKnownIdsExpected = 13;
+constexpr int kUnknownPidsExpected = 5;
+constexpr int kOtherVendorsExpected = 6;
+
 QString hex4(quint16 v)
 {
     return QStringLiteral("0x") + QString::number(v, 16).rightJustified(4, QLatin1Char('0')).toUpper();
@@ -105,22 +112,15 @@ private slots:
 
 void TestMtkUsbIds::knownIdsIncludeBromAndPreloader()
 {
+    QCOMPARE(int(sizeof(kKnownIds) / sizeof(kKnownIds[0])), kKnownIdsExpected);
     for (const UsbId &id : kKnownIds)
         QVERIFY2(mtkbrom::isKnownMtkUsbId(id.vid, id.pid),
                  qPrintable(QStringLiteral("白名单应含 %1").arg(describe(id))));
-
-    // 反向自检（防止上表被整表删空/写错成同一对 VID:PID）：命中的**组数**必须等于表长 ——
-    // 逐条 QVERIFY 的循环在表为空时"全绿"，这条把它堵住
-    int hits = 0;
-    for (const UsbId &id : kKnownIds) {
-        if (mtkbrom::isKnownMtkUsbId(id.vid, id.pid))
-            ++hits;
-    }
-    QCOMPARE(hits, int(sizeof(kKnownIds) / sizeof(kKnownIds[0])));
 }
 
 void TestMtkUsbIds::unknownPidOfKnownVidIsRejected()
 {
+    QCOMPARE(int(sizeof(kUnknownPids) / sizeof(kUnknownPids[0])), kUnknownPidsExpected);
     for (const UsbId &id : kUnknownPids)
         QVERIFY2(!mtkbrom::isKnownMtkUsbId(id.vid, id.pid),
                  qPrintable(QStringLiteral("白名单不应含 %1").arg(describe(id))));
@@ -131,6 +131,7 @@ void TestMtkUsbIds::samePidUnderAnotherVendorIsRejected()
     // 这条是"判据查了 VID 而不只是 PID"的甄别力所在：把 isKnownMtkUsbId 改成只比 PID，
     // 本用例即红（变异留档 M2，见 .superpowers/sdd/w6-task-1-logs/）——
     // 同一处改动也会让三星/华为/展锐三家的设备被 MTK 抢走（检测层不得抢既有厂商判据）。
+    QCOMPARE(int(sizeof(kOtherVendors) / sizeof(kOtherVendors[0])), kOtherVendorsExpected);
     for (const UsbId &id : kOtherVendors)
         QVERIFY2(!mtkbrom::isKnownMtkUsbId(id.vid, id.pid),
                  qPrintable(QStringLiteral("白名单不应含 %1").arg(describe(id))));
