@@ -785,7 +785,8 @@ QString DeviceDetector::getModeDisplayName(DeviceMode mode) const
         // W6：白名单同时收 BROM 与 preloader（检测层按 VID/PID 认，见 detectProtocolDevices），
         // 而**身份要握手后由 GET_BL_VER 判定** —— 故这里不许只写 "MTK BROM"（那是把 preloader
         // 说成 BROM）。设备列表第二行就是这句（detectProtocolDevices 的 info.model）。
-        // ⚠️ src/ui/flash_panel.cpp 有同款 switch 的**本地副本**（仓内约定两侧文案一致），那边尚未同步。
+        // src/ui/flash_panel.cpp 有同款 switch 的**本地副本**（仓内约定两侧文案一致）——W6-T1 移交后
+        // 已同步（2026-09-20，W2-T5 一并办）；两侧一致性由 tests/test_risk_gate_wiring.cpp 钉住。
         return QStringLiteral("MTK BROM / Preloader");
     case MODE_HUAWEI_USB_UPDATE:
         return QStringLiteral("华为 USB Update");
