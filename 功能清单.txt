@@ -368,7 +368,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 ------------------------------------------------------------
 [ ] 高通 crashdump (Sahara MEMORY_DEBUG / 900E; 诊断/转储端口, **非刷写**)
 [ ] 高通 9006 (待真机 PID 证据; 本地无协议描述/抓包/实现材料)
-[ ] MTK preloader 直连 (不经 BROM 的分支; BROM 与 DA 两条链已交付)
+[ ] MTK preloader 直连 (检测已接: preloader 一族 VID/PID 与 BROM 同表进同一模式, BROM / preloader 身份
+    握手后由 GET_BL_VER 判定; 0x70/0x71「preloader 当 DA 用」待侦察再定; 真机待持机人)
 [ ] 三星非 Odin 变体 (EUB 已单列; 其余候选待列)
 [ ] 华为 SLA RSA 响应生成 / 解锁码提取 / Xloader 载荷修补 (现为拒绝并说明原因)
 [ ] MTK META 模式 (诊断/校准: IMEI、传感器、射频; 属诊断非刷写, 归入「维修诊断」;
