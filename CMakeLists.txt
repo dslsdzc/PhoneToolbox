@@ -341,6 +341,7 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_button_labels.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_tiers.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_usb_ids.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
@@ -381,6 +382,12 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_usb_ids")
+                    # W6-T1：判据 isKnownMtkUsbId **与 kUsbIds 同源**，两者都在 mtk_brom.cpp ——
+                    # 本用例只碰这个纯函数（行为断言）+ 读 device_detector.cpp 的文本钉。
+                    # mtk_brom.cpp 自带 libusb 调用，故本 stem 也进下方 libusb 链接名单。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_payload")
                     # D1-T6：夹具 makeSelection() 走 parseDaFile/selectDaEntry（mtk_test_helpers.h），
                     # 不补 mtk_da_file.cpp 会在链接期炸（undef）。
@@ -756,16 +763,18 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
-                # A-40 结构钉：把**仓库根目录**编进这两个用例 —— 它们读传输层生产源文件，把
+                # A-40 结构钉（W6-T1 起 test_mtk_usb_ids 也用它读 device_detector.cpp）：把**仓库根
+                # 目录**编进这几个用例 —— odin/edl 那两个读传输层生产源文件，把
                 # "巡检记录 altsetting / claim 后的切换调用 / 句柄收尾的复位"三处钉成字面存在
                 # 且成对（这三处在真机路径上，删掉不会有行为用例变红；取材边界见用例内注释）。
                 # 只编路径，不编内容。
-                # ⚠️ 契约：这两条用例**要求源码树原地存在**（绝对路径被编进二进制）—— 检出目录被
+                # ⚠️ 契约：这几条用例**要求源码树原地存在**（绝对路径被编进二进制）—— 检出目录被
                 # 移动/改名、或拿旧 build 目录在别处跑，都会以"读不到生产源文件"**硬 FAIL**；
                 # 与样本目录那条（QSKIP + 可命令行覆盖）**不同**，且**有意不改成 QSKIP**：
                 # 钉在缺文件时静默失效，正是本仓反复吃亏的形态。
                 if(_test_stem STREQUAL "test_odin_libusb_transport"
-                   OR _test_stem STREQUAL "test_edl_libusb_transport")
+                   OR _test_stem STREQUAL "test_edl_libusb_transport"
+                   OR _test_stem STREQUAL "test_mtk_usb_ids")
                     target_compile_definitions(${_test_target} PRIVATE
                         PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
                 endif()
@@ -833,6 +842,7 @@ if(ENABLE_IMAGE_TESTS)
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
                 if(_test_stem STREQUAL "test_mtk_brom" OR _test_stem STREQUAL "test_mtk_payload"
+                   OR _test_stem STREQUAL "test_mtk_usb_ids"
                    OR _test_stem STREQUAL "test_spd_flash" OR _test_stem STREQUAL "test_pipeline"
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
                    OR _test_stem STREQUAL "test_mtk_xflash_session"
