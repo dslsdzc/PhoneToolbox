@@ -11,8 +11,9 @@ ButtonLabels flashButtonLabelsFor(DeviceDetector::DeviceMode mode)
 {
     // 无 default 分支是**故意的**：新增枚举值时 -Wswitch 会点名未处理的模式，且它会落到函数末尾的
     // 复位态（安全默认：宁可什么都不承诺，也不给错承诺）。新增协议模式必须同时改这里与用例的期望表。
-    // ⚠️ 这条编译期防线**需要显式 -Wall 才生效**（T3 审查 Minor 1）：本仓 CMake 默认不开任何警告开关，
-    //    常规构建下追加枚举值会静默落到复位态（按钮既不承诺也不提示）。全库 `-Wall -Wextra` 是已排期的工作流。
+    // ⚠️ 这条防线依赖 `-Wall` 带出的 `-Wswitch`：本仓自 2026-09-19 起构建默认开 `-Wall -Wextra`
+    //    （`CMakeLists.txt`，限 GNU/Clang 系），故默认构建下追加枚举值会在此被点名；MSVC 构建不在
+    //    其列（原因见 `CMakeLists.txt` 开关块），那种构建下追加值仍会静默落到复位态（按钮既不承诺也不提示）。
     switch (mode) {
     case DeviceDetector::MODE_SAMSUNG_EUB:
         // 救援入口：文案与 tooltip 成对，缺一不可（I3 就是只复位 text 留下的"救援提示 + 写入动作"组合）。

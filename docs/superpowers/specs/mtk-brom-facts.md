@@ -276,8 +276,9 @@ XFlash（`xflash/xflash_lib.py:903/909/926/989-990`）与 XML（`xmlflash/xml_li
 - **mock 只看写、看不见"读了多少字节"**：`MockUsbChannel::read` 是 `takeFirst()` + `left(maxLen)`
   （`tests/test_mtk_brom.cpp:38-45`）——**欠读会无声通过**；读侧判别力只能靠"逐条对上游读长度"
   （`mtk_payload.cpp` 的 `readExactBytes` 走 `IBromUsb::readExact`）+ probe。
-- **"0 warning" 只是编译器默认档**：`CMakeLists.txt` **未开** `-Wall/-Wextra`（想要更强的静态保证需另行开启，
-  那会引入一批既有告警，属独立工程）。
+- **"0 warning" 的口径**：本仓自 2026-09-19 起构建默认开 `-Wall -Wextra`（`CMakeLists.txt`，限 GNU/Clang 系），
+  故此处原写"只是编译器默认档 / `CMakeLists.txt` 未开"**已不成立**；现行 0 条是开开关后的全量实测
+  （GCC 16，见 `.superpowers/sdd/w5-task-6-report.md`）—— 但**只对 Linux/GCC 成立，不构成 MSVC 等其他编译器的背书**。
 - **`0xD8` 老格式**：探测到即**明确拒绝**（无真实样本、字段偏移不同）；**PMTv1/v3** 无真实样本；
   **MMM-EMI 分支** 3/832；**NAND/NOR 设备**在 stage2 处明确拒绝（`mtk_payload.cpp:255-260`；D1 只支持 eMMC）；
   **IoT 与"选中条目 DA 空 region"机型**（2625 的 `0x2523`、iot 的 `0x6261`）报错不静默

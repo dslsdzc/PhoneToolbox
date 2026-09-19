@@ -3,7 +3,7 @@ PhoneToolbox - Android 设备多功能工具箱 v0.0.1-beta03
 开源 / GPLv3 / Qt6 C++17 / 跨平台 (Linux + Windows)
 
 GitHub: https://github.com/DslsDZC/PhoneToolbox
-构建: cmake -B build -G Ninja && cmake --build build (默认开启 -Wall -Wextra)
+构建: cmake -B build -G Ninja && cmake --build build (GNU/Clang 系默认开启 -Wall -Wextra)
 
 
 一、设备连接与检测

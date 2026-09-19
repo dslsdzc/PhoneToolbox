@@ -23,17 +23,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-# ---- 警告开关：全库默认开启 -Wall -Wextra ----
+# ---- 警告开关：GNU/Clang 系默认开启 -Wall -Wextra ----
 # 用户 2026-09-19 裁决"全库开 -Wall -Wextra + 修完既有警告"；
-# 计划 docs/superpowers/plans/2026-09-19-wall-wextra-cleanup.md，本开关落地见 W5-T1。
+# 计划 docs/superpowers/plans/2026-09-19-wall-wextra-cleanup.md，本开关落地见 W5-T1（74fb0ca）。
 # 用 add_compile_options（目录属性）：对本目录及其**之后** add_subdirectory 的所有目标生效
 # （主程序 / image_engine / root_patcher / phone_plugins / huawei_flash 插件及其用例）。
 # 不局限于 C++ —— 该属性对 C 编译器同样生效（合成工程实测：C_COMPILER 与 CXX_COMPILER
-# 两条规则的 FLAGS 均含这两个开关），故将来加入 .c 源不需要再改这里。
-# **有意不设 -Werror**：任何新警告不应变成别人构建失败的硬墙。
-# 存量警告由 W5-T2～T5 分批清零（逐文件分布见 .superpowers/sdd/w5-task-1-report.md）；
-# 在这几批完成前，本开关会让所有人的增量构建都报这批警告 —— 那是**预期内**的，不是构建坏了。
-add_compile_options(-Wall -Wextra)
+# 两条规则的 FLAGS 均含这两个开关），故将来加入 .c 源不需要针对 C 语言再写一遍。
+# **有意不设 -Werror**：任何新警告不应变成别人构建失败的硬墙 —— 存量警告由 W5-T2～T5 清零、
+# W5-T6 全新目录终验（0 warning / 0 error，见 .superpowers/sdd/w5-task-6-report.md），但那只是"当前干净"：没有 CI 硬墙，
+# 新警告随时能进来。
+# **只对 GNU/Clang 系加**（W5-T7 裁决）：MSVC 上这两个开关**语义不等价** —— `-Wall` 会被当成
+# /Wall（一套完全不同、极吵的诊断集），`-Wextra` 是未知选项（D9002）—— 故 MSVC 侧**有意不加**；
+# MSVC 该开哪些开关（/W4 之类）**属未决项，不在这里替它拍板**。
+# Linux/GCC 侧行为与 W5 终验时逐字一致：还是下面这两个开关。
+# 门条件只看 CMAKE_CXX_COMPILER_ID（工程当前是 project(LANGUAGES CXX)）；将来若启用 C 语言而
+# 其编译器与 C++ 不同族，需回来复审这一条。
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra)
+endif()
 
 # 查找 Qt6
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
@@ -342,7 +350,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_tiers.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_usb_ids.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -761,6 +770,15 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp)
+                elseif(_test_stem STREQUAL "test_risk_confirm_dialog")
+                    # W2 Task 4：二次确认对话框（RiskConfirmDialog）+ **唯一闸门** riskui::ensureAccepted。
+                    # 三个源：对话框与闸门本体、分级映射（tierTitle/tierWarnings 是文案唯一来源）、
+                    # 留痕层（闸门要 hasAcceptedTier/acceptTier）。无 libusb；Widgets/offscreen 与
+                    # 协议资源（闸门对话框里的协议入口要读 :/legal/user-agreement.md）见下方两个 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_confirm_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp)
                 endif()
                 add_executable(${_test_target} ${_test_src} ${_test_extra_sources})
                 # A-40 结构钉（W6-T1 起 test_mtk_usb_ids 也用它读 device_detector.cpp）：把**仓库根
@@ -827,7 +845,8 @@ if(ENABLE_IMAGE_TESTS)
                 if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog"
                    OR _test_stem STREQUAL "test_mtk_plan_dialog"
                    OR _test_stem STREQUAL "test_eub_recovery_dialog"
-                   OR _test_stem STREQUAL "test_agreement_dialog")
+                   OR _test_stem STREQUAL "test_agreement_dialog"
+                   OR _test_stem STREQUAL "test_risk_confirm_dialog")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
                     set_tests_properties(${_test_target} PROPERTIES
                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")
@@ -835,7 +854,10 @@ if(ENABLE_IMAGE_TESTS)
                 # W2 Task 3：使用须知对话框的用例要读 `:/legal/user-agreement.md` —— 资源必须编进**本目标**
                 # （主程序的 ${QRC_FILES} 不会传递到测试可执行文件）。QRC_FILES 是 qt_add_resources 的
                 # 变量式产物（生成的 qrc_resources.cpp 路径列表），直接加进本目标源即可。
-                if(_test_stem STREQUAL "test_agreement_dialog")
+                # W2 Task 4：二次确认对话框里也有**协议入口**（可展开的 QTextBrowser 读同一份
+                # :/legal/user-agreement.md），故本目标同样要把资源编进来。
+                if(_test_stem STREQUAL "test_agreement_dialog"
+                   OR _test_stem STREQUAL "test_risk_confirm_dialog")
                     target_sources(${_test_target} PRIVATE ${QRC_FILES})
                 endif()
                 # BROM 协议测试需要 libusb（image_engine 不传递）。

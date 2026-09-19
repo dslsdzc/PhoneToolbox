@@ -321,7 +321,9 @@ D1 已有样本（DA 文件 / preloader / 文本 scatter）见 `mtk-brom-facts.m
   `reference/` gitignored，不随仓库分发、不进构建。
 - **`0x6781` 的 16B 合并 ack 与其它芯片的两次写**：只按上游实现，**无该芯片真机复核**。
 - **mock 看不见"设备实际读了多少字节"**：读侧判据靠"逐条对上游读长度"+ probe。
-- **"0 warning" 只是编译器默认档**：`CMakeLists.txt` 未开 `-Wall -Wextra`。
+- **"0 warning" 的口径**：本仓自 2026-09-19 起构建默认开 `-Wall -Wextra`（`CMakeLists.txt`，限 GNU/Clang 系），
+  故此处原写"只是编译器默认档 / `CMakeLists.txt` 未开"**已不成立**；现行 0 条是开开关后的全量实测
+  （GCC 16，见 `.superpowers/sdd/w5-task-6-report.md`）—— 但**只对 Linux/GCC 成立，不构成 MSVC 等其他编译器的背书**。
 - **spec §9 的三条"实现时核实"到此结案**：
   1. **XML 分区表读取路径**：`CMD:READ-FLASH`（`XC:474-484` 区间读）+ **同一个 GPT 解析器**
      （上游同口径 `mtk_daloader.py:296-302`）—— **设计期已核实**；

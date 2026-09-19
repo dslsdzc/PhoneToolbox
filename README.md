@@ -73,7 +73,8 @@ cmake --build build
 ./build/PhoneToolbox
 ```
 
-> 构建默认开启 `-Wall -Wextra`；本仓不设 `-Werror`，警告不阻断构建。
+> 构建默认开启 `-Wall -Wextra`（GNU/Clang 系；MSVC 链有意不加，见 `CMakeLists.txt` 的开关块）；
+> 本仓不设 `-Werror`，警告不阻断构建。
 
 ### Windows
 
