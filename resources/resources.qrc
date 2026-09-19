@@ -3,4 +3,10 @@
         <!-- MTK Bridge (not available elsewhere, keep embedded) -->
         <file alias="mtk_bridge/linux/x64/mtk_bridge">../third_party/mtk_bridge/linux/x64/mtk_bridge</file>
     </qresource>
+    <!-- 使用须知正文（W2 Task 3）：**单一副本** —— spec §2 的代码块逐字搬来，正文不得改写。
+         alias 是必须的：前缀 /legal + 无 alias 会得到 :/legal/legal/user-agreement.md。
+         用例三路比对（spec 正文 ↔ 本文件 ↔ legal::kAgreementVersion）。 -->
+    <qresource prefix="/legal">
+        <file alias="user-agreement.md">legal/user-agreement.md</file>
+    </qresource>
 </RCC>

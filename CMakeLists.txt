@@ -340,7 +340,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_eub_recovery_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_flash_button_labels.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_tiers.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_consent_store.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -737,6 +738,13 @@ if(ENABLE_IMAGE_TESTS)
                     # DeviceDetector::DeviceMode 这个枚举）。无 Widgets / 无 libusb。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp)
+                elseif(_test_stem STREQUAL "test_agreement_dialog")
+                    # W2 Task 3：首屏「使用须知」对话框（src/ui，不编入任何静态库）。只需被测源 ——
+                    # 它只依赖 Qt Widgets 与 Qt 资源（正文的单一副本在 resources/legal/user-agreement.md）。
+                    # 第三路比对用的 legal::kAgreementVersion 是 constexpr（C++17 起隐式 inline），
+                    # 故**不需要**补 consent_store.cpp。Widgets/offscreen 与资源见下方两个 if 块。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/agreement_dialog.cpp)
                 elseif(_test_stem STREQUAL "test_consent_store")
                     # W2 Task 2：同意留痕（src/legal，不编入任何静态库）。除被测源外补
                     # risk_ui.cpp —— 头文件按名字引用 riskui::RiskTier 枚举（分级映射的唯一来源）。
@@ -807,10 +815,17 @@ if(ENABLE_IMAGE_TESTS)
                 # Phase E Task 7：EUB 救援对话框同款（QTEST_MAIN 造 QApplication，无 DISPLAY 必须 offscreen）。
                 if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog"
                    OR _test_stem STREQUAL "test_mtk_plan_dialog"
-                   OR _test_stem STREQUAL "test_eub_recovery_dialog")
+                   OR _test_stem STREQUAL "test_eub_recovery_dialog"
+                   OR _test_stem STREQUAL "test_agreement_dialog")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
                     set_tests_properties(${_test_target} PROPERTIES
                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")
+                endif()
+                # W2 Task 3：使用须知对话框的用例要读 `:/legal/user-agreement.md` —— 资源必须编进**本目标**
+                # （主程序的 ${QRC_FILES} 不会传递到测试可执行文件）。QRC_FILES 是 qt_add_resources 的
+                # 变量式产物（生成的 qrc_resources.cpp 路径列表），直接加进本目标源即可。
+                if(_test_stem STREQUAL "test_agreement_dialog")
+                    target_sources(${_test_target} PRIVATE ${QRC_FILES})
                 endif()
                 # BROM 协议测试需要 libusb（image_engine 不传递）。
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
