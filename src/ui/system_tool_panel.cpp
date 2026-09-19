@@ -2,6 +2,7 @@
 #include "core/adb_embedded.h"
 #include "core/engineer_mode.h"
 #include "core/resource_monitor.h"
+#include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门** + 功能→tier 映射
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -1309,6 +1310,8 @@ void SystemToolPanel::onEditBuildProp()
 
 void SystemToolPanel::onSpoofDevice()
 {
+    // W2-T5：伪造设备信息（型号/厂商/序列号）—— Tier3 诊断与安全研究
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::ImeiTool))) return;
     QString cur = adbShell("getprop ro.product.model; echo ---; getprop ro.product.manufacturer; "
                            "echo ---; getprop ro.serialno");
     auto parts = cur.split("---");
@@ -1350,6 +1353,8 @@ void SystemToolPanel::onSelinuxMode()
 
 void SystemToolPanel::onSafetynetBypass()
 {
+    // W2-T5：SafetyNet 绕过 —— Tier3 诊断与安全研究
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SafetyNet))) return;
     QStringList opts = {
         "检查 CTS 状态",
         "隐藏 Root (Magisk Hide)",
@@ -1382,6 +1387,8 @@ void SystemToolPanel::onSafetynetBypass()
 
 void SystemToolPanel::onSignatureSpoof()
 {
+    // W2-T5：签名伪造（需 LSPosed 核心破解）—— Tier3 诊断与安全研究
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SignatureSpoof))) return;
     appendOutput("检查签名伪造支持...", false);
     QString r = adbShell("su -c 'ls /system/etc/permissions/org.aware.* 2>/dev/null || "
                          "ls /data/data/org.lsposed.manager 2>/dev/null || echo NEED_XPOSED'");
@@ -1465,6 +1472,8 @@ void SystemToolPanel::onShizukuStatus()
 
 void SystemToolPanel::onOpenEngineerMode()
 {
+    // W2-T5：工程模式（含 AT 指令面）—— Tier3 诊断与安全研究
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::EngineerMode))) return;
     // 无设备保护（按钮在 setDeviceInfo/clearDeviceInfo 中按连接状态禁用，此处双保险）
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendOutput("打开工程模式失败: 无设备连接", true);

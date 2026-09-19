@@ -1,6 +1,8 @@
 #include <QApplication>
 #include <QPalette>
 #include "ui/main_window.h"
+#include "ui/agreement_dialog.h"     // W2-T5：首屏使用须知（协议正文入口）
+#include "legal/consent_store.h"     // W2-T5：留痕（本机 QSettings，不联网）
 
 static void applyDarkTheme(QApplication &app)
 {
@@ -36,6 +38,16 @@ int main(int argc, char *argv[])
     // 设置应用程序样式
     app.setStyle("Fusion");
     applyDarkTheme(app);
+
+    // W2-T5：首屏「使用须知」—— 本版本未接受则**不进入主界面**（用户拒绝即退出）。
+    // 位置在 MainWindow 构造之前：主窗口一构造就会开始轮询设备，门控必须先于任何设备动作。
+    // 留痕落本机 QSettings（见 legal/consent_store.h）；acceptAgreement 只在用户点了同意后才写。
+    legal::ConsentStore store;
+    if (!store.hasAcceptedAgreement()) {
+        if (!agreementui::ask(nullptr))
+            return 0;
+        store.acceptAgreement();
+    }
 
     MainWindow window;
     window.show();

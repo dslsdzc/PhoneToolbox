@@ -4,6 +4,7 @@
 #include "mtk_plan_dialog.h"            // Phase D1 Task 11：MTK BROM 刷写计划预览
 #include "eub_recovery_dialog.h"        // Phase E Task 7：EUB 救援（Exynos USB Boot）
 #include "flash_button_labels.h"        // EUB backlog Task 3：「刷入」按钮文案/tooltip 的唯一来源
+#include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门** riskui::ensureAccepted + 分级映射
 #include "core/eub/eub_libusb_transport.h"  // 真机传输在本面板构造，对话框只认抽象（IEubTransport）
 #include "core/filename_parser.h"
 #include "core/modes/spd_pac.h"         // SPD 入口：pac 内 FDL1/FDL2 自动提取 + 落盘
@@ -260,7 +261,10 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
     case DeviceDetector::MODE_MTK_DA:
         modeStr = "MTK DA"; break;
     case DeviceDetector::MODE_MTK_BROM:
-        modeStr = "MTK BROM"; break;
+        // W6-T1 移交：与 device_detector.cpp 的 getModeDisplayName 保持一致（白名单同收
+        // BROM 与 preloader，身份须握手后由 GET_BL_VER 判定 —— 不许只说 BROM）。
+        // 两侧一致性由 tests/test_risk_gate_wiring.cpp 的 mtkBromDisplayNamePairIsConsistent 钉住。
+        modeStr = "MTK BROM / Preloader"; break;
     case DeviceDetector::MODE_HUAWEI_USB_UPDATE:
         modeStr = "华为 USB Update"; break;
     case DeviceDetector::MODE_SPD:
@@ -692,6 +696,8 @@ static QString spdEntryLabel(const spd::ExtractedFdl &fdl)
 
 void FlashPanel::onFlashClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     // F5: 协议通道整包刷写（MTK BROM / 华为 USB Update / 展锐）——
     // 优先于分区刷写；通道按所选设备模式分派，ADB 条目不会进入此分支
     // （flashChannelForMode 对非协议模式返回空串）。
@@ -1022,6 +1028,8 @@ void FlashPanel::onFlashClicked()
 
 void FlashPanel::onEraseClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QListWidgetItem *item = m_partitionList->currentItem();
     if (!item) return;
 
@@ -1049,6 +1057,8 @@ void FlashPanel::onEraseClicked()
 
 void FlashPanel::onUpdateClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     if (m_currentFile.isEmpty()) return;
 
     QString deviceId = m_deviceInfo.serialNumber;
@@ -1085,6 +1095,8 @@ void FlashPanel::onUpdateClicked()
 
 void FlashPanel::onSideloadClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     if (m_currentFile.isEmpty()) return;
 
     QString deviceId = m_deviceInfo.serialNumber;
@@ -1108,6 +1120,8 @@ void FlashPanel::onSideloadClicked()
 
 void FlashPanel::onRunScriptClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     if (m_currentFile.isEmpty()) return;
 
     QString deviceId = m_deviceInfo.serialNumber;
@@ -1130,6 +1144,8 @@ void FlashPanel::onRunScriptClicked()
 
 void FlashPanel::onDumpClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QListWidgetItem *item = m_partitionList->currentItem();
     if (!item) {
         QMessageBox::information(this, "提示", "请先在分区列表中选择一个分区");
@@ -1273,6 +1289,8 @@ void FlashPanel::onDumpClicked()
 
 void FlashPanel::onBootImageClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     if (m_currentFile.isEmpty()) {
         QString imgPath = QFileDialog::getOpenFileName(
             this, "选择 Recovery/启动镜像",
@@ -1317,6 +1335,9 @@ void FlashPanel::onEdlSelectProgrammer()
 
 void FlashPanel::onEdlConnect()
 {
+    // W2-T5：连接即把 programmer 上传到设备 RAM（底层引导入口，同属 Tier2 写路径）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     if (m_programmerPath.isEmpty()) {
         QMessageBox::information(this, "提示", "请先选择 Programmer ELF 文件");
         return;
@@ -1363,6 +1384,9 @@ void FlashPanel::onEdlDisconnect()
 // settings.xml）或整包（.ofp/.ops，先解包到临时目录）。预览确认后按计划整包刷写。
 void FlashPanel::onEdlPlanFlash()
 {
+    // W2-T5：本入口自己走 Sahara 引导（连接即上传 programmer 到 RAM）——同属 Tier2 写路径
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QMessageBox box(this);
     box.setWindowTitle(QStringLiteral("EDL 刷写计划"));
     box.setIcon(QMessageBox::Question);
@@ -1479,6 +1503,9 @@ void FlashPanel::onEdlPlanFlash()
 
 void FlashPanel::onMtkConnect()
 {
+    // W2-T5：连接即把 DA 上传到设备 RAM（底层引导入口，同属 Tier2 写路径）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QMessageBox::StandardButton confirm = QMessageBox::question(
         this, "确认连接 MTK",
         "即将连接 MTK DA 设备。\n\n"
@@ -1525,6 +1552,8 @@ void FlashPanel::onMtkDisconnect()
 
 void FlashPanel::onUnlockBootloader()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     if (deviceId.isEmpty()) return;
 
@@ -1566,6 +1595,8 @@ void FlashPanel::onUnlockBootloader()
 
 void FlashPanel::onLockBootloader()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     if (deviceId.isEmpty()) return;
 
@@ -1608,6 +1639,8 @@ void FlashPanel::onLockBootloader()
 
 void FlashPanel::onFrpErase()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     int mode = m_deviceInfo.mode;
 
@@ -1991,6 +2024,8 @@ int FlashPanel::loadProgressFile(const QString &dir)
 
 void FlashPanel::onBrickRepairClicked()
 {
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
+            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
     int mode = m_deviceInfo.mode;
     bool edlMode = (mode == DeviceDetector::MODE_EDL_9008);
     bool mtkMode = (mode == DeviceDetector::MODE_MTK_DA);

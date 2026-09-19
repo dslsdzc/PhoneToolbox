@@ -1,5 +1,6 @@
 #include "vuln_panel.h"
 #include "vuln_db/vuln_matcher.h"
+#include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门**（漏洞扫描/利用属 Tier3）
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -361,6 +362,8 @@ void VulnPanel::onLoadDatabase()
 
 void VulnPanel::onScan()
 {
+    // W2-T5：扫描也纳入（spec §5：判据出自 exploit DB，属诊断与安全研究）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;
@@ -491,6 +494,8 @@ void VulnPanel::onScan()
 
 void VulnPanel::onExploitAll()
 {
+    // W2-T5：批量利用 —— Tier3 诊断与安全研究
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;
@@ -557,6 +562,8 @@ void VulnPanel::onExploitAll()
 
 void VulnPanel::onExploitSingle(const QString &cveId)
 {
+    // W2-T5：单条利用 —— Tier3 诊断与安全研究（与批量利用同一档：闸门一次即两处都放行）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;

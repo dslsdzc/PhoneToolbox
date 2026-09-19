@@ -28,6 +28,8 @@
 #include <QVBoxLayout>
 
 #include "core/eub/eub_payload.h"
+#include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门**（EUB 救援属 Tier2 底层引导）
+#include "core/device_detector.h"       // DeviceDetector::MODE_SAMSUNG_EUB（tier 由它决定）
 
 namespace {
 
@@ -381,6 +383,10 @@ bool EubRecoveryDialog::runRescue(QString *error)
 
 void EubRecoveryDialog::onStart()
 {
+    // W2-T5：发送前过闸门（救援会向设备 RAM 发送 BL 镜像并引导进 Download 模式）。
+    // 放在按钮启用判据之前：闸门是**最外层**，任何到达本函数的路径都先过它。
+    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(DeviceDetector::MODE_SAMSUNG_EUB)))
+        return;
     if (!m_startBtn->isEnabled())      // 双保险：门控以外的路径（如快捷键）不许绕过
         return;
 

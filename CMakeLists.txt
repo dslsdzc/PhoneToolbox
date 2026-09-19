@@ -646,12 +646,18 @@ if(ENABLE_IMAGE_TESTS)
                     # （onPickSource 走 loadSbootBytes）。**刻意不补任何 libusb 源** ——
                     # 对话框只认 IEubTransport 抽象（真机传输由 FlashPanel 侧构造并注入），
                     # 这条依赖契约由本目标的构建图钉住（故不进下方 libusb 链接名单）。
+                    # W2-T5：onStart 接上风险门控（riskui::ensureAccepted / riskTierForMode）后，
+                    # 本目标必须补上闸门本体 + 分级映射 + 留痕层，否则链接期 undef（首轮全量构建实测）。
+                    # 用例仍只调 runRescue/prepare（不点「开始」）—— 传了门控也不会弹模态（见该用例注释）。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/eub_recovery_dialog.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_session.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_loadout.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_protocol.cpp
-                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp)
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_payload.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_confirm_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp)
                 elseif(_test_stem STREQUAL "test_flash_button_labels")
                     # backlog Task 3：FlashPanel「刷入」按钮的 (文案, tooltip) 纯函数（src/ui，
                     # 不编入任何静态库）。只编被测源 —— 它只取 DeviceDetector::DeviceMode
