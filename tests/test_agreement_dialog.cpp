@@ -178,6 +178,14 @@ void TestAgreementDialog::bodyPinsKeyClausesVerbatim()
         QStringLiteral("本须知**不是**对违法行为的许可"),              // §四 定性句，`**` 是原文的一部分
         QStringLiteral("改写 IMEI、序列号等设备标识"),                  // §四 明写禁止①
         QStringLiteral("绕过他人设备的安全机制"),                      // §四 明写禁止②
+        QStringLiteral("**规避运营商/厂商的合法限制**"),               // §四 明写禁止③（整条 bullet，含 `**`）
+        // §四「本版本**提供**…」那段（448 字节）＝ 裁决③「自咬式披露」要求的**明写敏感行为**那段：
+        // 整段删掉曾 12/12 全绿，是残余缺口里责任权重最高的一条，故逐句钉。
+        QStringLiteral("在 MTK BROM 上运行载荷"),                      // 披露①（含 SBC/SLA/DAA 那段的起句）
+        QStringLiteral("preloader 安全修补"),                          // 披露②
+        QStringLiteral("本工具**不内置、不分发**任何载荷二进制"),      // 载荷自备 / 不分发（含 `**`）
+        // §四「本版本**不提供**」那一列的另两项（熔丝类已有锚，见下）：
+        QStringLiteral("本版本**不提供**：DA 二进制生成（改写 DA 使其自校验通过）、SLA/DAA 响应生成"),
         QStringLiteral("熔丝类一次性写入（eFuse / QFPROM 等）"),       // §四 明写不做（熔断类）
         QStringLiteral("## 六、本须知不影响你的自由软件权利"),          // §六 小节标题
         QStringLiteral("不联网、不上传"),                              // §七 本地记录承诺
@@ -197,6 +205,11 @@ void TestAgreementDialog::bodyPinsKeyClausesVerbatim()
         QStringLiteral("本须知不是对违法行为的许可"),
         QStringLiteral("改写 IMEI、序列号等设备标识"),
         QStringLiteral("绕过他人设备的安全机制"),
+        QStringLiteral("规避运营商/厂商的合法限制"),
+        QStringLiteral("在 MTK BROM 上运行载荷"),
+        QStringLiteral("preloader 安全修补"),
+        QStringLiteral("本工具不内置、不分发任何载荷二进制"),
+        QStringLiteral("本版本不提供：DA 二进制生成（改写 DA 使其自校验通过）、SLA/DAA 响应生成"),
         QStringLiteral("熔丝类一次性写入（eFuse / QFPROM 等）"),
         QStringLiteral("六、本须知不影响你的自由软件权利"),
         QStringLiteral("不联网、不上传"),
