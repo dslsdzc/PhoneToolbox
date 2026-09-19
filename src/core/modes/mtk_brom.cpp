@@ -16,6 +16,16 @@ struct UsbIdEntry {
 };
 
 // 对照 usb_ids.py default_ids（BROM 全部 + Preloader 主要）
+//
+// ⚠️ 本表**同时是自动认领表**（W6 起）：检测层（device_detector.cpp 的 detectProtocolDevices）直接按它
+// 把设备认成 MODE_MTK_BROM、在设备列表里显示、并引到刷写面板 —— 语义已从"愿意尝试打开的设备"变成
+// "会自动认领的设备"。故：
+//   • 只准加**真正的 MTK BROM / preloader** 的 VID:PID；
+//   • 上游同一份表里还有 8 行 **USB 串口芯片**（0x0403:0x6001 FTDI；0x1A86 的 0x55D3/0x7523/0x5523/
+//     0x5512 CH34x；0x4348:0x5523 WCH CH340；0x10C4:0xEA60 与 0x11CA:0x0211 CP2102）—— 本仓**有意
+//     不带**：带了就会把每一根 CH340 数据线认成「MTK BROM / Preloader」并引去刷写。将来若要"忠实
+//     对照上游"，**不得**把这些行加进来。
+//   • tests/test_mtk_usb_ids.cpp 有两道钉守这里：表内容镜像（两侧互为副本）+ 串口芯片黑名单。
 constexpr UsbIdEntry kUsbIds[] = {
     {0x0E8D, 0x0003}, {0x0E8D, 0x6000}, {0x0E8D, 0x2000}, {0x0E8D, 0x2001},
     {0x0E8D, 0x20FF}, {0x0E8D, 0x3000},
