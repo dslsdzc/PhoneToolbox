@@ -15,6 +15,9 @@
 //     会在这里挂）。
 //   * fail-closed 槽用**两个注入子例**（不存在的路径 / 存在的空文件）：只查 bodyLoaded() 而不同时
 //     查按钮 enabled 的断言过不了 —— 而"读不到也能同意"正是本任务点名要挡的形态。
+//   * 关键条款槽（F3）钉的是**具体条款 + 原文记号**，不是"正文里有个把泛词"：泛词锚（不包含 / 违法 /
+//     GPLv3）在「四、」整节被删或被改写成宽松版本时照样绿（复审实测），所以锚文本一律从资源文件的
+//     **原始字节**取（`**` / `##` 记号还在的那份）。
 #include <QtTest>
 #include <QApplication>
 #include <QCheckBox>
@@ -39,6 +42,7 @@ private slots:
     void resourceIsBundledAndNonEmpty();
     void versionInBodyMatchesImplementationConstant();
     void bodyPinsKeySentences();
+    void bodyPinsKeyClausesVerbatim();
     void bodyViewIsReadOnlyWithMinimumHeight();
     void agreeButtonGatedByCheckbox();
     void missingOrEmptyBodyBlocksAgreement();
@@ -156,6 +160,50 @@ void TestAgreementDialog::bodyPinsKeySentences()
         QVERIFY2(raw.contains(k), qPrintable(QStringLiteral("资源正文缺关键句：%1").arg(k)));
         QVERIFY2(shown.contains(k), qPrintable(QStringLiteral("对话框展示的正文缺关键句：%1").arg(k)));
     }
+}
+
+void TestAgreementDialog::bodyPinsKeyClausesVerbatim()
+{
+    // F3（复审）：上面那三条泛词（不包含 / 违法 / GPLv3）**不足以**发现条款被删或被改写成宽松版本 ——
+    // 复审实测把「四、以下行为即使你同意本须知也不被许可」整节（1210 字节，含 IMEI 改写违法 /
+    // 绕过他人设备安全机制 / 熔丝类不做 三项明写条款）删掉，11/11 仍全绿。这里改为逐条钉**具体条款**。
+    //
+    // 锚一律按资源文件的**原始字节**取（`##`、`**` 记号还在的那份），不拿渲染后文本当锚：
+    // QTextBrowser::setMarkdown() 会去掉这些记号并合并段内换行，渲染文本认不出"记号被删/换行被改"。
+    const QString raw = bundledBodyText();
+    QVERIFY(!raw.isEmpty());
+
+    const QStringList rawAnchors = {
+        QStringLiteral("## 四、以下行为即使你同意本须知也不被许可"),  // §四 小节标题（整节被删则红）
+        QStringLiteral("本须知**不是**对违法行为的许可"),              // §四 定性句，`**` 是原文的一部分
+        QStringLiteral("改写 IMEI、序列号等设备标识"),                  // §四 明写禁止①
+        QStringLiteral("绕过他人设备的安全机制"),                      // §四 明写禁止②
+        QStringLiteral("熔丝类一次性写入（eFuse / QFPROM 等）"),       // §四 明写不做（熔断类）
+        QStringLiteral("## 六、本须知不影响你的自由软件权利"),          // §六 小节标题
+        QStringLiteral("不联网、不上传"),                              // §七 本地记录承诺
+    };
+    for (const QString &a : rawAnchors)
+        QVERIFY2(raw.contains(a),
+                 qPrintable(QStringLiteral("资源正文缺关键条款（raw 逐字）：%1").arg(a)));
+
+    // 同一批条款还得真的**到达用户眼前**（资源对了但没接到控件上要能红）。渲染后的形态单独列一份：
+    // 与上面的差别只有 markdown 记号（`## ` 前缀 / `**` 加粗）—— 形态经 offscreen 实跑核对，见
+    // .superpowers/sdd/w2-task-3-logs/f3-render-probe.txt（Qt 6.11.2 渲染输出）。
+    auto dlg = makeDlg();
+    QVERIFY(dlg->bodyLoaded());
+    const QString shown = dlg->bodyText();
+    const QStringList shownAnchors = {
+        QStringLiteral("四、以下行为即使你同意本须知也不被许可"),
+        QStringLiteral("本须知不是对违法行为的许可"),
+        QStringLiteral("改写 IMEI、序列号等设备标识"),
+        QStringLiteral("绕过他人设备的安全机制"),
+        QStringLiteral("熔丝类一次性写入（eFuse / QFPROM 等）"),
+        QStringLiteral("六、本须知不影响你的自由软件权利"),
+        QStringLiteral("不联网、不上传"),
+    };
+    for (const QString &a : shownAnchors)
+        QVERIFY2(shown.contains(a),
+                 qPrintable(QStringLiteral("对话框展示的正文缺关键条款：%1").arg(a)));
 }
 
 void TestAgreementDialog::bodyViewIsReadOnlyWithMinimumHeight()
