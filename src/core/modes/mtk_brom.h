@@ -94,6 +94,14 @@ public:
 // libusb 枚举（对照 usb_ids.py 白名单）
 bool enumerateUsb(QList<BromDevice> &out, QString *error);
 
+// 白名单判据：BROM 与 **preloader** 都在表内（与 enumerateUsb 的 kUsbIds **同一份表**）。
+// 检测层（device_detector.cpp 的协议通道判据）也调它 —— 那里不再自己列第二份 PID 表。
+//
+// ⚠️ 本函数只回答"是不是 MTK 协议通道设备"，**不回答是不是 BROM**：BROM / preloader 的身份要
+// 握手之后由 GET_BL_VER（0xFE）的回值判定（上游 mtk_preloader.py:664-673；本仓 getBlVer() 只记录
+// 不分支）。检测层不得据此把 preloader 说成 BROM。
+bool isKnownMtkUsbId(quint16 vid, quint16 pid);
+
 // 打开 libusb 通道（ch 接管所有权；失败时 ch 保持 null）
 bool openLibusbUsb(const BromDevice &dev, std::unique_ptr<IBromUsb> &ch, QString *error);
 

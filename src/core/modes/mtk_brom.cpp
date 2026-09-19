@@ -216,6 +216,15 @@ private:
 
 } // namespace
 
+bool isKnownMtkUsbId(quint16 vid, quint16 pid)
+{
+    for (const UsbIdEntry &id : kUsbIds) {
+        if (id.vid == vid && id.pid == pid)
+            return true;
+    }
+    return false;
+}
+
 bool IBromUsb::readExact(QByteArray &out, int len, int timeoutMs, QString *error)
 {
     // 默认实现 = 单次 read + 严格长度校验：mock（及既有"短包即失败"的断言）语义与判别力不变；

@@ -3,6 +3,7 @@
 #include "modes/edl_9008.h"
 #include "core/odin/odin_libusb_transport.h"
 #include "core/eub/samsung_mode.h"
+#include "core/modes/mtk_brom.h"   // 协议通道 MTK 白名单判据（与协议层 kUsbIds 同源）
 #include "resource_monitor.h"
 #include <libusb.h>
 #include <QProcess>
@@ -548,11 +549,13 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
 {
     // 协议通道设备检测（F5）：libusb VID/PID 快查三个自研协议通道。
     // 设备 ID 用 usb-<bus>-<addr>；模式映射：
-    //   0x0E8D:0x0003 → MTK BROM；0x12D1（DBAdapter，任意 PID）→ 华为 USB Update；
-    //   0x1782（任意 PID）→ 展锐。
+    //   MTK 白名单（BROM + preloader，判据见下）→ MTK BROM；
+    //   0x12D1（DBAdapter，任意 PID）→ 华为 USB Update；0x1782（任意 PID）→ 展锐。
+    //
+    // MTK **不在下面这张表里**：它的判据由协议层单点提供（mtkbrom::isKnownMtkUsbId，与 kUsbIds 同源）。
+    // 检测层再抄一份 PID 表就会与协议层漂移 —— 本仓已多次吃亏（漏一个 PID = 设备进不了门）。
     struct ProtoId { int vid; int pid; DeviceMode mode; };
     const ProtoId ids[] = {
-        { 0x0E8D, 0x0003, MODE_MTK_BROM },
         { 0x12D1, -1,     MODE_HUAWEI_USB_UPDATE },
         { 0x1782, -1,     MODE_SPD },
     };
@@ -632,30 +635,45 @@ void DeviceDetector::detectProtocolDevices(QMap<QString, DeviceInfo> &newDevices
             }
         }
 
-        for (const ProtoId &id : ids) {
-            if (desc.idVendor != id.vid)
-                continue;
-            if (id.pid != -1 && desc.idProduct != id.pid)
-                continue;
+        // 认领一台设备。emit 语义与 detectEDLDevices 一致：新设备 → deviceConnected；
+        // 同 ID 模式变化 → deviceModeChanged（与 fastboot/ADB 分支一致）。
+        // （上面的三星分支有自己的日志前缀，仍走它自己那段。）
+        const auto claim = [&](DeviceMode mode) {
             const QString devId = QStringLiteral("usb-%1-%2")
                                       .arg(libusb_get_bus_number(list[i]))
                                       .arg(libusb_get_device_address(list[i]));
             DeviceInfo info;
             info.serialNumber = devId;
-            info.mode = id.mode;
-            info.model = getModeDisplayName(id.mode); // 与 detectEDLDevices 构造模式一致（列表第二行显示）
+            info.mode = mode;
+            info.model = getModeDisplayName(mode); // 与 detectEDLDevices 构造模式一致（列表第二行显示）
             newDevices[devId] = info;
 
-            // emit 模式与 detectEDLDevices 一致：新设备 → deviceConnected；
-            // 同 ID 模式变化 → deviceModeChanged（与 fastboot/ADB 分支一致）
             if (!m_currentDevices.contains(devId)) {
                 qDebug() << "Protocol device connected:" << devId;
                 emit deviceConnected(info);
-            } else if (m_currentDevices[devId].mode != id.mode) {
-                emit deviceModeChanged(devId, id.mode);
+            } else if (m_currentDevices[devId].mode != mode) {
+                emit deviceModeChanged(devId, mode);
                 qDebug() << "Protocol device mode changed:" << devId
-                         << "to" << getModeDisplayName(id.mode);
+                         << "to" << getModeDisplayName(mode);
             }
+        };
+
+        // MTK（W6）：BROM 与 preloader **同一模式、同一张白名单** —— 不新增模式（协议层对两者是同一条链：
+        // 握手字节完全相同，唯一差别是 isBromPid() 决定要不要预发一个 0xA0）。身份（BROM 还是 preloader）
+        // 是**握手之后**由 GET_BL_VER 回值判定的事实，检测层不猜、模式文案也不把它说成 BROM。
+        // 与既有行为的关系：原表里那一行（BROM 的 VID:PID）本就是 kUsbIds 的子集，故 BROM 那台照旧命中；
+        // preloader PID 由此第一次进门。三星（0x04E8，在上方分支）与华为/展锐（下方表）的判据都不与其交叠。
+        if (mtkbrom::isKnownMtkUsbId(desc.idVendor, desc.idProduct)) {
+            claim(MODE_MTK_BROM);
+            continue;
+        }
+
+        for (const ProtoId &id : ids) {
+            if (desc.idVendor != id.vid)
+                continue;
+            if (id.pid != -1 && desc.idProduct != id.pid)
+                continue;
+            claim(id.mode);
             break;
         }
     }
@@ -764,7 +782,11 @@ QString DeviceDetector::getModeDisplayName(DeviceMode mode) const
     case MODE_MTK_DA: return "MTK DA";
     case MODE_RECOVERY: return "Recovery";
     case MODE_MTK_BROM:
-        return QStringLiteral("MTK BROM");
+        // W6：白名单同时收 BROM 与 preloader（检测层按 VID/PID 认，见 detectProtocolDevices），
+        // 而**身份要握手后由 GET_BL_VER 判定** —— 故这里不许只写 "MTK BROM"（那是把 preloader
+        // 说成 BROM）。设备列表第二行就是这句（detectProtocolDevices 的 info.model）。
+        // ⚠️ src/ui/flash_panel.cpp 有同款 switch 的**本地副本**（仓内约定两侧文案一致），那边尚未同步。
+        return QStringLiteral("MTK BROM / Preloader");
     case MODE_HUAWEI_USB_UPDATE:
         return QStringLiteral("华为 USB Update");
     case MODE_SPD:
