@@ -741,8 +741,10 @@ if(ENABLE_IMAGE_TESTS)
                 elseif(_test_stem STREQUAL "test_agreement_dialog")
                     # W2 Task 3：首屏「使用须知」对话框（src/ui，不编入任何静态库）。只需被测源 ——
                     # 它只依赖 Qt Widgets 与 Qt 资源（正文的单一副本在 resources/legal/user-agreement.md）。
-                    # 第三路比对用的 legal::kAgreementVersion 是 constexpr（C++17 起隐式 inline），
-                    # 故**不需要**补 consent_store.cpp。Widgets/offscreen 与资源见下方两个 if 块。
+                    # 第三路比对用的 legal::kAgreementVersion 是**命名空间作用域的 constexpr 变量**：
+                    # 它是 const → **内部链接**（每个 TU 各持一份；`nm` 里是局部符号 `r legal::kAgreementVersion`）。
+                    # （C++17 的"隐式 inline"只覆盖**静态数据成员**，不覆盖它 —— 别照那句推。）
+                    # 因内部链接自足，故**不需要**补 consent_store.cpp。Widgets/offscreen 与资源见下方两个 if 块。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/agreement_dialog.cpp)
                 elseif(_test_stem STREQUAL "test_consent_store")
