@@ -3,8 +3,9 @@
 
 用法:  python3 tools/gen_mtk_chip_table.py [输出路径|-]
        给了输出路径 → 写**同目录临时文件**、成功后 `os.replace()` 原子换入
-                     （拒绝路径全部是具名 `sys.exit`，当前 27 处；计数请用 ast 数 `sys.exit(...)`
-                      调用 —— `grep -c sys.exit` 会把注释里提到这个词的也算上、多报 4 处。
+                     （拒绝路径全部是具名 `sys.exit`，当前 27 处；计数一律用 ast 数 `sys.exit(...)`
+                      调用 —— `grep -c sys.exit` 会把注释/文档里提到该词的也算上，而本文档自己就
+                      提到这个词，所以 grep 的差值是浮动的、别引用具体差值。
                       原子换入保证**任何拒绝都不碰目标文件**）
        不给路径 / 给 `-` → 产物写 stdout（向后兼容，便于管道）
        例: python3 tools/gen_mtk_chip_table.py src/core/modes/mtk_chip_table.cpp

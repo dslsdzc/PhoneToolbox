@@ -10,3 +10,5 @@ reference/
 
 # 构建目录（含 build-h1/ build-release/ build-final-fw/ build-windows/ 等历史/临时目录）
 build*/
+# 工具脚本（tools/*.py）被 import 时留下的字节码缓存；reference/ 下的同理（整目录已忽略）
+__pycache__/
