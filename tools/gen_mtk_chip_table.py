@@ -67,6 +67,10 @@ HW_FIELDS = [
 ]
 HW_HEADER = REPO / "src" / "core" / "modes" / "mtk_chip_table.h"
 
+# 逐字段的**取值上界**（未列出的用 0xFFFFFFFF）。var1 单独收紧到 0xFF：它是控制传输的
+# wIndex **字节**（kamakiri.py:44），不是地址 —— 表里出现 >0xFF 的值必然是转写出了别的东西。
+HW_FIELD_MAX = {"var1": 0xFF}
+
 # 规模下限：**只**用来抓"表被换成 stub / 解析读到别的 dict"这类整体性事故。
 # **上限不是我拍的、也不是 100 这种圆整数**：上游 v2.1.4.1-20-g71b0175 的 hwconfig 实测
 # **89** 条（交叉核对上游 main 分支同为 ~89 条），100 是不可达的。下限 80 = 留约 10% 余量。
@@ -204,9 +208,16 @@ def extract():
             # 0 与"缺失"在产物里无法区分（值槽本来就写 0），且往 watchdog 写 0 是砖机；
             # 负数不是地址。上游 71b0175 的这 8 个字段无 0/负值（var1 实测最小 10）——
             # 真出现了先人工复核再放宽。
-            if not 0 < val <= 0xFFFFFFFF:
-                sys.exit(f"0x{hw:04X} 的 {upstream_name} = {val} 不在 (0, 0xFFFFFFFF] —— 拒绝生成"
-                         "（0 与'缺失'无法区分；负数不是地址）")
+            #
+            # 上界**逐字段**不同（复审 M-6）：var1 是**控制传输的 wIndex 字节**
+            # （kamakiri.py:44 `ctrl_transfer(0xA1, 0, 0, self.var1, 0)`，wIndex 是 16 位里的
+            # 一个 1 字节量；上游实测取值 {10,37,40,115,127,172,177,180,204} 全都 ≤ 0xFF），
+            # 而其余字段是 32 位地址/基址。收窄到 0xFF 是为了让"表里 var1 超范围"在**生成期**
+            # 就炸，而不是等到真机上被截断成一个别的 wIndex。
+            maxv = HW_FIELD_MAX.get(upstream_name, 0xFFFFFFFF)
+            if not 0 < val <= maxv:
+                sys.exit(f"0x{hw:04X} 的 {upstream_name} = {val} 不在 (0, 0x{maxv:X}] —— 拒绝生成"
+                         "（0 与'缺失'无法区分；负数不是地址；var1 还要 ≤ 0xFF —— 它是 wIndex 字节）")
             hw_values[upstream_name] = (True, val)
         # 对称不变量（emit 与用例都依赖它）：值槽为 0 **当且仅当** 存在位为假。
         # ⚠️ 这是**兜底**，不是运行时校验：上面那段构造已经保证 present ⇒ 值 > 0、absent ⇒ 值 = 0，
