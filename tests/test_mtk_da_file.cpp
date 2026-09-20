@@ -4,10 +4,13 @@
 // （6 个真实文件 / 161 条目，与 reference/mtk-samples/da_parse_report.json 逐字段一致）。
 #include <QtTest>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTemporaryDir>
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 #include "core/modes/mtk_chip_table.h"   // T9 复审：查找键 = chip->dacode 的真样本用例
@@ -31,15 +34,107 @@ private slots:
     void breaksVersionTiesByTakingFirst();
     void rejectsZeroDacode();
     void rejectsOversizedRegionSlice();
+    // 切分另存（writeExtractedDAs）—— 写 da1.bin / da2.bin
+    void writeExtractedDasRoundTrip();
+    void writeExtractedDasKeepsDa2TailSignature();
+    void writeExtractedDasOverwritesExistingFiles();
+    void writeExtractedDasMissingDirFails();
+    void writeExtractedDasRejectsEmptyData();
+    void writeExtractedDasFirstWriteFailureLeavesNoFile();
+    void writeExtractedDasSecondWriteFailureLeavesNoFile();
+    void writeExtractedDasPartialWriteCleansSecondPath();
     // 真样本（reference/mtk-samples/，缺失时 SKIP；验证跑带 -DMTK_SAMPLES_REQUIRED=ON）
     void realSamplesMatchIndependentReport();
     void realSamplesSelectExpectedEntries();
     void realSamplesCoverCollisionAndVersionFilter();
     // T9 复审修复的真样本方向：查找键 = chip->dacode（不是设备报的 hw_code）
     void realSamplesLookUpByDacodeNotHwCode();
+    void realSamplesWriteDaFilesRoundTrip();
 };
 
 using namespace mtktest;
+
+// ---- 切分另存用例用的私有件 ----
+
+// 非周期填充（xorshift32，同 test_spd_pac / test_eub_session 的做法）：`(i * k) & 0xFF` 一类
+// 256 周期图案会让"偏移错 256 的整数倍"漏检；逐字节对拍要能分辨错位/截断。
+static QByteArray patternedBytes(int n, quint32 seed)
+{
+    QByteArray b(n, '\0');
+    quint32 x = seed;
+    for (int i = 0; i < n; ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        b[i] = char(x & 0xFF);
+    }
+    return b;
+}
+
+// 把 raw 里第 0 条条目的 region[2]（DA2）末尾 sigLen 字节改成 pattern（长度须 == sigLen）。
+// 为什么非改不可：builder 的每个 region 是**单一填充字节**，则"签名保留 / 被裁掉 / 被清零"只有
+// **长度**可分；换成图案后内容也可分 —— 本项的核心验收是"不许裁 DA2 尾部签名"，对拍要能看见
+// 签名那一段本身（否则一个"长度对、内容被裁后补零"的实现能蒙混过关）。
+static bool patchDa2Tail(QByteArray &raw, const QByteArray &pattern)
+{
+    mtkbrom::DaFile f;
+    QString err;
+    if (!mtkbrom::parseDaFile(raw, f, &err) || f.entries.isEmpty())
+        return false;
+    const mtkbrom::DaEntry &e = f.entries.first();
+    if (e.regions.size() < 3)
+        return false;
+    const mtkbrom::DaRegion &r2 = e.regions.at(2);
+    if (r2.sigLen != quint32(pattern.size()) || r2.len < r2.sigLen)
+        return false;
+    // 用**解析器给的** fileOffset 定位（不是自己按 builder 布局算的常数）：夹具与解析器对同一
+    // 偏移的两种算法互相印证，改 builder 时这里不会静默改到别的字节上。
+    raw.replace(int(r2.fileOffset + r2.len - r2.sigLen), pattern.size(), pattern);
+    return true;
+}
+
+// 真样本 / 落盘用例共用的两段可辨识载荷：region[0] 用作 EMI（选择层不用），
+// region[1] = DA1、region[2] = DA2（带 sigLen 尾部签名，落在 pattern 上）。
+// 返回 false = 夹具自身不合法（用例应当 QVERIFY 它，别让失败伪装成"实现有问题"）。
+static bool makeWritableSelection(mtkbrom::DaSelection &out, const QByteArray &tailPattern,
+                                  quint32 da1Len = 64, quint32 da2Len = 96, quint32 sigLen = 32)
+{
+    if (tailPattern.size() != int(sigLen) || da2Len < sigLen || da1Len == 0)
+        return false;
+    EntrySpec e;
+    e.hwCode = 0x6765;
+    RegionSpec r0; r0.len = 16;     r0.startAddr = 0x200000;
+    RegionSpec r1; r1.len = da1Len; r1.startAddr = 0x2007000;
+    RegionSpec r2; r2.len = da2Len; r2.startAddr = 0x80000000; r2.sigLen = sigLen;
+    e.regions << r0 << r1 << r2;
+    QByteArray raw = buildDa({e});
+    if (!patchDa2Tail(raw, tailPattern))
+        return false;
+    mtkbrom::DaFile f;
+    QString err;
+    if (!mtkbrom::parseDaFile(raw, f, &err))
+        return false;
+    QStringList warn;
+    return mtkbrom::selectDaEntry(f, 0x6765, 0, 0, &warn, out, &err);
+}
+
+// /dev/full 构造"打开成功、写入失败"（同 test_spd_pac::linkToFullDevice）：QFile 带缓冲 ——
+// open 成功、write() 返回满额，失败在 flush() 现形，正是"可能已写出部分内容"要清理的那条分支。
+// 平台无 /dev/full 或建不出符号链接 → false（调用方 QSKIP）。
+static bool linkToFullDevice(const QString &linkPath)
+{
+    if (!QFileInfo::exists(QStringLiteral("/dev/full")))
+        return false;
+    if (!QFile::link(QStringLiteral("/dev/full"), linkPath))
+        return false;
+    return QFileInfo(linkPath).isSymLink();   // Windows 上 link() 造的是 .lnk，不是符号链接
+}
+
+// 目录下的常规文件（断言"没留半份产物"用；符号链接不计入 QDir::Files，失败腿另按 isSymLink 判）
+static QStringList regularFiles(const QString &dir)
+{
+    return QDir(dir).entryList(QDir::Files, QDir::Name);
+}
 
 static EntrySpec entryWith3Regions(quint16 hwCode = 0x6765)
 {
@@ -403,6 +498,256 @@ void TestMtkDaFile::rejectsOversizedRegionSlice()
     QVERIFY2(!misleading, qPrintable(warn.join(QStringLiteral(" | "))));
 }
 
+// ---- 切分另存（writeExtractedDAs）：写 da1.bin / da2.bin ----
+
+void TestMtkDaFile::writeExtractedDasRoundTrip()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray tail = patternedBytes(32, 0x51);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+    QCOMPARE(sel.da1.len, quint32(64));
+    QCOMPARE(sel.da2.len, quint32(96));
+    QVERIFY2(sel.da1Bytes != sel.da2Bytes, "两段内容必须可区分（否则「取反/串位」类错误测不出）");
+
+    QString p1, p2, err;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
+    QCOMPARE(p1, dir.filePath(QStringLiteral("da1.bin")));
+    QCOMPARE(p2, dir.filePath(QStringLiteral("da2.bin")));
+    QVERIFY2(err.isEmpty(), qPrintable(err));   // 成功路径不留错误文案（不残留上一次的）
+
+    QFile f1(p1);
+    QFile f2(p2);
+    QVERIFY(f1.open(QIODevice::ReadOnly));
+    QVERIFY(f2.open(QIODevice::ReadOnly));
+    const QByteArray got1 = f1.readAll();
+    const QByteArray got2 = f2.readAll();
+    QCOMPARE(got1, sel.da1Bytes);
+    QCOMPARE(got2, sel.da2Bytes);
+    QCOMPARE(got1.size(), int(sel.da1.len));
+    QCOMPARE(got2.size(), int(sel.da2.len));
+    // 两段没串位：da2.bin 的尾部签名段是夹具图案（da1.bin 里没有这段图案）
+    QCOMPARE(got2.right(tail.size()), tail);
+    QVERIFY2(!got1.contains(tail), "da1.bin 里不该出现 DA2 的签名段（两段串位/取反）");
+    // 目录里只有这两个文件：不留临时件（本实现是直写，不留 .part 一类中间产物）
+    QCOMPARE(regularFiles(dir.path()),
+             QStringList({QStringLiteral("da1.bin"), QStringLiteral("da2.bin")}));
+}
+
+// 本项的核心验收：**DA2 保留尾部签名，不许裁剪**。裁剪是上游/本仓曾经踩过的方向
+//（XFlash 的 boot_to 才剥签名，见 mtk_xflash_payload.h —— 剥签名是**协议层**的事，
+//  落盘的是"文件里那一段"，与 LEGACY 上传的字节逐字节相同）。
+void TestMtkDaFile::writeExtractedDasKeepsDa2TailSignature()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray tail = patternedBytes(32, 0x77);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+    // 前提：签名长度非 0 且小于 m_len —— 否则"裁了"与"没裁"在长度上不可分，本用例会变成空转
+    QVERIFY(sel.da2.sigLen > 0);
+    QVERIFY(sel.da2.len > sel.da2.sigLen);
+
+    QString p1, p2, err;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
+    QFile f2(p2);
+    QVERIFY(f2.open(QIODevice::ReadOnly));
+    const QByteArray written = f2.readAll();
+
+    // 长度 = m_len（**不是** m_len - m_sig_len）：裁剪实现会短掉 sigLen 字节
+    QCOMPARE(written.size(), int(sel.da2.len));
+    // 尾部那 sigLen 字节**逐字节**还在（内容可分，不只看长度）
+    QCOMPARE(written.right(int(sel.da2.sigLen)), tail);
+    // 整段与选择层切出的字节逐字节一致：落盘不做任何二次加工（不裁、不补、不移位）
+    QCOMPARE(written, sel.da2Bytes);
+}
+
+// 同名文件已存在时**覆盖**（文件名固定 da1.bin/da2.bin = 导出语义，不静默改名）。
+// 判别力：旧内容比新内容**长** —— 若实现按追加/不截断写，文件尾部会留下旧字节，
+// 后续按路径取用就是"静默用错数据"（比失败更糟）。
+void TestMtkDaFile::writeExtractedDasOverwritesExistingFiles()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray tail = patternedBytes(32, 0x1D);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    const QString p1 = dir.filePath(QStringLiteral("da1.bin"));
+    const QString p2 = dir.filePath(QStringLiteral("da2.bin"));
+    const QByteArray stale1(sel.da1Bytes.size() + 64, '\xEE');
+    const QByteArray stale2(sel.da2Bytes.size() + 64, '\xEE');
+    for (const auto &pair : {std::make_pair(p1, stale1), std::make_pair(p2, stale2)}) {
+        QFile old(pair.first);
+        QVERIFY(old.open(QIODevice::WriteOnly));
+        QCOMPARE(old.write(pair.second), qint64(pair.second.size()));
+        old.close();
+    }
+
+    QString w1, w2, err;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), w1, w2, &err), qPrintable(err));
+    QCOMPARE(w1, p1);
+    QCOMPARE(w2, p2);
+    QFile f1(p1);
+    QFile f2(p2);
+    QVERIFY(f1.open(QIODevice::ReadOnly));
+    QVERIFY(f2.open(QIODevice::ReadOnly));
+    QCOMPARE(f1.readAll(), sel.da1Bytes);       // 长度也要一样：旧字节不许留在尾部
+    QCOMPARE(f2.readAll(), sel.da2Bytes);
+    QCOMPARE(f1.size(), qint64(sel.da1.len));
+    QCOMPARE(f2.size(), qint64(sel.da2.len));
+}
+
+// 目录不存在 / 路径是常规文件：不替调用方建目录（路径由调用方/用户给，猜错地方比失败更糟）——
+// 对齐 spd::writeExtractedFdls 的姿态。失败必须清空两个出参（不残留上一次的成功路径）。
+void TestMtkDaFile::writeExtractedDasMissingDirFails()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray tail = patternedBytes(32, 0x2B);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    // 先来一次**成功**把出参填满：失败路径"清空出参"才有东西可清（fresh 就是空的话是恒真断言）
+    QString p1, p2, err;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
+    QVERIFY(!p1.isEmpty() && !p2.isEmpty());
+
+    const QString missing = dir.filePath(QStringLiteral("not-there"));
+    err.clear();
+    QVERIFY(!mtkbrom::writeExtractedDAs(sel, missing, p1, p2, &err));
+    QVERIFY2(err.contains(missing), qPrintable(err));   // 文案点明是哪个路径
+    QVERIFY2(p1.isEmpty() && p2.isEmpty(), "失败路径必须清空出参（不残留上一次的成功路径）");
+    QVERIFY2(!QFileInfo::exists(missing), "不得替调用方把目录建出来");
+
+    // 路径存在但是**常规文件**（不是目录）：同样拒绝，且不把它当目录用
+    const QString asFile = dir.filePath(QStringLiteral("afile"));
+    QFile af(asFile);
+    QVERIFY(af.open(QIODevice::WriteOnly));
+    QCOMPARE(af.write("x", 1), qint64(1));
+    af.close();
+    err.clear();
+    QVERIFY(!mtkbrom::writeExtractedDAs(sel, asFile, p1, p2, &err));
+    QVERIFY2(err.contains(asFile), qPrintable(err));
+    QVERIFY(p1.isEmpty() && p2.isEmpty());
+    // 那个常规文件没被动过：既没被当目录用，也没被写坏（"路径是文件"这条分支不得回落到覆盖它）
+    QFile check(asFile);
+    QVERIFY(check.open(QIODevice::ReadOnly));
+    QCOMPARE(check.readAll(), QByteArray("x"));
+    // 目录里仍是"上一次成功写出的两个 + afile"：本次失败没多写、也没删别人的文件
+    QCOMPARE(regularFiles(dir.path()),
+             QStringList({QStringLiteral("afile"), QStringLiteral("da1.bin"), QStringLiteral("da2.bin")}));
+}
+
+// 空载荷（0 字节）拒写：空 DA 发出去起不了作用，失败点会被推到设备侧（同 spd 的空 FDL 判据）。
+// 选择层已跳过 region[1]/[2] 长度为 0 的条目，故这里守的是**手工构造的 DaSelection**（调用方
+// 可能自己拼一份，或将来由别的来源填）——守卫要在落盘口，而不是假设上游一定干净。
+void TestMtkDaFile::writeExtractedDasRejectsEmptyData()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QByteArray tail = patternedBytes(32, 0x3D);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    QString p1, p2, err;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
+
+    for (int which = 1; which <= 2; ++which) {
+        mtkbrom::DaSelection bad = sel;
+        if (which == 1)
+            bad.da1Bytes.clear();
+        else
+            bad.da2Bytes.clear();
+        err.clear();
+        QVERIFY(!mtkbrom::writeExtractedDAs(bad, dir.path(), p1, p2, &err));
+        QVERIFY2(err.contains(QStringLiteral("空载荷")), qPrintable(err));
+        // 指明**是**哪一段空的（文案格式："（DA1 N 字节 / DA2 M 字节）"）—— 只判"含空载荷"的话，
+        // 把两段判据写反（查 da1 却报 da2）也照样通过
+        QVERIFY2(err.contains(QStringLiteral("DA%1 0 字节").arg(which)), qPrintable(err));
+        QVERIFY2(p1.isEmpty() && p2.isEmpty(), "失败路径必须清空出参");
+        // 空载荷是**入口拒写**：目录里仍是上一次成功留下的两个文件，没有被清掉或被写空
+        QCOMPARE(regularFiles(dir.path()),
+                 QStringList({QStringLiteral("da1.bin"), QStringLiteral("da2.bin")}));
+        QCOMPARE(QFileInfo(dir.filePath(QStringLiteral("da1.bin"))).size(), qint64(sel.da1.len));
+        QCOMPARE(QFileInfo(dir.filePath(QStringLiteral("da2.bin"))).size(), qint64(sel.da2.len));
+    }
+}
+
+// 第一轮**写不完整**（打开成功、刷盘失败，构造见 linkToFullDevice）：失败即清理该路径上的残留，
+// 且"刷盘失败"要如实说（QFile 带缓冲 ⇒ 这条分支上 write() 的返回值仍是满额，照"实写 N 字节"写
+// 会自相矛盾 —— spd_pac 的复审 M6 同款）。
+void TestMtkDaFile::writeExtractedDasFirstWriteFailureLeavesNoFile()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QString p1 = dir.filePath(QStringLiteral("da1.bin"));
+    if (!linkToFullDevice(p1))
+        QSKIP("本机无 /dev/full（或建不出符号链接）—— 离线构造不出「打开成功、写入失败」");
+    const QByteArray tail = patternedBytes(32, 0x5F);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    QString w1, w2, err;
+    QVERIFY(!mtkbrom::writeExtractedDAs(sel, dir.path(), w1, w2, &err));
+    QVERIFY2(err.contains(QStringLiteral("da1.bin")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("刷盘失败")), qPrintable(err));
+    QVERIFY(w1.isEmpty() && w2.isEmpty());
+    QVERIFY2(!QFileInfo(p1).isSymLink(), "第一轮写失败后 da1.bin 仍留着条目（清理未执行）");
+    QVERIFY2(regularFiles(dir.path()).isEmpty(), "第一轮失败留下了常规文件");
+    QVERIFY2(!QFile::exists(dir.filePath(QStringLiteral("da2.bin"))), "第二轮不该被写到");
+}
+
+// 第二个文件写不进去（同名位置被一个**目录**占住）：整次调用失败，**第一个文件也要删掉** ——
+// 只落成 da1.bin 会让调用方以为拿到了可用的一对（同 spd::writeExtractedFdls 的姿态）。
+void TestMtkDaFile::writeExtractedDasSecondWriteFailureLeavesNoFile()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    // 占位目录：写同名常规文件必失败（QFile 打不开一个目录）
+    QVERIFY(QDir(dir.path()).mkdir(QStringLiteral("da2.bin")));
+    const QByteArray tail = patternedBytes(32, 0x6B);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    QString w1, w2, err;
+    QVERIFY(!mtkbrom::writeExtractedDAs(sel, dir.path(), w1, w2, &err));
+    // 失败确实发生在**第二次**写：文案点名 da2.bin、不点 da1.bin —— 否则"直接返回 false、什么都没写"
+    // 的桩实现也能让下面"第一个文件不存在"恒真通过；反过来第一轮就失败会在这里显出 da1.bin。
+    QVERIFY2(!err.contains(QStringLiteral("da1.bin")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("da2.bin")), qPrintable(err));
+    QVERIFY(w1.isEmpty() && w2.isEmpty());
+    QVERIFY2(!QFile::exists(dir.filePath(QStringLiteral("da1.bin"))),
+             "第一个文件没删：失败留下了半份产物");
+    QVERIFY2(QFileInfo(dir.filePath(QStringLiteral("da2.bin"))).isDir(), "占位目录不该被动过");
+    QVERIFY2(regularFiles(dir.path()).isEmpty(), "失败留下了常规文件");
+}
+
+// 第二轮**写不完整**（打开成功、刷盘失败）：先写成的 da1.bin 是"半份产物"（调用方以为拿到了可用的
+// 一对），后写的 da2.bin 路径上的残留也要清掉。
+void TestMtkDaFile::writeExtractedDasPartialWriteCleansSecondPath()
+{
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    const QString p2 = dir.filePath(QStringLiteral("da2.bin"));
+    if (!linkToFullDevice(p2))
+        QSKIP("本机无 /dev/full（或建不出符号链接）—— 离线构造不出「打开成功、写入失败」");
+    const QByteArray tail = patternedBytes(32, 0x83);
+    mtkbrom::DaSelection sel;
+    QVERIFY2(makeWritableSelection(sel, tail), "夹具 DA 自身不合法");
+
+    QString w1, w2, err;
+    QVERIFY(!mtkbrom::writeExtractedDAs(sel, dir.path(), w1, w2, &err));
+    QVERIFY2(err.contains(QStringLiteral("da2.bin")), qPrintable(err));
+    QVERIFY2(err.contains(QStringLiteral("刷盘失败")), qPrintable(err));
+    QVERIFY(w1.isEmpty() && w2.isEmpty());
+    QVERIFY2(!QFile::exists(dir.filePath(QStringLiteral("da1.bin"))),
+             "第一个文件没删：失败留下了半份产物");
+    QVERIFY2(!QFileInfo(p2).isSymLink(), "第二个路径仍留着条目（清理未执行）");
+    QVERIFY2(regularFiles(dir.path()).isEmpty(), "失败留下了常规文件");
+}
+
 void TestMtkDaFile::reportsNoCandidateWithAvailableCodes()
 {
     mtkbrom::DaFile f;
@@ -693,6 +1038,47 @@ void TestMtkDaFile::realSamplesCoverCollisionAndVersionFilter()
     QCOMPARE(sel.entry.hwVersion, quint16(0xCA00));
     QCOMPARE(sel.da1.len, quint32(137884));
     QCOMPARE(sel.da1Bytes.size(), int(sel.da1.len));
+}
+
+// 真样本的切分另存：合成夹具能覆盖边界，但 region 偏移/长度/**签名长度**都不由本仓决定 ——
+// 用真文件落一次盘，把两段与源文件切片逐字节对拍（V5 的 0x6752：region[1] m_buf 4429000/m_len 87480，
+// region[2] m_buf 4516488/m_len 226552/**m_sig_len 256**，数字取自独立解析器报告 da_parse_report.json）。
+void TestMtkDaFile::realSamplesWriteDaFilesRoundTrip()
+{
+    if (!mtktest::sampleFileAvailable(QStringLiteral("MTK_DA_V5.bin"))) {
+#if MTK_SAMPLES_REQUIRED
+        QFAIL("真样本缺失，但本次构建要求真样本（MTK_SAMPLES_REQUIRED=ON）");
+#else
+        QSKIP("真样本缺失（reference/ 为 gitignored）");
+#endif
+    }
+    QFile f(mtktest::samplesDir() + QStringLiteral("/MTK_DA_V5.bin"));
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QByteArray v5Data = f.readAll();
+    mtkbrom::DaFile v5;
+    QString err;
+    QVERIFY2(mtkbrom::parseDaFile(v5Data, v5, &err), qPrintable(err));
+    QStringList warn;
+    mtkbrom::DaSelection sel;
+    QVERIFY2(mtkbrom::selectDaEntry(v5, 0x6752, 0, 0, &warn, sel, &err), qPrintable(err));
+    // 前提：真样本这一条的 DA2 确实带签名（sigLen 非 0）—— 否则本用例测不到"不裁剪"
+    QCOMPARE(sel.da2.sigLen, quint32(256));
+    QCOMPARE(sel.da2.len, quint32(226552));
+
+    QTemporaryDir dir;
+    QVERIFY2(dir.isValid(), "临时目录创建失败（/tmp 不可写？）");
+    QString p1, p2;
+    QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
+    QFile f1(p1);
+    QFile f2(p2);
+    QVERIFY(f1.open(QIODevice::ReadOnly));
+    QVERIFY(f2.open(QIODevice::ReadOnly));
+    // 盘上字节 == 源文件对应切片（含 DA2 尾部那 256 字节签名）：裁剪 → 长度不符；补零/移位 →
+    // 逐字节不符；两种情况都在下面两条对拍上红（真文件的这段签名自带内容，不是整段同色）。
+    QCOMPARE(f1.readAll(), v5Data.mid(int(sel.da1.fileOffset), int(sel.da1.len)));
+    QCOMPARE(f2.readAll(), v5Data.mid(4516488, 226552));
+    QCOMPARE(f1.size(), qint64(sel.da1.len));
+    QCOMPARE(f2.size(), qint64(226552));
 }
 
 QTEST_APPLESS_MAIN(TestMtkDaFile)

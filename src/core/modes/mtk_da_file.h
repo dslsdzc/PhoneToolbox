@@ -35,8 +35,9 @@
 //  12. P4 0xD8/0xDC 探测必须与 0x6C + count*size <= filesize 交叉校验，不自洽就报错
 //      （探测点落在 entry[0] 自己的槽内，nregions >= 10 时会变成真实数据）。
 //
-// 本文件做**解析**与**条目选择**两层：解析层只把字段完整读出（不做选择、不按内容去重 —— P6），
+// 本文件做**解析**、**条目选择**与**切分另存**三层：解析层只把字段完整读出（不做选择、不按内容去重 —— P6），
 // 选择层（D1 Task 2，`selectDaEntry`）落实 P2（5 元组才是唯一键）与 P5（region[1]/[2] 硬编码）；
+// 切分另存层（W8 Task 4，`writeExtractedDAs`）把选中的两段**原样**写盘 —— 只碰文件系统、不碰设备。
 // P12 的协议端序属协议层，本文件只按 LE 读文件字段。
 //
 // 选择层规则出处（mtkclient v2.1.4-20-g71b0175，GPL-3.0，**只读引用不复制代码**）：
@@ -117,5 +118,28 @@ struct DaSelection {
 // 不残留上一次的成功结果，也不留"entry 有值、字节为空"的半份选择（fail-closed）。
 bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16 deviceSwVer,
                    QStringList *warnings, DaSelection &out, QString *error);
+
+// 把选中条目的两阶段 DA 切分另存到目录 dir（文件名固定 `da1.bin` / `da2.bin`）。**纯本地 IO**：
+// 不枚举 USB、不发一个字节给设备，也不改 DaSelection（const 入参）。成功路径填好两个出参（绝对/相对
+// 形态与 dir 一致，供调用方按**路径**取用）；失败路径两个出参清空 + 中文 *error。
+//
+// 内容契约（本项的核心验收）：
+//   • 逐字节照搬 `sel.da1Bytes` / `sel.da2Bytes`（以**字节**为准，不由 `da1.len`/`da2.len` 反推、
+//     不改写长度）—— 也正因为如此，**DA2 的尾部签名段必须原样落盘**：LEGACY 协议要的是整段
+//     （`mtk_payload.cpp` 按 m_len 上传、`da2Bytes` 带签名），剥签名是**协议层**在 XML 路径上的事
+//     （见 mtk_xflash_payload.h 的 boot_to），不在落盘口做。
+//   • 同名文件按**覆盖**处理（导出语义：名字固定，不静默改名）—— 覆盖前的内容一律清掉，不留旧字节。
+//
+// fail-closed（不留半份产物，对齐 `spd::writeExtractedFdls` 的先例）：
+//   • 任一阶段为空载荷（0 字节）→ 入口即拒（空 DA 发出去起不了作用，失败点会被推到设备侧）；
+//   • dir 不存在 / 不是目录 → 拒（**不替调用方建目录**：路径由调用方给，猜错地方比失败更糟）；
+//   • 打开 / 写入 / 刷盘(flush) / 关闭任一步失败 → 返回 false，且**本次已写出的文件全部删除**
+//     （只落成 da1.bin 会让调用方以为拿到了可用的一对）。清理只针对本次写出的两个路径。
+// 出参在入口清空、只在成功路径写入（与 selectDaEntry 同口径：不残留上一次的成功结果）。
+//
+// 诚实边界：本函数只保证"盘上字节 == 选中的字节"（离线可完整验证）。这份 DA 在真机上是否可用，
+// 属既有 BROM 刷写链的未验证范围；`selectDaEntry` 的调用方仍需要 dacode（来自设备/芯片表）。
+bool writeExtractedDAs(const DaSelection &sel, const QString &dir, QString &da1Path, QString &da2Path,
+                       QString *error);
 
 } // namespace mtkbrom

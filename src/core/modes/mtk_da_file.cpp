@@ -14,6 +14,9 @@
 #include <climits>   // INT_MAX（>2GiB 切片守卫）
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
+#include <QDir>      // writeExtractedDAs 的落盘目录（存在性检查 + 拼路径）
+#include <QFile>     // 落盘与失败清理
+
 #include "mtk_err.h"       // setErr（与 mtk_preloader_emi.cpp 共用一份）
 #include "mtk_le_bytes.h"  // le16At / le32At（小端解码，与各帧层共用一份）
 
@@ -232,6 +235,86 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
                                     "上游同语义；两条目仅 pagesize 不同时唯一键才是 5 元组（含 pagesize），"
                                     "本层不做 pagesize 匹配")
                          .arg(dacode, 4, 16, QLatin1Char('0')).arg(candidates.size()).arg(best);
+    return true;
+}
+
+namespace {
+
+// 写文件并查到"落盘确实成功"这一层：write() 的返回值 + flush()/close() 的错误状态都要看 ——
+// QFile 带缓冲：磁盘满时数据可能先停在用户态缓冲，失败在 flush() 现形，**此时 write() 的返回值
+// 仍是满额** —— 照"实写 N 字节"写会自相矛盾，故两种情况分开说（用例：符号链接指向 /dev/full）。
+// 与 spd_pac.cpp 的同名件是**有意各自持有一份**：那份在匿名命名空间里（跨 TU 取不到），提到公共头
+// 要动已完成面（SPD 模块）；本模块多这 30 行，好过为一个单列小任务去改别人的文件。
+bool writeFileChecked(const QString &path, const QByteArray &data, QString *error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) {   // WriteOnly 隐含 Truncate：同名旧文件不留旧字节
+        setErr(error, QStringLiteral("无法写入 DA 文件 %1：%2").arg(path, f.errorString()));
+        return false;
+    }
+    const qint64 written = f.write(data);
+    const bool shortWrite = written != qint64(data.size());
+    if (shortWrite || !f.flush() || f.error() != QFileDevice::NoError) {
+        const QString why = f.errorString();
+        f.close();
+        setErr(error, shortWrite
+                          ? QStringLiteral("写入 DA 文件 %1 不完整（应写 %2 字节，实写 %3 字节）：%4")
+                                .arg(path).arg(data.size()).arg(written).arg(why)
+                          : QStringLiteral("DA 文件 %1 刷盘失败（%2 字节未能落盘）：%3")
+                                .arg(path).arg(data.size()).arg(why));
+        return false;
+    }
+    f.close();
+    if (f.error() != QFileDevice::NoError) {
+        setErr(error, QStringLiteral("关闭 DA 文件 %1 失败：%2").arg(path, f.errorString()));
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool writeExtractedDAs(const DaSelection &sel, const QString &dir, QString &da1Path, QString &da2Path,
+                       QString *error)
+{
+    // 失败不留半份产物（仓内约定）：出参在入口清空，只有两个文件都写成才写入
+    da1Path.clear();
+    da2Path.clear();
+    if (error)
+        error->clear();
+
+    if (sel.da1Bytes.isEmpty() || sel.da2Bytes.isEmpty()) {
+        setErr(error, QStringLiteral("不落盘：选中内容含空载荷（DA1 %1 字节 / DA2 %2 字节）——"
+                                     "空 DA 无法上传")
+                          .arg(sel.da1Bytes.size()).arg(sel.da2Bytes.size()));
+        return false;
+    }
+    const QDir outDir(dir);
+    if (!outDir.exists()) {
+        // 不替调用方建目录：路径由调用方/用户给，猜错地方比失败更糟（同 spd::writeExtractedFdls）
+        setErr(error, QStringLiteral("DA 落盘目录不存在或不是目录：%1").arg(dir));
+        return false;
+    }
+    const QString path1 = outDir.filePath(QStringLiteral("da1.bin"));
+    const QString path2 = outDir.filePath(QStringLiteral("da2.bin"));
+
+    QString why;
+    if (!writeFileChecked(path1, sel.da1Bytes, &why)) {
+        QFile::remove(path1);   // 可能已写出部分内容（写一半失败）——不留半份产物
+        setErr(error, why);
+        return false;
+    }
+    if (!writeFileChecked(path2, sel.da2Bytes, &why)) {
+        // 只落成 da1.bin 会让调用方以为拿到了可用的一对（da2.bin 的字节落到设备侧才现形）——
+        // 两个都删（与 spd::writeExtractedFdls 同姿态；QFile::remove 对"本来就没写成/是目录"
+        // 返回 false，不影响失败结论）
+        QFile::remove(path1);
+        QFile::remove(path2);
+        setErr(error, why);
+        return false;
+    }
+    da1Path = path1;
+    da2Path = path2;
     return true;
 }
 
