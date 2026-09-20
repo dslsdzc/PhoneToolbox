@@ -71,8 +71,20 @@ PhoneToolbox 是一个**面向设备所有者与维修人员**的 Android 设备
 | Tier | 名称 | 覆盖的功能（**本版本实际存在的**） | 二次确认时机 |
 |---|---|---|---|
 | 1 | 使用须知 | 全部（首屏） | 启动时（未接受过该版本 → 弹窗阻断，未接受则退出程序） |
-| 2 | 底层引导与写操作 | EDL（oppo-edl）/ MTK BROM / 展锐 / 华为 USB Update / 三星 Odin / **EUB 救援** / 死砖修复 / FRP 清除 / Fastboot 分区刷写·擦除·格式化 / fastboot update / Sideload / ADB Root 刷入 / Bootloader 解锁·回锁 / MTK 解锁·回锁 / 内存转储 / 运行刷机脚本 | 该版本首次进入任一项时 |
-| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 | 该版本首次进入任一项时 |
+| 2 | 底层引导与写操作 | EDL（oppo-edl）/ MTK BROM / 展锐 / 华为 USB Update / 三星 Odin / **EUB 救援** / 死砖修复 / FRP 清除 / Fastboot 分区刷写·擦除·格式化 / fastboot update / Sideload / ADB Root 刷入 / Bootloader 解锁·回锁 / MTK 解锁·回锁 / 内存转储 / 运行刷机脚本 / **系统分区改写（remount rw / umount / 改 build.prop / 换开机动画）/ 应用卸载（pm uninstall）** | 该版本首次进入任一项时 |
+| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 / **SELinux 模式切换（setenforce）** | 该版本首次进入任一项时 |
+
+> **2026-09-20 复审裁决补登（W2-T5 复审 ②）**：首版接线只覆盖了系统工具面板里的**检测类**入口，
+> 把"**真改设备状态**"的入口漏在外面（`setenforce 0` 削弱 SELinux、remount rw 把 /system 置为可写、
+> 改 build.prop、换开机动画、卸载应用）—— 与"SafetyNet 绕过（其实只是检测）都门控了"不自洽。
+> 补登 4 个 `RiskFeature`：`SystemPartitionWrite` / `AppUninstall`（→ Tier 2）、
+> `SelinuxMode` / `DeviceSpoof`（→ Tier 3）。`DeviceSpoof` 同时修掉一处"借用"：本表早就把
+> "设备信息伪造"与"IMEI 入口"列为**两项**，而枚举此前只有 `ImeiTool` 可借。
+>
+> ⚠️ **遗留（文案口径，未决）**：`tierWarnings(Tier3Diagnostic)` 的三条要点是**按 exploit 场景**写的
+> （"漏洞扫描与利用脚本会尝试绕过设备安全机制。"）。新纳入 Tier3 的 SELinux 切换与设备信息伪造会
+> 展示同一段要点 —— 语义不算错（同属"绕过/削弱安全机制、改写设备标识"），但**读起来偏 exploit**。
+> 改文案要同时改 `test_risk_tiers.cpp` 的逐字钉（W2-T1 有意为之），故**留给控制方裁决**（T5 报告 §疑虑）。
 
 **纯函数映射**（可单测，不碰 Widgets/libusb —— 与 `flashui::flashButtonLabelsFor` 同款分层）：
 ```cpp
@@ -80,7 +92,9 @@ namespace riskui {
 enum class RiskTier { None = 0, Tier2Boot = 2, Tier3Diagnostic = 3 };   // 2/3 与 §4 的 legal/tier2Version 键名对齐
 RiskTier riskTierForMode(DeviceDetector::DeviceMode mode);   // 按设备模式（协议通道/EDL/…）
 enum class RiskFeature { DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot, MtkUnlock,   // → Tier 2
-                         VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool };           // → Tier 3
+                         SystemPartitionWrite, AppUninstall,                                        // → Tier 2（2026-09-20 补登）
+                         VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool,            // → Tier 3
+                         SelinuxMode, DeviceSpoof };                                                // → Tier 3（2026-09-20 补登）
 RiskTier riskTierForFeature(RiskFeature f);                  // 按功能入口
 QString tierTitle(RiskTier t);                               // "底层引导与写操作" / "诊断与安全研究"
 QStringList tierWarnings(RiskTier t);                        // 该 tier 的具体风险要点（进二次确认对话框）
