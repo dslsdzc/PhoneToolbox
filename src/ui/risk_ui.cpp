@@ -114,7 +114,9 @@ QStringList tierWarnings(RiskTier t)
             QStringLiteral("这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / 账号与安全校验），"
                            "或改写设备标识。"),
             QStringLiteral("未经设备所有者同意对他人设备使用，可能违法。"),
-            QStringLiteral("脚本来自第三方数据库，本工具不对其效果与后果负责。"),
+            // W2-T5 复审 ②（追加）：原句"脚本来自第三方数据库…"只对 exploit 成立，而本档还含
+            // SELinux 切换与设备信息伪造（两类都不涉及第三方脚本）—— 改成两类都成立的措辞。
+            QStringLiteral("操作效果与后果由你自行判断并承担；本工具不对其效果负责。"),
         };
     }
     return QStringList();   // 不可达（枚举已穷尽）

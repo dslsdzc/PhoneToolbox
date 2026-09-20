@@ -373,6 +373,11 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     签名伪造 / 工程模式 / SELinux 模式切换 / 挂载 /system 可写 / 卸载分区 / 编辑 build.prop /
     更换开机动画 / 卸载应用); 漏洞面板 3 个入口 (扫描 / 批量利用 / 单条利用)。
     闸门是**唯一函数** riskui::ensureAccepted, 接线处一律调全限定名 (结构钉用例按名计数)
+    计数来源 (tests/test_risk_gate_wiring.cpp 的四个槽, 每一处都是逐入口钉的, 不只是总数):
+      flashPanelGatesAllFourteenHandlers = 14 / systemToolPanelGatesTenEntries = 10 /
+      vulnPanelGatesThreeEntries = 3 / eubRecoveryDialogGatesOnStart = 1
+    **改上述任一处计数前先回来改这里** (本文件的数字没有用例钉 —— 2026-09-20 裁决: 高频改动的
+    清单文档钉字面数字成本大于收益; 真正要防的"漏登记新危险入口"由全枚举覆盖断言 + 接线钉守着)
 [√] 界线 (2026-09-20 裁定): 改**设备状态** (写设备存储 / 削弱安全机制) 才弹二次确认; 改**用户偏好
     设置项**不弹 —— 系统工具的 settings put 族 (DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 /
     CPU·GPU 调频 / IO 调度 / 内存优化 / 应用冻结, 共 11 个入口) **有意不纳门控** (两档门控不为每次

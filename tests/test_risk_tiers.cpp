@@ -178,7 +178,9 @@ private slots:
         QCOMPARE(t3.at(0), QStringLiteral("这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / "
                                           "账号与安全校验），或改写设备标识。"));
         QCOMPARE(t3.at(1), QStringLiteral("未经设备所有者同意对他人设备使用，可能违法。"));
-        QCOMPARE(t3.at(2), QStringLiteral("脚本来自第三方数据库，本工具不对其效果与后果负责。"));
+        // 第 3 条同批改（原句"脚本来自第三方数据库…"只对 exploit 成立；本档还含 SELinux 切换与
+        // 设备信息伪造，两类都不涉及第三方脚本）。
+        QCOMPARE(t3.at(2), QStringLiteral("操作效果与后果由你自行判断并承担；本工具不对其效果负责。"));
         QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("绕过")),
                  qPrintable(QStringLiteral("Tier3 要点必须点明「绕过」安全机制 —— 实得 %1")
                                 .arg(t3.join(QStringLiteral(" / ")))));

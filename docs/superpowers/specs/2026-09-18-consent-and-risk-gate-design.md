@@ -81,11 +81,12 @@ PhoneToolbox 是一个**面向设备所有者与维修人员**的 Android 设备
 > `SelinuxMode` / `DeviceSpoof`（→ Tier 3）。`DeviceSpoof` 同时修掉一处"借用"：本表早就把
 > "设备信息伪造"与"IMEI 入口"列为**两项**，而枚举此前只有 `ImeiTool` 可借。
 >
-> ✅ **文案口径（2026-09-20 已裁决并落地）**：`tierWarnings(Tier3Diagnostic)` 的三条要点原来按
-> exploit 场景写，而 Tier3 还收了 SELinux 切换与设备信息伪造 —— 第 1 条已改为
-> 「这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / 账号与安全校验），或改写设备标识。」，
-> 第 2 条（法律边界）与第 3 条（第三方脚本免责）保持。同步改动：`src/ui/risk_ui.cpp`（唯一来源）、
-> `tests/test_risk_tiers.cpp`（逐字副本）。
+> ✅ **文案口径（2026-09-20 已裁决并落地）**：`tierWarnings(Tier3Diagnostic)` 原来三条都按 exploit
+> 场景写，而 Tier3 还收了 SELinux 切换与设备信息伪造 —— 第 **1** 条改为「这些功能会绕过或削弱设备的
+> 安全机制（SELinux / 签名校验 / 账号与安全校验），或改写设备标识。」；第 **3** 条改为「操作效果与后果
+> 由你自行判断并承担；本工具不对其效果负责。」（原句"脚本来自第三方数据库…"对上述两类不成立）；
+> 第 2 条（"未经设备所有者同意…可能违法"）是法律边界，**原文保留**。
+> 同步改动：`src/ui/risk_ui.cpp`（唯一来源）、`tests/test_risk_tiers.cpp`（逐字副本）。
 
 **纯函数映射**（可单测，不碰 Widgets/libusb —— 与 `flashui::flashButtonLabelsFor` 同款分层）：
 ```cpp
