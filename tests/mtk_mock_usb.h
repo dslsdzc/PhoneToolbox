@@ -20,8 +20,10 @@
 //
 //   • 控制传输（controlTransfer）：默认**恒成功**，请求按序追加进 controlTransfers 供断言；
 //     failControlAt 与 failWriteAt 同为**一次性**注入，失败的那次不进 controlTransfers。
-//     **不建模**生产侧对"IN 方向 + 非空 data"的拒绝（取值约定见 mtk_brom.h）—— 该形的调用在 mock 里
-//     照常记录并返回 true，只有真机通道才报错；依赖它的用例等于没测到那层守卫。
+//     与生产在**取值约定守卫上行为一致**（取值约定见 mtk_brom.h）：`requestType & 0x80` 且 `data`
+//     非空、或 `data.size() > 0xFFFF` ⇒ **拒绝**（返回 false + 写 error），被拒的那次**不进**
+//     controlTransfers、也**不计入** controlCalls —— 与生产"拒绝了就不发"一致。
+//     这样误用不会"在测试里绿、真机上红"（这正是 mock 最不该撒的谎）。
 //
 // 注入开关：failOpen 管打开失败（openError 为报错文案）；failWriteAt 是**一次性**写失败
 // （0 基，按**含失败在内**的 write() 调用序计；失败的那次不进 writes/writeFrames），-1 = 不注入，
@@ -57,7 +59,9 @@ public:
     };
     QList<ControlTransfer> controlTransfers;
     // 一次性控制传输失败（0 基，按**含失败在内**的 controlTransfer() 调用序计；失败的那次不进
-    // controlTransfers），-1 = 不注入。风格同 failWriteAt。controlCalls = 已发生的调用数（含失败）。
+    // controlTransfers），-1 = 不注入。风格同 failWriteAt。
+    // controlCalls = 已发生的调用数（含失败）；**被取值约定守卫拒绝的不计**（守卫在自增之前，
+    // 故 failControlAt 的序号也只在"通过守卫的调用"里数）。
     int failControlAt = -1;
     int controlCalls = 0;
 
@@ -93,6 +97,21 @@ public:
     bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
                          const QByteArray &data, int timeoutMs, QString *error) override
     {
+        // 两条取值约定守卫 —— **与生产 BromUsbLibusb 同形、同文案**（取值约定见 mtk_brom.h）。
+        // 放在失败注入**之前**：它们挡的是"实参违反约定"，不是"本次传输失败"（生产也是先守卫后发）。
+        // 拒绝即不发、不记录、不计数。
+        // 0x80 = LIBUSB_ENDPOINT_IN：此处用字面量是**有意**的 —— 本头是 IBromUsb 的替身，不把
+        // libusb.h 拖进测试目标（生产侧用该常量）。
+        if ((requestType & 0x80) && !data.isEmpty()) {
+            if (error) *error = QStringLiteral("控制传输不支持带数据阶段的 IN 方向"
+                                               "（requestType=0x%1，data %2 字节）：读回的字节无处安放")
+                                    .arg(requestType, 2, 16, QLatin1Char('0')).arg(data.size());
+            return false;
+        }
+        if (data.size() > 0xFFFF) {
+            if (error) *error = QStringLiteral("控制传输数据过长（%1 字节 > 65535）").arg(data.size());
+            return false;
+        }
         if (controlCalls++ == failControlAt) {
             if (error) *error = QStringLiteral("注入的控制传输失败（第 %1 次 controlTransfer）").arg(controlCalls);
             return false;

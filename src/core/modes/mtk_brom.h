@@ -104,11 +104,16 @@ public:
     //     (2) **OUT 写**（要）：kamakiri2.py:30、kamakiripl.py:28/34/46/52/59/84 的 `0x21`
     //         ⇒ 可表达（`data` 空或非空；其中 kamakiripl.py:34/52/59 长度为 0 = 无数据阶段，
     //         与 kamakiri.py:44 同形只是方向不同）；
-    //     (3) **IN + 带长度读**（本仓取材不需要）：即 `requestType & 0x80` 且 `data` 非空 ——
-    //         `0xA1` 带长度且**返回值被使用**（kamakiri2.py:28/70/88、kamakiripl.py:22/40/78，
-    //         存/恢复 CDC linecode），以及 `0x80` 标准请求读（kamakiri2.py:31 的 wIndex=0；
-    //         kamakiripl.py:69/93 的 wIndex=0xFFFF，两处均 wLength=9）。**表达不了**：
-    //         `data` 是 const 引用，读回的字节无处安放。
+    //     (3) **IN + 带长度读**（本仓取材不需要）：即 `requestType & 0x80` 且 `data` 非空。
+    //         归类**只看"IN + wLength > 0"**（本接口没有接收缓冲区 ⇒ 表达不了），与调用方是否读
+    //         返回值**无关**。出处：`0xA1` 带长度 —— kamakiri2.py:28/70/88（赋给 `self.linecode`）、
+    //         kamakiripl.py:22（赋给 `get_val` 但**从未被读**，外层 `for i in range(5)` 只是把该传输
+    //         重复 5 次）、:40、:78（**返回值丢弃**，:77 是注释掉的 `# value =`）；
+    //         `0x80` 标准请求读 —— kamakiri2.py:31（wIndex=0）、kamakiripl.py:69/93（wIndex=0xFFFF），
+    //         两处均 wLength=9。
+    //         其中**真正读了返回值**的只有两处：kamakiri2.py:28（其值在 :30 的 OUT 写里被使用）与
+    //         kamakiripl.py:40（其值在 :50 用作 `data_or_w_length`）；其余处返回值丢弃或赋值后从未被读。
+    //         **表达不了**：`data` 是 const 引用，读回的字节无处安放。
     //    该形**两个实现都明确报错** —— 与其让上层拿到空数据却以为成功（静默丢数据），不如响亮失败。
     //    **将来要用 IN 读**（例如支持 preloader 变体 kamakiripl）**必须先扩签名**（如 `QByteArray *inOut`
     //    或拆成读/写两条）：那会让本接口的**两个实现者再改一轮**，故必须在动手前先定。
@@ -116,6 +121,10 @@ public:
     //   "够用"不只靠上面两族：上游的成功判据在 exploit_handler.py:126-141 `runpayload()` ——
     //   `usbread(4)` 比对 `0xA1A2A3A4`，是 **bulk 读**不是控制传输；载荷本体走 `port.usbwrite`（bulk，
     //   已由本接口的 write() 覆盖）、载荷地址走 `preloader.write32`。
+    // 无数据阶段两个实现都传 `nullptr`（配 `wLength` 0）。⚠️ 安全性**依赖 `wLength == 0`**：本机
+    // libusb 1.0.30 的 IN 回填路径对 `data` **没有 NULL 守卫**（审查者反汇编：`memcpy(data, buffer+8,
+    // actual_length)`，`data` 直接来自第 6 实参），0 长度时两次拷贝都不解引用故无恙。本机探针实测
+    // `memcpy(NULL, ·, 0)` 不崩，**未在其它 libusb 版本验证**。
     // 真机时序/超时行为未验证（无 MTK 真机；本仓相位只到"离线可验证"）。
     virtual bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
                                  const QByteArray &data, int timeoutMs, QString *error) = 0;
