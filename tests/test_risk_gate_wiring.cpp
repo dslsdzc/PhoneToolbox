@@ -13,8 +13,10 @@
 //  ② 结构对照钉（tripwire）：
 //     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "14 个已过闸门入口
 //       + 6 个按设计不过闸门入口"。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
-//     * 断线复位：`setDeviceInfo` 能启用的每个按钮，`clearDeviceInfo` 必须禁用（W2-T5 复审 Low-1a：
-//       漏了三个按钮 → 拔线后仍可点，而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗）。
+//     * 断线复位：**本文件里凡被 `setEnabled(...)` 碰过的按钮，`clearDeviceInfo` 必须禁用**
+//       （两轮复审各撞见同一类缺口：Low-1a 的解锁/回锁/FRP、复审 ③ 的 EDL/MTK 连接类 ——
+//       拔线后仍可点，而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗）。
+//     * 界线：设置类入口（`settings put` 族）**有意不纳门控**，那 11 个 handler 体内必须无闸门。
 //
 // 取材边界（结论必须连同这一段一起读）：
 //   * 本用例只数字面出现次数与出现位置 —— 把 `if (!riskui::ensureAccepted(...)) return;` 包进
@@ -123,8 +125,8 @@ private slots:
     void flashPanelButtonConnectsMatchTheGatedSet();
     // ② 界线钉：设置类入口（settings put 族）**有意不纳门控**（W2-T5 复审 ④）
     void settingsPutFamilyStaysUngatedByDesign();
-    // ② 复位钉：setDeviceInfo 能启用的按钮，clearDeviceInfo 必须禁用（W2-T5 复审 Low-1a）
-    void flashPanelClearsEveryButtonSetDeviceInfoCanEnable();
+    // ② 复位钉：全文件凡被 setEnabled 碰过的按钮，clearDeviceInfo 必须禁用（Low-1a + 复审 ③）
+    void flashPanelClearsEveryButtonItCanEnable();
     // ② 一对文案钉：设备模式显示名两侧一致（W6-T1 移交）
     void mtkBromDisplayNamePairIsConsistent();
 };
@@ -449,45 +451,68 @@ void TestRiskGateWiring::settingsPutFamilyStaysUngatedByDesign()
     }
 }
 
-// W2-T5 复审 Low-1(a)：`clearDeviceInfo()`（"设备没了"的复位口）漏掉了三个按钮 ——
-// 拔线后它们仍可点，而闸门按模式取档会得到 MODE_UNKNOWN → tier None → **不弹窗直接放行**；
-// 那时只剩各 handler 自己的 serialNumber 判据兜着（另一道，不是闸门这道）。
-// 本槽钉"setDeviceInfo 能启用的每个按钮，clearDeviceInfo 必须禁用"这条不变量：
-//   * 提取：从 setDeviceInfo 函数体抓 `m_xxxBtn->setEnabled(true)`（正则），逐个要求在
-//     clearDeviceInfo 函数体里有 `m_xxxBtn->setEnabled(false);`；
-//   * 集合本身也钉住（排序后逐字比对）——新增启用点 → 红 → 作者必须回答"拔线后怎么复位"。
-// 取材边界：纯文本断言（只认 `setEnabled(true)` 这种写法）；且**不覆盖**由各处理函数自己启用的
-// 按钮（EDL/MTK 的连接类按钮就是这批）—— 那批拔线后同样不复位，属**另一处已知缺口**
-// （不由本槽背书，见 W2-T5 报告 §疑虑）。
-void TestRiskGateWiring::flashPanelClearsEveryButtonSetDeviceInfoCanEnable()
+// `clearDeviceInfo()`（"设备没了"的复位口）**必须把本文件里凡被 `setEnabled(...)` 碰过的按钮
+// 全部禁用**。两轮复审各撞见同一类缺口：先是 m_unlockBtn/m_lockBtn/m_frpBtn（Low-1a），
+// 再是 EDL/MTK 的连接 / 断开 / 刷写计划键（复审 ③）—— 都是"由 handler 自己 setEnabled、不由
+// setDeviceInfo 的模式分支统一复位"的按钮。判据因此从"setDeviceInfo 启用过谁"扩成**全文件**，
+// 免得下一轮再一处处补：
+//   * 提取：`src/ui/flash_panel.cpp` 全文的 `m_xxxBtn->setEnabled(` （**不论 true/false、不论参数
+//     是常量还是条件表达式** —— 条件式启用也能抓到，这正是上一版只扫 `setEnabled(true)` 的漏网处），
+//     排除 clearDeviceInfo 自身（它的 setEnabled(false) 是要检查的对象，不是启用点）；
+//   * 集合本身排序后逐字钉住 16 个成员（成员换了/新增一个都要红）；
+//   * 逐个要求 clearDeviceInfo 里有**恰好一次** `m_xxxBtn->setEnabled(false);`。
+// 为什么值得：拔线后仍可点的按钮 → 用户点下去 → 闸门按模式取档得到 MODE_UNKNOWN → tier None
+// → **不弹窗直接放行**（今天只剩各 handler 自己的 serialNumber 判据兜着，那是另一道）。
+// **取材边界（tripwire，不是运行期不变量）**：只认 `m_xxxBtn->setEnabled(` 这一种写法 ——
+// 用局部指针/别名/别的成员名形式改启用状态就漏；也不管 show()/hide() 与父控件禁用。
+// 覆盖范围说明（复审 ③(c)）：这些按钮成员都是 FlashPanel 的私有成员，全仓 grep 只在
+// flash_panel.h/.cpp 出现，故**没有**别的文件里的启用点落在本钉之外。
+void TestRiskGateWiring::flashPanelClearsEveryButtonItCanEnable()
 {
     const QString src = readSource(QStringLiteral("/src/ui/flash_panel.cpp"));
     QVERIFY2(!src.isNull(),
              qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/flash_panel.cpp")
                             .arg(QStringLiteral(PT_SRC_ROOT))));
 
-    const QString setBody = functionBody(
-        src, QStringLiteral("void FlashPanel::setDeviceInfo(const DeviceInfo &info)"));
-    const QString clearBody = functionBody(src, QStringLiteral("void FlashPanel::clearDeviceInfo()"));
-    QVERIFY2(!setBody.isEmpty(), "找不到 FlashPanel::setDeviceInfo 的定义（改名/删除？）");
+    const QString clearSig = QStringLiteral("void FlashPanel::clearDeviceInfo()");
+    const QString clearBody = functionBody(src, clearSig);
     QVERIFY2(!clearBody.isEmpty(), "找不到 FlashPanel::clearDeviceInfo 的定义（改名/删除？）");
+    const qsizetype clearBegin = src.indexOf(QLatin1Char('{'), src.indexOf(clearSig));
+    const qsizetype clearEnd = clearBegin + clearBody.size();
 
-    QStringList enabled;
-    const QRegularExpression re(QStringLiteral("(m_\\w+)->setEnabled\\(true\\)"));
-    QRegularExpressionMatchIterator it = re.globalMatch(setBody);
+    QStringList touched;
+    const QRegularExpression re(QStringLiteral("(m_\\w+)->setEnabled\\("));
+    QRegularExpressionMatchIterator it = re.globalMatch(src);
     while (it.hasNext()) {
-        const QString name = it.next().captured(1);
-        if (!enabled.contains(name))
-            enabled << name;
+        const QRegularExpressionMatch m = it.next();
+        const qsizetype pos = m.capturedStart(1);
+        if (pos >= clearBegin && pos < clearEnd)
+            continue;   // clearDeviceInfo 自己的复位调用不算"启用点"
+        const QString name = m.captured(1);
+        if (!touched.contains(name))
+            touched << name;
     }
-    enabled.sort();
-    // 7 个"要有设备才能点"的按钮（unlock/lock/frp 就是 Low-1 漏掉的那三个）。
-    // 逐个列出而非只比条数：条数相同而成员换了（例如拿 flashBtn 顶替 frpBtn）也要红。
-    QCOMPARE(enabled.join(QStringLiteral(",")),
-             QStringLiteral("m_brickRepairBtn,m_dumpBtn,m_flashBtn,m_frpBtn,"
-                            "m_lockBtn,m_unlockBtn,m_updateBtn"));
+    touched.sort();
 
-    for (const QString &name : enabled) {
+    // 16 个被 setEnabled 碰过的按钮（逐个列出而非只比条数：条数相同而成员换了也要红）。
+    // 其中 m_unlockBtn/m_lockBtn/m_frpBtn（Low-1a）与 m_edlConnectBtn/m_edlDisconnectBtn/
+    // m_edlPlanBtn/m_mtkConnectBtn/m_mtkDisconnectBtn（复审 ③）是两轮实际补上的成员。
+    QCOMPARE(touched.join(QStringLiteral(",")),
+             QStringLiteral("m_bootImgBtn,m_brickRepairBtn,m_dumpBtn,m_edlConnectBtn,"
+                            "m_edlDisconnectBtn,m_edlPlanBtn,m_eraseBtn,m_flashBtn,m_frpBtn,"
+                            "m_lockBtn,m_mtkConnectBtn,m_mtkDisconnectBtn,m_runScriptBtn,"
+                            "m_sideloadBtn,m_unlockBtn,m_updateBtn"));
+
+    // 两轮补上的成员必须在表里看得到（否则这条不变量的来历就丢了）。
+    for (const char *must : { "m_unlockBtn", "m_lockBtn", "m_frpBtn",
+                              "m_edlConnectBtn", "m_edlDisconnectBtn", "m_edlPlanBtn",
+                              "m_mtkConnectBtn", "m_mtkDisconnectBtn" }) {
+        QVERIFY2(touched.contains(QString::fromLatin1(must)),
+                 qPrintable(QStringLiteral("%1 不在被启用的按钮集合里（名单变了？）")
+                                .arg(QString::fromLatin1(must))));
+    }
+
+    for (const QString &name : touched) {
         const QString needle = name + QStringLiteral("->setEnabled(false);");
         QVERIFY2(clearBody.count(needle) == 1,
                  qPrintable(QStringLiteral("clearDeviceInfo 没有（或重复）复位 %1 —— 拔线后它仍可点，"

@@ -447,6 +447,16 @@ void FlashPanel::clearDeviceInfo()
     m_unlockBtn->setEnabled(false);
     m_lockBtn->setEnabled(false);
     m_frpBtn->setEnabled(false);
+    // W2-T5 复审 ③（治根，不再一处处补）：EDL/MTK 的连接 / 断开 / 刷写计划键也是**由 handler
+    // 自己 setEnabled** 的（不由 setDeviceInfo 的模式分支统一复位），因此同样得在"设备没了"时
+    // 复位 —— 否则拔线后它们仍是上一次 show()+enable 的状态，点下去走到的闸门在 MODE_UNKNOWN 上
+    // 取到 None = 不弹窗。不变的判据：**本文件里凡被 setEnabled(...) 碰过的按钮，这里必须全禁**，
+    // 由 tests/test_risk_gate_wiring.cpp 的 flashPanelClearsEveryButtonItCanEnable 钉住。
+    m_edlConnectBtn->setEnabled(false);
+    m_edlDisconnectBtn->setEnabled(false);
+    m_edlPlanBtn->setEnabled(false);
+    m_mtkConnectBtn->setEnabled(false);
+    m_mtkDisconnectBtn->setEnabled(false);
 }
 
 // ==================== 拖放 ====================
