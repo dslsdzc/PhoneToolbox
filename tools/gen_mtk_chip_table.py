@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 """从 mtkclient 的 brom_config.py 转写芯片表（hw_code -> dacode/damode/iot）到 C++。
 
-用法:  python3 tools/gen_mtk_chip_table.py > src/core/modes/mtk_chip_table.cpp
+用法:  python3 tools/gen_mtk_chip_table.py [输出路径|-]
+       给了输出路径 → 写**同目录临时文件**、成功后 `os.replace()` 原子换入
+                     （拒绝路径全部是具名 `sys.exit`，当前 30 处，`grep -c sys.exit` 可复核；
+                      原子换入保证**任何拒绝都不碰目标文件**）
+       不给路径 / 给 `-` → 产物写 stdout（向后兼容，便于管道）
+       例: python3 tools/gen_mtk_chip_table.py src/core/modes/mtk_chip_table.cpp
+
+       ⚠️ **不要**写 `python3 tools/gen_mtk_chip_table.py > src/core/modes/mtk_chip_table.cpp`：
+       bash（noclobber 关）会在 exec 之前先截断目标，生成器一旦拒绝生成，入库文件就被留成
+       **0 字节**（实测 17 → 0；zsh/fish 的 noclobber 会把那句 `>` 直接拒掉、文件反而没事 ——
+       即这个坑**换 shell 才发作**）。"拒绝生成"与"工作树被破坏"是两件事，别混在一起。
 依据:  mtkclient/mtkclient/config/brom_config.py 的 `hwconfig = { ... }`（第 ~479 行起），
        条目形如 `0x6226: Chipconfig(damode=DAmodes.LEGACY, dacode=0x6226, iot=True, name="MT6226")`。
 
 为什么用 ast 而不是 import：只取静态事实、避免拉起 mtkclient 的 usb/加密依赖；
 也避免把它的运行期副作用带进生成流程。
 
+**已知盲区（W8-T2 审查 Minor-1，如实记录、有意不修）**：上游若把某个字段**改名**
+（如 `watchdog` → `watchdog2`），本生成器会把它当作"该字段**缺失**"处理（present=False）——
+不报错、不中断。这不是静默砖机路径：受影响芯片的存在位为假 ⇒ 消费方（带检查的取用口）
+会**响亮拒绝**该芯片；且用例钉死的覆盖直方图（watchdog 71/89 等）在重跑后**立刻变红**、
+失败信息会点名字段。要机器化拦住它，就得枚举上游 `Chipconfig.__init__` 的全部形参
+（其中大量与本表无关，不能一律拒绝），收益不抵复杂度 —— 故按"记录 + 用例兜底"处理。
+
 许可: mtkclient 为 GPL-3.0，本项目为 GPLv3 → 兼容；本脚本入库以保证可复现。
 """
 import ast
 import collections
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -178,8 +197,15 @@ def extract():
                          "（0 与'缺失'无法区分；负数不是地址）")
             hw_values[upstream_name] = (True, val)
         # 对称不变量（emit 与用例都依赖它）：值槽为 0 **当且仅当** 存在位为假。
-        # 上面已保证 present ⇒ 值 > 0、absent ⇒ 值 = 0，这里再断言一次，防以后有人改上面时漏掉。
-        assert all((val == 0) == (not present) for present, val in hw_values.values())
+        # 上面已保证 present ⇒ 值 > 0、absent ⇒ 值 = 0，这里再核一次，防以后有人改上面时漏掉。
+        # ⚠️ 用 sys.exit 而不是 assert（W8-T2 审查 Minor-3 / 控制方裁决）：assert 在 `python3 -O`
+        # 下会被整个剥掉（实测退出码 0、什么都不打印）—— "静默"正是 fail-closed 最不能有的性质；
+        # 且裸 AssertionError 不指名芯片与字段，与其余 25 条拒绝路径的姿态不一致。
+        for upstream_name, _cpp_name, _has_name in HW_FIELDS:
+            present, val = hw_values[upstream_name]
+            if (val == 0) != (not present):
+                sys.exit(f"0x{hw:04X} 的 {upstream_name} 破坏了对称不变量：present={present}、值={val}"
+                         "（值槽为 0 必须当且仅当存在位为假）—— 拒绝生成")
         # damode 缺失/不可解析 → **拒绝**而不是默认 LEGACY：猜代际就是砖机（本表存在的唯一理由）。
         if damode is None:
             sys.exit(f"0x{hw:04X} 的 damode 缺失或不可解析（期望 DAmodes.LEGACY/XFLASH/XML）—— 拒绝生成")
@@ -211,7 +237,50 @@ def extract():
     return entries, dacode_fallbacks
 
 
+def require_output_dir(out_path) -> None:
+    """输出路径的父目录必须存在 —— 在解析上游**之前**就核一次，免得白跑一遍再拒绝。
+
+    同一个检查在 write_artifact() 里再走一遍（那才是真正落盘的关口）；两处都具名 sys.exit，
+    不靠"反正前面查过了"。
+    """
+    if out_path is not None and not out_path.parent.is_dir():
+        sys.exit(f"输出目录不存在：{out_path.parent} —— 拒绝生成（未创建/未改动任何文件）")
+
+
+def write_artifact(text: str, out_path):
+    """产物落地：给了路径就**原子写**（同目录临时文件 + os.replace），否则写 stdout。
+
+    为什么不让调用方用 `> 文件` 重定向：shell 在 exec **之前**就把目标截断了，而本脚本有
+    30 处具名拒绝路径 —— 一旦拒绝，入库文件就变成 0 字节（bash 实测 17 → 0）。
+    "拒绝生成"和"工作树被破坏"必须分开；原子写让**任何**调用式都不会毁数据。
+
+    out_path is None → 旧行为（stdout，`print` 补尾换行）。
+    """
+    if out_path is None:
+        print(text)
+        return
+    require_output_dir(out_path)       # 落盘前的最后一道（main 里已早查过一次）
+    # 临时文件必须与目标**同目录**：os.replace 只在同一文件系统内才是原子的。
+    fd, tmp_name = tempfile.mkstemp(dir=str(out_path.parent),
+                                    prefix=out_path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text + "\n")
+        os.replace(tmp, out_path)      # 原子换入：此刻之前目标一直是旧内容
+    except BaseException:
+        tmp.unlink(missing_ok=True)    # 失败不留残骸，目标保持原样
+        raise
+
+
 def main():
+    # 只接受 0 或 1 个参数（输出路径；`-` 同"不给"）。用法见模块 docstring。
+    if len(sys.argv) > 2:
+        sys.exit(f"参数过多（收到 {len(sys.argv) - 1} 个）—— 用法: "
+                 "gen_mtk_chip_table.py [输出路径|-]，拒绝生成")
+    out_arg = sys.argv[1] if len(sys.argv) == 2 else None
+    out_path = None if out_arg in (None, "-") else Path(out_arg)
+    require_output_dir(out_path)       # 早拒绝：白跑一遍再报"目录不存在"没有意义
     if not SRC.exists():
         sys.exit(f"缺少 {SRC}（mtkclient 子模块未初始化？git submodule update --init）")
     entries, dacode_fallbacks = extract()
@@ -246,7 +315,10 @@ def main():
     out.append("// src/core/modes/mtk_chip_table.cpp")
     out.append("//")
     out.append("// ⚠️ **本文件由脚本生成，请勿手改** —— 改表请改生成脚本后重跑：")
-    out.append("//     python3 tools/gen_mtk_chip_table.py > src/core/modes/mtk_chip_table.cpp")
+    out.append("//     python3 tools/gen_mtk_chip_table.py src/core/modes/mtk_chip_table.cpp")
+    out.append("// 生成器写同目录临时文件、成功后原子换入 ⇒ 它**任何**拒绝生成都不会碰本文件。")
+    out.append("// ⚠️ **不要**用 `python3 … > src/core/modes/mtk_chip_table.cpp`：bash 下重定向先截断再 exec，")
+    out.append("//     生成器一旦拒绝，本文件会被留成 0 字节（实测 17 → 0）—— 该调用式自 W8-T2 起弃用。")
     out.append("//")
     out.append("// 数据来源：bkerler/mtkclient（GPL-3.0）的 mtkclient/config/brom_config.py 的 `hwconfig` 表")
     out.append(f"//     commit: {commit}")
@@ -326,7 +398,7 @@ def main():
     out.append("}")
     out.append("")
     out.append("} // namespace mtkbrom")
-    print("\n".join(out))
+    write_artifact("\n".join(out), out_path)
 
 
 if __name__ == "__main__":

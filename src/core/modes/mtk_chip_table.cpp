@@ -1,7 +1,10 @@
 // src/core/modes/mtk_chip_table.cpp
 //
 // ⚠️ **本文件由脚本生成，请勿手改** —— 改表请改生成脚本后重跑：
-//     python3 tools/gen_mtk_chip_table.py > src/core/modes/mtk_chip_table.cpp
+//     python3 tools/gen_mtk_chip_table.py src/core/modes/mtk_chip_table.cpp
+// 生成器写同目录临时文件、成功后原子换入 ⇒ 它**任何**拒绝生成都不会碰本文件。
+// ⚠️ **不要**用 `python3 … > src/core/modes/mtk_chip_table.cpp`：bash 下重定向先截断再 exec，
+//     生成器一旦拒绝，本文件会被留成 0 字节（实测 17 → 0）—— 该调用式自 W8-T2 起弃用。
 //
 // 数据来源：bkerler/mtkclient（GPL-3.0）的 mtkclient/config/brom_config.py 的 `hwconfig` 表
 //     commit: 71b01752d39461dfbf9c21bc29d7b0e121c40483
