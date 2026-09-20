@@ -96,9 +96,26 @@ public:
     //   • **空 = 无数据阶段**（wLength 0）：上游的触发路径就是这一形
     //     —— 例 kamakiri.py:44 `ctrl_transfer(0xA1, 0, 0, self.var1, 0)`：0xA1 带 IN 位但长度为 0；
     //   • **非空 = 输出阶段**（主机→设备，wLength = data.size()）—— 例 kamakiri2.py:30 的 `0x21` 写。
-    // ⚠️ 故本接口**表达不了"带数据阶段的 IN 读"**（要读回字节那种）：data 是 const 引用，读回的
-    //    字节无处安放（该形见上游 kamakiripl.py:22 的 `ctrl_transfer(0xA1, 0x21, 0, 0, 7)`）。
-    //    两个实现都**明确报错**，不静默丢弃；将来要用得先扩签名。
+    //
+    // ⚠️ 已知的、**有意**的限制（2026-09-20 控制方裁决：本签名不改）。上游三族控制传输里，
+    //    前两族是本仓取材要的、本签名表达得了，第三族表达不了：
+    //     (1) **0 长度 IN 触发**（要）：kamakiri.py:44 `(0xA1, 0, 0, var1, 0)`，返回值被丢弃
+    //         ⇒ 可表达（`data` 空）；
+    //     (2) **OUT 写**（要）：kamakiri2.py:30、kamakiripl.py:28/34/46/52/59/84 的 `0x21`
+    //         ⇒ 可表达（`data` 空或非空；其中 kamakiripl.py:34/52/59 长度为 0 = 无数据阶段，
+    //         与 kamakiri.py:44 同形只是方向不同）；
+    //     (3) **IN + 带长度读**（本仓取材不需要）：即 `requestType & 0x80` 且 `data` 非空 ——
+    //         `0xA1` 带长度且**返回值被使用**（kamakiri2.py:28/70/88、kamakiripl.py:22/40/78，
+    //         存/恢复 CDC linecode），以及 `0x80` 标准请求读（kamakiri2.py:31 的 wIndex=0；
+    //         kamakiripl.py:69/93 的 wIndex=0xFFFF，两处均 wLength=9）。**表达不了**：
+    //         `data` 是 const 引用，读回的字节无处安放。
+    //    该形**两个实现都明确报错** —— 与其让上层拿到空数据却以为成功（静默丢数据），不如响亮失败。
+    //    **将来要用 IN 读**（例如支持 preloader 变体 kamakiripl）**必须先扩签名**（如 `QByteArray *inOut`
+    //    或拆成读/写两条）：那会让本接口的**两个实现者再改一轮**，故必须在动手前先定。
+    //
+    //   "够用"不只靠上面两族：上游的成功判据在 exploit_handler.py:126-141 `runpayload()` ——
+    //   `usbread(4)` 比对 `0xA1A2A3A4`，是 **bulk 读**不是控制传输；载荷本体走 `port.usbwrite`（bulk，
+    //   已由本接口的 write() 覆盖）、载荷地址走 `preloader.write32`。
     // 真机时序/超时行为未验证（无 MTK 真机；本仓相位只到"离线可验证"）。
     virtual bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
                                  const QByteArray &data, int timeoutMs, QString *error) = 0;
