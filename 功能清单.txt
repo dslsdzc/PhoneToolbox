@@ -373,6 +373,11 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     签名伪造 / 工程模式 / SELinux 模式切换 / 挂载 /system 可写 / 卸载分区 / 编辑 build.prop /
     更换开机动画 / 卸载应用); 漏洞面板 3 个入口 (扫描 / 批量利用 / 单条利用)。
     闸门是**唯一函数** riskui::ensureAccepted, 接线处一律调全限定名 (结构钉用例按名计数)
+[√] 界线 (2026-09-20 裁定): 改**设备状态** (写设备存储 / 削弱安全机制) 才弹二次确认; 改**用户偏好
+    设置项**不弹 —— 系统工具的 settings put 族 (DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 /
+    CPU·GPU 调频 / IO 调度 / 内存优化 / 应用冻结, 共 11 个入口) **有意不纳门控** (两档门控不为每次
+    操作打扰, 改动可随时改回); 这条界线由 test_risk_gate_wiring 的 settingsPutFamilyStaysUngatedByDesign
+    钉住 (那 11 个 handler 体内必须一个闸门都没有)
 [√] 你的选择记录在本机: 协议版本与各档版本存本机 QSettings (legal/agreementVersion, legal/tier2Version,
     legal/tier3Version), **不联网、不上传**; 同一档同意过不再重复弹窗; 协议升版 (kAgreementVersion 增大)
     后三处都要重新确认

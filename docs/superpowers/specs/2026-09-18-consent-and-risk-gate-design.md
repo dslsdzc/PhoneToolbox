@@ -104,6 +104,14 @@ QStringList tierWarnings(RiskTier t);                        // 该 tier 的具�
   （用例里加一条"全枚举覆盖"断言，漏登记即红）。
 - **Tier 3 覆盖漏洞面板是本次的重点**：exploit 脚本目前**可以直接执行**，而它属"绕过安全机制"一族 ——
   协议正文第四条已明写其法律边界，门控在这一版把它纳入。
+- **界线（2026-09-20 控制方裁定，写明以免下一轮复核把同一处当缺口重报）**：
+  **改"设备状态"（写设备存储 / 削弱安全机制）才弹二次确认；改"用户偏好设置项"不弹**。
+  故系统工具面板的 `settings put {system,secure,global}` 族 —— `onSetDpi` / `onAnimationScale` /
+  `onStatusBar` / `onNavBar` / `onSetFont` / `onThermalControl` / `onCpuGovernor` / `onGpuGovernor` /
+  `onIOScheduler` / `onMemoryOptimize` / `onAppFreezeToggle`（11 个）—— **有意不纳门控**
+  （两档门控 + 不为每次操作弹窗，见 §1 非目标；这些改动可随时改回，且不碰存储与安全机制）。
+  这条界线由 `tests/test_risk_gate_wiring.cpp` 的 `settingsPutFamilyStaysUngatedByDesign` 钉成机器可检：
+  那 11 个 handler 体内必须一个闸门都没有；将来若要纳入，先在那里红。
 
 ## 4. 同意留痕（`src/legal/consent_store.{h,cpp}`）
 
@@ -132,7 +140,8 @@ public:
 | `MainWindow` 构造/显示前 | `hasAcceptedAgreement()` 否 → `AgreementDialog`（模态）；用户拒绝 → `QApplication::quit()`（不进入主界面） |
 | `FlashPanel::onFlashClicked`（分派前） | `riskTierForMode(mode)` ≠ None 且该 tier 未接受 → `RiskConfirmDialog`；拒绝则**不发起任何操作**（静默返回，与"用户取消"同口径） |
 | `EubRecoveryDialog::onStart`（发送前） | 同上（EUB 的 tier 由 `riskTierForMode(MODE_SAMSUNG_EUB)` 给） |
-| `SystemToolPanel` 的 5 个入口（死砖修复 / FRP / 解锁 / Root / Sideload）与诊断类 4 个 | `riskTierForFeature(...)` 同上 |
+| `SystemToolPanel` 的 10 个入口（伪造设备信息 / SafetyNet / 签名伪造 / 工程模式 / SELinux 切换 / 挂载·卸载 /system / 编辑 build.prop / 换开机动画 / 卸载应用） | `riskTierForFeature(...)` 同上 |
+| `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 | `riskTierForFeature(Unlock / Unlock / FrpClear)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
 | `VulnPanel` 的"批量利用/单条利用/批量扫描" | `riskTierForFeature(RiskFeature::VulnExploit)` 同上（**扫描**也纳入：它出自 exploit DB） |
 
 **共同形态**（沿用仓内既有"未验证勾选门控"）：对话框展示 `tierWarnings()` + 完整协议入口（可展开/滚动）

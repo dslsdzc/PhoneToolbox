@@ -121,6 +121,8 @@ private slots:
     void mainAsksAgreementBeforeTheMainWindow();
     // ② tripwire：按钮接线集合 == 已过闸门 14 + 按设计不过闸门 6
     void flashPanelButtonConnectsMatchTheGatedSet();
+    // ② 界线钉：设置类入口（settings put 族）**有意不纳门控**（W2-T5 复审 ④）
+    void settingsPutFamilyStaysUngatedByDesign();
     // ② 复位钉：setDeviceInfo 能启用的按钮，clearDeviceInfo 必须禁用（W2-T5 复审 Low-1a）
     void flashPanelClearsEveryButtonSetDeviceInfoCanEnable();
     // ② 一对文案钉：设备模式显示名两侧一致（W6-T1 移交）
@@ -174,6 +176,16 @@ void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
           "riskui::riskTierForFeature(riskui::RiskFeature::FrpClear)", false },
     };
     QCOMPARE(int(sizeof(rows) / sizeof(rows[0])), 14);   // 表本身受检：少一行就少钉一个入口
+
+    // 两组的**条数**也钉住（复审要求的两组拆表：11 模式取档 + 3 功能取档）——
+    // 只按行内 flag 判会被"整行挪组"骗过：把 unlock 那行写成 byMode=true 时，下面 region 里
+    // 既没有 riskTierForMode( 也没有 m_deviceInfo.mode，仍会红；但反过来把某个模式取档的行
+    // 误标 byMode=false 就少钉一处。条数是这张表的形状，必须显式。
+    int byModeCount = 0, byFeatureCount = 0;
+    for (const GateRow &row : rows)
+        (row.byMode ? byModeCount : byFeatureCount) += 1;
+    QCOMPARE(byModeCount, 11);
+    QCOMPARE(byFeatureCount, 3);
 
     for (const GateRow &row : rows) {
         const QString signature = QString::fromUtf8(row.signature);
@@ -393,6 +405,48 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
     got.sort();
     want.sort();
     QCOMPARE(got, want);
+}
+
+// W2-T5 复审 ④：**有意不纳门控**的"设置类"入口。它们走 `settings put {system,secure,global}`，
+// 改的是可随时改回的用户偏好（DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 / CPU·GPU 调频 /
+// IO 调度 / 内存优化 / 应用冻结），既不写设备存储、也不削弱安全机制 —— 在"两档门控 + 不为每次
+// 操作弹窗"的设计（spec §1 非目标）下有意不纳（`onAppFreezeToggle` 的冻结/解冻同属这类可控开关，
+// 同样不纳）。界线由控制方 2026-09-20 裁定：**改"设备状态"（写存储 / 削安全机制）才弹，
+// 改"用户偏好设置项"不弹**。
+// 本槽把这条界线**钉成机器可检**（否则下一轮复核会把同一处当缺口重报）：
+// 这 11 个 handler 的函数体里必须**一个闸门都没有**。若将来决定纳入，先在这里红 ——
+// 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（28）。
+void TestRiskGateWiring::settingsPutFamilyStaysUngatedByDesign()
+{
+    const QString src = readSource(QStringLiteral("/src/ui/system_tool_panel.cpp"));
+    QVERIFY2(!src.isNull(),
+             qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/system_tool_panel.cpp")
+                            .arg(QStringLiteral(PT_SRC_ROOT))));
+
+    const QStringList ungated = {
+        QStringLiteral("void SystemToolPanel::onSetDpi()"),
+        QStringLiteral("void SystemToolPanel::onAnimationScale()"),
+        QStringLiteral("void SystemToolPanel::onStatusBar()"),
+        QStringLiteral("void SystemToolPanel::onNavBar()"),
+        QStringLiteral("void SystemToolPanel::onSetFont()"),
+        QStringLiteral("void SystemToolPanel::onThermalControl()"),
+        QStringLiteral("void SystemToolPanel::onCpuGovernor()"),
+        QStringLiteral("void SystemToolPanel::onGpuGovernor()"),
+        QStringLiteral("void SystemToolPanel::onIOScheduler()"),
+        QStringLiteral("void SystemToolPanel::onMemoryOptimize()"),
+        QStringLiteral("void SystemToolPanel::onAppFreezeToggle()"),
+    };
+    QCOMPARE(ungated.size(), 11);   // 表本身受检
+
+    for (const QString &signature : ungated) {
+        const QString body = functionBody(src, signature);
+        QVERIFY2(!body.isEmpty(),
+                 qPrintable(QStringLiteral("找不到函数定义（改名/删除？）：%1").arg(signature)));
+        QVERIFY2(body.count(kGate) == 0,
+                 qPrintable(QStringLiteral("%1 里出现了闸门 —— 若是有意纳入门控，请同时更新 "
+                                           "spec §3 的界线说明、接线计数与用例里的本张表")
+                                .arg(signature)));
+    }
 }
 
 // W2-T5 复审 Low-1(a)：`clearDeviceInfo()`（"设备没了"的复位口）漏掉了三个按钮 ——
