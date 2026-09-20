@@ -18,6 +18,11 @@
 //   • read 不校验请求长度：给少了照收、给多了按 maxLen 截断（裸 read 调用点的上层守卫各自负责，
 //     帧层路径已有 readExact 的严格长度校验）。
 //
+//   • 控制传输（controlTransfer）：默认**恒成功**，请求按序追加进 controlTransfers 供断言；
+//     failControlAt 与 failWriteAt 同为**一次性**注入，失败的那次不进 controlTransfers。
+//     **不建模**生产侧对"IN 方向 + 非空 data"的拒绝（取值约定见 mtk_brom.h）—— 该形的调用在 mock 里
+//     照常记录并返回 true，只有真机通道才报错；依赖它的用例等于没测到那层守卫。
+//
 // 注入开关：failOpen 管打开失败（openError 为报错文案）；failWriteAt 是**一次性**写失败
 // （0 基，按**含失败在内**的 write() 调用序计；失败的那次不进 writes/writeFrames），-1 = 不注入，
 // writeCalls = 已发生的调用数（含失败）。与 mock_eub_transport.h 的 failWriteAt（按**成功**数计、
@@ -41,6 +46,20 @@ public:
     // 注入的那次**不消耗** reads 队列（方便用例断言"队列没被动过"）。readCalls = 已发生的调用数。
     int readEmptySuccessAt = -1;
     int readCalls = 0;
+    // 控制传输：一笔请求一条记录，按 controlTransfer() 调用序追加（裸字段，不设 getter）
+    struct ControlTransfer {
+        quint8 requestType = 0;
+        quint8 request = 0;
+        quint16 value = 0;
+        quint16 index = 0;
+        QByteArray data;   // 空 = 无数据阶段；非空 = 输出阶段（与生产实现同一约定，见 mtk_brom.h）
+        int timeoutMs = 0;
+    };
+    QList<ControlTransfer> controlTransfers;
+    // 一次性控制传输失败（0 基，按**含失败在内**的 controlTransfer() 调用序计；失败的那次不进
+    // controlTransfers），-1 = 不注入。风格同 failWriteAt。controlCalls = 已发生的调用数（含失败）。
+    int failControlAt = -1;
+    int controlCalls = 0;
 
     bool open(QString *error) override
     {
@@ -70,6 +89,16 @@ public:
         const QByteArray r = reads.takeFirst();
         out = r.left(maxLen);
         return !r.isEmpty() || maxLen == 0;
+    }
+    bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
+                         const QByteArray &data, int timeoutMs, QString *error) override
+    {
+        if (controlCalls++ == failControlAt) {
+            if (error) *error = QStringLiteral("注入的控制传输失败（第 %1 次 controlTransfer）").arg(controlCalls);
+            return false;
+        }
+        controlTransfers.append(ControlTransfer{requestType, request, value, index, data, timeoutMs});
+        return true;
     }
     int maxPacketSize() const override { return pktSize; }
     bool close() override { return true; }

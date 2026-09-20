@@ -87,6 +87,21 @@ public:
     // 断言保持原样，判别力不变）；libusb 实现**覆盖为累加循环**（预算 = timeoutMs，分段 transfer，
     // 读满即返回）—— 对齐上游 usblib.usbread 的循环语义。真机拆包行为未验证（见 T12 诚实边界）。
     virtual bool readExact(QByteArray &out, int len, int timeoutMs, QString *error);
+    // ---- 控制传输（BROM 利用注入路径；对照上游 Exploit/*.py 的 ctrl_transfer）----
+    // 前四参**逐字**对应 libusb_control_transfer 的 (bmRequestType, bRequest, wValue, wIndex)：
+    // requestType 就是 USB 规范的 bmRequestType（bit7 方向：0x80=设备→主机 IN；bit6..5 类型；
+    // bit4..0 接收方），libusb 用同一编码（`LIBUSB_ENDPOINT_IN = 0x80`），故实现
+    // **原样透传、不重新解释**。数据长度没有独立参数 —— wLength 即 data.size()。
+    // data 的取值约定（本接口唯一的一处语义约定）：
+    //   • **空 = 无数据阶段**（wLength 0）：上游的触发路径就是这一形
+    //     —— 例 kamakiri.py:44 `ctrl_transfer(0xA1, 0, 0, self.var1, 0)`：0xA1 带 IN 位但长度为 0；
+    //   • **非空 = 输出阶段**（主机→设备，wLength = data.size()）—— 例 kamakiri2.py:30 的 `0x21` 写。
+    // ⚠️ 故本接口**表达不了"带数据阶段的 IN 读"**（要读回字节那种）：data 是 const 引用，读回的
+    //    字节无处安放（该形见上游 kamakiripl.py:22 的 `ctrl_transfer(0xA1, 0x21, 0, 0, 7)`）。
+    //    两个实现都**明确报错**，不静默丢弃；将来要用得先扩签名。
+    // 真机时序/超时行为未验证（无 MTK 真机；本仓相位只到"离线可验证"）。
+    virtual bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
+                                 const QByteArray &data, int timeoutMs, QString *error) = 0;
     virtual int maxPacketSize() const { return 0x400; } // SEND_DA 分块上限
     virtual bool close() = 0;
 };

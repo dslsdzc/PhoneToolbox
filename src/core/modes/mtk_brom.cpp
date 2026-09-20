@@ -165,6 +165,53 @@ public:
         return true;
     }
 
+    // ---- 控制传输（对照上游 Exploit/*.py 的 ctrl_transfer）----
+    // 参数映射依据：libusb_control_transfer(dev, bmRequestType, bRequest, wValue, wIndex, data,
+    // wLength, timeout) 的前四参与本接口**同序同名**且**同一编码** —— 接口的 requestType 即 USB 规范的
+    // bmRequestType（libusb 直接把它交给驱动，不另做解释；见 libusb.h:384 LIBUSB_ENDPOINT_IN = 0x80
+    // 正是方向位），所以**原样透传**。wLength 取 data.size()：本接口没有独立的长度参数，数据长度即长度。
+    // data 语义（取值约定写在 mtk_brom.h）：空 = 无数据阶段（空指针 + wLength 0），非空 = 输出阶段。
+    bool controlTransfer(quint8 requestType, quint8 request, quint16 value, quint16 index,
+                         const QByteArray &data, int timeoutMs, QString *error) override
+    {
+        if (!m_handle) {
+            if (error) *error = QStringLiteral("USB 通道未打开");
+            return false;
+        }
+        // 取值约定的守卫：IN 位与非空 data 互斥（IN 的数据阶段是设备→主机，而 data 是 const 引用，
+        // 读回的字节无处安放）。与其静默丢弃，不如明确拒绝 —— 见 mtk_brom.h 的 ⚠️。
+        if ((requestType & LIBUSB_ENDPOINT_IN) && !data.isEmpty()) {
+            if (error) *error = QStringLiteral("控制传输不支持带数据阶段的 IN 方向"
+                                               "（requestType=0x%1，data %2 字节）：读回的字节无处安放")
+                                    .arg(requestType, 2, 16, QLatin1Char('0')).arg(data.size());
+            return false;
+        }
+        // 控制传输的 wLength 是 16 位：data 超了会被静默截断成错的长度 —— 早拒，不截断。
+        if (data.size() > 0xFFFF) {
+            if (error) *error = QStringLiteral("控制传输数据过长（%1 字节 > 65535）").arg(data.size());
+            return false;
+        }
+        // libusb 的 data 形参非 const，但输出阶段它只**读**这块缓冲区（与 write() 同款 const_cast）；
+        // 带数据阶段的 IN 方向已在上面挡掉，故不存在"穿过 const 引用去写"的可能。
+        const int ret = libusb_control_transfer(
+            m_handle, requestType, request, value, index,
+            data.isEmpty() ? nullptr
+                           : reinterpret_cast<unsigned char *>(const_cast<char *>(data.constData())),
+            quint16(data.size()), static_cast<unsigned int>(timeoutMs));
+        if (ret < 0) {
+            if (error) *error = QStringLiteral("USB 控制传输失败: %1（%2/%3 字节）")
+                                    .arg(QLatin1String(usbErrName(ret)))
+                                    .arg(ret).arg(data.size());
+            return false;
+        }
+        if (ret != data.size()) { // 成功但短包：ret 非负，不是 libusb 错误码，故不套 usbErrName
+            if (error) *error = QStringLiteral("USB 控制传输短包（%1/%2 字节）")
+                                    .arg(ret).arg(data.size());
+            return false;
+        }
+        return true;
+    }
+
     bool close() override
     {
         if (m_handle) {
