@@ -326,6 +326,14 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_edlStatusLabel->show();
         m_edlStatusLabel->setText(m_flashTool->edlIsConnected() ? "EDL: 已连接" : "EDL: 未连接");
         m_edlDisconnectBtn->setEnabled(m_flashTool->edlIsConnected());
+        // W2-T5 复审 High 修复：**回位**。这三个键的 setEnabled(true) 原本只在各自的 handler 里
+        // （而 handler 只有点到按钮才能进入）—— 一旦 clearDeviceInfo() 跑过（拔线/取消选中/空列表
+        // 刷新），它们就被禁死，设备回来时 show() 出来的是灰键，点击路径整条断掉。故在模式分支里
+        // 与 disconnect 键同款复位。判据见 tests/test_risk_gate_wiring.cpp 的
+        // flashPanelShownButtonsAreReenabledInTheirModeBranch（"显示即启用"）。
+        m_edlConnectBtn->setEnabled(!m_flashTool->edlIsConnected());
+        // 刷写计划入口**常启**：如上注，它不需要"已连接"（通道自己走 Sahara 引导）
+        m_edlPlanBtn->setEnabled(true);
 
         // 已连接 EDL Firehose 后显示分区操作。「清除 FRP」「死砖修复」在 EDL 下点不出任何结果：
         // 两者都要"分区名 → 分区"，而 Firehose 只回报 lun<N>（各自的处理函数会弹指路框，
@@ -358,6 +366,8 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_mtkStatusLabel->show();
         m_mtkStatusLabel->setText(m_flashTool->mtkIsConnected() ? "MTK: 已连接" : "MTK: 未连接");
         m_mtkDisconnectBtn->setEnabled(m_flashTool->mtkIsConnected());
+        // W2-T5 复审 High 修复：回位（同上 —— 连接键的启用不能只留在 handler 里）
+        m_mtkConnectBtn->setEnabled(!m_flashTool->mtkIsConnected());
 
         // 已连接后显示分区操作
         if (m_flashTool->mtkIsConnected()) {

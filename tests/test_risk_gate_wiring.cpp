@@ -16,7 +16,8 @@
 //     * 断线复位：**本文件里凡被 `setEnabled(...)` 碰过的按钮，`clearDeviceInfo` 必须禁用**
 //       （两轮复审各撞见同一类缺口：Low-1a 的解锁/回锁/FRP、复审 ③ 的 EDL/MTK 连接类 ——
 //       拔线后仍可点，而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗）。
-//     * 界线：设置类入口（`settings put` 族）**有意不纳门控**，那 11 个 handler 体内必须无闸门。
+//     * 界线：偏好开关族（DPI/动画/状态栏/导航栏/字体/温控/调频/IO/内存/冻结）**有意不纳门控**，
+//       那 11 个 handler 体内必须无闸门（按**行为**归类，不按 `settings put` 机制 —— 复审 Low-2）。
 //
 // 取材边界（结论必须连同这一段一起读）：
 //   * 本用例只数字面出现次数与出现位置 —— 把 `if (!riskui::ensureAccepted(...)) return;` 包进
@@ -123,10 +124,13 @@ private slots:
     void mainAsksAgreementBeforeTheMainWindow();
     // ② tripwire：按钮接线集合 == 已过闸门 14 + 按设计不过闸门 6
     void flashPanelButtonConnectsMatchTheGatedSet();
-    // ② 界线钉：设置类入口（settings put 族）**有意不纳门控**（W2-T5 复审 ④）
-    void settingsPutFamilyStaysUngatedByDesign();
+    // ② 界线钉：偏好开关族**有意不纳门控**（W2-T5 复审 ④；命名按复审 Low-2 订正）
+    void preferenceSwitchesStayUngatedByDesign();
     // ② 复位钉：全文件凡被 setEnabled 碰过的按钮，clearDeviceInfo 必须禁用（Low-1a + 复审 ③）
     void flashPanelClearsEveryButtonItCanEnable();
+    // ② 回位钉：凡在复位表里 **且** 在 setDeviceInfo 里被 show() 的控件，必须也能在那里被 setEnabled(
+    // （W2-T5 复审 High：只做复位不做回位 → 三个连接类键被治成死键）
+    void flashPanelShownButtonsAreReenabledInTheirModeBranch();
     // ② 一对文案钉：设备模式显示名两侧一致（W6-T1 移交）
     void mtkBromDisplayNamePairIsConsistent();
 };
@@ -409,16 +413,22 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
     QCOMPARE(got, want);
 }
 
-// W2-T5 复审 ④：**有意不纳门控**的"设置类"入口。它们走 `settings put {system,secure,global}`，
-// 改的是可随时改回的用户偏好（DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 / CPU·GPU 调频 /
-// IO 调度 / 内存优化 / 应用冻结），既不写设备存储、也不削弱安全机制 —— 在"两档门控 + 不为每次
-// 操作弹窗"的设计（spec §1 非目标）下有意不纳（`onAppFreezeToggle` 的冻结/解冻同属这类可控开关，
-// 同样不纳）。界线由控制方 2026-09-20 裁定：**改"设备状态"（写存储 / 削安全机制）才弹，
-// 改"用户偏好设置项"不弹**。
+// W2-T5 复审 ④：**有意不纳门控**的"偏好开关"入口 —— DPI / 动画速度 / 状态栏 / 导航栏 / 字体 /
+// 温控 / CPU·GPU 调频 / IO 调度 / 内存优化 / 应用冻结。判据是**行为**：它们改的是可随时改回的
+// 用户偏好，**不改系统状态、也不削弱安全机制** —— 在"两档门控 + 不为每次操作弹窗"的设计
+// （spec §1 非目标）下有意不纳（`onAppFreezeToggle` 的冻结/解冻同属这类可控开关，同样不纳）。
+// 界线由控制方 2026-09-20 裁定：**改"设备状态"（写存储 / 削安全机制）才弹，改"偏好开关"不弹**。
+// ⚠️ 命名与理由句按**复审 Low-2/Low-3** 订正过：本槽原叫 `settingsPutFamilyStaysUngatedByDesign`，
+//    但磁盘实况是 —— 全文件 `settings put` 只有 11 处、且只落在 3 个 handler
+//    （`onAnimationScale` 3 / `onStatusBar` 4 / `onNavBar` 4）；其余 8 个走别的机制
+//    （`onSetDpi` = `wm density`、三个调频 = sysfs、`onMemoryOptimize` = `/proc/sys/vm`、
+//    `onAppFreezeToggle` = `pm hide/disable`、`onThermalControl` = 读 + 备份、`onSetFont` = 纯提示框）。
+//    故按**行为族**命名，不按机制命名；也删掉了"既不写设备存储"的说法（`onThermalControl` 落盘一份
+//    配置备份到 /sdcard —— 是备份产物，不改设备行为，但原文那句话与磁盘不符）。
 // 本槽把这条界线**钉成机器可检**（否则下一轮复核会把同一处当缺口重报）：
 // 这 11 个 handler 的函数体里必须**一个闸门都没有**。若将来决定纳入，先在这里红 ——
 // 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（28）。
-void TestRiskGateWiring::settingsPutFamilyStaysUngatedByDesign()
+void TestRiskGateWiring::preferenceSwitchesStayUngatedByDesign()
 {
     const QString src = readSource(QStringLiteral("/src/ui/system_tool_panel.cpp"));
     QVERIFY2(!src.isNull(),
@@ -451,6 +461,62 @@ void TestRiskGateWiring::settingsPutFamilyStaysUngatedByDesign()
     }
 }
 
+// W2-T5 复审 High 的判据钉（"**显示即启用**"）：凡在 `clearDeviceInfo()` 里被 `setEnabled(false)`
+// 的控件，只要在 `setDeviceInfo` 里被 `show()`，就必须**也在 `setDeviceInfo` 里**出现 `setEnabled(`。
+// 为什么：这类控件的启用路径若只留在 handler 里，而 handler 只有点到按钮才能进入，则
+// `clearDeviceInfo()` 一跑（拔线 / 取消选中 / 空列表刷新）就把它们**禁死** —— 设备回来时 `show()`
+// 出来的是灰键，点击路径整条断掉（`e179bb5` 的实测后果：连接 EDL / EDL 刷写计划… / 连接 MTK）。
+// 复位钉只问"禁有没有"、不问"启有没有"，所以那条回归对它全绿 —— 本槽补的就是这个方向。
+// 取材边界（tripwire，不是运行期不变量）：
+//   * 只认 `m_xxxBtn->show()` 与 `m_xxxBtn->setEnabled(` 两种写法 —— `hide()`、父控件禁用、
+//     别名/局部指针写法都逃逸（与复位钉同款口径）；
+//   * 它**不会**误伤 `m_edlSelectProgBtn`（被 `show()` 但不在复位表里 → 前件不成立）。
+// 覆盖计数：复位表 16 个里被 show() 的是 **5** 个（EDL/MTK 两支的连接 / 断开 / 计划键），
+// 其余 11 个（刷入/擦除/读取/更新/Sideload/脚本/启动镜像/解锁/回锁/FRP/死砖）常驻可见、不走 show()。
+void TestRiskGateWiring::flashPanelShownButtonsAreReenabledInTheirModeBranch()
+{
+    const QString src = readSource(QStringLiteral("/src/ui/flash_panel.cpp"));
+    QVERIFY2(!src.isNull(),
+             qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/flash_panel.cpp")
+                            .arg(QStringLiteral(PT_SRC_ROOT))));
+
+    const QString setBody = functionBody(
+        src, QStringLiteral("void FlashPanel::setDeviceInfo(const DeviceInfo &info)"));
+    const QString clearBody = functionBody(src, QStringLiteral("void FlashPanel::clearDeviceInfo()"));
+    QVERIFY2(!setBody.isEmpty(), "找不到 FlashPanel::setDeviceInfo 的定义（改名/删除？）");
+    QVERIFY2(!clearBody.isEmpty(), "找不到 FlashPanel::clearDeviceInfo 的定义（改名/删除？）");
+
+    // 复位表成员（clearDeviceInfo 体内 setEnabled(false) 的控件）
+    QStringList cleared;
+    const QRegularExpression re(QStringLiteral("(m_\\w+)->setEnabled\\(false\\)"));
+    QRegularExpressionMatchIterator it = re.globalMatch(clearBody);
+    while (it.hasNext()) {
+        const QString name = it.next().captured(1);
+        if (!cleared.contains(name))
+            cleared << name;
+    }
+    cleared.sort();
+    QCOMPARE(cleared.size(), 16);   // 复位表形状（与复位钉同一张表）
+
+    QStringList shownAndCleared;
+    for (const QString &name : cleared) {
+        if (!setBody.contains(name + QStringLiteral("->show()")))
+            continue;   // 前件不成立：不靠 show() 出现 → 不在本钉范围内
+        shownAndCleared << name;
+        const QString needle = name + QStringLiteral("->setEnabled(");
+        QVERIFY2(setBody.count(needle) >= 1,
+                 qPrintable(QStringLiteral("%1 在 clearDeviceInfo 被禁用、在 setDeviceInfo 被 show()，"
+                                           "但那里没有把它重新启用 —— 复位会变成**禁死**："
+                                           "它的启用路径只剩 handler，而 handler 只有点到按钮才进得去")
+                                .arg(name)));
+    }
+    shownAndCleared.sort();
+    // 5 = EDL/MTK 两支的连接 / 断开 / 计划键（修前这里恰好红三个：连接 EDL / EDL 刷写计划… / 连接 MTK）
+    QCOMPARE(shownAndCleared.join(QStringLiteral(",")),
+             QStringLiteral("m_edlConnectBtn,m_edlDisconnectBtn,m_edlPlanBtn,"
+                            "m_mtkConnectBtn,m_mtkDisconnectBtn"));
+}
+
 // `clearDeviceInfo()`（"设备没了"的复位口）**必须把本文件里凡被 `setEnabled(...)` 碰过的按钮
 // 全部禁用**。两轮复审各撞见同一类缺口：先是 m_unlockBtn/m_lockBtn/m_frpBtn（Low-1a），
 // 再是 EDL/MTK 的连接 / 断开 / 刷写计划键（复审 ③）—— 都是"由 handler 自己 setEnabled、不由
@@ -465,6 +531,12 @@ void TestRiskGateWiring::settingsPutFamilyStaysUngatedByDesign()
 // → **不弹窗直接放行**（今天只剩各 handler 自己的 serialNumber 判据兜着，那是另一道）。
 // **取材边界（tripwire，不是运行期不变量）**：只认 `m_xxxBtn->setEnabled(` 这一种写法 ——
 // 用局部指针/别名/别的成员名形式改启用状态就漏；也不管 show()/hide() 与父控件禁用。
+// **未声明的逃逸形态（复审实测仍绿，只声明不修）**：`setDisabled(true/false)` —— 它与
+// `setEnabled(false/true)` 语义等价，是最可能被写出来的变体，但本钉完全看不见它（既不在 `touched`
+// 集合里、也不触发任何断言）。真要用它，请连同本注释与集合字面一起改。
+// 另一条已知形态（响亮方向）：needle 是 `name + "->setEnabled(false);"`，**空白敏感** ——
+// 写成 `setEnabled( false );` 或加空格会让 count 变 0 → 红；那是"防漏"的安全方向，
+// 纯排版改动造成的误报属**预期**，改的人照红改回原写法即可。
 // 覆盖范围说明（复审 ③(c)）：这些按钮成员都是 FlashPanel 的私有成员，全仓 grep 只在
 // flash_panel.h/.cpp 出现，故**没有**别的文件里的启用点落在本钉之外。
 void TestRiskGateWiring::flashPanelClearsEveryButtonItCanEnable()
@@ -503,14 +575,10 @@ void TestRiskGateWiring::flashPanelClearsEveryButtonItCanEnable()
                             "m_lockBtn,m_mtkConnectBtn,m_mtkDisconnectBtn,m_runScriptBtn,"
                             "m_sideloadBtn,m_unlockBtn,m_updateBtn"));
 
-    // 两轮补上的成员必须在表里看得到（否则这条不变量的来历就丢了）。
-    for (const char *must : { "m_unlockBtn", "m_lockBtn", "m_frpBtn",
-                              "m_edlConnectBtn", "m_edlDisconnectBtn", "m_edlPlanBtn",
-                              "m_mtkConnectBtn", "m_mtkDisconnectBtn" }) {
-        QVERIFY2(touched.contains(QString::fromLatin1(must)),
-                 qPrintable(QStringLiteral("%1 不在被启用的按钮集合里（名单变了？）")
-                                .arg(QString::fromLatin1(must))));
-    }
+    // 说明：这里**不再**单列"两轮补上的 8 个成员必在 touched 里"的循环 —— 复审实测它被上面那条
+    // `join(",") == <16 成员字面>` 完全吸收（只要那条过，这 8 个必然都在），**没有独立甄别力**。
+    // 成员的来历记在注释里就够了：m_unlockBtn/m_lockBtn/m_frpBtn（Low-1a）、
+    // m_edlConnectBtn/m_edlDisconnectBtn/m_edlPlanBtn/m_mtkConnectBtn/m_mtkDisconnectBtn（复审 ③）。
 
     for (const QString &name : touched) {
         const QString needle = name + QStringLiteral("->setEnabled(false);");

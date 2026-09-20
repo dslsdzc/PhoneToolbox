@@ -376,12 +376,14 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     计数来源 (tests/test_risk_gate_wiring.cpp 的四个槽, 每一处都是逐入口钉的, 不只是总数):
       flashPanelGatesAllFourteenHandlers = 14 / systemToolPanelGatesTenEntries = 10 /
       vulnPanelGatesThreeEntries = 3 / eubRecoveryDialogGatesOnStart = 1
+      (注: `grep -ro "riskui::ensureAccepted(" src/ | wc -l` 会得到 29 —— 第 29 处是
+       src/ui/risk_confirm_dialog.h 文件头注释里的示例句, 不是调用点; 调用点按上面四个槽数)
     **改上述任一处计数前先回来改这里** (本文件的数字没有用例钉 —— 2026-09-20 裁决: 高频改动的
     清单文档钉字面数字成本大于收益; 真正要防的"漏登记新危险入口"由全枚举覆盖断言 + 接线钉守着)
 [√] 界线 (2026-09-20 裁定): 改**设备状态** (写设备存储 / 削弱安全机制) 才弹二次确认; 改**用户偏好
-    设置项**不弹 —— 系统工具的 settings put 族 (DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 /
+    偏好开关**不弹 —— 系统工具的**偏好开关族** (DPI / 动画速度 / 状态栏 / 导航栏 / 字体 / 温控 /
     CPU·GPU 调频 / IO 调度 / 内存优化 / 应用冻结, 共 11 个入口) **有意不纳门控** (两档门控不为每次
-    操作打扰, 改动可随时改回); 这条界线由 test_risk_gate_wiring 的 settingsPutFamilyStaysUngatedByDesign
+    操作打扰, 改动可随时改回); 这条界线由 test_risk_gate_wiring 的 preferenceSwitchesStayUngatedByDesign
     钉住 (那 11 个 handler 体内必须一个闸门都没有)
 [√] 你的选择记录在本机: 协议版本与各档版本存本机 QSettings (legal/agreementVersion, legal/tier2Version,
     legal/tier3Version), **不联网、不上传**; 同一档同意过不再重复弹窗; 协议升版 (kAgreementVersion 增大)
@@ -392,7 +394,7 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     (MSVC 下编译通过并静默返回 None; 详见 docs/superpowers/specs/2026-09-18-consent-and-risk-gate-design.md §8);
     本特性**无真机依赖** (纯函数 + settings +
     offscreen 对话框, 全部可离线验证)
-[√] 未验证: 上表 22 处接线只有**结构钉用例** (读生产源文件数出现次数与位置 —— 包进 if (false) 仍绿,
+[√] 未验证: 上表 28 处接线只有**结构钉用例** (读生产源文件数出现次数与位置 —— 包进 if (false) 仍绿,
     是 tripwire 不是证明); 闸门语义与分级映射的行为证明在 test_risk_confirm_dialog / test_risk_tiers;
     "首次弹窗 → 勾选继续 → 再进不弹"这条**真实用户路径需人工过一遍** (用例一律注入临时 store,
     生产默认分支不写自动化用例 —— 会碰真实用户配置)

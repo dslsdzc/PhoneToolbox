@@ -108,11 +108,15 @@ QStringList tierWarnings(RiskTier t);                        // 该 tier 的具�
   协议正文第四条已明写其法律边界，门控在这一版把它纳入。
 - **界线（2026-09-20 控制方裁定，写明以免下一轮复核把同一处当缺口重报）**：
   **改"设备状态"（写设备存储 / 削弱安全机制）才弹二次确认；改"用户偏好设置项"不弹**。
-  故系统工具面板的 `settings put {system,secure,global}` 族 —— `onSetDpi` / `onAnimationScale` /
-  `onStatusBar` / `onNavBar` / `onSetFont` / `onThermalControl` / `onCpuGovernor` / `onGpuGovernor` /
-  `onIOScheduler` / `onMemoryOptimize` / `onAppFreezeToggle`（11 个）—— **有意不纳门控**
-  （两档门控 + 不为每次操作弹窗，见 §1 非目标；这些改动可随时改回，且不碰存储与安全机制）。
-  这条界线由 `tests/test_risk_gate_wiring.cpp` 的 `settingsPutFamilyStaysUngatedByDesign` 钉成机器可检：
+  故系统工具面板的**偏好开关族** —— `onSetDpi` / `onAnimationScale` / `onStatusBar` / `onNavBar` /
+  `onSetFont` / `onThermalControl` / `onCpuGovernor` / `onGpuGovernor` / `onIOScheduler` /
+  `onMemoryOptimize` / `onAppFreezeToggle`（11 个）—— **有意不纳门控**（两档门控 + 不为每次操作弹窗，
+  见 §1 非目标；这些改动**可随时改回、不改系统状态、不削弱安全机制**）。
+  ⚠️ 归类按**行为**、不按机制（2026-09-20 复审 Low-2/Low-3 订正）：全文件 `settings put` 只有 11 处、
+  且只落在 3 个 handler（`onAnimationScale` / `onStatusBar` / `onNavBar`）；其余 8 个走别的机制
+  （`wm density` / sysfs / `/proc/sys/vm` / `pm hide|disable` / 读+备份 / 纯提示框）。原文"既不写设备存储"
+  一句不准确（`onThermalControl` 会往 /sdcard 落一份配置备份），已按行为口径改写。
+  这条界线由 `tests/test_risk_gate_wiring.cpp` 的 `preferenceSwitchesStayUngatedByDesign` 钉成机器可检：
   那 11 个 handler 体内必须一个闸门都没有；将来若要纳入，先在那里红。
 
 ## 4. 同意留痕（`src/legal/consent_store.{h,cpp}`）
