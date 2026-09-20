@@ -98,6 +98,8 @@ QString tempFileNameFor(const ExtractedFdl &fdl)
 
 // 写文件并查到"落盘确实成功"这一层：write() 的返回值 + close() 后的错误状态都要看 ——
 // 磁盘满时数据可能先停在用户态缓冲，close() 才现形（本项就在 /tmp 满的机器上开发）。
+// 注：`mtk_da_file.cpp` 里有一份**同形副本**（`writeExtractedDAs` 的落盘件），两份已逐行核过
+// 语义等价。**触发条件：第三处出现时抽公共内部头，三处一起改**（对面那份上方有对称的指引）。
 bool writeFileChecked(const QString &path, const QByteArray &data, QString *error)
 {
     QFile f(path);

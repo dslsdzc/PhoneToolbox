@@ -512,10 +512,14 @@ void TestMtkDaFile::writeExtractedDasRoundTrip()
     QVERIFY2(sel.da1Bytes != sel.da2Bytes, "两段内容必须可区分（否则「取反/串位」类错误测不出）");
 
     QString p1, p2, err;
+    // 哨兵：先把 err 填成非空**再**走成功路径 —— 刚默认构造的空串下，"成功路径 err 为空"是**恒真断言**
+    // （生产若在成功路径漏清 error 也照样通过，审查 Minor-3）。判据出处 = 函数契约
+    // "出参在入口清空、只在成功路径写入"，故这里钉的是"**旧文案被清掉**"。
+    err = QStringLiteral("哨兵：调用前就存在的错误文案");
     QVERIFY2(mtkbrom::writeExtractedDAs(sel, dir.path(), p1, p2, &err), qPrintable(err));
     QCOMPARE(p1, dir.filePath(QStringLiteral("da1.bin")));
     QCOMPARE(p2, dir.filePath(QStringLiteral("da2.bin")));
-    QVERIFY2(err.isEmpty(), qPrintable(err));   // 成功路径不留错误文案（不残留上一次的）
+    QVERIFY2(err.isEmpty(), qPrintable(err));   // 成功路径清掉旧文案（不残留上一次的）
 
     QFile f1(p1);
     QFile f2(p2);

@@ -243,8 +243,10 @@ namespace {
 // 写文件并查到"落盘确实成功"这一层：write() 的返回值 + flush()/close() 的错误状态都要看 ——
 // QFile 带缓冲：磁盘满时数据可能先停在用户态缓冲，失败在 flush() 现形，**此时 write() 的返回值
 // 仍是满额** —— 照"实写 N 字节"写会自相矛盾，故两种情况分开说（用例：符号链接指向 /dev/full）。
-// 与 spd_pac.cpp 的同名件是**有意各自持有一份**：那份在匿名命名空间里（跨 TU 取不到），提到公共头
-// 要动已完成面（SPD 模块）；本模块多这 30 行，好过为一个单列小任务去改别人的文件。
+// 与 `spd_pac.cpp` 的 `writeFileChecked`（同名同形，两份已逐行核过**语义等价**）是**有意各自持有
+// 一份**：那份在匿名命名空间里（跨 TU 取不到），提到公共头要动已完成面（SPD 模块）；本模块多这
+// 30 行，好过为一个单列小任务去改别人的文件。
+// **触发条件：第三处出现时抽公共内部头，三处一起改**（对面那份上方有对称的指引）。
 bool writeFileChecked(const QString &path, const QByteArray &data, QString *error)
 {
     QFile f(path);
@@ -277,7 +279,9 @@ bool writeFileChecked(const QString &path, const QByteArray &data, QString *erro
 bool writeExtractedDAs(const DaSelection &sel, const QString &dir, QString &da1Path, QString &da2Path,
                        QString *error)
 {
-    // 失败不留半份产物（仓内约定）：出参在入口清空，只有两个文件都写成才写入
+    // 失败不留半份产物（仓内约定）：出参在入口清空，只有两个文件都写成才写入。
+    // 边界（同上，见头文件契约）：只覆盖**被处理到的失败**（本函数返回 false 的路径）—— SIGKILL/
+    // 掉电时清理代码没机会跑，且清理依赖 QFile::remove() 成功；本层不是原子写。
     da1Path.clear();
     da2Path.clear();
     if (error)

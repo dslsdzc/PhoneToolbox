@@ -137,6 +137,14 @@ bool selectDaEntry(const DaFile &f, quint16 dacode, quint16 deviceHwVer, quint16
 //     （只落成 da1.bin 会让调用方以为拿到了可用的一对）。清理只针对本次写出的两个路径。
 // 出参在入口清空、只在成功路径写入（与 selectDaEntry 同口径：不残留上一次的成功结果）。
 //
+// ⚠️ **"不留半份产物"的边界**（上面那条不是无条件承诺）：它只对**被处理到的失败** —— 即本函数
+//   **返回 false 的那些路径** —— 成立：清理代码有机会运行时才谈得上清理。进程被强杀（SIGKILL）/
+//   掉电 / 拔盘时清理代码**没有机会运行**，盘上会留下写到一半的文件；清理本身也依赖
+//   `QFile::remove()` **成功**（返回值未核，删除自身失败时残留同样会留下）。本层**不是原子写**
+//   （与 `spd::writeExtractedFdls` 先例同姿态，两条路都不是）；要关掉这个窗口需换成原子换入
+//   （`QSaveFile` 一类），代价是"打开成功、刷盘失败"这条失败分支不再能离线构造
+//   （直写才让它可用 `/dev/full` 复现）。
+//
 // 诚实边界：本函数只保证"盘上字节 == 选中的字节"（离线可完整验证）。这份 DA 在真机上是否可用，
 // 属既有 BROM 刷写链的未验证范围；`selectDaEntry` 的调用方仍需要 dacode（来自设备/芯片表）。
 bool writeExtractedDAs(const DaSelection &sel, const QString &dir, QString &da1Path, QString &da2Path,

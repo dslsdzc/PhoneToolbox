@@ -45,6 +45,12 @@ bool extractFdlsFromPac(const QString &pacPath, ExtractedFdl &fdl1, ExtractedFdl
 // 任一失败 → false + 可行动 *error，且**不留半份产物**（本次已写出的文件删除）——
 // 只有 FDL1 落盘时若继续，通道会拿不到 FDL2 或把 FDL1 的字节发去 FDL2。
 // 出参在入口清空。空载荷（0 字节）拒写：空 FDL 发出去也起不了作用，失败点会被推到设备侧。
+//
+// ⚠️ **"不留半份产物"的边界**（上句限定在"任一失败"上，这里把边界写明 —— 不是改口，是补明示）：
+//   只对**被处理到的失败**（本函数返回 false 的那些路径）成立 —— 清理代码有机会运行时才谈得上清理。
+//   进程被强杀（SIGKILL）/ 掉电 / 拔盘时清理代码**没有机会运行**，盘上会留下写到一半的文件；
+//   清理本身也依赖 `QFile::remove()` **成功**（返回值未核）。本层**不是原子写**，不构成
+//   "任何情况下都不会留半份"的承诺。同款边界见 `mtk_da_file.h` 的 `writeExtractedDAs`。
 bool writeExtractedFdls(const ExtractedFdl &fdl1, const ExtractedFdl &fdl2, const QString &dir,
                         QString &fdl1Path, QString &fdl2Path, QString *error);
 
