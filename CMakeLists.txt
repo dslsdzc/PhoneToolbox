@@ -353,7 +353,9 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_gate_wiring.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_hwaddrs.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_hwaddrs.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_fix.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_run.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -693,6 +695,23 @@ if(ENABLE_IMAGE_TESTS)
                     # 故**不进** PT_SRC_ROOT 名单也不进 libusb 链接名单。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
+                elseif(_test_stem STREQUAL "test_brom_exploit_fix"
+                       OR _test_stem STREQUAL "test_brom_exploit_run")
+                    # W8 Task 3：漏洞利用层。两个用例的目标**同一份依赖闭包**：
+                    # mtk_brom_exploit.cpp（被测）取 ChipHwAddrs 的取用口 → 芯片表；
+                    # 编排层调 BromSession 的 readMemory/writeMemory/echoCmd/readStatus/sendCommand
+                    # → mtk_brom.cpp（echo/握手/控制传输）+ mtk_emmc.cpp（内存协议）+ 它们的默认
+                    # readExact。mtk_brom.cpp 自带 libusb 调用 ⇒ 两个 stem 都要进下方 libusb 链接名单。
+                    # ⚠️ 纯函数那个用例（fix）**也因此链了 libusb** —— 同一个 .cpp 里既有纯函数又有
+                    # 编排层（brief 指定的文件划分），链接闭包是整个 .cpp 的。它的用例本身仍然离线
+                    # （不碰真设备、不开网络）。
+                    # 载荷来源部分复用 mtk_preloader_fetch.cpp 的 verifySha256（sha256 判据的唯一实现）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom_exploit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_preloader_emi")
                     # D1 Task 5：preloader EMI 提取（纯函数，只依赖 Qt Core；src/core/modes
                     # 已 GLOB 编入主程序，不属任何静态库）。真样本宏（MTK_SAMPLES_DIR /
@@ -820,7 +839,8 @@ if(ENABLE_IMAGE_TESTS)
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
                    OR _test_stem STREQUAL "test_mtk_usb_ids"
                    OR _test_stem STREQUAL "test_risk_gate_wiring"
-                   OR _test_stem STREQUAL "test_mtk_brom")
+                   OR _test_stem STREQUAL "test_mtk_brom"
+                   OR _test_stem STREQUAL "test_brom_exploit_fix")
                     target_compile_definitions(${_test_target} PRIVATE
                         PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
                 endif()
@@ -899,6 +919,10 @@ if(ENABLE_IMAGE_TESTS)
                    OR _test_stem STREQUAL "test_mtk_xflash_payload"
                    OR _test_stem STREQUAL "test_mtk_xml_session"
                    OR _test_stem STREQUAL "test_mtk_xml_payload"
+                   # W8-T3：mtk_brom_exploit.cpp 调 BromSession 的内存协议（定义在 mtk_emmc.cpp），
+                   # 而 mtk_brom.cpp 自带 libusb 调用 ⇒ 两个新 stem 都按名补链。
+                   OR _test_stem STREQUAL "test_brom_exploit_fix"
+                   OR _test_stem STREQUAL "test_brom_exploit_run"
                    OR _test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_eub_transport"
                    OR _test_stem STREQUAL "test_eub_samsung_mode")

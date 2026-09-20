@@ -92,6 +92,40 @@ struct ChipHwAddrs {
     bool hasPlPayloadAddr = false;
     bool hasCqdmaBase = false;
     bool hasSejBase = false;
+
+    // —— 带检查的取用口（W8-T3；控制方裁决：消费者**不得直接读值槽**）——
+    //
+    // 为什么非有不可：存在位与值槽是**两个字段**，C++ 挡不住消费者写成 `a.watchdog` 却漏查
+    // `hasWatchdog` —— 那会读到 0，而**把 0 写进 watchdog 是砖机路径**。取用口把"查存在位"
+    // 与"取值"合成一个动作，漏查在语法上不可能。这与本批 I-1 是同一类事故
+    // （约定只靠注释维持 → 静默分叉），所以不靠注释、靠接口。
+    //
+    // 语义：存在位为假、或 `out` 为 nullptr → **返 false 且不写 `*out`**（调用方拿不到那个 0）；
+    // 存在位为真 → 写 `*out` 并返 true。**没有 0 兜底、也没有默认值**：取不到就由调用方
+    // **响亮失败**（进日志 + 阶段 + error）。
+    //
+    // 命名：用 `getXxx` 而不是 `xxxAddr` —— 三个 payload 字段的**成员名本身**就叫
+    // bromPayloadAddr/daPayloadAddr/plPayloadAddr，同名成员函数会与之撞名编译不过；
+    // 七个取用口统一同一形态，免得"哪几个能这么叫"要靠记。
+    // 位置：定义在 header 内联 —— 表体所在的 mtk_chip_table.cpp 是**生成文件**，往里加函数会被下次重跑抹掉。
+    bool getWatchdog(quint32 *out) const { return takeChecked(hasWatchdog, watchdog, out); }
+    bool getUart(quint32 *out) const { return takeChecked(hasUart, uart, out); }
+    bool getBromPayloadAddr(quint32 *out) const { return takeChecked(hasBromPayloadAddr, bromPayloadAddr, out); }
+    bool getDaPayloadAddr(quint32 *out) const { return takeChecked(hasDaPayloadAddr, daPayloadAddr, out); }
+    bool getPlPayloadAddr(quint32 *out) const { return takeChecked(hasPlPayloadAddr, plPayloadAddr, out); }
+    bool getCqdmaBase(quint32 *out) const { return takeChecked(hasCqdmaBase, cqdmaBase, out); }
+    bool getSejBase(quint32 *out) const { return takeChecked(hasSejBase, sejBase, out); }
+
+private:
+    // 唯一的读值槽之处（七个取用口都经它）。私有成员**函数**不影响本 struct 的聚合性
+    // （C++17 聚合只排除 private/protected 的**非静态数据成员**）—— kHwAddrs 的按位置初始化照旧。
+    static bool takeChecked(bool present, quint32 value, quint32 *out)
+    {
+        if (!present || out == nullptr)
+            return false;
+        *out = value;
+        return true;
+    }
 };
 
 // 按 hw_code 查硬件地址。**仅当 hwCode 不在表内**才返 nullptr（维持 89 条口径：字段不全的芯片
