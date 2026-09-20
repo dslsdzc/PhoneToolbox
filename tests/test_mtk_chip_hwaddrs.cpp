@@ -12,9 +12,16 @@
 //   形参都有 None 默认值，把 None 当 0 就是砖机）。本文件的期望值由两条独立路径得出且一致：
 //   控制方 2026-09-20 的预检、本任务实现者的独立 ast 脚本；两者都是 89/71/66/68/74/66/38/68。
 //
-// 上游 7 字段的覆盖极不齐整 —— 这是本任务的核心事实，也是"七字段全齐才收录"会砍掉功能的原因：
+// 上游字段的覆盖极不齐整 —— 这是本任务的核心事实，也是"全齐才收录"会砍掉功能的原因：
 //   watchdog 71 / uart 66 / brom_payload_addr 68 / da_payload_addr 74 /
 //   pl_payload_addr 66 / cqdma_base 38 / sej_base 68（共 89 条）。
+//
+// ⚠️ **W8-T3 起本表多了一列**：`var1`（控制传输的 wIndex）作为**第 8 个字段**由控制方
+// 2026-09-20 裁决补入（上游 89 条实测 **56 条有值 / 33 条未写 / 0 条显式 None**，众数 10 = 41 条）。
+// 因此本文件里"全齐"的口径由**七**字段改为**八**字段，T2 时代钉的 `nAllSeven = 37` 相应变为
+// `nAllEight = 35`（不是表错，是"多了一列、能全齐的芯片少了 2 条"）。
+// kamakiri 三要素口径（watchdog + uart + 任一 payload）**未变**，仍是 66；新增的是
+// "三要素齐全 **且** var1 有值"= 56（可开箱即用）与"需调用方覆盖 var1"= 10 两个数字。
 #include <QtTest>
 
 #include <QStringList>
@@ -24,10 +31,11 @@
 
 namespace {
 
-// 与生成器/结构体**同序**的 7 个字段名（失败信息里用；顺序 = ChipHwAddrs 的声明顺序）。
-const char *const kFieldNames[7] = {
+// 与生成器/结构体**同序**的 8 个字段名（失败信息里用；顺序 = ChipHwAddrs 的声明顺序）。
+// var1 在**末尾**（生成器 HW_FIELDS 的追加方式决定的：末尾追加不动前 7 列的位置）。
+const char *const kFieldNames[8] = {
     "watchdog", "uart", "bromPayloadAddr", "daPayloadAddr",
-    "plPayloadAddr", "cqdmaBase", "sejBase",
+    "plPayloadAddr", "cqdmaBase", "sejBase", "var1",
 };
 
 // kamakiri（漏洞利用）真正需要的三要素：watchdog + uart + 任一 payload 地址。
@@ -105,8 +113,9 @@ void TestMtkChipHwAddrs::fieldCoverageMatchesUpstream()
     const QVector<const mtkbrom::ChipHwAddrs *> hits = scanAllHwAddrChips();
     QCOMPARE(hits.size(), 89);
 
-    int nWatchdog = 0, nUart = 0, nBrom = 0, nDa = 0, nPl = 0, nCqdma = 0, nSej = 0;
-    int nAllSeven = 0, nUsable = 0, nUsableButIncomplete = 0, nOnlyCqdmaMissing = 0;
+    int nWatchdog = 0, nUart = 0, nBrom = 0, nDa = 0, nPl = 0, nCqdma = 0, nSej = 0, nVar1 = 0;
+    int nAllEight = 0, nUsable = 0, nUsableButIncomplete = 0, nOnlyCqdmaMissing = 0;
+    int nExploitReady = 0, nNeedsVar1Override = 0;
     for (const mtkbrom::ChipHwAddrs *a : hits) {
         nWatchdog += a->hasWatchdog;
         nUart     += a->hasUart;
@@ -115,14 +124,18 @@ void TestMtkChipHwAddrs::fieldCoverageMatchesUpstream()
         nPl       += a->hasPlPayloadAddr;
         nCqdma    += a->hasCqdmaBase;
         nSej      += a->hasSejBase;
+        nVar1     += a->hasVar1;
 
-        const bool allSeven = a->hasWatchdog && a->hasUart && a->hasBromPayloadAddr
+        const bool allEight = a->hasWatchdog && a->hasUart && a->hasBromPayloadAddr
                               && a->hasDaPayloadAddr && a->hasPlPayloadAddr
-                              && a->hasCqdmaBase && a->hasSejBase;
-        nAllSeven += allSeven;
+                              && a->hasCqdmaBase && a->hasSejBase && a->hasVar1;
+        nAllEight += allEight;
         const bool usable = kamakiriUsable(*a);
         nUsable += usable;
-        nUsableButIncomplete += (usable && !allSeven);
+        nUsableButIncomplete += (usable && !allEight);
+        // W8-T3 的两个新口径：三要素齐全之后，var1 决定"开箱即用"还是"要调用方覆盖"。
+        nExploitReady += (usable && a->hasVar1);
+        nNeedsVar1Override += (usable && !a->hasVar1);
         // "只缺 cqdma_base"（其余六个都有）：kamakiri **不用** cqdma，这些芯片照样可用。
         // 必须严格判（六个**逐个**都要有），不能用"可用 && 缺 cqdma"这种松弛写法 ——
         // 后者会把"还缺别的字段"的芯片也算进来，数字就失去意义了。
@@ -131,7 +144,7 @@ void TestMtkChipHwAddrs::fieldCoverageMatchesUpstream()
         nOnlyCqdmaMissing += (allButCqdma && !a->hasCqdmaBase);
     }
 
-    // 7 个数字逐条对着上游 71b0175 数过（见文件头"期望值的来源"）
+    // 8 个数字逐条对着上游 71b0175 数过（见文件头"期望值的来源"；var1=56 是 W8-T3 补的）
     QCOMPARE(nWatchdog, 71);
     QCOMPARE(nUart, 66);
     QCOMPARE(nBrom, 68);
@@ -140,13 +153,23 @@ void TestMtkChipHwAddrs::fieldCoverageMatchesUpstream()
     QCOMPARE(nCqdma, 38);
     QCOMPARE(nSej, 68);
 
-    // 本任务最大的坑的量化：按"七字段全齐才收录"实现，可用芯片会从 66 掉到 37
-    // —— 白扔 29 条（其中**只缺 cqdma_base** 的就有 17 条，而 kamakiri 根本不用 cqdma）。
-    // 这两条断言是"不许按全齐口径过滤"的可执行证据：一旦有人把过滤条件收紧，数字立刻对不上。
-    QCOMPARE(nAllSeven, 37);
-    QCOMPARE(nUsable, 66);
-    QCOMPARE(nUsableButIncomplete, 29);   // 66 - 37
+    // W8-T3 补的第 8 列（var1）：56 条有值 —— 与上游 71b0175 的 ast 实测一致
+    // （众数 10 = 41 条；取值集合 {10,37,40,115,127,172,177,180,204}）。
+    QCOMPARE(nVar1, 56);
+    // 本任务最大的坑的量化：按"全齐才收录"实现，可用芯片会从 66 掉到 35
+    // —— 白扔 31 条（其中**只缺 cqdma_base** 的就有 17 条，而 kamakiri 根本不用 cqdma）。
+    // 这几条断言是"不许按全齐口径过滤"的可执行证据：一旦有人把过滤条件收紧，数字立刻对不上。
+    // ⚠️ 口径变更留痕：T2 时代是"七字段全齐 = 37"，W8-T3 加了 var1 列后八字段全齐 = **35**
+    //    （37 里那两颗 0x0279/0x0335 之类仍有 var1，掉出来的 2 条是"其余七列齐全但上游没给 var1"）。
+    QCOMPARE(nAllEight, 35);
+    QCOMPARE(nUsable, 66);                // 三要素口径**没变**（var1 不参与这三要素）
+    QCOMPARE(nUsableButIncomplete, 31);   // 66 - 35
     QCOMPARE(nOnlyCqdmaMissing, 17);
+    // 三要素齐全的 66 条里：56 条表里有 var1（开箱即用）、10 条要调用方显式覆盖
+    // （上游对那 10 条也没给 var1 —— 上游靠 bruteforce 扫 0..0xFF 找）。
+    QCOMPARE(nExploitReady, 56);
+    QCOMPARE(nNeedsVar1Override, 10);
+    QCOMPARE(nExploitReady + nNeedsVar1Override, nUsable);
 }
 
 // 诚实边界：上游数据本身就凑不齐 kamakiri 三要素的那些芯片（**不是本仓漏转写**）。
@@ -173,7 +196,7 @@ void TestMtkChipHwAddrs::kamakiriUsabilityBoundary()
     // 这是**上游数据事实**（89 条里 23 条如此），不是本仓缺陷，也不许含糊成"未收录"。
     QCOMPARE(unusable.size(), 23);
 
-    // 其中 10 条七个字段全缺 —— 上游原文里这些行是**整段注释掉的**（如 0x6236 的
+    // 其中 10 条八个字段全缺 —— 上游原文里这些行是**整段注释掉的**（如 0x6236 的
     // `# sej_base=0x80140000,`），逐条列出以便人工对着上游复核：
     QCOMPARE(allSevenMissing,
              QStringList({QStringLiteral("0x6236"), QStringLiteral("0x6238"),
@@ -195,13 +218,13 @@ void TestMtkChipHwAddrs::presenceFlagAndValueAgree()
     QCOMPARE(hits.size(), 89);
 
     for (const mtkbrom::ChipHwAddrs *a : hits) {
-        const quint32 values[7] = {a->watchdog, a->uart, a->bromPayloadAddr,
+        const quint32 values[8] = {a->watchdog, a->uart, a->bromPayloadAddr,
                                    a->daPayloadAddr, a->plPayloadAddr,
-                                   a->cqdmaBase, a->sejBase};
-        const bool present[7] = {a->hasWatchdog, a->hasUart, a->hasBromPayloadAddr,
+                                   a->cqdmaBase, a->sejBase, a->var1};
+        const bool present[8] = {a->hasWatchdog, a->hasUart, a->hasBromPayloadAddr,
                                  a->hasDaPayloadAddr, a->hasPlPayloadAddr,
-                                 a->hasCqdmaBase, a->hasSejBase};
-        for (int i = 0; i < 7; ++i) {
+                                 a->hasCqdmaBase, a->hasSejBase, a->hasVar1};
+        for (int i = 0; i < 8; ++i) {
             QVERIFY2((values[i] == 0) == !present[i],
                      qPrintable(QStringLiteral("%1 的 %2：值=0x%3 而存在位=%4 —— "
                                                "值槽为 0 必须当且仅当存在位为假")
@@ -212,63 +235,73 @@ void TestMtkChipHwAddrs::presenceFlagAndValueAgree()
     }
 }
 
-// 抽查：8 颗芯片的 7 个值与 7 个存在位逐一对着上游行号复核。
-// 选取标准：覆盖"七字段全齐 / 只缺 cqdma / 只缺 uart / 只有 sej / 七字段全缺"五种形态，
-// 值的选择：**字段齐全的那 4 颗**（0x0279/0x0335/0x0907/0x6752）的 7 个**存在**值两两不同 ——
+// 抽查：8 颗芯片的 8 个值与 8 个存在位逐一对着上游行号复核。
+// 选取标准：覆盖"八字段全齐 / 只缺 cqdma / 只缺 uart / 只有 sej / 八字段全缺"五种形态，
+// W8-T3 追加的 var1 列同时覆盖"有值"（0x0279/0x0335/0x0907/0x6752/0x1066）与"上游没给"
+// （0x0571/0x6226/0x6236 三颗上游原文就是注释掉的 `# var1`）两种形态。
+// 值的选择：**字段齐全的那 4 颗**（0x0279/0x0335/0x0907/0x6752）的存在值两两不同 ——
 // 这样字段互换、把某一行抄给别的行这类错误会露出来。（缺失字段的值槽一律写 0，于是
 // 0x0571/0x6226/0x6236 等会有多个 0 槽 —— 那是"没有该字段"的写法、不是"值相同"，
 // 本表对"有没有"的表达是 hasXxx，值槽的 0 在 hasXxx == false 时无意义。）
-// 注意上游大量芯片的 7 个值彼此相同 —— 如 0x0279 与 0x0326 完全一致（含存在位）——
+// 注意上游大量芯片的各字段值彼此相同 —— 如 0x0279 与 0x0326 完全一致（含存在位）——
 // 只抽查其中一颗是不够的（0x0326 不在抽查表里，正说明这一点）。
 void TestMtkChipHwAddrs::knownChipsHaveExpectedAddresses()
 {
     struct ChipExpectation {
         quint16 hwCode;
-        quint32 value[7];       // 顺序同 kFieldNames；has 为 false 的槽写 0（不参与断言）
-        bool    has[7];
+        quint32 value[8];       // 顺序同 kFieldNames；has 为 false 的槽写 0（不参与断言）
+        bool    has[8];         // 末位 = var1（W8-T3 补的第 8 列）
         int     upstreamLine;   // 上游 71b0175 里该 Chipconfig( 的起始行，可 sed 复核
     };
     const ChipExpectation expected[] = {
-        // 0x0279（上游 :1613，最低 hw_code）：七字段全齐
-        {0x0279, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x10212c00, 0x1000a000},
-                 {true, true, true, true, true, true, true}, 1613},
-        // 0x0335（上游 :1133）：七字段全齐，watchdog/cqdma/sej 与 0x0279 不同值
-        {0x0335, {0x10212000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x10217c00, 0x10008000},
-                 {true, true, true, true, true, true, true}, 1133},
+        // 0x0279（上游 :1613，最低 hw_code）：八字段全齐
+        // var1=10（上游 :1614 `var1=0xA,`）
+        {0x0279, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x10212c00, 0x1000a000, 0xa},
+                 {true, true, true, true, true, true, true, true}, 1613},
+        // 0x0335（上游 :1133）：八字段全齐，watchdog/cqdma/sej 与 0x0279 不同值
+        //   （var1 恰好与 0x0279 不同：40 vs 10 —— 抽查表里因此也覆盖了 var1 的差异）
+        // var1=40（上游 :1134）
+        {0x0335, {0x10212000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x10217c00, 0x10008000, 0x28},
+                 {true, true, true, true, true, true, true, true}, 1133},
         // 0x0907（上游 :1832，XML 代 —— 兄弟用例也用它）：watchdog/uart/cqdma 都与众不同
-        {0x0907, {0x1c007000, 0x11001000, 0x100a00, 0x201000, 0x40200000, 0x10212000, 0x1000a000},
-                 {true, true, true, true, true, true, true}, 1832},
-        // 0x6752（上游 :1202）：七字段全齐，pl 与 0x0279 不同（0x40001000 vs 0x40200000）
-        {0x6752, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40001000, 0x10212c00, 0x1000a000},
-                 {true, true, true, true, true, true, true}, 1202},
+        // var1=10（上游 :1833）
+        {0x0907, {0x1c007000, 0x11001000, 0x100a00, 0x201000, 0x40200000, 0x10212000, 0x1000a000, 0xa},
+                 {true, true, true, true, true, true, true, true}, 1832},
+        // 0x6752（上游 :1202）：八字段全齐，pl 与 0x0279 不同（0x40001000 vs 0x40200000）
+        // var1=40（上游 :1203）
+        {0x6752, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40001000, 0x10212c00, 0x1000a000, 0x28},
+                 {true, true, true, true, true, true, true, true}, 1202},
         // 0x1066（上游 :1534）：**只缺 cqdma_base** 的 17 条之一 —— 表内但字段不全的形态：
         // lookup 必须非空，且 cqdma 的存在位必须是假（不许填 0 冒充）
-        {0x1066, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x00000000, 0x1000a000},
-                 {true, true, true, true, true, false, true}, 1534},
+        // var1=0x73=115（上游 :1535 `var1=0x73,  # confirmed`）—— 它是三要素齐全但缺 cqdma 的那 17 条之一，
+        // 且**有** var1：正好说明"字段全齐"与"可用"是两件事。
+        {0x1066, {0x10007000, 0x11002000, 0x100a00, 0x201000, 0x40200000, 0x00000000, 0x1000a000, 0x73},
+                 {true, true, true, true, true, false, true, true}, 1534},
         // 0x0571（上游 :480）：只有 watchdog（uart 在上游是注释行）—— 存在位必须逐字段独立，
         // 不许"一颗芯片要么全有要么全无"地简化
-        {0x0571, {0x10007000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000},
-                 {true, false, false, false, false, false, false}, 480},
+        // var1 未给（上游 :480 `0x571: Chipconfig(  # var1` —— 那行就是被注释掉的 var1 位）
+        {0x0571, {0x10007000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000},
+                 {true, false, false, false, false, false, false, false}, 480},
         // 0x6226（上游 :673，iot=True 的 MT6226）：只有 sej_base（其余皆注释）——
         // "表内有、但三要素一个都不够"的中间形态
-        {0x6226, {0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x80140000},
-                 {false, false, false, false, false, false, true}, 673},
-        // 0x6236（上游 :688）：七个字段全缺（连 sej_base 那行都是注释掉的）
-        {0x6236, {0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000},
-                 {false, false, false, false, false, false, false}, 688},
+        {0x6226, {0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x80140000, 0x00000000},
+                 {false, false, false, false, false, false, true, false}, 673},
+        // 0x6236（上游 :688）：八个字段全缺（连 sej_base 那行都是注释掉的）
+        {0x6236, {0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000},
+                 {false, false, false, false, false, false, false, false}, 688},
     };
 
-    const quint32 mtkbrom::ChipHwAddrs::*const valueMembers[7] = {
+    const quint32 mtkbrom::ChipHwAddrs::*const valueMembers[8] = {
         &mtkbrom::ChipHwAddrs::watchdog, &mtkbrom::ChipHwAddrs::uart,
         &mtkbrom::ChipHwAddrs::bromPayloadAddr, &mtkbrom::ChipHwAddrs::daPayloadAddr,
         &mtkbrom::ChipHwAddrs::plPayloadAddr, &mtkbrom::ChipHwAddrs::cqdmaBase,
-        &mtkbrom::ChipHwAddrs::sejBase,
+        &mtkbrom::ChipHwAddrs::sejBase, &mtkbrom::ChipHwAddrs::var1,
     };
-    const bool mtkbrom::ChipHwAddrs::*const hasMembers[7] = {
+    const bool mtkbrom::ChipHwAddrs::*const hasMembers[8] = {
         &mtkbrom::ChipHwAddrs::hasWatchdog, &mtkbrom::ChipHwAddrs::hasUart,
         &mtkbrom::ChipHwAddrs::hasBromPayloadAddr, &mtkbrom::ChipHwAddrs::hasDaPayloadAddr,
         &mtkbrom::ChipHwAddrs::hasPlPayloadAddr, &mtkbrom::ChipHwAddrs::hasCqdmaBase,
-        &mtkbrom::ChipHwAddrs::hasSejBase,
+        &mtkbrom::ChipHwAddrs::hasSejBase, &mtkbrom::ChipHwAddrs::hasVar1,
     };
 
     for (const ChipExpectation &e : expected) {
@@ -277,7 +310,7 @@ void TestMtkChipHwAddrs::knownChipsHaveExpectedAddresses()
                                               .arg(chipTag(e.hwCode))
                                               .arg(e.upstreamLine)));
         QCOMPARE(a->hwCode, e.hwCode);
-        for (int i = 0; i < 7; ++i) {
+        for (int i = 0; i < 8; ++i) {
             const QString field = QString::fromLatin1(kFieldNames[i]);
             QVERIFY2((a->*valueMembers[i]) == e.value[i],
                      qPrintable(QStringLiteral("%1 的 %2：期望 0x%3 实得 0x%4（上游 :%5）")

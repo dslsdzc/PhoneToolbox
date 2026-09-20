@@ -56,6 +56,14 @@ HW_FIELDS = [
     ("pl_payload_addr",   "plPayloadAddr",   "hasPlPayloadAddr"),
     ("cqdma_base",        "cqdmaBase",       "hasCqdmaBase"),
     ("sej_base",          "sejBase",         "hasSejBase"),
+    # W8-T3（控制方 2026-09-20 裁决）：var1 补进来当**第 8 个字段**。
+    # 它此前被 T2 漏掉，而 T3 的编排层需要它（kamakiri.py:44 的 ctrl_transfer wIndex）。
+    # 上游实测（ast，89 条）：**56 条有值 / 33 条未写 / 0 条显式 None**；
+    # 取值集合 {10(众数,41 条), 37, 40, 115, 127, 172, 177, 180, 204}。
+    # 不是"地址"但与 watchdog/uart 同类：**逐芯片配置常量**，且多数芯片都有
+    # ⇒ 让调用方每次手输是错的，天然属于本表（缺的照样是"上游没给"，不是 0）。
+    # 放在**末尾**：不动前 7 个字段的位置（T2 已入库的表体按位置初始化，末尾追加是唯一不搬动既有列的做法）。
+    ("var1",              "var1",            "hasVar1"),
 ]
 HW_HEADER = REPO / "src" / "core" / "modes" / "mtk_chip_table.h"
 
@@ -177,7 +185,8 @@ def extract():
                 sys.exit(f"0x{hw:04X} 的 iot 不是 bool 字面量（{ast.unparse(kw.value)}）—— 拒绝生成")
             iot = kw.value.value                # 上游 hwconfig 的 iot=True（如 0x6226）
 
-        # —— 逐芯片硬件地址（W8-T2）：**忠实转写"有没有"**，缺的字段不许填 0 冒充 ——
+        # —— 逐芯片字段（W8-T2 的 7 个硬件地址 + W8-T3 补的 var1）：**忠实转写"有没有"**，
+        # 缺的字段不许填 0 冒充 ——
         # 上游 Chipconfig.__init__ 的形参默认值全是 None ⇒ "kwarg 缺失"与"显式写 None"是同一件事，
         # 两者都算**该字段缺失**（把 None 当 0 写进表，往 watchdog 写 0 就是砖机）。
         hw_values = {}
@@ -193,7 +202,8 @@ def extract():
                          "—— 读不懂就拒绝生成（不回填、不猜）")
             val = v.value
             # 0 与"缺失"在产物里无法区分（值槽本来就写 0），且往 watchdog 写 0 是砖机；
-            # 负数不是地址。上游 71b0175 的这 7 个字段无 0/负值 —— 真出现了先人工复核再放宽。
+            # 负数不是地址。上游 71b0175 的这 8 个字段无 0/负值（var1 实测最小 10）——
+            # 真出现了先人工复核再放宽。
             if not 0 < val <= 0xFFFFFFFF:
                 sys.exit(f"0x{hw:04X} 的 {upstream_name} = {val} 不在 (0, 0xFFFFFFFF] —— 拒绝生成"
                          "（0 与'缺失'无法区分；负数不是地址）")
@@ -304,17 +314,23 @@ def main():
         return (f["watchdog"][0] and f["uart"][0]
                 and any(f[p][0] for p in ("brom_payload_addr", "da_payload_addr", "pl_payload_addr")))
     n_usable = sum(1 for e in entries if _usable(e))
-    n_all7 = sum(1 for e in entries if all(e[4][n][0] for n, _, _ in HW_FIELDS))
+    # "全齐"的口径随字段数走：T2 时代的"七字段全齐"= 37；加了 var1 之后要按**八**字段重算
+    # （T3 报告里记了这次口径变更与新旧数字 —— 旧数字不是错，是"当时只有 7 列"）。
+    n_all8 = sum(1 for e in entries if all(e[4][n][0] for n, _, _ in HW_FIELDS))
     n_all_missing = sum(1 for e in entries if not any(e[4][n][0] for n, _, _ in HW_FIELDS))
     all_missing = [hex(e[0]) for e in entries if not any(e[4][n][0] for n, _, _ in HW_FIELDS)]
+    # 漏洞利用"开箱可用"= 三要素齐全 **且** var1 有值（T3 起 var1 由表提供；
+    # 三要素齐全但 var1 缺的那些芯片需要调用方显式覆盖 var1，见 mtk_brom_exploit.h 的 ExploitOptions）。
+    n_exploit_ready = sum(1 for e in entries if _usable(e) and e[4]["var1"][0])
     # 诊断一律走 stderr：stdout 是产物本身。
     print(f"转写 {len(entries)} 条（iot=True {iot_count} 条；dacode 回填 {len(dacode_fallbacks)} 条"
           f"{'：' + ' '.join(hex(h) for h in dacode_fallbacks) if dacode_fallbacks else ''}）",
           file=sys.stderr)
-    print("硬件地址覆盖（显式给出/总条数）："
+    print("逐芯片字段覆盖（显式给出/总条数）："
           + "  ".join(f"{n}={counts[n]}" for n, _, _ in HW_FIELDS)
-          + f"；七字段全齐={n_all7}；kamakiri 三要素(watchdog+uart+任一 payload)齐全={n_usable}；"
-          + f"三要素缺={len(entries) - n_usable}（其中七字段全缺={n_all_missing}：{' '.join(all_missing)}）",
+          + f"；八字段全齐={n_all8}；kamakiri 三要素(watchdog+uart+任一 payload)齐全={n_usable}"
+          + f"（其中 var1 也有值、可开箱即用={n_exploit_ready}；需调用方覆盖 var1={n_usable - n_exploit_ready}）；"
+          + f"三要素缺={len(entries) - n_usable}（其中八字段全缺={n_all_missing}：{' '.join(all_missing)}）",
           file=sys.stderr)
     out = []
     out.append("// src/core/modes/mtk_chip_table.cpp")
@@ -330,7 +346,7 @@ def main():
     out.append("//     上游 URL: https://github.com/bkerler/mtkclient")
     out.append(f"//     上游原文: https://github.com/bkerler/mtkclient/blob/{commit}/mtkclient/config/brom_config.py")
     out.append("// 本项目为 GPLv3，与本表许可兼容；转写只取静态事实（hw_code / dacode / damode / iot +")
-    out.append("// 7 个硬件地址字段），不复制上游代码。")
+    out.append("// 8 个逐芯片字段（7 个硬件地址 + var1），不复制上游代码。")
     out.append(f"// 本表 {len(entries)} 条 = 上游 hwconfig 的全部条目（其中 iot=True {iot_count} 条、"
                f"dacode 按 hw_code 回填 {len(dacode_fallbacks)} 条）；damode 取值同上游 DAmodes。")
     out.append("//")
@@ -362,7 +378,7 @@ def main():
     out.append("")
     out.append("int chipTableSize() { return kChipCount; }")
     out.append("")
-    out.append("// —— 逐芯片硬件地址（W8-T2）：同一张上游表的另 7 个字段 ——")
+    out.append("// —— 逐芯片字段（W8-T2 的 7 个硬件地址 + W8-T3 的 var1）：同一张上游表的全部字段 ——")
     out.append("// 列序同 mtk_chip_table.h 的 ChipHwAddrs（生成期已核对该 struct 的成员顺序，不一致即拒绝生成）：")
     out.append("//   hwCode, " + ", ".join(cpp for _, cpp, _ in HW_FIELDS) + ",")
     out.append("//   " + ", ".join(has for _, _, has in HW_FIELDS))
@@ -370,9 +386,9 @@ def main():
     out.append("// 反过来 present ⇒ 值必非 0（生成器拒绝 0 值）。谁要往硬件写地址，先查存在位。")
     out.append("// 覆盖（生成器实测，改上游后以 tests/test_mtk_chip_hwaddrs.cpp 的复核为准）：")
     out.append("//   " + "  ".join(f"{n} {counts[n]}/{len(entries)}" for n, _, _ in HW_FIELDS))
-    out.append(f"//   七字段全齐 {n_all7}；kamakiri 三要素（watchdog+uart+任一 payload）齐全 {n_usable}"
-               f"（其中 {n_usable - n_all7} 条字段不全但可用）；")
-    out.append(f"//   三要素缺 {len(entries) - n_usable}（其中七字段全缺 {n_all_missing} 条：{' '.join(all_missing)}）"
+    out.append(f"//   八字段全齐 {n_all8}；kamakiri 三要素（watchdog+uart+任一 payload）齐全 {n_usable}"
+               f"（其中三要素齐全但 var1 缺、需调用方覆盖 var1 的 {n_usable - n_exploit_ready} 条）；")
+    out.append(f"//   三要素缺 {len(entries) - n_usable}（其中八字段全缺 {n_all_missing} 条：{' '.join(all_missing)}）"
                " ⇒ 漏洞利用对它们**不可用**。")
     out.append("const ChipHwAddrs kHwAddrs[] = {")
     for hw, _dacode, _damode, _iot, hwf in entries:
