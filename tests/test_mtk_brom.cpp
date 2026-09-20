@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QFile>
 #include <memory>
 
 #include "core/modes/mtk_brom.h"
@@ -7,6 +8,22 @@
 #include "mtk_test_helpers.h"
 
 using mtktest::be32;
+
+namespace {
+
+// 读生产源文件（相对仓库根，路径在 CMake 里编成 PT_SRC_ROOT）。读不到返回空串，调用方一律
+// QVERIFY2 硬 FAIL —— 钉在缺文件时静默失效，正是本仓反复吃亏的形态。
+// 同款见 test_mtk_usb_ids.cpp 的 readProductionFile；PT_SRC_ROOT 的契约见 CMakeLists 的
+// target_compile_definitions 名单（本文件是 W8-T1 审查 I-1 起加进去的）。
+QString readProductionFile(const QString &relPath)
+{
+    QFile f(QStringLiteral(PT_SRC_ROOT) + relPath);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+    return QString::fromUtf8(f.readAll());
+}
+
+} // namespace
 
 // 注意：MockUsbChannel（tests/mtk_mock_usb.h）所有权在 BromSession 构造时转移；
 // 测试一律先保存裸指针 MockUsbChannel *m = usb.get() 再 move，后续经 m 访问。
@@ -63,6 +80,9 @@ private slots:
     // ---- D1-T9: FINISH 收尾 ----
     void daStorageFinishFlashFrames();
     void daStorageFinishFlashRequiresDa();
+    // ---- W8-T1: 控制传输（mock 行为 + 生产侧同款判据的文本钉）----
+    void mockControlTransferGuardsMirrorProduction();
+    void controlTransferGuardsPinnedInProductionSource();
 };
 
 void TestMtkBrom::checksumXorsLittleEndianU16()
@@ -737,6 +757,91 @@ void TestMtkBrom::daStorageFinishFlashRequiresDa()
     QVERIFY(!st.finishFlash(0, &err));
     QVERIFY(!err.isEmpty());
     QVERIFY2(m->writes.isEmpty(), "未激活 DA 时一个字节都不许发");
+}
+
+// ================= W8-T1 审查 I-1 回归钉：mock 与生产不许再"静默分叉" =================
+//
+// 根因：控制传输的两条取值约定守卫（IN 方向 + 非空 data；数据超过 wLength 的 16 位上界）当初只在
+// 生产侧实现，mock 照收不误 —— 一个拒、一个收，**且没有任何机制会发现**。后果是误用该形的用例
+// 会在测试里绿、真机上红。下面两槽成对：行为槽钉 mock、文本钉钉生产，**任一侧被删都会红**。
+
+// mock 侧行为：与生产同款的两条守卫都拒绝，且"拒绝即不发、不记录、不计数"。
+// ⚠️ 这条钉的是"mock 与生产一致"，**不是**"真机能用"（生产路径无真机验证）。
+void TestMtkBrom::mockControlTransferGuardsMirrorProduction()
+{
+    MockUsbChannel usb;
+    QString err;
+
+    // (1) IN 方向（0x80）且 data 非空 —— 生产拒绝（读回的字节无处安放），mock 必须一样拒
+    QVERIFY(!usb.controlTransfer(0x80, 0x6, 0x02FF, 0, QByteArray(9, '\0'), 1000, &err));
+    QVERIFY2(!err.isEmpty(), "被拒时必须给出报错文案");
+    QCOMPARE(usb.controlTransfers.size(), 0);   // 拒绝即不发 → 不记录
+    QCOMPARE(usb.controlCalls, 0);              // 也不计数
+
+    // (2) 数据超过 wLength 的 16 位上界 —— 同拒（生产不许静默截断，mock 也不许照收）
+    err.clear();
+    QVERIFY(!usb.controlTransfer(0x21, 0x20, 0, 0, QByteArray(0x10000, '\0'), 1000, &err));
+    QVERIFY2(!err.isEmpty(), "被拒时必须给出报错文案");
+    QCOMPARE(usb.controlTransfers.size(), 0);
+    QCOMPARE(usb.controlCalls, 0);
+
+    // (3) 正常形态 A：IN + 空 data = 无数据阶段（上游 kamakiri.py:44 那一形）→ 通过并记一笔
+    err.clear();
+    QVERIFY2(usb.controlTransfer(0xA1, 0, 0, 0x1234, QByteArray(), 2000, &err), qPrintable(err));
+    QCOMPARE(usb.controlTransfers.size(), 1);
+    QCOMPARE(usb.controlCalls, 1);
+    QCOMPARE(int(usb.controlTransfers.at(0).requestType), 0xA1);
+    QCOMPARE(int(usb.controlTransfers.at(0).request), 0);
+    QCOMPARE(int(usb.controlTransfers.at(0).index), 0x1234);
+    QCOMPARE(usb.controlTransfers.at(0).timeoutMs, 2000);
+    QVERIFY(usb.controlTransfers.at(0).data.isEmpty());
+
+    // (4) 正常形态 B：OUT + 非空 data（上游 kamakiri2.py:30 那一形）→ 通过并记第二笔
+    err.clear();
+    QVERIFY2(usb.controlTransfer(0x21, 0x20, 0, 0, QByteArray("\x01\x02", 2), 1000, &err), qPrintable(err));
+    QCOMPARE(usb.controlTransfers.size(), 2);
+    QCOMPARE(usb.controlCalls, 2);
+    QCOMPARE(usb.controlTransfers.at(1).data, QByteArray("\x01\x02", 2));
+
+    // (5) 守卫在失败注入**之前**（mock 字段注释里文档化的语义）：被守卫拒绝的调用不消耗
+    //     failControlAt 的序号，故"第 0 次通过的调用"才是被注入的那次。
+    MockUsbChannel u2;
+    u2.failControlAt = 0;
+    err.clear();
+    QVERIFY(!u2.controlTransfer(0x80, 0x6, 0, 0, QByteArray(1, '\0'), 0, &err));  // 守卫拒绝
+    QCOMPARE(u2.controlCalls, 0);               // 序号未被消耗
+    QVERIFY(!u2.controlTransfer(0xA1, 0, 0, 0, QByteArray(), 0, &err));           // 这才是第 0 次 → 注入失败
+    QCOMPARE(u2.controlCalls, 1);
+    QCOMPARE(u2.controlTransfers.size(), 0);    // 注入失败的不记录
+    QVERIFY2(u2.controlTransfer(0xA1, 0, 0, 0, QByteArray(), 0, &err), qPrintable(err)); // 一次性：后续照常
+    QCOMPARE(u2.controlTransfers.size(), 1);
+}
+
+// 生产侧同款判据的**文本钉**：读 src/core/modes/mtk_brom.cpp，钉住 BromUsbLibusb::controlTransfer
+// 的函数体里也有这二判据（IN 位用 LIBUSB_ENDPOINT_IN、上界用 0xFFFF）与"空 data → 无数据阶段"的映射。
+// ⚠️ 取材边界：断的是**文本**（判据字面在函数体内存在），**不证明它被正确执行、更不证明真机行为**
+// （无真机）。行为侧的判别力由上一槽（mock）与将来的真机验证承担。
+// 锚点形态依赖当前写法：若将来把守卫抽成公共函数、或改了函数签名，本钉会以"找不到锚点"红 ——
+// 那是**要人来更新这个解析器**（抽公共函数本身是允许的，届时改钉抽出的那处即可），不是放宽。
+void TestMtkBrom::controlTransferGuardsPinnedInProductionSource()
+{
+    const QString src = readProductionFile(QStringLiteral("/src/core/modes/mtk_brom.cpp"));
+    QVERIFY2(!src.isEmpty(),
+             qPrintable(QStringLiteral("读不到生产源文件：%1").arg(QStringLiteral(PT_SRC_ROOT))));
+
+    // 只在 controlTransfer 的函数体内找（免得撞上文件里别处的同款字面）
+    const qsizetype begin = src.indexOf(QStringLiteral("bool controlTransfer(quint8 requestType"));
+    QVERIFY2(begin >= 0, "找不到 controlTransfer 的定义");
+    const qsizetype end = src.indexOf(QStringLiteral("bool close() override"), begin);
+    QVERIFY2(end > begin, "找不到 controlTransfer 的收尾锚点（函数体范围定不出来）");
+    const QString body = src.mid(begin, end - begin);
+
+    QVERIFY2(body.contains(QStringLiteral("requestType & LIBUSB_ENDPOINT_IN")),
+             "生产侧 IN 位判据缺失 —— mock 与生产会再分叉");
+    QVERIFY2(body.contains(QStringLiteral("0xFFFF")),
+             "生产侧 wLength 上界判据缺失 —— mock 与生产会再分叉");
+    QVERIFY2(body.contains(QStringLiteral("data.isEmpty() ? nullptr")),
+             "生产侧'空 data → 无数据阶段（nullptr）'的映射缺失");
 }
 
 QTEST_APPLESS_MAIN(TestMtkBrom)

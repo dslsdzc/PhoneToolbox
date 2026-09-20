@@ -807,10 +807,13 @@ if(ENABLE_IMAGE_TESTS)
                 # 移动/改名、或拿旧 build 目录在别处跑，都会以"读不到生产源文件"**硬 FAIL**；
                 # 与样本目录那条（QSKIP + 可命令行覆盖）**不同**，且**有意不改成 QSKIP**：
                 # 钉在缺文件时静默失效，正是本仓反复吃亏的形态。
+                # W8-T1 审查 I-1 起 test_mtk_brom 也读生产源（钉 controlTransfer 的两条取值约定
+                # 判据与 mock 侧同款，防两侧静默分叉）；它本就与 mtk_brom.cpp 同源，这里只是加一条。
                 if(_test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
                    OR _test_stem STREQUAL "test_mtk_usb_ids"
-                   OR _test_stem STREQUAL "test_risk_gate_wiring")
+                   OR _test_stem STREQUAL "test_risk_gate_wiring"
+                   OR _test_stem STREQUAL "test_mtk_brom")
                     target_compile_definitions(${_test_target} PRIVATE
                         PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
                 endif()
