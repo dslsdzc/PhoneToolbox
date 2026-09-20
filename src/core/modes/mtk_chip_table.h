@@ -50,4 +50,52 @@ const ChipInfo *lookupChip(quint16 hwCode);
 int chipTableSize();
 QString damodeName(DaMode m);
 
+// —— 逐芯片硬件地址（W8-T2，同一张上游表的另 7 个字段）——
+//
+// 漏洞利用（kamakiri 系）要往载荷尾部写几个 **SoC 寄存器/内存地址**，它们逐芯片不同，
+// 而上游 brom_config.py 的 `hwconfig` **给得极不齐**（89 条，上游 71b0175 实测显式给出数）：
+//   watchdog 71 / uart 66 / bromPayloadAddr 68 / daPayloadAddr 74 / plPayloadAddr 66 /
+//   cqdmaBase 38 / sejBase 68。
+// ⇒ **存在位是这张表的一等公民**：`hasXxx` 为假时 `xxx` 槽里的 0 不是"地址 0"，是"上游没给"。
+//   要往硬件写地址的人必须先查存在位，缺了 → **响亮报错（拒绝，不猜）**：往 watchdog 写 0 是砖机。
+//   （生成器按对称口径落地：**缺 → 值槽 0 + 存在位假**；**存在 → 值必非 0**，present 且值为 0
+//     在生成期就被拒绝。tests/test_mtk_chip_hwaddrs.cpp 把这个当不变量全局扫。）
+//
+// 上游 71b0175 的实测边界（**上游数据事实，不是本仓缺陷，不许含糊成"未收录"**）：
+//   - 89 条里 **23 条缺 watchdog 或 uart**（其中 10 条七个字段全缺，上游原文整段注释掉）
+//     ⇒ 漏洞利用对它们**不可用**；它们**仍在表内**（lookup 返回非空），只是凑不齐三要素。
+//   - 反过来：**只缺 cqdmaBase** 的有 17 条，而 kamakiri **不用** cqdma
+//     ⇒ 若按"七字段全齐才收录"实现，可用芯片会从 **66 条掉到 37 条**（白扔 29 条）。**不许**加这种过滤。
+//   这些数字由 tests/test_mtk_chip_hwaddrs.cpp 钉住（上游换版本重跑生成器后，以用例的复核为准）。
+//
+// 字段语义（供消费者按需取用，**不是所有消费者都要全部**）：
+//   watchdog  → kamakiri 触发用（往载荷尾 4 字节写）        —— 缺 = 不可用
+//   uart      → 同上（尾 8..4 字节），决定 UART 基址           —— 缺 = 不可用
+//   bromPayloadAddr / daPayloadAddr / plPayloadAddr → 载荷注入目标（三者取一即可）
+//   cqdmaBase → CQ-DMA 系利用路径用（kamakiri 不用）
+//   sejBase   → 安全引擎基址
+struct ChipHwAddrs {
+    quint16 hwCode = 0;
+    // 值槽：**仅当对应 hasXxx 为真时**才是上游给出的地址（为假时是 0，无意义 —— 见上）
+    quint32 watchdog = 0;
+    quint32 uart = 0;
+    quint32 bromPayloadAddr = 0;
+    quint32 daPayloadAddr = 0;
+    quint32 plPayloadAddr = 0;
+    quint32 cqdmaBase = 0;
+    quint32 sejBase = 0;
+    // 存在位（上游"这一条给了这个 kwarg 且不是 None"；显式 None 与缺失**同义**）
+    bool hasWatchdog = false;
+    bool hasUart = false;
+    bool hasBromPayloadAddr = false;
+    bool hasDaPayloadAddr = false;
+    bool hasPlPayloadAddr = false;
+    bool hasCqdmaBase = false;
+    bool hasSejBase = false;
+};
+
+// 按 hw_code 查硬件地址。**仅当 hwCode 不在表内**才返 nullptr（维持 89 条口径：字段不全的芯片
+// 照样返回非空指针，缺哪个由 hasXxx 表达）。上层拿 nullptr 必须明确报错，不得猜代际/地址。
+const ChipHwAddrs *lookupChipHwAddrs(quint16 hwCode);
+
 } // namespace mtkbrom

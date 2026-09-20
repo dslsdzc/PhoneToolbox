@@ -352,7 +352,8 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_usb_ids.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_agreement_dialog.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_confirm_dialog.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_gate_wiring.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_gate_wiring.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_hwaddrs.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -684,6 +685,12 @@ if(ENABLE_IMAGE_TESTS)
                 elseif(_test_stem STREQUAL "test_mtk_chip_table")
                     # D1 Task 3：芯片表（由 tools/gen_mtk_chip_table.py 从 mtkclient 的
                     # hwconfig 转写；src/core/modes 已 GLOB 编入主程序，不属任何静态库）
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
+                elseif(_test_stem STREQUAL "test_mtk_chip_hwaddrs")
+                    # W8 Task 2：逐芯片硬件地址表（同一张 hwconfig 的另 7 个字段，同一个生产源）
+                    # —— 与 test_mtk_chip_table 同款：纯数据表，无 libusb、不读生产源文本，
+                    # 故**不进** PT_SRC_ROOT 名单也不进 libusb 链接名单。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_preloader_emi")
