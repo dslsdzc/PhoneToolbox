@@ -3,7 +3,8 @@
 
 用法:  python3 tools/gen_mtk_chip_table.py [输出路径|-]
        给了输出路径 → 写**同目录临时文件**、成功后 `os.replace()` 原子换入
-                     （拒绝路径全部是具名 `sys.exit`，当前 30 处，`grep -c sys.exit` 可复核；
+                     （拒绝路径全部是具名 `sys.exit`，当前 27 处；计数请用 ast 数 `sys.exit(...)`
+                      调用 —— `grep -c sys.exit` 会把注释里提到这个词的也算上、多报 4 处。
                       原子换入保证**任何拒绝都不碰目标文件**）
        不给路径 / 给 `-` → 产物写 stdout（向后兼容，便于管道）
        例: python3 tools/gen_mtk_chip_table.py src/core/modes/mtk_chip_table.cpp
@@ -197,10 +198,13 @@ def extract():
                          "（0 与'缺失'无法区分；负数不是地址）")
             hw_values[upstream_name] = (True, val)
         # 对称不变量（emit 与用例都依赖它）：值槽为 0 **当且仅当** 存在位为假。
-        # 上面已保证 present ⇒ 值 > 0、absent ⇒ 值 = 0，这里再核一次，防以后有人改上面时漏掉。
-        # ⚠️ 用 sys.exit 而不是 assert（W8-T2 审查 Minor-3 / 控制方裁决）：assert 在 `python3 -O`
-        # 下会被整个剥掉（实测退出码 0、什么都不打印）—— "静默"正是 fail-closed 最不能有的性质；
-        # 且裸 AssertionError 不指名芯片与字段，与其余 25 条拒绝路径的姿态不一致。
+        # ⚠️ 这是**兜底**，不是运行时校验：上面那段构造已经保证 present ⇒ 值 > 0、absent ⇒ 值 = 0，
+        # **正常路径永远不该触发这里**。留着它的唯一理由是给"以后改上面那段的人"兜底 ——
+        # 改漏了会被它挡住。**不要因为"现在不可能触发"就删掉它。**
+        # 用具名 sys.exit 而不是 assert（W8-T2 审查 Minor-3 / 控制方裁决）：assert 在 `python3 -O`
+        # 下会被**整条剥掉**（实测退出码 0、什么都不打印）—— 而这道兜底的用途恰恰是"将来某次改动
+        # 没被现有检查覆盖时兜住"，被剥掉就等于它不存在；且裸 AssertionError 不指名芯片与字段，
+        # 与其余具名拒绝路径的姿态也不一致。
         for upstream_name, _cpp_name, _has_name in HW_FIELDS:
             present, val = hw_values[upstream_name]
             if (val == 0) != (not present):
@@ -251,7 +255,7 @@ def write_artifact(text: str, out_path):
     """产物落地：给了路径就**原子写**（同目录临时文件 + os.replace），否则写 stdout。
 
     为什么不让调用方用 `> 文件` 重定向：shell 在 exec **之前**就把目标截断了，而本脚本有
-    30 处具名拒绝路径 —— 一旦拒绝，入库文件就变成 0 字节（bash 实测 17 → 0）。
+    27 处具名拒绝路径 —— 一旦拒绝，入库文件就变成 0 字节（bash 实测 17 → 0）。
     "拒绝生成"和"工作树被破坏"必须分开；原子写让**任何**调用式都不会毁数据。
 
     out_path is None → 旧行为（stdout，`print` 补尾换行）。
