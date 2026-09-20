@@ -441,6 +441,12 @@ void FlashPanel::clearDeviceInfo()
     m_runScriptBtn->setEnabled(false);
     m_bootImgBtn->setEnabled(false);
     m_brickRepairBtn->setEnabled(false);
+    // W2-T5 复审 L-1(a)：这三个此前漏在禁用表外 —— 拔线后仍可点，而闸门此时取到 MODE_UNKNOWN
+    // （tier None = 不弹窗直接放行，只剩各 handler 自己的 serialNumber 判据兜着）。启用条件见
+    // setDeviceInfo 的分支（ADB+已 Root / MTK 已连接 / MTK-Fastboot），这里无条件复位。
+    m_unlockBtn->setEnabled(false);
+    m_lockBtn->setEnabled(false);
+    m_frpBtn->setEnabled(false);
 }
 
 // ==================== 拖放 ====================
@@ -1552,8 +1558,8 @@ void FlashPanel::onMtkDisconnect()
 
 void FlashPanel::onUnlockBootloader()
 {
-    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
-            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
+    // W2-T5 复审 L-1(b)：见 onFrpErase 的说明 —— 本按钮不经模式分支启用，改功能映射取档
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::Unlock))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     if (deviceId.isEmpty()) return;
 
@@ -1595,8 +1601,8 @@ void FlashPanel::onUnlockBootloader()
 
 void FlashPanel::onLockBootloader()
 {
-    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
-            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
+    // W2-T5 复审 L-1(b)：回锁与解锁同属引导锁状态改写，共用 RiskFeature::Unlock（同档 Tier2）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::Unlock))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     if (deviceId.isEmpty()) return;
 
@@ -1639,8 +1645,9 @@ void FlashPanel::onLockBootloader()
 
 void FlashPanel::onFrpErase()
 {
-    if (!riskui::ensureAccepted(this, riskui::riskTierForMode(
-            static_cast<DeviceDetector::DeviceMode>(m_deviceInfo.mode)))) return;
+    // W2-T5 复审 L-1(b)：改用**功能映射**取档 —— 本按钮在 ADB 分支下也可点（不依赖当前模式），
+    // 而模式映射在 MODE_UNKNOWN 上给 None = 不弹窗；功能映射不随模式漂，天然 fail-closed
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::FrpClear))) return;
     QString deviceId = m_deviceInfo.serialNumber;
     int mode = m_deviceInfo.mode;
 

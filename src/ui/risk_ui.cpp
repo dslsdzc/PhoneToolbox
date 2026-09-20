@@ -65,12 +65,18 @@ RiskTier riskTierForFeature(RiskFeature f)
     case RiskFeature::Sideload:       return RiskTier::Tier2Boot;
     case RiskFeature::AdbRoot:        return RiskTier::Tier2Boot;
     case RiskFeature::MtkUnlock:      return RiskTier::Tier2Boot;
-    // 诊断与安全研究族（绕过安全机制的脚本可执行 —— 计划正文第四条已明写其法律边界）
+    // W2-T5 复审裁决补登：系统工具面板里"真改设备状态"的入口（此前只门控了同面板的**检测类**
+    // 入口 —— 把 setenforce / remount 写 / 卸载应用漏在外面不自洽）。
+    case RiskFeature::SystemPartitionWrite: return RiskTier::Tier2Boot;
+    case RiskFeature::AppUninstall:         return RiskTier::Tier2Boot;
+    // 诊断与安全研究族（绕过/削弱安全机制与改写设备标识 —— 计划正文第四条已明写其法律边界）
     case RiskFeature::VulnExploit:    return RiskTier::Tier3Diagnostic;
     case RiskFeature::EngineerMode:   return RiskTier::Tier3Diagnostic;
     case RiskFeature::SafetyNet:      return RiskTier::Tier3Diagnostic;
     case RiskFeature::SignatureSpoof: return RiskTier::Tier3Diagnostic;
     case RiskFeature::ImeiTool:       return RiskTier::Tier3Diagnostic;
+    case RiskFeature::SelinuxMode:    return RiskTier::Tier3Diagnostic;
+    case RiskFeature::DeviceSpoof:    return RiskTier::Tier3Diagnostic;   // spec §3 已列"设备信息伪造"，此前只有 ImeiTool 可借
     }
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop

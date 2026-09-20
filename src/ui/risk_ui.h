@@ -24,8 +24,14 @@ namespace riskui {
 enum class RiskTier { None = 0, Tier2Boot = 2, Tier3Diagnostic = 3 };
 
 enum class RiskFeature {
-    DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot, MtkUnlock,   // → Tier2Boot
-    VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool              // → Tier3Diagnostic
+    // —— Tier2Boot 族（写操作）——
+    DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot, MtkUnlock,
+    SystemPartitionWrite,   // remount rw / umount / 直接写 /system（build.prop、bootanimation）
+    AppUninstall,           // pm uninstall（系统应用不可逆）
+    // —— Tier3Diagnostic 族（诊断与安全研究）——
+    VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool,
+    SelinuxMode,            // setenforce 切换（削弱设备安全机制）
+    DeviceSpoof             // 伪造型号/厂商/序列号（改写设备标识 —— 协议正文第四条明写其法律边界）
 };
 
 // 设备模式 → tier。**全枚举覆盖**：除 MODE_UNKNOWN 外全部 Tier2Boot —— FlashPanel 在每个协议

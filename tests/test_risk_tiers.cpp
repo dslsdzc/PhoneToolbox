@@ -55,8 +55,10 @@ const char *const kModeNames[] = {
 static_assert(sizeof(kModeNames) / sizeof(kModeNames[0]) == sizeof(kExpected) / sizeof(kExpected[0]),
               "kModeNames 与 kExpected 必须等长（否则失败信息会把模式名张冠李戴）");
 
-// RiskFeature 全项（12 项，**顺序 = 枚举声明顺序**）：期望档位逐项手写。
-// 分组依枚举注释：前 6 项写操作 → Tier2Boot；后 5 项诊断/绕过 → Tier3Diagnostic。
+// RiskFeature 全项（16 项，**顺序 = 枚举声明顺序**）：期望档位逐项手写。
+// 分组依枚举注释：前 9 项写操作 → Tier2Boot；后 7 项诊断/绕过 → Tier3Diagnostic。
+// （W2-T5 复审裁决新增 4 项：SystemPartitionWrite / AppUninstall / SelinuxMode / DeviceSpoof ——
+//   登记表漏项在这里红，这是本文件的核心机制。）
 struct FeatureRow {
     riskui::RiskFeature feature;
     const char *name;
@@ -71,14 +73,18 @@ const FeatureRow kFeatures[] = {
     {riskui::RiskFeature::Sideload,       "Sideload",       riskui::RiskTier::Tier2Boot},
     {riskui::RiskFeature::AdbRoot,        "AdbRoot",        riskui::RiskTier::Tier2Boot},
     {riskui::RiskFeature::MtkUnlock,      "MtkUnlock",      riskui::RiskTier::Tier2Boot},
+    {riskui::RiskFeature::SystemPartitionWrite, "SystemPartitionWrite", riskui::RiskTier::Tier2Boot},
+    {riskui::RiskFeature::AppUninstall,   "AppUninstall",   riskui::RiskTier::Tier2Boot},
     {riskui::RiskFeature::VulnExploit,    "VulnExploit",    riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::EngineerMode,   "EngineerMode",   riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::SafetyNet,      "SafetyNet",      riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::SignatureSpoof, "SignatureSpoof", riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::ImeiTool,       "ImeiTool",       riskui::RiskTier::Tier3Diagnostic},
+    {riskui::RiskFeature::SelinuxMode,    "SelinuxMode",    riskui::RiskTier::Tier3Diagnostic},
+    {riskui::RiskFeature::DeviceSpoof,    "DeviceSpoof",    riskui::RiskTier::Tier3Diagnostic},
 };
 constexpr int kFeatureCount = int(sizeof(kFeatures) / sizeof(kFeatures[0]));
-static_assert(kFeatureCount == 12, "RiskFeature 全项表必须覆盖 12 项");
+static_assert(kFeatureCount == 16, "RiskFeature 全项表必须覆盖 16 项");
 
 // RiskTier 的数值：None/Tier2Boot/Tier3Diagnostic = 0/2/3（1 留给了首屏「使用须知」）。
 // 数值本身不参与运行时逻辑（ConsentStore 用显式 key），钉住是为了让这套编号语义不被悄悄改动
@@ -122,7 +128,7 @@ private slots:
         }
     }
 
-    // 功能入口逐项：写操作 6 项（含 MTK 解锁）→ Tier2Boot；诊断 5 项 → Tier3Diagnostic。
+    // 功能入口逐项：写操作 9 项 → Tier2Boot；诊断/绕过 7 项 → Tier3Diagnostic。
     // 变异⑤（留档）：把 EngineerMode 改成 Tier2Boot → 本槽对应项变红。
     void riskTierForFeatureMatchesEveryItem()
     {

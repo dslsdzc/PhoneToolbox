@@ -1068,6 +1068,8 @@ void SystemToolPanel::onNavBar()
 
 void SystemToolPanel::onBootAnimation()
 {
+    // W2-T5 复审：本入口不止是"教学"—— 选完文件后真的 push + remount rw + 写 /system/media
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SystemPartitionWrite))) return;
     QMessageBox::information(this, "更换开机动画",
         "操作步骤:\n\n"
         "1. 准备 bootanimation.zip 文件\n"
@@ -1135,6 +1137,8 @@ void SystemToolPanel::onSuperInfo()
 
 void SystemToolPanel::onMountSystem()
 {
+    // W2-T5 复审：remount rw —— 把 /system 置为可写，是后面所有系统分区改写的前置
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SystemPartitionWrite))) return;
     QString r = adbShell("su -c 'mount -o rw,remount /system 2>/dev/null && echo OK || "
                          "mount -o rw,remount / 2>/dev/null && echo OK || echo FAIL'");
     appendOutput("挂载 /system: " + r, !r.contains("OK"));
@@ -1142,6 +1146,8 @@ void SystemToolPanel::onMountSystem()
 
 void SystemToolPanel::onUnmountSystem()
 {
+    // W2-T5 复审：umount 用户填的挂载点（设备侧文件系统状态变更；卸载运行中的分区可直接搞坏系统）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SystemPartitionWrite))) return;
     bool ok = false;
     QString path = QInputDialog::getText(this, "卸载分区", "输入分区挂载点:",
         QLineEdit::Normal, "/system", &ok);
@@ -1245,6 +1251,8 @@ void SystemToolPanel::onAppFreezeToggle()
 
 void SystemToolPanel::onAppUninstall()
 {
+    // W2-T5 复审：pm uninstall（系统应用不可逆，需重新刷入固件才能恢复）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::AppUninstall))) return;
     if (!m_appList || !m_appList->currentItem()) return;
     QString pkg = m_appList->currentItem()->data(Qt::UserRole).toString();
 
@@ -1290,6 +1298,8 @@ void SystemToolPanel::onAppExtract()
 
 void SystemToolPanel::onEditBuildProp()
 {
+    // W2-T5 复审：本入口后半段 remount rw + 在设备上直接改 /system/build.prop（改坏 = 起不来）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SystemPartitionWrite))) return;
     QString r = adbShell("su -c 'cat /system/build.prop 2>/dev/null | head -40'");
     if (r.isEmpty() || r.contains("Error")) {
         r = adbShell("getprop ro.build.display.id");
@@ -1310,8 +1320,9 @@ void SystemToolPanel::onEditBuildProp()
 
 void SystemToolPanel::onSpoofDevice()
 {
-    // W2-T5：伪造设备信息（型号/厂商/序列号）—— Tier3 诊断与安全研究
-    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::ImeiTool))) return;
+    // W2-T5 复审：伪造设备信息（型号/厂商/序列号）—— spec §3 把"设备信息伪造"与"IMEI 入口"列为
+    // 两项，此前枚举只有后者可借；现按裁决改用 RiskFeature::DeviceSpoof（同为 Tier3）
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::DeviceSpoof))) return;
     QString cur = adbShell("getprop ro.product.model; echo ---; getprop ro.product.manufacturer; "
                            "echo ---; getprop ro.serialno");
     auto parts = cur.split("---");
@@ -1329,6 +1340,9 @@ void SystemToolPanel::onSpoofDevice()
 
 void SystemToolPanel::onSelinuxMode()
 {
+    // W2-T5 复审：本入口**真改** SELinux 状态（setenforce 0 = 削弱设备安全机制）——
+    // 此前只门控同面板的**检测类**入口（SafetyNet/签名伪造只是检测），不自洽
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::SelinuxMode))) return;
     QString cur = adbShell("getenforce 2>/dev/null");
     m_selinuxLabel->setText("SELinux: " + cur);
 

@@ -10,8 +10,11 @@
 // 本文件两段：
 //  ① 接线钉：五个生产文件里 `riskui::ensureAccepted(` 的出现次数与**位置**（逐入口、函数体头部），
 //     以及每个闸门取 tier 的表达式（模式映射 / 功能映射，不是硬编的档）。
-//  ② 按钮接线对照钉（tripwire）：FlashPanel 每个 `QPushButton` 的槽名集合 == "14 个已过闸门入口
-//     + 6 个按设计不过闸门入口"。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
+//  ② 结构对照钉（tripwire）：
+//     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "14 个已过闸门入口
+//       + 6 个按设计不过闸门入口"。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
+//     * 断线复位：`setDeviceInfo` 能启用的每个按钮，`clearDeviceInfo` 必须禁用（W2-T5 复审 Low-1a：
+//       漏了三个按钮 → 拔线后仍可点，而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗）。
 //
 // 取材边界（结论必须连同这一段一起读）：
 //   * 本用例只数字面出现次数与出现位置 —— 把 `if (!riskui::ensureAccepted(...)) return;` 包进
@@ -110,20 +113,27 @@ class TestRiskGateWiring : public QObject
 private slots:
     // ① 接线钉：FlashPanel 的 14 个 handler
     void flashPanelGatesAllFourteenHandlers();
-    // ① 接线钉：其余三处（4 + 3 + 1）
-    void systemToolPanelGatesFourEntries();
+    // ① 接线钉：其余三处（10 + 3 + 1）
+    void systemToolPanelGatesTenEntries();
     void vulnPanelGatesThreeEntries();
     void eubRecoveryDialogGatesOnStart();
     // ① 接线钉：首屏（MainWindow 构造之前）
     void mainAsksAgreementBeforeTheMainWindow();
     // ② tripwire：按钮接线集合 == 已过闸门 14 + 按设计不过闸门 6
     void flashPanelButtonConnectsMatchTheGatedSet();
+    // ② 复位钉：setDeviceInfo 能启用的按钮，clearDeviceInfo 必须禁用（W2-T5 复审 Low-1a）
+    void flashPanelClearsEveryButtonSetDeviceInfoCanEnable();
     // ② 一对文案钉：设备模式显示名两侧一致（W6-T1 移交）
     void mtkBromDisplayNamePairIsConsistent();
 };
 
-// FlashPanel 的 14 个入口：每个入口的第一件事都是闸门，且 tier 从**面板已有的设备模式**取
-// （`m_deviceInfo.mode` —— 本面板没有独立的 m_currentMode，见 W2-T5 报告；不为接线新增并行状态）。
+// FlashPanel 的 14 个入口：每个入口的第一件事都是闸门，tier 逐个钉住取法。
+// 取档来源分两类（W2-T5 复审 L-1(b)）：
+//   * 11 个入口从**面板已有的设备模式**取（`m_deviceInfo.mode` —— 本面板没有独立的 m_currentMode，
+//     见 W2-T5 报告；不为接线新增并行状态）；
+//   * 3 个入口（解锁/回锁/FRP）改用**功能映射** —— 这三个按钮**不由模式分支启用**（ADB+已 Root /
+//     MTK 已连接 都算），拔线后闸门若按模式取会落到 MODE_UNKNOWN → tier None → 不弹窗直接放行。
+//     功能映射不随模式漂，天然 fail-closed。
 void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
 {
     const QString src = readSource(QStringLiteral("/src/ui/flash_panel.cpp"));
@@ -134,26 +144,40 @@ void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
     // 计数：14 = 上表 14 个 handler 各一次（多一处 = 有人重复挂闸门 / 少一处 = 有人漏接线）。
     QCOMPARE(countIn(src, kGate), 14);
 
-    const QStringList handlers = {
-        QStringLiteral("void FlashPanel::onFlashClicked()"),
-        QStringLiteral("void FlashPanel::onEraseClicked()"),
-        QStringLiteral("void FlashPanel::onUpdateClicked()"),
-        QStringLiteral("void FlashPanel::onSideloadClicked()"),
-        QStringLiteral("void FlashPanel::onRunScriptClicked()"),
-        QStringLiteral("void FlashPanel::onDumpClicked()"),
-        QStringLiteral("void FlashPanel::onBootImageClicked()"),
-        QStringLiteral("void FlashPanel::onUnlockBootloader()"),
-        QStringLiteral("void FlashPanel::onLockBootloader()"),
-        QStringLiteral("void FlashPanel::onFrpErase()"),
-        QStringLiteral("void FlashPanel::onBrickRepairClicked()"),
-        // 后三个是"底层引导"入口：连接即把 programmer/DA 上传到设备 RAM —— 同属 Tier2 写路径
-        QStringLiteral("void FlashPanel::onEdlConnect()"),
-        QStringLiteral("void FlashPanel::onEdlPlanFlash()"),
-        QStringLiteral("void FlashPanel::onMtkConnect()"),
-    };
-    QCOMPARE(handlers.size(), 14);   // 表本身受检：这张表少一行，下面的循环就少钉一个入口
+    const QString kByMode = QStringLiteral("riskui::riskTierForMode(");
+    const QString kModeSource = QStringLiteral("m_deviceInfo.mode");
 
-    for (const QString &signature : handlers) {
+    struct GateRow {
+        const char *signature;
+        const char *tierExpr;    // 闸门取档必须出现的字面（focused 到具体 feature）
+        bool        byMode;      // true → 额外要求出现 m_deviceInfo.mode（模式映射）
+    };
+    const GateRow rows[] = {
+        { "void FlashPanel::onFlashClicked()",        "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onEraseClicked()",        "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onUpdateClicked()",       "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onSideloadClicked()",     "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onRunScriptClicked()",    "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onDumpClicked()",         "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onBootImageClicked()",    "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onBrickRepairClicked()",  "riskui::riskTierForMode(", true },
+        // 后三个是"底层引导"入口：连接即把 programmer/DA 上传到设备 RAM —— 同属 Tier2 写路径
+        { "void FlashPanel::onEdlConnect()",          "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onEdlPlanFlash()",        "riskui::riskTierForMode(", true },
+        { "void FlashPanel::onMtkConnect()",          "riskui::riskTierForMode(", true },
+        // L-1(b)：这三个改功能映射（理由见函数头注释）
+        { "void FlashPanel::onUnlockBootloader()",
+          "riskui::riskTierForFeature(riskui::RiskFeature::Unlock)", false },
+        { "void FlashPanel::onLockBootloader()",
+          "riskui::riskTierForFeature(riskui::RiskFeature::Unlock)", false },
+        { "void FlashPanel::onFrpErase()",
+          "riskui::riskTierForFeature(riskui::RiskFeature::FrpClear)", false },
+    };
+    QCOMPARE(int(sizeof(rows) / sizeof(rows[0])), 14);   // 表本身受检：少一行就少钉一个入口
+
+    for (const GateRow &row : rows) {
+        const QString signature = QString::fromUtf8(row.signature);
+        const QString tierExpr = QString::fromUtf8(row.tierExpr);
         const QString body = functionBody(src, signature);
         QVERIFY2(!body.isEmpty(),
                  qPrintable(QStringLiteral("找不到函数定义（改名/删除？）：%1").arg(signature)));
@@ -169,28 +193,30 @@ void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
                  qPrintable(QStringLiteral("%1 的闸门在函数体第 %2 行（应 ≤ %3：闸门必须是第一件事）")
                                 .arg(signature).arg(line).arg(kGateMaxLine)));
 
-        // tier 表达式：必须是**模式映射**且取自面板已有的 m_deviceInfo.mode ——
-        // 硬编 `RiskTier::None`（= 永不弹窗）或硬编某一档都会被这条钉住。
-        const QString region = body.mid(body.indexOf(kGate), 200);
-        QVERIFY2(region.contains(QStringLiteral("riskui::riskTierForMode(")),
-                 qPrintable(QStringLiteral("%1 的闸门没有用 riskui::riskTierForMode(...) 取档")
-                                .arg(signature)));
-        QVERIFY2(region.contains(QStringLiteral("m_deviceInfo.mode")),
-                 qPrintable(QStringLiteral("%1 的闸门没有从面板已有的 m_deviceInfo.mode 取模式")
-                                .arg(signature)));
+        // tier 表达式：硬编 `RiskTier::None`（= 永不弹窗）或硬编某一档都会被这条钉住。
+        const QString region = body.mid(body.indexOf(kGate), 220);
+        QVERIFY2(region.contains(tierExpr),
+                 qPrintable(QStringLiteral("%1 的闸门没有取 %2").arg(signature, tierExpr)));
+        if (row.byMode) {
+            QVERIFY2(region.contains(kByMode) && region.contains(kModeSource),
+                     qPrintable(QStringLiteral("%1 的闸门没有从面板已有的 m_deviceInfo.mode 取模式")
+                                    .arg(signature)));
+        }
     }
 }
 
-// SystemToolPanel 的 4 个入口 → 功能映射（逐个钉住"哪个入口对应哪个 RiskFeature"：
-// 四个都是 Tier3，互换不会改变行为，所以只有这条钉得住计划表里的对应关系）。
-void TestRiskGateWiring::systemToolPanelGatesFourEntries()
+// SystemToolPanel 的 10 个入口 → 功能映射（逐个钉住"哪个入口对应哪个 RiskFeature"：
+// 同一档内的彼此互换不会改变行为，所以只有这条钉得住计划表里的对应关系）。
+// 10 = 4 个检测/诊断类（W2-T5 首版）+ 6 个**真改设备状态**的入口（W2-T5 复审裁决纳入：
+// SELinux 切换 / remount rw / umount / 改 build.prop / 换开机动画 / 卸载应用）。
+void TestRiskGateWiring::systemToolPanelGatesTenEntries()
 {
     const QString src = readSource(QStringLiteral("/src/ui/system_tool_panel.cpp"));
     QVERIFY2(!src.isNull(),
              qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/system_tool_panel.cpp")
                             .arg(QStringLiteral(PT_SRC_ROOT))));
 
-    QCOMPARE(countIn(src, kGate), 4);
+    QCOMPARE(countIn(src, kGate), 10);
 
     struct Entry {
         const char *signature;
@@ -199,12 +225,21 @@ void TestRiskGateWiring::systemToolPanelGatesFourEntries()
     const Entry entries[] = {
         // 功能名用**全限定**写法：RiskFeature 在 riskui 命名空间内，这些面板类不在其中
         // （首次全量构建实测：漏了 riskui:: 前缀 → "‘RiskFeature’未声明"，7 处一起炸）。
-        { "void SystemToolPanel::onSpoofDevice()",      "riskui::RiskFeature::ImeiTool" },
+        // —— 检测/诊断类（首版 4 个）——
+        { "void SystemToolPanel::onSpoofDevice()",      "riskui::RiskFeature::DeviceSpoof" },
         { "void SystemToolPanel::onSafetynetBypass()",  "riskui::RiskFeature::SafetyNet" },
         { "void SystemToolPanel::onSignatureSpoof()",   "riskui::RiskFeature::SignatureSpoof" },
         { "void SystemToolPanel::onOpenEngineerMode()", "riskui::RiskFeature::EngineerMode" },
+        // —— 真改设备状态（复审裁决 6 个）——
+        // 反例对照：SafetyNet/签名伪造那两个只做**检测**却已门控，SELinux 切换是真改状态，此前漏了。
+        { "void SystemToolPanel::onSelinuxMode()",      "riskui::RiskFeature::SelinuxMode" },
+        { "void SystemToolPanel::onMountSystem()",      "riskui::RiskFeature::SystemPartitionWrite" },
+        { "void SystemToolPanel::onUnmountSystem()",    "riskui::RiskFeature::SystemPartitionWrite" },
+        { "void SystemToolPanel::onEditBuildProp()",    "riskui::RiskFeature::SystemPartitionWrite" },
+        { "void SystemToolPanel::onBootAnimation()",    "riskui::RiskFeature::SystemPartitionWrite" },
+        { "void SystemToolPanel::onAppUninstall()",     "riskui::RiskFeature::AppUninstall" },
     };
-    QCOMPARE(int(sizeof(entries) / sizeof(entries[0])), 4);
+    QCOMPARE(int(sizeof(entries) / sizeof(entries[0])), 10);
 
     for (const Entry &e : entries) {
         const QString signature = QString::fromUtf8(e.signature);
@@ -358,6 +393,53 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
     got.sort();
     want.sort();
     QCOMPARE(got, want);
+}
+
+// W2-T5 复审 Low-1(a)：`clearDeviceInfo()`（"设备没了"的复位口）漏掉了三个按钮 ——
+// 拔线后它们仍可点，而闸门按模式取档会得到 MODE_UNKNOWN → tier None → **不弹窗直接放行**；
+// 那时只剩各 handler 自己的 serialNumber 判据兜着（另一道，不是闸门这道）。
+// 本槽钉"setDeviceInfo 能启用的每个按钮，clearDeviceInfo 必须禁用"这条不变量：
+//   * 提取：从 setDeviceInfo 函数体抓 `m_xxxBtn->setEnabled(true)`（正则），逐个要求在
+//     clearDeviceInfo 函数体里有 `m_xxxBtn->setEnabled(false);`；
+//   * 集合本身也钉住（排序后逐字比对）——新增启用点 → 红 → 作者必须回答"拔线后怎么复位"。
+// 取材边界：纯文本断言（只认 `setEnabled(true)` 这种写法）；且**不覆盖**由各处理函数自己启用的
+// 按钮（EDL/MTK 的连接类按钮就是这批）—— 那批拔线后同样不复位，属**另一处已知缺口**
+// （不由本槽背书，见 W2-T5 报告 §疑虑）。
+void TestRiskGateWiring::flashPanelClearsEveryButtonSetDeviceInfoCanEnable()
+{
+    const QString src = readSource(QStringLiteral("/src/ui/flash_panel.cpp"));
+    QVERIFY2(!src.isNull(),
+             qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/flash_panel.cpp")
+                            .arg(QStringLiteral(PT_SRC_ROOT))));
+
+    const QString setBody = functionBody(
+        src, QStringLiteral("void FlashPanel::setDeviceInfo(const DeviceInfo &info)"));
+    const QString clearBody = functionBody(src, QStringLiteral("void FlashPanel::clearDeviceInfo()"));
+    QVERIFY2(!setBody.isEmpty(), "找不到 FlashPanel::setDeviceInfo 的定义（改名/删除？）");
+    QVERIFY2(!clearBody.isEmpty(), "找不到 FlashPanel::clearDeviceInfo 的定义（改名/删除？）");
+
+    QStringList enabled;
+    const QRegularExpression re(QStringLiteral("(m_\\w+)->setEnabled\\(true\\)"));
+    QRegularExpressionMatchIterator it = re.globalMatch(setBody);
+    while (it.hasNext()) {
+        const QString name = it.next().captured(1);
+        if (!enabled.contains(name))
+            enabled << name;
+    }
+    enabled.sort();
+    // 7 个"要有设备才能点"的按钮（unlock/lock/frp 就是 Low-1 漏掉的那三个）。
+    // 逐个列出而非只比条数：条数相同而成员换了（例如拿 flashBtn 顶替 frpBtn）也要红。
+    QCOMPARE(enabled.join(QStringLiteral(",")),
+             QStringLiteral("m_brickRepairBtn,m_dumpBtn,m_flashBtn,m_frpBtn,"
+                            "m_lockBtn,m_unlockBtn,m_updateBtn"));
+
+    for (const QString &name : enabled) {
+        const QString needle = name + QStringLiteral("->setEnabled(false);");
+        QVERIFY2(clearBody.count(needle) == 1,
+                 qPrintable(QStringLiteral("clearDeviceInfo 没有（或重复）复位 %1 —— 拔线后它仍可点，"
+                                           "而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗")
+                                .arg(name)));
+    }
 }
 
 // ② 设备模式显示名两侧一致（W6-T1 移交的收口）：
