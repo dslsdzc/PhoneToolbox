@@ -23,6 +23,29 @@ QString readProductionFile(const QString &relPath)
     return QString::fromUtf8(f.readAll());
 }
 
+// 取出包含 needlePos 处那个字面的 **if 语句的条件文本**（从 "if (" 起按括号配平，截到配平的那个
+// ')'，不含两侧括号）。返回空串 = 没找到。
+// 用途：要求两个判据必须出现在**同一条条件**里，而不是各自孤立地存在于函数体某处 —— 后者挡不住
+// "条件里删掉一个子句"（X3：删掉 `&& !data.isEmpty()` 后两段字面都还在，孤立钉仍绿）。
+QString enclosingIfCondition(const QString &src, qsizetype needlePos)
+{
+    const qsizetype ifPos = src.lastIndexOf(QStringLiteral("if ("), needlePos);
+    if (ifPos < 0)
+        return QString();
+    const qsizetype open = ifPos + 3;   // '(' 自身的位置
+    int depth = 0;
+    for (qsizetype i = open; i < src.size(); ++i) {
+        const QChar c = src.at(i);
+        if (c == QLatin1Char('(')) {
+            ++depth;
+        } else if (c == QLatin1Char(')')) {
+            if (--depth == 0)
+                return src.mid(open + 1, i - open - 1);
+        }
+    }
+    return QString();
+}
+
 } // namespace
 
 // 注意：MockUsbChannel（tests/mtk_mock_usb.h）所有权在 BromSession 构造时转移；
@@ -817,10 +840,14 @@ void TestMtkBrom::mockControlTransferGuardsMirrorProduction()
     QCOMPARE(u2.controlTransfers.size(), 1);
 }
 
-// 生产侧同款判据的**文本钉**：读 src/core/modes/mtk_brom.cpp，钉住 BromUsbLibusb::controlTransfer
-// 的函数体里也有这二判据（IN 位用 LIBUSB_ENDPOINT_IN、上界用 0xFFFF）与"空 data → 无数据阶段"的映射。
-// ⚠️ 取材边界：断的是**文本**（判据字面在函数体内存在），**不证明它被正确执行、更不证明真机行为**
-// （无真机）。行为侧的判别力由上一槽（mock）与将来的真机验证承担。
+// 生产侧同款判据的**文本钉**：读 src/core/modes/mtk_brom.cpp，在 BromUsbLibusb::controlTransfer 的
+// 函数体里钉「方向判据与空判据在**同一条 if 条件**里同时具备」+ **上界判据 `0xFFFF`** + 空 data →
+// 无数据阶段的映射 `data.isEmpty() ? nullptr`。
+// ⚠️ 这仍是 **tripwire，不是证明**：断的是**文本**，不证明判据被正确执行、更不证明真机行为（无真机）。
+//    会漏的形：把条件**包起来**（如 `if (false && …)`）—— 字面全在，本钉抓不到；那类"逻辑被改坏但
+//    字面还在"由 mock 行为槽 + 将来真机验证兜。会误报的形：排版/换行变动、把守卫抽成公共函数
+//    （字面搬家）—— 那时**红**是要人来更新解析器，不是放宽。
+// 行为侧的判别力由上一槽（mock）与将来的真机验证承担。
 // 锚点形态依赖当前写法：若将来把守卫抽成公共函数、或改了函数签名，本钉会以"找不到锚点"红 ——
 // 那是**要人来更新这个解析器**（抽公共函数本身是允许的，届时改钉抽出的那处即可），不是放宽。
 void TestMtkBrom::controlTransferGuardsPinnedInProductionSource()
@@ -836,8 +863,19 @@ void TestMtkBrom::controlTransferGuardsPinnedInProductionSource()
     QVERIFY2(end > begin, "找不到 controlTransfer 的收尾锚点（函数体范围定不出来）");
     const QString body = src.mid(begin, end - begin);
 
-    QVERIFY2(body.contains(QStringLiteral("requestType & LIBUSB_ENDPOINT_IN")),
-             "生产侧 IN 位判据缺失 —— mock 与生产会再分叉");
+    // ⚠️ 方向判据与空判据必须在**同一条 if 条件**里同时具备 —— 只钉两段各自独立的字面是不够的
+    // （X3 盲区，审查二轮实测）：把条件改成 `if (requestType & LIBUSB_ENDPOINT_IN) {`（丢掉
+    // `&& !data.isEmpty()`）后，两段字面都还在 ⇒ 孤立钉仍**绿**，而生产会连带拒掉本仓的**主用法**
+    // （0 长度 IN 触发：`ctrl_transfer(0xA1, 0, 0, var1, 0)`），且没有生产调用点 ⇒ 整套用例一声不响。
+    const qsizetype dirPos = body.indexOf(QStringLiteral("requestType & LIBUSB_ENDPOINT_IN"));
+    QVERIFY2(dirPos >= 0, "生产侧 IN 位判据缺失 —— mock 与生产会再分叉");
+    const QString cond = enclosingIfCondition(body, dirPos);
+    QVERIFY2(!cond.isEmpty(), "取不出 IN 位判据所在的 if 条件文本（锚点形态变了？）");
+    QVERIFY2(cond.contains(QStringLiteral("requestType & LIBUSB_ENDPOINT_IN")),
+             "取到的 if 条件里没有方向判据");
+    QVERIFY2(cond.contains(QStringLiteral("!data.isEmpty()")),
+             "方向判据所在的条件里**没有**空判据 —— 生产会把 0 长度 IN 触发（主用法）一并拒掉");
+
     QVERIFY2(body.contains(QStringLiteral("0xFFFF")),
              "生产侧 wLength 上界判据缺失 —— mock 与生产会再分叉");
     QVERIFY2(body.contains(QStringLiteral("data.isEmpty() ? nullptr")),
