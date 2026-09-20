@@ -173,7 +173,10 @@ private slots:
 
         const QStringList t3 = riskui::tierWarnings(riskui::RiskTier::Tier3Diagnostic);
         QCOMPARE(t3.size(), 3);
-        QCOMPARE(t3.at(0), QStringLiteral("漏洞扫描与利用脚本会尝试绕过设备安全机制。"));
+        // W2-T5 复审 ② 改文案（2026-09-20 控制方采纳）：本档现在同时覆盖"漏洞利用"与
+        // "削弱安全机制 / 改写设备标识"（SELinux 切换、设备信息伪造），第 1 条不再只写 exploit 场景。
+        QCOMPARE(t3.at(0), QStringLiteral("这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / "
+                                          "账号与安全校验），或改写设备标识。"));
         QCOMPARE(t3.at(1), QStringLiteral("未经设备所有者同意对他人设备使用，可能违法。"));
         QCOMPARE(t3.at(2), QStringLiteral("脚本来自第三方数据库，本工具不对其效果与后果负责。"));
         QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("绕过")),

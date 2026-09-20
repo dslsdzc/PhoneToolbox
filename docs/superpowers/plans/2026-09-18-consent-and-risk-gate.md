@@ -81,6 +81,10 @@ QStringList tierWarnings(RiskTier t);    // 进二次确认对话框的风险要
 
 - `Tier2Boot`：`{"这些操作直接写设备存储或底层引导，失败可能导致设备变砖、数据不可恢复。", "请先确认机型与固件匹配，并确认设备属于你或已获授权。", "部分通道未经真机验证（见项目文档「诚实边界」），实际行为可能与预期不同。"}`
 - `Tier3Diagnostic`：`{"漏洞扫描与利用脚本会尝试绕过设备安全机制。", "未经设备所有者同意对他人设备使用，可能违法。", "脚本来自第三方数据库，本工具不对其效果与后果负责。"}`
+  > ⚠️ **2026-09-20 W2-T5 复审已改第 1 条**（本行是当时的计划原文，保留以存史）：
+  > 第 1 条改为「这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / 账号与安全校验），或改写设备标识。」
+  > —— 因为 Tier3 实际还收了 **SELinux 切换**（`setenforce`）与**设备信息伪造**，原句只覆盖 exploit 场景。
+  > 现行文案的唯一来源是 `src/ui/risk_ui.cpp` 的 `tierWarnings`；逐字副本在 `tests/test_risk_tiers.cpp`。
 
 - [ ] **Step 1: 失败用例**（`tests/test_risk_tiers.cpp`，纯 QtTest，无 Widgets）
   - 全枚举覆盖：把上表写成 `static const riskui::RiskTier kExpected[]`（**12 项**，顺序 = 枚举值 0..11），

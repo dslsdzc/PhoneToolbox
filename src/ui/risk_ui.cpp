@@ -109,7 +109,10 @@ QStringList tierWarnings(RiskTier t)
         };
     case RiskTier::Tier3Diagnostic:
         return {
-            QStringLiteral("漏洞扫描与利用脚本会尝试绕过设备安全机制。"),
+            // W2-T5 复审 ②：本档现在同时覆盖"漏洞利用"与"削弱安全机制/改写设备标识"两类入口
+            // （SELinux 切换、设备信息伪造），要点必须对两类都成立 —— 原来只写 exploit 场景。
+            QStringLiteral("这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / 账号与安全校验），"
+                           "或改写设备标识。"),
             QStringLiteral("未经设备所有者同意对他人设备使用，可能违法。"),
             QStringLiteral("脚本来自第三方数据库，本工具不对其效果与后果负责。"),
         };
