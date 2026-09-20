@@ -467,9 +467,12 @@ void TestRiskGateWiring::preferenceSwitchesStayUngatedByDesign()
 // `clearDeviceInfo()` 一跑（拔线 / 取消选中 / 空列表刷新）就把它们**禁死** —— 设备回来时 `show()`
 // 出来的是灰键，点击路径整条断掉（`e179bb5` 的实测后果：连接 EDL / EDL 刷写计划… / 连接 MTK）。
 // 复位钉只问"禁有没有"、不问"启有没有"，所以那条回归对它全绿 —— 本槽补的就是这个方向。
-// 取材边界（tripwire，不是运行期不变量）：
-//   * 只认 `m_xxxBtn->show()` 与 `m_xxxBtn->setEnabled(` 两种写法 —— `hide()`、父控件禁用、
-//     别名/局部指针写法都逃逸（与复位钉同款口径）；
+// 取材边界（**tripwire，不是运行期不变量**）：只数字面文本 —— 把启用写成**注释**
+// （`// m_edlConnectBtn->setEnabled(...)`）、放进 `if (false)` 之类的不可达分支、或换成
+// `setDisabled(false)` 等**等价写法**，本钉都会**绿**（复审实测：真行改成内容相同的注释后，
+// 复位钉不受影响，于是"禁死"回来而**两条钉都不红**）。它防的是"改动时忘了回位"，不是"有人蓄意绕过"。
+//   * 也只认 `m_xxxBtn->show()` 与 `m_xxxBtn->setEnabled(` 两种写法 —— `hide()`、父控件禁用、
+//     别名/局部指针写法同样逃逸（与复位钉同款口径）；
 //   * 它**不会**误伤 `m_edlSelectProgBtn`（被 `show()` 但不在复位表里 → 前件不成立）。
 // 覆盖计数：复位表 16 个里被 show() 的是 **5** 个（EDL/MTK 两支的连接 / 断开 / 计划键），
 // 其余 11 个（刷入/擦除/读取/更新/Sideload/脚本/启动镜像/解锁/回锁/FRP/死砖）常驻可见、不走 show()。
