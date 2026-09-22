@@ -72,7 +72,7 @@ PhoneToolbox 是一个**面向设备所有者与维修人员**的 Android 设备
 |---|---|---|---|
 | 1 | 使用须知 | 全部（首屏） | 启动时（未接受过该版本 → 弹窗阻断，未接受则退出程序） |
 | 2 | 底层引导与写操作 | EDL（oppo-edl）/ MTK BROM / 展锐 / 华为 USB Update / 三星 Odin / **EUB 救援** / 死砖修复 / FRP 清除 / Fastboot 分区刷写·擦除·格式化 / fastboot update / Sideload / ADB Root 刷入 / Bootloader 解锁·回锁 / MTK 解锁·回锁 / 内存转储 / 运行刷机脚本 / **系统分区改写（remount rw / umount / 改 build.prop / 换开机动画）/ 应用卸载（pm uninstall）** | 该版本首次进入任一项时 |
-| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 / **SELinux 模式切换（setenforce）** / **preloader 安全修补（W8-T5，「调用方不改设备存储、但削弱设备将来的校验」—— 与 SELinux 同族故归本档）** | 该版本首次进入任一项时 |
+| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ **MTK BROM 漏洞利用的「执行利用」（W8-T6 —— 向 BROM 注入并触发载荷，与同面板的扫描/利用同一档同一闸门；其「解析载荷」只是本机文件/网络取字节，**不入本档**）** / 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 / **SELinux 模式切换（setenforce）** / **preloader 安全修补（W8-T5，「调用方不改设备存储、但削弱设备将来的校验」—— 与 SELinux 同族故归本档）** | 该版本首次进入任一项时 |
 
 > **2026-09-20 复审裁决补登（W2-T5 复审 ②）**：首版接线只覆盖了系统工具面板里的**检测类**入口，
 > 把"**真改设备状态**"的入口漏在外面（`setenforce 0` 削弱 SELinux、remount rw 把 /system 置为可写、
@@ -96,7 +96,8 @@ RiskTier riskTierForMode(DeviceDetector::DeviceMode mode);   // 按设备模式�
 enum class RiskFeature { DieRepair, FrpClear, PartitionFlash, Unlock, Sideload, AdbRoot, MtkUnlock,   // → Tier 2
                          SystemPartitionWrite, AppUninstall,                                        // → Tier 2（2026-09-20 补登）
                          VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool,            // → Tier 3
-                         SelinuxMode, DeviceSpoof };                                                // → Tier 3（2026-09-20 补登）
+                         SelinuxMode, DeviceSpoof,                                                 // → Tier 3（2026-09-20 补登）
+                         PreloaderPatch };                                                          // → Tier 3（W8-T5 补登；本行此前漏同步，W8-T6 随手补）
 RiskTier riskTierForFeature(RiskFeature f);                  // 按功能入口
 QString tierTitle(RiskTier t);                               // "底层引导与写操作" / "诊断与安全研究"
 QStringList tierWarnings(RiskTier t);                        // 该 tier 的具体风险要点（进二次确认对话框）
@@ -106,6 +107,9 @@ QStringList tierWarnings(RiskTier t);                        // 该 tier 的具�
   （用例里加一条"全枚举覆盖"断言，漏登记即红）。
 - **Tier 3 覆盖漏洞面板是本次的重点**：exploit 脚本目前**可以直接执行**，而它属"绕过安全机制"一族 ——
   协议正文第四条已明写其法律边界，门控在这一版把它纳入。
+- **W8-T6 的 MTK BROM 漏洞利用沿用这条口径**：它的「执行利用」走**同一个** `RiskFeature::VulnExploit`
+  → `Tier3Diagnostic`（不为它新登记 feature —— 同一档、同一函数、同一留痕键）；而同一区的「解析载荷」
+  只是本机文件/网络取字节，见 §5 的两行"有意不纳"。接线计数随之 29 → **30**（漏洞面板 3 → 4）。
 - **界线（2026-09-20 控制方裁定，写明以免下一轮复核把同一处当缺口重报）**：
   **改"设备状态"（写设备存储 / 削弱安全机制）才弹二次确认；改"用户偏好设置项"不弹**。
   故系统工具面板的**偏好开关族** —— `onSetDpi` / `onAnimationScale` / `onStatusBar` / `onNavBar` /
@@ -148,7 +152,9 @@ public:
 | `EubRecoveryDialog::onStart`（发送前） | 同上（EUB 的 tier 由 `riskTierForMode(MODE_SAMSUNG_EUB)` 给） |
 | `SystemToolPanel` 的 10 个入口（伪造设备信息 / SafetyNet / 签名伪造 / 工程模式 / SELinux 切换 / 挂载·卸载 /system / 编辑 build.prop / 换开机动画 / 卸载应用） | `riskTierForFeature(...)` 同上 |
 | `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 + **preloader 安全修补（W8-T5）** | `riskTierForFeature(Unlock / Unlock / FrpClear / **PreloaderPatch** —— 后者 Tier 3，W8-T5 补)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
-| `VulnPanel` 的"批量利用/单条利用/批量扫描" | `riskTierForFeature(RiskFeature::VulnExploit)` 同上（**扫描**也纳入：它出自 exploit DB） |
+| `VulnPanel` 的"批量利用/单条利用/批量扫描" + **MTK BROM 漏洞利用的「执行利用」（W8-T6）** | `riskTierForFeature(RiskFeature::VulnExploit)` 同上（**扫描**也纳入：它出自 exploit DB；BROM 载荷同为"绕过安全机制"一族，**复用同一档同一闸门**，不为它另登记 feature） |
+| `VulnPanel` BROM 区的「解析载荷」**有意不纳**（W8-T6） | 只读本地文件 / 按用户**显式勾选**的网络开关取字节并做 sha256 校验，**不碰设备、不改设备状态** —— 按 §3 的界线不弹（近邻先例：`EubRecoveryDialog::onPickSource` 与 `FlashPanel::onSelectFile` 都只读本机文件，同样不过闸门） |
+| `FlashPanel` 的「导出 DA 片段…（W8-T6）」**有意不纳** | **本地只读**：读一个 DA 文件、写 `da1.bin`/`da2.bin` 两个文件，一个字节都不发给设备 —— 它连设备都不需要（芯片码由用户填），故也**常驻可用**、不进 `clearDeviceInfo` 的复位表 |
 
 **共同形态**（沿用仓内既有"未验证勾选门控"）：对话框展示 `tierWarnings()` + 完整协议入口（可展开/滚动）
 + 一个必须勾选的确认框 → 勾选后"继续"可用 → 接受则写入 `ConsentStore` 并继续原操作。

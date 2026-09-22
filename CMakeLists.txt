@@ -355,7 +355,9 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_risk_gate_wiring.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mtk_chip_hwaddrs.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_fix.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_run.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_run.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_ui.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_da_export_dialog.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -712,6 +714,48 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
+                elseif(_test_stem STREQUAL "test_brom_exploit_ui")
+                    # W8-T6：BROM 漏洞利用区的**执行前判据**（纯函数）+ 面板按钮状态机 + 注入面。
+                    # 依赖闭包 = 面板自身（vuln_panel.cpp 拖 vuln_db / exploit_engine / adb_embedded）
+                    # + 判据（brom_exploit_ui.cpp + chip_code_text.cpp）+ 芯片表 + 闸门/留痕
+                    # （risk_confirm_dialog / risk_ui / consent_store）+ 载荷解析与编排
+                    # （mtk_brom_exploit.cpp → mtk_brom / mtk_emmc / mtk_preloader_fetch）。
+                    # ⚠️ 生产下载器 mtk_brom_exploit_download_qt.cpp 要**编进本目标**：vuln_panel.cpp
+                    # 的默认分支引用 `makeQtExploitDownloader()`（符号必须存在），而用例注入假下载器后
+                    # **一次都不会调用它**（网络调用数 == 0 由用例断言）。它自带 Qt Network，而
+                    # adb_embedded.cpp 本来也拖 Network ⇒ 本目标无论如何都要链 Qt6::Network。
+                    # libusb 由 mtk_brom.cpp 带入，见下方按名命中。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/vuln_panel.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/brom_exploit_ui.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/chip_code_text.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_confirm_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/risk_ui.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/legal/consent_store.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/device_info.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vuln_db/vuln_entry.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vuln_db/vuln_db.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vuln_db/vuln_matcher.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vuln_db/exploit_engine.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/adb_embedded.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom_exploit_download_qt.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom_exploit.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
+                elseif(_test_stem STREQUAL "test_da_export_dialog")
+                    # W8-T6：DA 切分另存对话框（src/ui，不编入任何静态库）。只编**被测对话框**与它
+                    # 真用到的那几层：芯片码文本（chip_code_text，**刻意不拖漏洞利用层** —— 这正是
+                    # 把它从 brom_exploit_ui.cpp 拆出来的原因）、DA 解析/选择/另存（mtk_da_file）、
+                    # 芯片表（hw_code → dacode）。**无 libusb、无 Qt Network**。
+                    # 夹具 mtk_test_helpers.h 共享（它含 MTK_SAMPLES_DIR 的引用 ⇒ 本 stem 也在下方
+                    # 真样本宏名单里，只是本用例不读样本 —— 合成夹具与解析器不共用读写原语）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/da_export_dialog.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/chip_code_text.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_da_file.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp)
                 elseif(_test_stem STREQUAL "test_mtk_preloader_emi")
                     # D1 Task 5：preloader EMI 提取（纯函数，只依赖 Qt Core；src/core/modes
                     # 已 GLOB 编入主程序，不属任何静态库）。真样本宏（MTK_SAMPLES_DIR /
@@ -855,8 +899,11 @@ if(ENABLE_IMAGE_TESTS)
                 # MTK 真样本（reference/mtk-samples/，gitignored）：只把**路径**编进用例。
                 # MTK_SAMPLES_REQUIRED=ON 时缺失即 FAIL（QSKIP 不改退出码，ctest 绿灯会骗人）。
                 set(MTK_SAMPLES_DIR_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/reference/mtk-samples")
+                # W8-T6：DA 导出对话框用例 include 共享夹具 mtk_test_helpers.h，而该头含
+                # MTK_SAMPLES_DIR 的引用（本用例本身不读任何真样本，合成夹具足够）。
                 if(_test_stem STREQUAL "test_mtk_da_file" OR _test_stem STREQUAL "test_mtk_preloader_emi"
-                   OR _test_stem STREQUAL "test_mtk_flash_plan" OR _test_stem STREQUAL "test_mtk_gpt")
+                   OR _test_stem STREQUAL "test_mtk_flash_plan" OR _test_stem STREQUAL "test_mtk_gpt"
+                   OR _test_stem STREQUAL "test_da_export_dialog")
                     target_compile_definitions(${_test_target} PRIVATE
                         MTK_SAMPLES_DIR="${MTK_SAMPLES_DIR_DEFAULT}")
                     if(MTK_SAMPLES_REQUIRED)
@@ -890,11 +937,15 @@ if(ENABLE_IMAGE_TESTS)
                 # 让本用例与环境无关（ENVIRONMENT 是**追加**到环境，不能只靠不设置）。
                 # Phase C Task 9：三星计划对话框共用同一套 Widgets + offscreen 配置。
                 # Phase E Task 7：EUB 救援对话框同款（QTEST_MAIN 造 QApplication，无 DISPLAY 必须 offscreen）。
+                # W8-T6：BROM 漏洞利用区用例（面板按钮状态机）与 DA 导出对话框用例同款
+                # （QTEST_MAIN 造 QApplication —— 无 DISPLAY 必须 offscreen）。
                 if(_test_stem STREQUAL "test_flash_plan_dialog" OR _test_stem STREQUAL "test_samsung_plan_dialog"
                    OR _test_stem STREQUAL "test_mtk_plan_dialog"
                    OR _test_stem STREQUAL "test_eub_recovery_dialog"
                    OR _test_stem STREQUAL "test_agreement_dialog"
-                   OR _test_stem STREQUAL "test_risk_confirm_dialog")
+                   OR _test_stem STREQUAL "test_risk_confirm_dialog"
+                   OR _test_stem STREQUAL "test_brom_exploit_ui"
+                   OR _test_stem STREQUAL "test_da_export_dialog")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Widgets)
                     set_tests_properties(${_test_target} PROPERTIES
                         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=")
@@ -907,6 +958,17 @@ if(ENABLE_IMAGE_TESTS)
                 if(_test_stem STREQUAL "test_agreement_dialog"
                    OR _test_stem STREQUAL "test_risk_confirm_dialog")
                     target_sources(${_test_target} PRIVATE ${QRC_FILES})
+                endif()
+                # W8-T6：BROM 区用例要读 `:/exploit/exploit-payload-sources.json`（内置来源清单 ——
+                # `bromui::defaultSourceListPath()` 的兜底分支）与 `:/legal/user-agreement.md`
+                # （取消分支弹的风险确认对话框要读它），故资源必须编进**本目标**。
+                if(_test_stem STREQUAL "test_brom_exploit_ui")
+                    target_sources(${_test_target} PRIVATE ${QRC_FILES})
+                endif()
+                # W8-T6：本用例要占住 adb_embedded 的 QNetworkAccessManager 符号（vuln_panel.cpp 的
+                # 依赖闭包），Qt Network 按名补链 —— image_engine 不传递它。
+                if(_test_stem STREQUAL "test_brom_exploit_ui")
+                    target_link_libraries(${_test_target} PRIVATE Qt6::Network)
                 endif()
                 # BROM 协议测试需要 libusb（image_engine 不传递）。
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
@@ -921,8 +983,11 @@ if(ENABLE_IMAGE_TESTS)
                    OR _test_stem STREQUAL "test_mtk_xml_payload"
                    # W8-T3：mtk_brom_exploit.cpp 调 BromSession 的内存协议（定义在 mtk_emmc.cpp），
                    # 而 mtk_brom.cpp 自带 libusb 调用 ⇒ 两个新 stem 都按名补链。
+                   # W8-T6：BROM 区用例的依赖闭包含同一份 mtk_brom.cpp（面板的生产执行器引用它）——
+                   # 同样按名补链。
                    OR _test_stem STREQUAL "test_brom_exploit_fix"
                    OR _test_stem STREQUAL "test_brom_exploit_run"
+                   OR _test_stem STREQUAL "test_brom_exploit_ui"
                    OR _test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_eub_transport"
                    OR _test_stem STREQUAL "test_eub_samsung_mode")

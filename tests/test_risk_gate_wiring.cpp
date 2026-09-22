@@ -116,9 +116,9 @@ class TestRiskGateWiring : public QObject
 private slots:
     // ① 接线钉：FlashPanel 的 15 个 handler（W8-T5 把 preloader 安全修补纳入后 14→15）
     void flashPanelGatesAllFifteenHandlers();
-    // ① 接线钉：其余三处（10 + 3 + 1）
+    // ① 接线钉：其余三处（10 + 4 + 1）
     void systemToolPanelGatesTenEntries();
-    void vulnPanelGatesThreeEntries();
+    void vulnPanelGatesFourEntries();
     void eubRecoveryDialogGatesOnStart();
     // ① 接线钉：首屏（MainWindow 构造之前）
     void mainAsksAgreementBeforeTheMainWindow();
@@ -290,22 +290,29 @@ void TestRiskGateWiring::systemToolPanelGatesTenEntries()
     }
 }
 
-// VulnPanel 的 3 个入口（扫描 + 批量利用 + 单条利用）：同一档（spec §5：扫描也纳入）。
-void TestRiskGateWiring::vulnPanelGatesThreeEntries()
+// VulnPanel 的 4 个入口（扫描 + 批量利用 + 单条利用 + W8-T6 的 MTK BROM 漏洞利用）：同一档
+// （spec §5：扫描也纳入；BROM 载荷同为"绕过安全机制"一族，故同档同函数）。
+// ⚠️ **过闸门的是「执行利用」那一个入口**，不是本区的三个控件：
+//    * 「解析载荷」不过闸门 —— 它只读本地文件/按用户显式开启的网络取字节，不碰设备（W2 的界线）；
+//    * 「目标芯片」输入框是纯输入，更谈不上动作。
+//    将来若有人给解析入口也挂上闸门，本槽会因计数变 5 而红 —— 那时先回来更新本条与 spec §5。
+void TestRiskGateWiring::vulnPanelGatesFourEntries()
 {
     const QString src = readSource(QStringLiteral("/src/ui/vuln_panel.cpp"));
     QVERIFY2(!src.isNull(),
              qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/vuln_panel.cpp")
                             .arg(QStringLiteral(PT_SRC_ROOT))));
 
-    QCOMPARE(countIn(src, kGate), 3);
+    QCOMPARE(countIn(src, kGate), 4);
 
     const QStringList handlers = {
         QStringLiteral("void VulnPanel::onScan()"),
         QStringLiteral("void VulnPanel::onExploitAll()"),
         QStringLiteral("void VulnPanel::onExploitSingle(const QString &cveId)"),
+        // W8-T6：BROM 漏洞利用的**执行**入口（解析载荷那条**有意不过闸门**，见函数头注释）
+        QStringLiteral("void VulnPanel::onBromExploitRun()"),
     };
-    QCOMPARE(handlers.size(), 3);
+    QCOMPARE(handlers.size(), 4);
 
     for (const QString &signature : handlers) {
         const QString body = functionBody(src, signature);
@@ -376,8 +383,10 @@ void TestRiskGateWiring::mainAsksAgreementBeforeTheMainWindow()
 }
 
 // ② tripwire：FlashPanel 每个 QPushButton 的 clicked 槽名集合 == 15 个已过闸门入口
-//    + 6 个**按设计不过闸门**的入口（不写设备/不需要风险确认：文件选择、返回、刷新分区列表、
-//    选 programmer 文件、EDL 断开、MTK 断开 —— 逐条都只做本机 UI 或断开连接）。
+//    + 7 个**按设计不过闸门**的入口（不写设备/不需要风险确认：文件选择、返回、刷新分区列表、
+//    选 programmer 文件、EDL 断开、MTK 断开、W8-T6 的 **DA 切分另存** —— 前六个只做本机 UI 或
+//    断开连接，DA 另存是**本地只读**：读一个 DA 文件、写两个文件，不碰设备、不削弱任何安全机制
+//    ⇒ 按 W2 的界线（改设备状态才弹）**有意不纳**；它连设备都不需要，故也常驻可用、不进复位表）。
 //    新增按钮 → 槽名不在两侧任何一边 → 本用例红 → 作者必须回来回答"这个入口要不要过闸门"。
 //    取材边界：这是**文本**钉 —— 换一种写法接线（如不用 connect(m_xxxBtn, ...)）它就数不到，
 //    那时先在这里红（集合变小）而不是静默放过。
@@ -398,7 +407,7 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
         connectedSlots << it.next().captured(1);
 
     // 解析器自身受检：写法变了先在这里红（否则集合为空、下面的比较会给出误导性的差异）。
-    QCOMPARE(int(connectedSlots.size()), 20);
+    QCOMPARE(int(connectedSlots.size()), 21);
 
     const QStringList gated = {
         // 15 个已过闸门的入口
@@ -409,12 +418,14 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
         QStringLiteral("onLockBootloader"), QStringLiteral("onFrpErase"),
         QStringLiteral("onBrickRepairClicked"), QStringLiteral("onEdlConnect"),
         QStringLiteral("onEdlPlanFlash"), QStringLiteral("onMtkConnect"),
-        // 6 个按设计不过闸门（本机 UI / 文件选择 / 断开连接，不发起任何设备写入）
+        // 7 个按设计不过闸门（本机 UI / 文件选择 / 断开连接 / 本地只读导出，不发起任何设备写入）
         QStringLiteral("onSelectFile"), QStringLiteral("onRefreshPartitions"),
         QStringLiteral("onEdlSelectProgrammer"), QStringLiteral("onEdlDisconnect"),
         QStringLiteral("onMtkDisconnect"), QStringLiteral("switchToDeviceInfo"),
+        // W8-T6：DA 切分另存（读 DA 文件 → 写 da1.bin/da2.bin；**不碰设备** ⇒ 不纳门控）
+        QStringLiteral("onExportDaSegments"),
     };
-    QCOMPARE(gated.size(), 20);
+    QCOMPARE(gated.size(), 21);
 
     QStringList got = connectedSlots, want = gated;
     got.sort();
@@ -436,7 +447,8 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
 //    配置备份到 /sdcard —— 是备份产物，不改设备行为，但原文那句话与磁盘不符）。
 // 本槽把这条界线**钉成机器可检**（否则下一轮复核会把同一处当缺口重报）：
 // 这 11 个 handler 的函数体里必须**一个闸门都没有**。若将来决定纳入，先在这里红 ——
-// 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（29）。
+// 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（30 —— W8-T6 起：FlashPanel 15 + 系统工具 10
+// + 漏洞面板 4 + EUB 1）。
 void TestRiskGateWiring::preferenceSwitchesStayUngatedByDesign()
 {
     const QString src = readSource(QStringLiteral("/src/ui/system_tool_panel.cpp"));

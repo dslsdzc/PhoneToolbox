@@ -9,4 +9,10 @@
     <qresource prefix="/legal">
         <file alias="user-agreement.md">legal/user-agreement.md</file>
     </qresource>
+    <!-- W8-T6：利用载荷来源清单的**内置副本**（用户没在自己配置路径放清单时的兜底）。
+         ⚠️ 它**只有 URL + sha256**，不含任何载荷二进制（本仓不分发载荷，见 mtk_brom_exploit.h）。
+         与磁盘上那份是同一份文件的两个入口：用户配置优先（bromui::defaultSourceListPath）。 -->
+    <qresource prefix="/exploit">
+        <file alias="exploit-payload-sources.json">exploit-payload-sources.json</file>
+    </qresource>
 </RCC>

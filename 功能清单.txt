@@ -50,7 +50,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] DA 两阶段: DA1 (region[1] 地址/长度/签名长度) → 0xC0 就绪 → 存储信息交换 → EMI/DRAM → DA2 (保留尾部签名) → read_flash_info
 [√] DA 切分另存: 选中条目的 DA1/DA2 逐字节落盘为 da1.bin / da2.bin (保留 da2 尾部签名 —— 剥签名属协议层;
     同名覆盖; 失败不留半份产物; 只碰本地文件系统, 不发一个字节给设备)
-    (机制已交付; **UI 入口待定** —— 入口需要 dacode, 而 dacode 来自设备, 归属与 T6 一起定)
+    (W8-T6 起 UI 入口已接: 刷机面板「导出 DA 片段…」= 显式输入 **DA 文件 + 芯片码 hw_code**,
+     **不依赖连接设备** —— dacode 由芯片表按 hw_code 给出; 本地只读 ⇒ 不纳门控; 见"MTK BROM 漏洞利用"段)
 [√] EMI/DRAM 初始化: LEGACY 逐版本档位 (0x00/0x0A/0x0B/0x0C/0x0D/0x0F/0x10/0x11/0x14/0x15) + M_EXT_RAM_* 回包判定
     (含两处比上游更严的 fail-closed: EMI 应答非 ACK/NACK / 档 C/D 的 dramlength 超长; 见 mtk-brom-facts.md §4.2 附注)
 [√] preloader 两路径: 显式指定 / 固件目录自动导入 (唯一命中才用) / 网络获取 (**默认关闭**, 来源清单 + sha256 校验, fail-closed)
@@ -59,6 +60,32 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 代际判定: 内置芯片表 (转写自 bkerler/mtkclient, GPL-3.0, 89 条全表); 表外/IoT → 明确报错
 [√] 三代路由 (D2/D3): 芯片表 damode + DA 文件 v6 (v6 强制 XML) → LEGACY / XFLASH / XML 三条链自动分派
 [√] 诚实边界: SLA/DAA 检测返回明确错误 (RSA 响应生成标后续)
+
+--- MTK BROM 漏洞利用 (W8, kamakiri 路径; 自研, 行为对照 bkerler/mtkclient 源码逐条核实) ---
+[√] 载荷修正 (纯函数): 尾 4 字节 0x10007000 → 该芯片 watchdog / 尾 8..4 字节 0x11002000 → uart;
+    长度补齐 4 字节对齐; 非命中分支**如实记日志**(不静默); 地址一律经"带存在位的取用口"取
+    (**直接读值槽会把 0 写成 watchdog —— 砖机路径**)
+[√] 逐芯片硬件地址: 上游 hwconfig 的 7 字段 (watchdog/uart/brom·da·plPayloadAddr/cqdmaBase/sejBase)
+    + W8-T3 补的 var1 (第 8 字段) 全表转写, **存在位是一等公民** (缺 = 响亮拒绝, 不猜 0)
+[√] 载荷来源解析: 显式文件优先 → 内容寻址缓存 → 来源清单 (逐芯片条目优先, 通用兜底);
+    **网络默认关闭** (关闭时下载器一次都不会被调用); 下载字节一律 **sha256 fail-closed** 才采用;
+    清单只存 URL + sha256 (**本仓不分发任何利用载荷二进制**)
+[√] kamakiri 编排: 触发控制传输 (wIndex = 表里的 var1) + priming 读 + 载荷上传/触发;
+    **失败即响亮中止**(上游把触发失败吞掉后照样报成功 —— 不复刻); 成功判据 = 载荷回 **ack 0xA1A2A3A4**
+[√] 前置判据(离线可判): 芯片未收录 / IoT / 已修补代际(V6, 默认早退, opt-in 才硬闯) / 缺三要素 →
+    明确拒绝, 且都在任何设备 I/O **之前**判 (不碰设备就报错)
+[√] UI 接线 (W8-T6): 漏洞面板新增「MTK BROM 漏洞利用」区 —— 目标芯片 hw_code / 载荷来源
+    (文件或显式开启的网络获取) + 「解析载荷」/「执行利用」/ 逐步日志;
+    执行前过 **Tier 3 二次确认** (与扫描/利用同一档同一闸门);
+    按钮禁用时给出**可行动原因** (未选设备 / 芯片不在表内 / IoT / 缺三要素 / 载荷未解析 / sha256 不过)
+[√] DA 切分另存的 UI 入口 (W8-T6): 刷机面板「导出 DA 片段…」—— 显式输入 DA 文件 + 芯片码 hw_code,
+    **不依赖连接设备** (dacode 由芯片表给出); 本地只读 ⇒ **不纳门控** (W2 界线: 改设备状态才弹);
+    不做"按序号挑条目"入口 (按 entryRegionIndex 取会把 region[0] 的 EMI/env 当 DA1)
+[√] 诚实边界: **真机全链未验证 (无 MTK 真机)** —— 判据/载荷解析/修正/DA 另存可离线完整验证,
+    编排层只有"编译 + mock 通道"级证据; UI 层按钮状态机与执行前的握手有 offscreen 用例,
+    但**生产执行器** (枚举 USB/握手/读设备芯片码/触发) **无自动化覆盖**;
+    已修补代际判据是**粗判据** (来自公开报告, 非逐设备实测, 会有假阳性);
+    var1 覆盖口**未暴露到 UI** (缺 var1 的芯片由编排层响亮失败)
 
 --- MTK BROM XFlash/XML 两代 (Phase D2+D3, 2026-09-16) ---
 [√] XFlash 帧层: 12B 小端帧 (magic/datatype/len, 头一次写+载荷分块) + status 三态判据 + ack 的 0x6781 特例 (16B 单写)
@@ -165,6 +192,8 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 状态追踪: 待检测 → 存在漏洞/不受影响 → 已利用/失败
 [√] JSON 持久化 (保存 / 加载)
 [√] 内置 10 个示例漏洞 (Dirty Pipe / Pixel 提权 / Mali GPU 等)
+[√] MTK BROM 漏洞利用区 (W8-T6): 目标芯片 hw_code / 载荷来源 / 解析载荷 / 执行利用 / 日志
+    —— 执行前过 Tier 3 二次确认, 按钮禁用时给可行动原因 (详见「MTK BROM 漏洞利用」段)
 
 
 十一、重启工具
@@ -371,19 +400,21 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] 二次确认 (风险分级门控): **首次进入某一档**的危险功能时弹风险确认 —— 按档给标题
     (Tier2「底层引导与写操作」/ Tier3「诊断与安全研究」) + 该档风险要点逐条 + 可展开的完整协议正文
     + 必勾「我已了解上述风险」; 取消/关窗 = **静默不执行** (不发起任何设备动作)
-[√] 覆盖入口 (29 处 ensureAccepted 调用点): 刷机面板 15 个写/引导入口 (刷入 / 擦除 / 更新 / Sideload /
+[√] 覆盖入口 (30 处 ensureAccepted 调用点): 刷机面板 15 个写/引导入口 (刷入 / 擦除 / 更新 / Sideload /
     运行脚本 / 读取 / 启动镜像 / 解锁 / 回锁 / FRP 清除 / 死砖修复 / EDL 连接 / EDL 刷写计划 / MTK 连接 /
     preloader 安全修补;
     其中解锁 / 回锁 / FRP 与 preloader 安全修补取**功能映射**而非模式映射 —— 前三个按钮拔线后仍可点,
     按模式取会落到 "无模式" → 不弹窗; preloader 修补是跨模式的危险选项, 按功能取 Tier 3 (不跟刷写那次的
     Tier 2 走)); EUB 救援「开始」1 处; 系统工具 10 个入口 (伪造设备信息 / SafetyNet 绕过 /
     签名伪造 / 工程模式 / SELinux 模式切换 / 挂载 /system 可写 / 卸载分区 / 编辑 build.prop /
-    更换开机动画 / 卸载应用); 漏洞面板 3 个入口 (扫描 / 批量利用 / 单条利用)。
+    更换开机动画 / 卸载应用); 漏洞面板 4 个入口 (扫描 / 批量利用 / 单条利用 /
+    **MTK BROM 漏洞利用的「执行利用」** —— W8-T6 起; 该区的「解析载荷」**有意不过闸门**:
+    它只读本地文件/按用户显式开启的网络取字节, 不碰设备, 按 W2 的界线不弹二次确认)。
     闸门是**唯一函数** riskui::ensureAccepted, 接线处一律调全限定名 (结构钉用例按名计数)
     计数来源 (tests/test_risk_gate_wiring.cpp 的四个槽, 每一处都是逐入口钉的, 不只是总数):
       flashPanelGatesAllFifteenHandlers = 15 / systemToolPanelGatesTenEntries = 10 /
-      vulnPanelGatesThreeEntries = 3 / eubRecoveryDialogGatesOnStart = 1
-      (注: `grep -ro "riskui::ensureAccepted(" src/ | wc -l` 会得到 30 —— 第 30 处是
+      vulnPanelGatesFourEntries = 4 / eubRecoveryDialogGatesOnStart = 1
+      (注: `grep -ro "riskui::ensureAccepted(" src/ | wc -l` 会得到 31 —— 第 31 处是
        src/ui/risk_confirm_dialog.h 文件头注释里的示例句, 不是调用点; 调用点按上面四个槽数)
     **改上述任一处计数前先回来改这里** (本文件的数字没有用例钉 —— 2026-09-20 裁决: 高频改动的
     清单文档钉字面数字成本大于收益; 真正要防的"漏登记新危险入口"由全枚举覆盖断言 + 接线钉守着)
@@ -401,8 +432,10 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
     (MSVC 下编译通过并静默返回 None; 详见 docs/superpowers/specs/2026-09-18-consent-and-risk-gate-design.md §8);
     本特性**无真机依赖** (纯函数 + settings +
     offscreen 对话框, 全部可离线验证)
-[√] 未验证: 上表 29 处接线只有**结构钉用例** (读生产源文件数出现次数与位置 —— 包进 if (false) 仍绿,
+[√] 未验证: 上表 30 处接线只有**结构钉用例** (读生产源文件数出现次数与位置 —— 包进 if (false) 仍绿,
     是 tripwire 不是证明); 闸门语义与分级映射的行为证明在 test_risk_confirm_dialog / test_risk_tiers;
+    W8-T6 的 BROM 执行入口另有**行为级**覆盖 (test_brom_exploit_ui: 注入已接受/未接受的临时 store,
+    取消即不执行), 其余入口仍只有结构钉;
     "首次弹窗 → 勾选继续 → 再进不弹"这条**真实用户路径需人工过一遍** (用例一律注入临时 store,
     生产默认分支不写自动化用例 —— 会碰真实用户配置)
 
@@ -425,8 +458,10 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [ ] 高通 Diag / DM 端口 (QXDM/QPST 诊断与日志; 属诊断非刷写)
 [ ] MTK 擦除/格式化 (上游等价物 CMD:ERASE-FLASH / X_CMD_FORMAT; 材料齐全, 破坏性路径需二次确认)
 [ ] MTK XML 零调用命令 15 个 (RAM-TEST / DRAM-REPAIR / WRITE-EFUSE / FLASH-ALL / GET-DA-INFO 等; 应答格式无材料, 需真实抓包)
-[ ] BROM 漏洞利用 (kamakiri / carbonara)
-[ ] DA 二进制提取/生成、签名绕过、熔丝类 (QFuse)  ← 提取的**切分另存**子集已交付 (见 MTK BROM 段); 生成/签名绕过仍待
+[√] BROM 漏洞利用 (kamakiri) —— W8 已交付 (载荷修正/来源解析/编排/UI 接线/门控, 见 MTK BROM 段);
+    carbonara 变体与 var1 覆盖口仍待
+[ ] DA 二进制提取/生成、签名绕过、熔丝类 (QFuse)  ← 提取的**切分另存**子集已交付且 **UI 入口已接**
+    (W8-T6: 刷机面板「导出 DA 片段…」); 生成/签名绕过仍待
 
 待材料 (缺协议材料/真机抓包)
 ------------------------------------------------------------

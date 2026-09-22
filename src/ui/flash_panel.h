@@ -57,6 +57,9 @@ private slots:
     void onMtkConnect();
     void onMtkDisconnect();
 
+    // W8-T6：DA 切分另存（**本地只读**：读一个 DA 文件、写两个文件；不碰设备、不需要连接）
+    void onExportDaSegments();
+
     // Bootloader 解锁/回锁
     void onUnlockBootloader();
     void onLockBootloader();
@@ -132,6 +135,9 @@ private:
     QPushButton *m_mtkConnectBtn;
     QPushButton *m_mtkDisconnectBtn;
     QLabel *m_mtkStatusLabel;
+
+    // W8-T6：DA 切分另存（本地只读，不依赖设备 ⇒ **常驻可用**：不进复位表、也不过门控）
+    QPushButton *m_daExportBtn;
 
     // 操作
     QPushButton *m_flashBtn;

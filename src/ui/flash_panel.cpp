@@ -33,6 +33,8 @@
 #include <QDateTime>
 #include <QDir>
 
+#include "ui/da_export_dialog.h"   // W8-T6：DA 切分另存的 UI 入口（本地只读）
+
 FlashPanel::FlashPanel(QWidget *parent)
     : QWidget(parent)
     , m_flashTool(new FlashTool(this))
@@ -167,12 +169,19 @@ void FlashPanel::setupUI()
     m_brickRepairBtn = new QPushButton("死砖修复", this);
     m_brickRepairBtn->setEnabled(false);
 
+    // W8-T6：DA 切分另存（本地只读：读 DA 文件 + 芯片码 → 写 da1.bin/da2.bin）。
+    // **有意常驻可用**（不 setEnabled：不需要设备、不依赖连接）——它读的是你自己给的文件。
+    m_daExportBtn = new QPushButton("导出 DA 片段…", this);
+    m_daExportBtn->setToolTip("从 AllInOne DA 文件里切出 DA1/DA2（region[1]/[2]）另存；"
+                              "本地只读操作，不需要连接设备（要芯片码 hw_code，设备信息面板里有）");
+
     scriptLayout->addWidget(m_runScriptBtn);
     scriptLayout->addWidget(m_bootImgBtn);
     scriptLayout->addWidget(m_unlockBtn);
     scriptLayout->addWidget(m_lockBtn);
     scriptLayout->addWidget(m_frpBtn);
     scriptLayout->addWidget(m_brickRepairBtn);
+    scriptLayout->addWidget(m_daExportBtn);
     scriptLayout->addStretch();
     mainLayout->addLayout(scriptLayout);
 
@@ -222,6 +231,10 @@ void FlashPanel::setupUI()
             this, &FlashPanel::onMtkConnect);
     connect(m_mtkDisconnectBtn, &QPushButton::clicked,
             this, &FlashPanel::onMtkDisconnect);
+
+    // W8-T6：DA 切分另存（本地只读 → **按设计不过门控**，见 onExportDaSegments 的说明）
+    connect(m_daExportBtn, &QPushButton::clicked,
+            this, &FlashPanel::onExportDaSegments);
 
     // BL 解锁/回锁
     connect(m_unlockBtn, &QPushButton::clicked,
@@ -1585,6 +1598,23 @@ void FlashPanel::onMtkConnect()
     }
 
     m_mtkConnectBtn->setEnabled(true);
+}
+
+// W8-T6（T4 递延的 UI 入口）：DA 切分另存 —— 从 AllInOne DA 里切出 region[1]/[2] 另存。
+//
+// 为什么**不过门控**（与其余 MTK 入口不同）：这是**本地只读**操作 —— 读一个用户显式指定的 DA 文件、
+// 写两个文件，**一个字节都不发给设备**，也不削弱任何安全机制（W2 的界线：改设备状态才弹二次确认）。
+// 它与"连接 MTK / 刷入 / 死砖修复"那一族的区别就在这：那些动设备，这个只动本机文件。
+//
+// 为什么是**显式输入**（控制方 2026-09-21 二次订正）：DA 的解析发生在刷写链内部
+// （`bromFlashOnSession`），本面板那条流程**拿不到 dacode**（selectDaEntry 的必需入参）；
+// 而设备信息面板能显示设备报的 hw_code ⇒ 让用户显式给「DA 文件 + 芯片码」两个输入，
+// 于是本功能**不依赖连接设备**，也不需要"按序号挑条目"那类危险入口（按 entryRegionIndex
+// 取会把 region[0] 的 EMI/env 当 DA1 —— 见 mtk_da_file.h 的 P5）。
+void FlashPanel::onExportDaSegments()
+{
+    DaExportDialog dlg(this);
+    dlg.exec();
 }
 
 void FlashPanel::onMtkDisconnect()

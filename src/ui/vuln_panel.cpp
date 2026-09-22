@@ -12,18 +12,133 @@
 #include <QDateTime>
 #include <QSet>
 #include <QElapsedTimer>
+#include <QCheckBox>
+#include <QLineEdit>
+#include <memory>
+
+// W8-T6：MTK BROM 漏洞利用区（把 T1–T5 交付的能力接成可达）
+#include "core/modes/mtk_brom.h"                          // BromSession / enumerateUsb / openLibusbUsb
+#include "core/modes/mtk_brom_exploit_download_qt.h"      // makeQtExploitDownloader（生产下载器）
+#include "ui/brom_exploit_ui.h"                           // 执行前判据（纯函数，逐条被用例钉住）
+
+namespace {
+
+// 生产执行器：打开 BROM 会话 → **核对设备自报芯片码** → 修正载荷 → 跑 kamakiri 触发序列。
+//
+// ⚠️ 真机路径（本仓无 MTK 真机 ⇒ **无自动化覆盖**，只有"编译 + 注入点替换"级证据）：
+//    本函数的三处 fail-closed 都是**有意**的，别按"上游也这样"放宽：
+//      ① 多台候选设备 → 拒（`devs.first()` 打错设备的代价是砖机，F5 的多设备警告同族）；
+//      ② 设备自报 hw_code 与面板输入不符 → 拒（芯片表按 hw_code 取 watchdog/地址，写错芯片 = 砖机路径）；
+//      ③ 任一步失败 → 中止、不重试、不复位（与本仓其余真机段同口径）。
+bool runBromExploitOnDevice(const VulnPanel::BromRunRequest &req, QStringList *log, QString *error)
+{
+    auto note = [log](const QString &s) { if (log) *log << s; };
+    auto fail = [error](const QString &why) { if (error) *error = why; return false; };
+
+    QList<mtkbrom::BromDevice> devs;
+    QString enumErr;
+    if (!mtkbrom::enumerateUsb(devs, &enumErr))
+        return fail(QStringLiteral("枚举 USB 失败：%1").arg(enumErr));
+    if (devs.isEmpty())
+        return fail(QStringLiteral("未检测到 MTK 协议设备（BROM / preloader）—— "
+                                   "请让设备进入 BROM 模式后再插 USB"));
+    if (devs.size() > 1)
+        return fail(QStringLiteral("检测到 %1 台 MTK 协议设备：本入口只支持单台"
+                                   "（自动挑一台的代价是打错设备）—— 请只连一台")
+                        .arg(devs.size()));
+
+    std::unique_ptr<mtkbrom::IBromUsb> usb;
+    QString openErr;
+    if (!mtkbrom::openLibusbUsb(devs.first(), usb, &openErr))
+        return fail(QStringLiteral("打开 USB 通道失败：%1").arg(openErr));
+
+    mtkbrom::BromSession session(std::move(usb), devs.first());
+    QString connErr;
+    if (!session.connect(&connErr))
+        return fail(QStringLiteral("BROM 握手失败：%1").arg(connErr));
+    note(QStringLiteral("已连接 BROM 会话（握手完成）"));
+
+    quint16 devHw = 0, devHwVer = 0;
+    QString hwErr;
+    if (!session.getHwCode(devHw, devHwVer, &hwErr))
+        return fail(QStringLiteral("读设备芯片码失败：%1").arg(hwErr));
+    if (devHw != req.hwCode)
+        return fail(QStringLiteral("设备自报 hw_code 0x%1 与面板填的 0x%2 不一致 —— 拒绝执行"
+                                   "（按错的芯片写 watchdog / 载荷地址是砖机路径）")
+                        .arg(devHw, 4, 16, QLatin1Char('0'))
+                        .arg(req.hwCode, 4, 16, QLatin1Char('0')));
+    note(QStringLiteral("设备自报芯片码 0x%1（hw_ver 0x%2）与面板输入一致")
+             .arg(devHw, 4, 16, QLatin1Char('0')).arg(devHwVer, 4, 16, QLatin1Char('0')));
+
+    const mtkbrom::ChipHwAddrs *addrs = mtkbrom::lookupChipHwAddrs(req.hwCode);
+    if (!addrs)
+        return fail(QStringLiteral("芯片 0x%1 不在硬件地址表内").arg(req.hwCode, 4, 16, QLatin1Char('0')));
+
+    // 载荷修正：`runBromExploit` **要求**入参是 fixExploitPayload 的产物（传原始占位符载荷会把
+    // 0x10007000 / 0x11002000 当真实地址写下去）。daMode = false 是 kamakiri 路径的上游取值
+    // （exploit_handler.py 的 fix_payload(..., da=False)）—— 与 T3 用例同一口径。
+    QString fixErr;
+    const QByteArray fixed = mtkbrom::fixExploitPayload(req.payload, *addrs, /*daMode=*/false, log, &fixErr);
+    if (fixed.isEmpty())
+        return fail(QStringLiteral("载荷修正失败：%1").arg(fixErr));
+
+    mtkbrom::ExploitOptions opt;
+    opt.allowPatchedGeneration = req.allowPatchedGeneration;
+    if (req.allowPatchedGeneration)
+        note(QStringLiteral("⚠️ 已开启「允许已修补代际（V6）」—— 本仓对已修补代际的判据是粗判据"
+                            "（来自公开报告，非逐设备实测），不保证有意义"));
+    mtkbrom::ExploitResult out;
+    QString runErr;
+    const bool ok = mtkbrom::runBromExploit(session, fixed, *addrs, out, &runErr, opt);
+    for (const QString &line : out.log)
+        note(line);
+    if (!ok)
+        return fail(QStringLiteral("触发序列在阶段 `%1` 失败：%2").arg(out.stage, runErr));
+    return true;
+}
+
+} // namespace
 
 VulnPanel::VulnPanel(QWidget *parent)
     : QWidget(parent)
     , m_db(new VulnDb(this))
     , m_engine(new ExploitEngine(this))
 {
+    // W8-T6：载荷解析的**生产默认**——来源清单（用户配置优先，否则内置副本）+ 不落盘缓存。
+    // `cacheDir` 有意留空（只留内存）：与 FlashPanel 的 preloader 获取同款口径 —— 载荷二进制
+    // 只在这一步的内存里，不往用户盘上落一份（本仓不分发载荷，也不额外留下一份副本）。
+    m_bromPayloadOptions.sourceListPath = bromui::defaultSourceListPath();
+    m_bromPayloadOptions.cacheDir.clear();
+
     setupUI();
+    // W8-T6：初始态也要落原因（未选设备/无芯片码）—— 灰键不解释是本区最坏的形态。
+    refreshBromGate();
 
     connect(m_engine, &ExploitEngine::outputLine,
             this, &VulnPanel::onEngineOutput);
     connect(m_engine, &ExploitEngine::progressChanged,
             this, &VulnPanel::onProgressChanged);
+}
+
+void VulnPanel::setBromRunner(const BromRunner &runner)
+{
+    m_bromRunner = runner;
+}
+
+void VulnPanel::setBromDownloader(const mtkbrom::ExploitDownloader &downloader)
+{
+    m_bromDownloader = downloader;
+}
+
+void VulnPanel::setBromPayloadOptions(const mtkbrom::ExploitPayloadOptions &opt)
+{
+    // **整体替换**（不合并）：避免"用例的临时清单 + 生产缓存目录"这类混合态把字节写进用户缓存。
+    m_bromPayloadOptions = opt;
+}
+
+void VulnPanel::setConsentStore(legal::ConsentStore *store)
+{
+    m_consentStore = store;
 }
 
 VulnPanel::~VulnPanel() = default;
@@ -93,6 +208,9 @@ void VulnPanel::setupUI()
     tableLayout->addWidget(m_vulnTable);
     mainLayout->addWidget(tableGroup, 1);
 
+    // ── W8-T6：MTK BROM 漏洞利用区 ──
+    mainLayout->addWidget(buildBromExploitGroup());
+
     // ── Log output ──
     QGroupBox *logGroup = new QGroupBox(QStringLiteral("输出日志"), this);
     QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
@@ -109,6 +227,113 @@ void VulnPanel::setupUI()
     connect(m_loadDbBtn, &QPushButton::clicked, this, &VulnPanel::onLoadDatabase);
     connect(m_scanBtn, &QPushButton::clicked, this, &VulnPanel::onScan);
     connect(m_exploitAllBtn, &QPushButton::clicked, this, &VulnPanel::onExploitAll);
+}
+
+// W8-T6：MTK BROM 漏洞利用区（载荷来源 / 目标芯片 / 执行 / 日志 —— 日志落在本面板的输出日志区）。
+//
+// 三个输入为什么必须在**面板上显式给**而不是从设备/刷写链里取：
+//   * 目标芯片：`runBromExploit` 要的是**芯片表里的硬件地址**（watchdog/uart/载荷地址），表按 hw_code 查；
+//     设备自报的 hw_code 要到握手之后才有，而"按钮该不该亮"要在那之前就判（判不出来就是"未就绪"）。
+//     故面板输入 = 用户的**声明**，执行时再与设备自报值核对（不符 = 拒，见 runBromExploitOnDevice）。
+//   * 载荷：本仓**不分发**载荷二进制（清单只有 URL + sha256），所以载荷必须来自用户自己的文件或
+//     显式开启的网络获取 —— 没有"内置一份"这个选项。
+//   * daMode / var1：前者固定 false（kamakiri 路径的上游取值）；后者按"表优先 → 显式覆盖 → 响亮失败"，
+//     本区**不暴露**覆盖口（缺 var1 的芯片由 runBromExploit 响亮失败，不静默 0）。
+QWidget *VulnPanel::buildBromExploitGroup()
+{
+    QGroupBox *group = new QGroupBox(QStringLiteral("MTK BROM 漏洞利用（kamakiri 路径）"), this);
+    QVBoxLayout *v = new QVBoxLayout(group);
+
+    // —— 目标芯片（hw_code）——
+    QHBoxLayout *chipRow = new QHBoxLayout();
+    chipRow->addWidget(new QLabel(QStringLiteral("目标芯片 hw_code："), group));
+    m_bromHwCodeEdit = new QLineEdit(group);
+    m_bromHwCodeEdit->setObjectName(QStringLiteral("bromHwCodeEdit"));
+    m_bromHwCodeEdit->setPlaceholderText(QStringLiteral("如 0x6735"));
+    m_bromHwCodeEdit->setMaximumWidth(120);
+    chipRow->addWidget(m_bromHwCodeEdit);
+    chipRow->addStretch();
+    v->addLayout(chipRow);
+
+    m_bromChipStatus = new QLabel(group);
+    m_bromChipStatus->setObjectName(QStringLiteral("bromChipStatus"));
+    m_bromChipStatus->setWordWrap(true);
+    m_bromChipStatus->setStyleSheet(QStringLiteral("font-size: 11px;"));
+    v->addWidget(m_bromChipStatus);
+
+    // —— 载荷来源 ——
+    QHBoxLayout *payloadRow = new QHBoxLayout();
+    payloadRow->addWidget(new QLabel(QStringLiteral("载荷来源："), group));
+    m_bromPayloadPathEdit = new QLineEdit(group);
+    m_bromPayloadPathEdit->setObjectName(QStringLiteral("bromPayloadPathEdit"));
+    m_bromPayloadPathEdit->setPlaceholderText(
+        QStringLiteral("载荷文件（留空 = 按来源清单获取，需勾选下面的网络开关）"));
+    payloadRow->addWidget(m_bromPayloadPathEdit, 1);
+    auto *payloadBrowse = new QPushButton(QStringLiteral("选择…"), group);
+    payloadRow->addWidget(payloadBrowse);
+    m_bromAllowNetworkCheck = new QCheckBox(QStringLiteral("允许网络获取"), group);
+    m_bromAllowNetworkCheck->setObjectName(QStringLiteral("bromAllowNetworkCheck"));
+    m_bromAllowNetworkCheck->setToolTip(QStringLiteral(
+        "默认关闭（关着时下载器一次都不会被调用）。开启后按来源清单下载，"
+        "并逐条做 sha256 fail-closed 校验 —— 校验不过的字节一律丢弃。"));
+    payloadRow->addWidget(m_bromAllowNetworkCheck);
+    v->addLayout(payloadRow);
+
+    QHBoxLayout *resolveRow = new QHBoxLayout();
+    m_bromResolveBtn = new QPushButton(QStringLiteral("解析载荷"), group);
+    m_bromResolveBtn->setObjectName(QStringLiteral("bromResolveButton"));
+    resolveRow->addWidget(m_bromResolveBtn);
+    m_bromPayloadStatus = new QLabel(group);
+    m_bromPayloadStatus->setObjectName(QStringLiteral("bromPayloadStatus"));
+    m_bromPayloadStatus->setWordWrap(true);
+    m_bromPayloadStatus->setStyleSheet(QStringLiteral("font-size: 11px;"));
+    resolveRow->addWidget(m_bromPayloadStatus, 1);
+    v->addLayout(resolveRow);
+
+    // —— 执行 ——
+    QHBoxLayout *runRow = new QHBoxLayout();
+    m_bromRunBtn = new QPushButton(QStringLiteral("执行利用"), group);
+    m_bromRunBtn->setObjectName(QStringLiteral("bromRunButton"));
+    m_bromRunBtn->setEnabled(false);      // 判据由 refreshBromGate 给（初始必然未就绪）
+    runRow->addWidget(m_bromRunBtn);
+    m_bromAllowPatchedCheck = new QCheckBox(QStringLiteral("允许已修补代际（V6）"), group);
+    m_bromAllowPatchedCheck->setObjectName(QStringLiteral("bromAllowPatchedCheck"));
+    m_bromAllowPatchedCheck->setToolTip(QStringLiteral(
+        "默认关 = 已修补代际（V6 / XML）直接早退（fail-closed）。本仓没有逐设备的 BROM 补丁判据，"
+        "这里用的是来自公开报告的粗判据（会有假阳性）—— 开启只代表「允许尝试」，不保证有意义。"));
+    runRow->addWidget(m_bromAllowPatchedCheck);
+    runRow->addStretch();
+    v->addLayout(runRow);
+
+    m_bromRunReason = new QLabel(group);
+    m_bromRunReason->setObjectName(QStringLiteral("bromRunReason"));
+    m_bromRunReason->setWordWrap(true);
+    m_bromRunReason->setStyleSheet(QStringLiteral("font-size: 11px; color: #e67e22;"));
+    v->addWidget(m_bromRunReason);
+
+    auto *note = new QLabel(QStringLiteral(
+        "本仓库不分发任何利用载荷二进制：来源清单只存 URL + sha256，载荷来自你自己的文件"
+        "或你显式开启的网络获取。真机未验证 —— 详见功能清单里的诚实边界。"), group);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
+    v->addWidget(note);
+
+    // —— 连接 ——
+    connect(m_bromHwCodeEdit, &QLineEdit::textChanged,
+            this, &VulnPanel::onBromChipCodeChanged);
+    connect(m_bromResolveBtn, &QPushButton::clicked,
+            this, &VulnPanel::onBromResolvePayload);
+    connect(m_bromRunBtn, &QPushButton::clicked,
+            this, &VulnPanel::onBromExploitRun);
+    connect(payloadBrowse, &QPushButton::clicked, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("选择利用载荷文件"), QString(),
+            QStringLiteral("载荷 (*.bin);;所有文件 (*)"));
+        if (!path.isEmpty())
+            m_bromPayloadPathEdit->setText(path);
+    });
+
+    return group;
 }
 
 void VulnPanel::setDeviceInfo(const DeviceInfo &info)
@@ -142,6 +367,7 @@ void VulnPanel::setDeviceInfo(const DeviceInfo &info)
     }
 
     updateButtonStates();
+    refreshBromGate();   // W8-T6：设备来了/换了 → 「执行利用」的判据跟着重算
 }
 
 void VulnPanel::clearDeviceInfo()
@@ -152,6 +378,7 @@ void VulnPanel::clearDeviceInfo()
     m_riskLabel->setText("");
 
     updateButtonStates();
+    refreshBromGate();   // W8-T6：拔线/取消选中 → 执行键必须**当场禁用**（不留"拔线后仍可点"）
 }
 
 void VulnPanel::updateButtonStates()
@@ -363,7 +590,7 @@ void VulnPanel::onLoadDatabase()
 void VulnPanel::onScan()
 {
     // W2-T5：扫描也纳入（spec §5：判据出自 exploit DB，属诊断与安全研究）
-    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit), m_consentStore)) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;
@@ -495,7 +722,7 @@ void VulnPanel::onScan()
 void VulnPanel::onExploitAll()
 {
     // W2-T5：批量利用 —— Tier3 诊断与安全研究
-    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit), m_consentStore)) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;
@@ -563,7 +790,7 @@ void VulnPanel::onExploitAll()
 void VulnPanel::onExploitSingle(const QString &cveId)
 {
     // W2-T5：单条利用 —— Tier3 诊断与安全研究（与批量利用同一档：闸门一次即两处都放行）
-    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit))) return;
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit), m_consentStore)) return;
     if (m_deviceInfo.serialNumber.isEmpty()) {
         appendLog(QStringLiteral("请先连接设备"), true);
         return;
@@ -622,4 +849,153 @@ void VulnPanel::onProgressChanged(const QString &entryId, ExploitPhase phase)
     case ExploitPhase::VERIFY:  phaseName = QStringLiteral("验证"); break;
     }
     appendLog(QStringLiteral("    → %1 阶段...").arg(phaseName));
+}
+
+// ==================== W8-T6：MTK BROM 漏洞利用区 ====================
+
+// 判据全部来自 `bromui::evaluateRunGate`（纯函数，用例逐条钉住）——本函数只做"算 → 落控件"。
+void VulnPanel::refreshBromGate()
+{
+    bromui::GateInputs in;
+    in.deviceSelected = !m_deviceInfo.serialNumber.isEmpty();
+    in.hwCodeText     = m_bromHwCodeEdit->text();
+    in.payload        = m_bromPayloadState;
+    in.payloadError   = m_bromPayloadError;
+
+    const bromui::RunGate gate = bromui::evaluateRunGate(in);
+
+    m_bromChipStatus->setText(gate.chipSummary);
+    m_bromRunBtn->setEnabled(gate.canRun);
+    // 原因文案两处同源（按钮 tooltip + 下方状态行）：灰着不解释是本区最坏的形态 ——
+    // 用户会以为"没设备/坏了"，而不是"芯片码填错了"。
+    const QString reason = gate.canRun
+        ? QStringLiteral("就绪：执行前会弹一次「诊断与安全研究」（Tier 3）的风险确认")
+        : gate.reason;
+    m_bromRunBtn->setToolTip(reason);
+    m_bromRunReason->setText(reason);
+}
+
+void VulnPanel::setBromPayloadState(bromui::PayloadState state, const QString &errorText)
+{
+    m_bromPayloadState = state;
+    m_bromPayloadError = errorText;
+    if (state != bromui::PayloadState::Verified)
+        m_bromPayload.clear();          // 非放行态不保留字节（fail-closed：判据与数据不脱钩）
+
+    switch (state) {
+    case bromui::PayloadState::None:
+        m_bromPayloadStatus->setText(QStringLiteral("载荷：未解析"));
+        break;
+    case bromui::PayloadState::Verified:
+        m_bromPayloadStatus->setText(QStringLiteral("载荷：✔ 已就绪（%1 字节）").arg(m_bromPayload.size()));
+        break;
+    case bromui::PayloadState::Rejected:
+        m_bromPayloadStatus->setText(QStringLiteral("载荷：✘ %1").arg(errorText));
+        break;
+    }
+    refreshBromGate();
+}
+
+void VulnPanel::onBromChipCodeChanged()
+{
+    // 芯片码一变，已解析的载荷**一律作废**：来源是按芯片提示挑的（逐芯片条目优先于通用条目，
+    // 见 resolveExploitPayload），换了芯片还留着旧字节 = 拿 A 芯片的载荷去跑 B 芯片。
+    // 代价是改一次芯片码要重新解析一次；用缓存（若用户配了 cacheDir）不会重复下载。
+    if (m_bromPayloadState != bromui::PayloadState::None) {
+        const bool wasVerified = (m_bromPayloadState == bromui::PayloadState::Verified);
+        setBromPayloadState(bromui::PayloadState::None, QString());
+        if (wasVerified)
+            appendLog(QStringLiteral("目标芯片已改动 —— 已解析的载荷作废，请重新点「解析载荷」"), false);
+    }
+    refreshBromGate();
+}
+
+void VulnPanel::onBromResolvePayload()
+{
+    // 本入口**不过 tier3 门控**：它只读本地文件、或按用户**显式**勾选的网络开关取一份字节，
+    // 不碰设备、不改设备状态（W2 的界线：改设备状态才弹二次确认）。设备动作只在「执行利用」那道，
+    // 那里过 Tier 3（见 onBromExploitRun）。
+    mtkbrom::ExploitPayloadOptions opt = m_bromPayloadOptions;
+    opt.explicitPath = m_bromPayloadPathEdit->text().trimmed();   // 用户当场给的文件优先
+    opt.allowNetwork = m_bromAllowNetworkCheck->isChecked();      // 用户当场的选择优先
+    if (opt.sourceListPath.isEmpty())
+        opt.sourceListPath = bromui::defaultSourceListPath();
+
+    // 芯片提示的形态必须与清单的 chipHint 一致（`0x%04x`）—— 形态对不上会**静默**少试逐芯片来源。
+    quint16 hwCode = 0;
+    const QString hint = bromui::parseHwCodeText(m_bromHwCodeEdit->text(), &hwCode, nullptr)
+                             ? bromui::formatHwCodeHint(hwCode)
+                             : QString();
+
+    appendLog(QStringLiteral("解析 MTK BROM 载荷（芯片提示 %1；来源 %2；网络 %3）")
+                  .arg(hint.isEmpty() ? QStringLiteral("（无）") : hint,
+                       opt.explicitPath.isEmpty() ? QStringLiteral("来源清单")
+                                                  : QStringLiteral("显式文件"),
+                       opt.allowNetwork ? QStringLiteral("开") : QStringLiteral("关（默认）")));
+
+    QByteArray payload;
+    QStringList log;
+    QString err;
+    const mtkbrom::ExploitDownloader downloader =
+        m_bromDownloader ? m_bromDownloader : mtkbrom::makeQtExploitDownloader();
+    const bool ok = mtkbrom::resolveExploitPayload(opt, hint, payload, &log, &err, downloader);
+
+    for (const QString &line : log)
+        appendLog(QStringLiteral("  %1").arg(line), false);
+
+    if (!ok) {
+        appendLog(QStringLiteral("  ✘ %1").arg(err), true);
+        setBromPayloadState(bromui::PayloadState::Rejected, err);
+        return;
+    }
+    m_bromPayload = payload;
+    setBromPayloadState(bromui::PayloadState::Verified, QString());
+    appendLog(QStringLiteral("  ✔ 载荷就绪：%1 字节 —— 可以执行（执行前会弹一次风险确认）").arg(payload.size()));
+}
+
+void VulnPanel::onBromExploitRun()
+{
+    // W8-T6：执行前过 W2 的 tier 3 二次确认 —— **复用唯一闸门** `riskui::ensureAccepted`，
+    // 不另起一套。取档用 `riskTierForFeature(VulnExploit)`（== Tier3Diagnostic）：BROM 载荷与
+    // 扫描/批量利用/单条利用**同族同档**（绕过安全机制，spec §5 的 VulnPanel 行）。
+    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit),
+                                m_consentStore))
+        return;
+    if (!m_bromRunBtn->isEnabled())
+        return;   // 双保险：判据在 refreshBromGate；按钮灰着也挡不住程序化调用（与 EUB onStart 同款）
+
+    quint16 hwCode = 0;
+    QString perr;
+    if (!bromui::parseHwCodeText(m_bromHwCodeEdit->text(), &hwCode, &perr)) {
+        appendLog(QStringLiteral("芯片码不可用：%1").arg(perr), true);
+        return;
+    }
+
+    appendLog(QStringLiteral("开始 MTK BROM 漏洞利用（kamakiri 路径） —— 目标芯片 0x%1")
+                  .arg(hwCode, 4, 16, QLatin1Char('0')));
+
+    BromRunRequest req;
+    req.hwCode = hwCode;
+    req.payload = m_bromPayload;
+    req.allowPatchedGeneration = m_bromAllowPatchedCheck->isChecked();
+
+    QElapsedTimer timer;
+    timer.start();
+    QStringList log;
+    QString err;
+    const BromRunner runner = m_bromRunner ? m_bromRunner : BromRunner(runBromExploitOnDevice);
+    const bool ok = runner(req, &log, &err);
+
+    for (const QString &line : log)
+        appendLog(QStringLiteral("  %1").arg(line), false);
+
+    if (ok) {
+        // 判据只有 ack：照实说 —— 本仓没有"设备真的进入可利用状态"的证据链（无真机）。
+        appendLog(QStringLiteral("✔ 触发序列完成（耗时 %1ms）。判据只有 **ack**：载荷已回 ack、"
+                                 "触发控制传输已发出 —— 设备是否真的进入可利用状态，本仓无真机验证。")
+                      .arg(timer.elapsed()), false);
+    } else {
+        appendLog(QStringLiteral("✘ 执行失败（耗时 %1ms）：%2").arg(timer.elapsed()).arg(err), true);
+    }
+    refreshBromGate();
 }
