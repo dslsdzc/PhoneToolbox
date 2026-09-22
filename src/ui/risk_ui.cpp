@@ -120,6 +120,13 @@ QStringList tierWarnings(RiskTier t)
             // W2-T5 复审 ②（追加）：原句"脚本来自第三方数据库…"只对 exploit 成立，而本档还含
             // SELinux 切换与设备信息伪造（两类都不涉及第三方脚本）—— 改成两类都成立的措辞。
             QStringLiteral("操作效果与后果由你自行判断并承担；本工具不对其效果负责。"),
+            // W8 整分支终审 I1（2026-09-23）：**力度倒挂** —— Tier2 有"未经真机验证"要点，而本档
+            // （VulnExploit / PreloaderPatch 的门，risk_ui.cpp 的 riskTierForFeature）通篇没有；
+            // 更危险的档警告反而更少。exploit spec:172/:205 明文要求 UI 如实标注"未验证 / 写错即砖"。
+            // 措辞与 Tier2 那条同力度（同样点名文档出处 + 最坏后果 + 该先做什么），**不用 markdown**
+            // （这些串直接进 QLabel，见 risk_confirm_dialog.cpp 的渲染）。
+            QStringLiteral("本档能力的真机行为未经验证（见项目文档「诚实边界」）：注入或改写后设备可能"
+                           "无响应、需要重新插拔，最坏情况会变砖；请先确认已备份、设备可恢复。"),
         };
     }
     return QStringList();   // 不可达（枚举已穷尽）

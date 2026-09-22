@@ -37,6 +37,10 @@ public:
     QList<QByteArray> reads;        // 按序弹出的读取响应；空队列 / 空条目 → read 返回 false
     QList<int> readRequests;        // 每次 read() 的请求长度（maxLen）—— 读侧可观测：欠读/超给
                                     // 由用例拿请求长度与实际给出的字节对照（裸 read 无长度校验）
+    QList<int> readTimeouts;        // 每次 read() 的**超时实参**（与 readRequests 同序、等长）——
+                                    // W8 终审 I3 起：`ExploitOptions::readyTimeoutMs` 这类**可注入
+                                    // 超时**要能被断言"真的传到了传输层"（默认实现 readExact 会把
+                                    // timeoutMs 透传给 read；真机通道同）。不记它就只剩"字段存在"可查。
     bool failOpen = false;
     QString openError;
     int pktSize = 0x400;
@@ -85,9 +89,9 @@ public:
     }
     bool read(QByteArray &out, int maxLen, int timeoutMs, QString *error) override
     {
-        Q_UNUSED(timeoutMs)
         Q_UNUSED(error)
         readRequests << maxLen;
+        readTimeouts << timeoutMs;      // 超时实参也要记 —— 见 readTimeouts 的声明注释
         if (readCalls++ == readEmptySuccessAt) { out.clear(); return true; }   // 注入：成功但 0 字节
         if (reads.isEmpty()) { out.clear(); return false; }
         const QByteArray r = reads.takeFirst();

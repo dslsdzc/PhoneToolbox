@@ -175,7 +175,7 @@ private slots:
         QVERIFY2(!t2.isEmpty(), "Tier2 的要点表不得为空（空表 = 对话框没有风险说明）");
 
         const QStringList t3 = riskui::tierWarnings(riskui::RiskTier::Tier3Diagnostic);
-        QCOMPARE(t3.size(), 3);
+        QCOMPARE(t3.size(), 4);          // W8 整分支终审 I1 起 3 → 4（补"未验证/变砖"一条）
         // W2-T5 复审 ② 改文案（2026-09-20 控制方采纳）：本档现在同时覆盖"漏洞利用"与
         // "削弱安全机制 / 改写设备标识"（SELinux 切换、设备信息伪造），第 1 条不再只写 exploit 场景。
         QCOMPARE(t3.at(0), QStringLiteral("这些功能会绕过或削弱设备的安全机制（SELinux / 签名校验 / "
@@ -184,6 +184,19 @@ private slots:
         // 第 3 条同批改（原句"脚本来自第三方数据库…"只对 exploit 成立；本档还含 SELinux 切换与
         // 设备信息伪造，两类都不涉及第三方脚本）。
         QCOMPARE(t3.at(2), QStringLiteral("操作效果与后果由你自行判断并承担；本工具不对其效果负责。"));
+        // 第 4 条 = W8 整分支终审 I1（2026-09-23）：本档正是 VulnExploit / PreloaderPatch 的门
+        // （risk_ui.cpp 的 riskTierForFeature），而"未验证 / 可能变砖"此前只在 Tier2 说 ——
+        // 更危险的档警告反而更少（力度倒挂）。exploit spec:172/:205 明文要求 UI 如实标注。
+        QCOMPARE(t3.at(3), QStringLiteral("本档能力的真机行为未经验证（见项目文档「诚实边界」）：注入或"
+                                          "改写后设备可能无响应、需要重新插拔，最坏情况会变砖；"
+                                          "请先确认已备份、设备可恢复。"));
+        // 与 Tier2 同款的关键短语独立成钉：只钉"表非空"抓不住"把这条改成不痛不痒的文案"。
+        QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("变砖")),
+                 qPrintable(QStringLiteral("Tier3 要点必须写明「变砖」这一最坏后果（I1 的力度倒挂）"
+                                           "—— 实得 %1").arg(t3.join(QStringLiteral(" / ")))));
+        QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("未经验证")),
+                 qPrintable(QStringLiteral("Tier3 要点必须写明「未经验证」"
+                                           "—— 实得 %1").arg(t3.join(QStringLiteral(" / ")))));
         QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("绕过")),
                  qPrintable(QStringLiteral("Tier3 要点必须点明「绕过」安全机制 —— 实得 %1")
                                 .arg(t3.join(QStringLiteral(" / ")))));
