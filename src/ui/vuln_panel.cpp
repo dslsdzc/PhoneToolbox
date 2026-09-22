@@ -47,6 +47,16 @@ bool runBromExploitOnDevice(const VulnPanel::BromRunRequest &req, QStringList *l
                                    "（自动挑一台的代价是打错设备）—— 请只连一台")
                         .arg(devs.size()));
 
+    // 「这次打到了哪台」的**唯一可信记录**（控制方 2026-09-22 裁决①）：面板里"选中的设备"只是
+    // "有没有设备"的判据，真正被打开的是**现场枚举到的这一台** —— 芯片码核对挡不住"两台同芯片、
+    // 选了 A 只插着 B"，所以这里必须把设备身份落痕。
+    // 位置在**打开句柄之前**：打开失败时也要留下"本来要打哪台"（出事后能回溯）。
+    // `portName` 与设备列表的 ID 同形（都是 usb-<bus>-<addr>），可直接对表；**不是**持久序列号。
+    const mtkbrom::BromDevice &target = devs.first();
+    note(QStringLiteral("目标设备：%1 —— 本入口只作用于**现场枚举到的这一台**"
+                        "（不是设备列表里选中的那台；芯片码将在握手后与设备自报值核对）")
+             .arg(bromui::describeBromTarget(target.vid, target.pid, target.portName)));
+
     std::unique_ptr<mtkbrom::IBromUsb> usb;
     QString openErr;
     if (!mtkbrom::openLibusbUsb(devs.first(), usb, &openErr))
@@ -312,6 +322,8 @@ QWidget *VulnPanel::buildBromExploitGroup()
     v->addWidget(m_bromRunReason);
 
     auto *note = new QLabel(QStringLiteral(
+        "⚠️ 执行**作用于当前 USB 上枚举到的 BROM 设备**（多台时直接拒绝）—— 不是左侧设备列表里选中的"
+        "那台；芯片码会在握手后与设备自报值核对（不符即拒）。执行日志会记下目标设备的 VID:PID 与端口。\n"
         "本仓库不分发任何利用载荷二进制：来源清单只存 URL + sha256，载荷来自你自己的文件"
         "或你显式开启的网络获取。真机未验证 —— 详见功能清单里的诚实边界。"), group);
     note->setWordWrap(true);
@@ -868,8 +880,12 @@ void VulnPanel::refreshBromGate()
     m_bromRunBtn->setEnabled(gate.canRun);
     // 原因文案两处同源（按钮 tooltip + 下方状态行）：灰着不解释是本区最坏的形态 ——
     // 用户会以为"没设备/坏了"，而不是"芯片码填错了"。
+    // 口径（控制方 2026-09-22 裁决①）：**说清作用于哪台** —— 本入口现场枚举 USB（多台即拒），
+    // 打的是枚举到的那台，不是设备列表里选中的那台（芯片码会在握手后与设备自报值核对）。
     const QString reason = gate.canRun
-        ? QStringLiteral("就绪：执行前会弹一次「诊断与安全研究」（Tier 3）的风险确认")
+        ? QStringLiteral("就绪：作用于**当前 USB 上枚举到的 BROM 设备**（芯片码现场核对，执行日志会记下 "
+                         "VID:PID 与端口）—— 不是设备列表里选中的那台；执行前会弹一次"
+                         "「诊断与安全研究」（Tier 3）的风险确认")
         : gate.reason;
     m_bromRunBtn->setToolTip(reason);
     m_bromRunReason->setText(reason);
@@ -971,7 +987,11 @@ void VulnPanel::onBromExploitRun()
         return;
     }
 
-    appendLog(QStringLiteral("开始 MTK BROM 漏洞利用（kamakiri 路径） —— 目标芯片 0x%1")
+    // 首行就把"作用于哪台"写清楚（控制方 2026-09-22 裁决①）：**当前 USB 上枚举到的**那台，
+    // 不是设备列表里选中的那台 —— 执行器随后会把该设备的 VID:PID/端口落进日志。
+    appendLog(QStringLiteral("开始 MTK BROM 漏洞利用（kamakiri 路径） —— 目标芯片 0x%1；"
+                             "作用于**当前 USB 上枚举到的 BROM 设备**（不是设备列表里选中的那台；"
+                             "芯片码在握手后现场核对）")
                   .arg(hwCode, 4, 16, QLatin1Char('0')));
 
     BromRunRequest req;
