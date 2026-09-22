@@ -13,6 +13,7 @@
 #include <QSet>
 #include <QElapsedTimer>
 #include <QCheckBox>
+#include <QCryptographicHash>   // M5：载荷指纹（本机实算的 sha256 前 8 位）
 #include <QLineEdit>
 #include <memory>
 
@@ -22,6 +23,14 @@
 #include "ui/brom_exploit_ui.h"                           // 执行前判据（纯函数，逐条被用例钉住）
 
 namespace {
+
+// 载荷指纹：**本机实算**的 sha256 前 8 位（spec §3.8 要求 UI 显示它；M5 落地）。
+// 为什么强调"实算"：显示清单里那个值是回显，与手上这份字节没有因果关系；实算才有对表意义
+// （用户拿它去和来源页/清单比）。**它不是安全属性** —— 见 I5 的口径（sha256 只证"与清单一致"）。
+QString payloadFingerprint(const QByteArray &bytes)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()).left(8);
+}
 
 // 生产执行器：打开 BROM 会话 → **核对设备自报芯片码** → 修正载荷 → 跑 kamakiri 触发序列。
 //
@@ -94,6 +103,9 @@ bool runBromExploitOnDevice(const VulnPanel::BromRunRequest &req, QStringList *l
 
     mtkbrom::ExploitOptions opt;
     opt.allowPatchedGeneration = req.allowPatchedGeneration;
+    // var1 覆盖（W8 终审 I4）：只在面板判定"表里没有、用户填了"时才带上；表里有值时留空，
+    // 让 runBromExploit 的"表优先"语义照旧（面板不替它做决定）。
+    opt.var1 = req.var1;
     if (req.allowPatchedGeneration)
         note(QStringLiteral("⚠️ 已开启「允许已修补代际（V6）」—— 本仓对已修补代际的判据是粗判据"
                             "（来自公开报告，非逐设备实测），不保证有意义"));
@@ -262,6 +274,22 @@ QWidget *VulnPanel::buildBromExploitGroup()
     m_bromHwCodeEdit->setPlaceholderText(QStringLiteral("如 0x6735"));
     m_bromHwCodeEdit->setMaximumWidth(120);
     chipRow->addWidget(m_bromHwCodeEdit);
+
+    // var1 覆盖（W8 终审 I4）：上游 hwconfig 里有 10 条芯片三要素齐但**没给 var1**，而编排层对缺
+    // var1 是**响亮失败**（不默认 0）—— 没有这个输入框，那 10 条就是"按钮说就绪、点下去必失败"。
+    // 留空 = 用芯片表里的值（表优先由 runBromExploit 保证）；填了 = 表没有时由它兜底。
+    chipRow->addSpacing(12);
+    chipRow->addWidget(new QLabel(QStringLiteral("var1 覆盖："), group));
+    m_bromVar1Edit = new QLineEdit(group);
+    m_bromVar1Edit->setObjectName(QStringLiteral("bromVar1Edit"));
+    m_bromVar1Edit->setPlaceholderText(QStringLiteral("留空 = 用表里的值；表没有则必须填"));
+    m_bromVar1Edit->setMaximumWidth(160);
+    m_bromVar1Edit->setToolTip(QStringLiteral(
+        "触发控制传输的 wIndex（0x00..0xFF，十六进制）。\n"
+        "查表优先：芯片表里有值就用表里的（这是逐芯片实测常量，比手填可靠）；\n"
+        "只有表里没有（上游对 10 条芯片未给）时才需要在这里显式填 —— 不填则该芯片不可执行"
+        "（编排层不会替你猜 0，也不会 bruteforce 扫描）。"));
+    chipRow->addWidget(m_bromVar1Edit);
     chipRow->addStretch();
     v->addLayout(chipRow);
 
@@ -278,6 +306,12 @@ QWidget *VulnPanel::buildBromExploitGroup()
     m_bromPayloadPathEdit->setObjectName(QStringLiteral("bromPayloadPathEdit"));
     m_bromPayloadPathEdit->setPlaceholderText(
         QStringLiteral("载荷文件（留空 = 按来源清单获取，需勾选下面的网络开关）"));
+    // I5（W8 终审）：spec §8 的"sha256 只保证与清单一致、**不保证内容安全**"此前**只存在于 spec 一行**
+    // —— UI 却把 sha256 当安全属性讲。写进 tooltip（用户能读到的地方）与下方的说明行。
+    m_bromPayloadPathEdit->setToolTip(QStringLiteral(
+        "你的载荷文件，或留空改从来源清单获取（清单里是 URL + sha256）。\n"
+        "⚠️ sha256 只保证「与来源清单声明的那一份**一致**」—— 它挡的是传输损坏与串包，"
+        "**不保证内容安全**：上游可能变更实现、清单本身也可能被改。载荷是第三方产物，请自行确认来源。"));
     payloadRow->addWidget(m_bromPayloadPathEdit, 1);
     auto *payloadBrowse = new QPushButton(QStringLiteral("选择…"), group);
     payloadRow->addWidget(payloadBrowse);
@@ -325,7 +359,12 @@ QWidget *VulnPanel::buildBromExploitGroup()
         "⚠️ 执行**作用于当前 USB 上枚举到的 BROM 设备**（多台时直接拒绝）—— 不是左侧设备列表里选中的"
         "那台；芯片码会在握手后与设备自报值核对（不符即拒）。执行日志会记下目标设备的 VID:PID 与端口。\n"
         "本仓库不分发任何利用载荷二进制：来源清单只存 URL + sha256，载荷来自你自己的文件"
-        "或你显式开启的网络获取。真机未验证 —— 详见功能清单里的诚实边界。"), group);
+        "或你显式开启的网络获取。\n"
+        "⚠️ sha256 只保证「与来源清单声明的那一份一致」，**不保证内容安全**（上游可能变更实现、"
+        "清单本身也可能被改）—— 它是防传输损坏与串包的，不是对载荷可信性的保证。\n"
+        "真机未验证 —— 详见功能清单里的诚实边界。"), group);
+    // 暴露给用例（仓内对话框/面板同款约定）：这段"诚实边界"文案是产品对用户的承诺面，要能被钉住。
+    note->setObjectName(QStringLiteral("bromBoundaryNote"));
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
     v->addWidget(note);
@@ -333,6 +372,10 @@ QWidget *VulnPanel::buildBromExploitGroup()
     // —— 连接 ——
     connect(m_bromHwCodeEdit, &QLineEdit::textChanged,
             this, &VulnPanel::onBromChipCodeChanged);
+    // var1 只影响判据（不改变已解析载荷的归属），故直接重算闸门 —— 不走 onBromChipCodeChanged
+    //（那条会作废已解析的载荷：芯片码变了，按芯片提示挑的来源就不再可信；var1 与来源无关）。
+    connect(m_bromVar1Edit, &QLineEdit::textChanged,
+            this, &VulnPanel::refreshBromGate);
     connect(m_bromResolveBtn, &QPushButton::clicked,
             this, &VulnPanel::onBromResolvePayload);
     connect(m_bromRunBtn, &QPushButton::clicked,
@@ -871,6 +914,7 @@ void VulnPanel::refreshBromGate()
     bromui::GateInputs in;
     in.deviceSelected = !m_deviceInfo.serialNumber.isEmpty();
     in.hwCodeText     = m_bromHwCodeEdit->text();
+    in.var1Text       = m_bromVar1Edit->text();
     in.payload        = m_bromPayloadState;
     in.payloadError   = m_bromPayloadError;
 
@@ -903,7 +947,12 @@ void VulnPanel::setBromPayloadState(bromui::PayloadState state, const QString &e
         m_bromPayloadStatus->setText(QStringLiteral("载荷：未解析"));
         break;
     case bromui::PayloadState::Verified:
-        m_bromPayloadStatus->setText(QStringLiteral("载荷：✔ 已就绪（%1 字节）").arg(m_bromPayload.size()));
+        // M5（W8 终审）：spec §3.8 要求显示"命中条目名与 **sha256 前 8 位**"，此前成功态只显示
+        // 字节数、哈希前缀只在失败路径打印。这里显示**本机实算**的指纹（不是回显清单里的值）——
+        // 用户可拿它与清单/来源页对表；条目名在上一行的来源日志里（resolveExploitPayload 的 note）。
+        m_bromPayloadStatus->setText(QStringLiteral("载荷：✔ 已就绪（%1 字节 · sha256 前 8 位 %2）")
+                                         .arg(m_bromPayload.size())
+                                         .arg(payloadFingerprint(m_bromPayload)));
         break;
     case bromui::PayloadState::Rejected:
         m_bromPayloadStatus->setText(QStringLiteral("载荷：✘ %1").arg(errorText));
@@ -966,7 +1015,11 @@ void VulnPanel::onBromResolvePayload()
     }
     m_bromPayload = payload;
     setBromPayloadState(bromui::PayloadState::Verified, QString());
-    appendLog(QStringLiteral("  ✔ 载荷就绪：%1 字节 —— 可以执行（执行前会弹一次风险确认）").arg(payload.size()));
+    // M5：成功路径也把 sha256 前 8 位打出来（此前只有失败路径带哈希）—— 用户可据此对表。
+    appendLog(QStringLiteral("  ✔ 载荷就绪：%1 字节 · sha256 前 8 位 %2 —— 可以执行"
+                             "（sha256 只证「与清单声明的一致」，不证内容安全；执行前会弹一次风险确认）")
+                  .arg(int(payload.size()))
+                  .arg(payloadFingerprint(payload)));
 }
 
 void VulnPanel::onBromExploitRun()
@@ -998,6 +1051,13 @@ void VulnPanel::onBromExploitRun()
     req.hwCode = hwCode;
     req.payload = m_bromPayload;
     req.allowPatchedGeneration = m_bromAllowPatchedCheck->isChecked();
+    // var1 覆盖：**只在用户填了、且芯片表没有时**才带上（判据 = `bromui::resolveVar1`，与闸门同一个
+    // 函数，不是各写一份）。表里有值时留空 ⇒ 编排层的"表优先"语义照旧。
+    if (const mtkbrom::ChipHwAddrs *addrs = mtkbrom::lookupChipHwAddrs(hwCode)) {
+        const bromui::Var1Resolution var1 = bromui::resolveVar1(*addrs, m_bromVar1Edit->text());
+        if (var1.source == bromui::Var1Source::FromInput)
+            req.var1 = var1.value;
+    }
 
     QElapsedTimer timer;
     timer.start();

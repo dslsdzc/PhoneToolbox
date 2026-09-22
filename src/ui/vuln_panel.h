@@ -49,6 +49,10 @@ public:
         quint16    hwCode = 0;                   // 面板输入的芯片码（执行前会与设备自报值核对）
         QByteArray payload;                      // 已解析（含 sha256 结论）的载荷字节
         bool       allowPatchedGeneration = false; // 已修补代际（V6）硬闯（默认关 = fail-closed）
+        // var1 覆盖（W8 终审 I4）：**只在用户显式填了、且芯片表没有时**才有值 —— 由
+        // `bromui::resolveVar1` 判定（与闸门同一个判据，不是各写一份）。表里有值时留空，
+        // 让 `runBromExploit` 的表优先语义照旧生效。
+        std::optional<quint8> var1;
     };
     using BromRunner = std::function<bool(const BromRunRequest &req, QStringList *log, QString *error)>;
 
@@ -112,6 +116,8 @@ private:
 
     // ── W8-T6：MTK BROM 漏洞利用区 ──
     QLineEdit   *m_bromHwCodeEdit = nullptr;
+    // var1 覆盖（W8 终审 I4）：表里没有 var1 的那 10 条芯片靠它才可达（编排层对缺 var1 响亮失败）。
+    QLineEdit   *m_bromVar1Edit = nullptr;
     QLabel      *m_bromChipStatus = nullptr;
     QLineEdit   *m_bromPayloadPathEdit = nullptr;
     QCheckBox   *m_bromAllowNetworkCheck = nullptr;

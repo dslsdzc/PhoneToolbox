@@ -123,7 +123,8 @@ private slots:
     void eubRecoveryDialogGatesOnStart();
     // ① 接线钉：首屏（MainWindow 构造之前）
     void mainAsksAgreementBeforeTheMainWindow();
-    // ② tripwire：按钮接线集合 == 已过闸门 14 + 按设计不过闸门 6
+    // ② tripwire：按钮接线集合 == 21 个按钮槽（**14** 个按钮类已过闸门入口 + **7** 个按设计不过闸门
+    //    —— 闸门总数是 15：第 15 个是 `confirmPreloaderPatch`，它是提问不是按钮，故不在这份名单里）
     void flashPanelButtonConnectsMatchTheGatedSet();
     // ② 界线钉：偏好开关族**有意不纳门控**（W2-T5 复审 ④；命名按复审 Low-2 订正）
     void preferenceSwitchesStayUngatedByDesign();
