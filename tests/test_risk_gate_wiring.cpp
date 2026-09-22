@@ -11,8 +11,9 @@
 //  ① 接线钉：五个生产文件里 `riskui::ensureAccepted(` 的出现次数与**位置**（逐入口、函数体头部），
 //     以及每个闸门取 tier 的表达式（模式映射 / 功能映射，不是硬编的档）。
 //  ② 结构对照钉（tripwire）：
-//     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "15 个已过闸门入口
-//       + 6 个按设计不过闸门入口"。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
+//     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "14 个**按钮类**的已过闸门入口
+//       + 7 个按设计不过闸门入口"（= 21；**闸门总数是 15** —— 差的那个是 `confirmPreloaderPatch`，
+//       它是提问不是按钮，见该槽的函数头注释）。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
 //     * 断线复位：**本文件里凡被 `setEnabled(...)` 碰过的按钮，`clearDeviceInfo` 必须禁用**
 //       （两轮复审各撞见同一类缺口：Low-1a 的解锁/回锁/FRP、复审 ③ 的 EDL/MTK 连接类 ——
 //       拔线后仍可点，而闸门按模式取档在 MODE_UNKNOWN 上给 None = 不弹窗）。
@@ -382,11 +383,16 @@ void TestRiskGateWiring::mainAsksAgreementBeforeTheMainWindow()
              "ask() 与 acceptAgreement() 之间没有 return —— 用户拒绝也会进入主界面");
 }
 
-// ② tripwire：FlashPanel 每个 QPushButton 的 clicked 槽名集合 == 15 个已过闸门入口
-//    + 7 个**按设计不过闸门**的入口（不写设备/不需要风险确认：文件选择、返回、刷新分区列表、
-//    选 programmer 文件、EDL 断开、MTK 断开、W8-T6 的 **DA 切分另存** —— 前六个只做本机 UI 或
-//    断开连接，DA 另存是**本地只读**：读一个 DA 文件、写两个文件，不碰设备、不削弱任何安全机制
-//    ⇒ 按 W2 的界线（改设备状态才弹）**有意不纳**；它连设备都不需要，故也常驻可用、不进复位表）。
+// ② tripwire：FlashPanel 每个 QPushButton 的 clicked 槽名集合 == **21 个按钮槽**：
+//    **14** 个按钮类的已过闸门入口 + **7** 个按设计不过闸门的入口。
+//    ⚠️ 数与名单的对应关系（这处注释曾写错，2026-08/09 审查 Minor）——**闸门总数是 15，但按钮只有 14 个**：
+//    第 15 个闸门是 `confirmPreloaderPatch`，它是 MTK 刷写流程里的一个**提问**、不由按钮触发，
+//    故不在这份"按钮接线"名单里（它由 `flashPanelGatesAllFifteenHandlers` 的 rows 表钉住）。
+//    下面三组各自标了数，**不要**把组的数当成"闸门总数"。
+//    7 个不过闸门的是（不写设备/不需要风险确认）：文件选择、刷新分区列表、选 programmer 文件、
+//    EDL 断开、MTK 断开、返回（本机 UI / 断开连接），以及 W8-T6 的 **DA 切分另存**（**本地只读**：
+//    读一个 DA 文件、写两个文件，不碰设备、不削弱任何安全机制 ⇒ 按 W2 的界线（改设备状态才弹）
+//    **有意不纳**；它连设备都不需要，故也常驻可用、不进复位表）。
 //    新增按钮 → 槽名不在两侧任何一边 → 本用例红 → 作者必须回来回答"这个入口要不要过闸门"。
 //    取材边界：这是**文本**钉 —— 换一种写法接线（如不用 connect(m_xxxBtn, ...)）它就数不到，
 //    那时先在这里红（集合变小）而不是静默放过。
@@ -410,7 +416,8 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
     QCOMPARE(int(connectedSlots.size()), 21);
 
     const QStringList gated = {
-        // 15 个已过闸门的入口
+        // —— 第一组：14 个**按钮类**的已过闸门入口（第 15 个闸门 `confirmPreloaderPatch` 是提问、
+        //    不是按钮 ⇒ 不在这份按钮名单里；见本函数的函数头注释）——
         QStringLiteral("onFlashClicked"), QStringLiteral("onEraseClicked"),
         QStringLiteral("onUpdateClicked"), QStringLiteral("onSideloadClicked"),
         QStringLiteral("onRunScriptClicked"), QStringLiteral("onDumpClicked"),
@@ -418,13 +425,14 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
         QStringLiteral("onLockBootloader"), QStringLiteral("onFrpErase"),
         QStringLiteral("onBrickRepairClicked"), QStringLiteral("onEdlConnect"),
         QStringLiteral("onEdlPlanFlash"), QStringLiteral("onMtkConnect"),
-        // 7 个按设计不过闸门（本机 UI / 文件选择 / 断开连接 / 本地只读导出，不发起任何设备写入）
+        // —— 第二组：6 个按设计不过闸门（本机 UI / 文件选择 / 断开连接，不发起任何设备写入）——
         QStringLiteral("onSelectFile"), QStringLiteral("onRefreshPartitions"),
         QStringLiteral("onEdlSelectProgrammer"), QStringLiteral("onEdlDisconnect"),
         QStringLiteral("onMtkDisconnect"), QStringLiteral("switchToDeviceInfo"),
-        // W8-T6：DA 切分另存（读 DA 文件 → 写 da1.bin/da2.bin；**不碰设备** ⇒ 不纳门控）
+        // —— 第三组（W8-T6，1 个）：DA 切分另存（读 DA 文件 → 写 da1.bin/da2.bin；**不碰设备** ⇒ 不纳门控）——
         QStringLiteral("onExportDaSegments"),
     };
+    // 14 + 6 + 1 = 21（**不是**"15 + 7" —— 15 是闸门数，其中一个是提问不是按钮）
     QCOMPARE(gated.size(), 21);
 
     QStringList got = connectedSlots, want = gated;
