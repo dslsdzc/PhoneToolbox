@@ -168,7 +168,10 @@ private slots:
         QCOMPARE(t2.at(1), QStringLiteral("请先确认机型与固件匹配，并确认设备属于你或已获授权。"));
         QCOMPARE(t2.at(2), QStringLiteral("部分通道未经真机验证（见项目文档「诚实边界」），实际行为"
                                           "可能与预期不同。"));
-        // 关键短语独立成钉（用户可读的最坏后果；比"表非空"更能抓住"改成不痛不痒的文案"）。
+        // 下面两条关键短语钉是**冗余保险，不是第二道独立防线**（W8 终审 round2 N3 实测）：
+        // 上面的 `QCOMPARE` 是**致命断言**，任何文案改动都先在它那里红并 return，短语钉不会执行
+        // （实测把"未经真机验证"改成"未经真机确认" → 红在逐字钉）。留着是为了"有人把逐字钉放宽成
+        // `contains`"时仍能兜住"把这条改成不痛不痒的文案"。
         QVERIFY2(t2.join(QStringLiteral("\n")).contains(QStringLiteral("变砖")),
                  qPrintable(QStringLiteral("Tier2 要点必须写明「变砖」这一最坏后果 —— 实得 %1")
                                 .arg(t2.join(QStringLiteral(" / ")))));
@@ -190,7 +193,8 @@ private slots:
         QCOMPARE(t3.at(3), QStringLiteral("本档能力的真机行为未经验证（见项目文档「诚实边界」）：注入或"
                                           "改写后设备可能无响应、需要重新插拔，最坏情况会变砖；"
                                           "请先确认已备份、设备可恢复。"));
-        // 与 Tier2 同款的关键短语独立成钉：只钉"表非空"抓不住"把这条改成不痛不痒的文案"。
+        // 与 Tier2 同款的两条关键短语钉 —— **同样只是冗余保险**（见上一条的说明：逐字钉是致命断言，
+        // 先于它们红；真正的甄别力在 `QCOMPARE(t3.at(3), …)` 那条）。
         QVERIFY2(t3.join(QStringLiteral("\n")).contains(QStringLiteral("变砖")),
                  qPrintable(QStringLiteral("Tier3 要点必须写明「变砖」这一最坏后果（I1 的力度倒挂）"
                                            "—— 实得 %1").arg(t3.join(QStringLiteral(" / ")))));

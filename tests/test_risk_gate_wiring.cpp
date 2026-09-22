@@ -448,8 +448,13 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
 // （spec §1 非目标）下有意不纳（`onAppFreezeToggle` 的冻结/解冻同属这类可控开关，同样不纳）。
 // 界线由控制方 2026-09-20 裁定：**改"设备状态"（写存储 / 削安全机制）才弹，改"偏好开关"不弹**。
 // ⚠️ 命名与理由句按**复审 Low-2/Low-3** 订正过：本槽原叫 `settingsPutFamilyStaysUngatedByDesign`，
-//    但磁盘实况是 —— 全文件 `settings put` 只有 11 处、且只落在 3 个 handler
-//    （`onAnimationScale` 3 / `onStatusBar` 4 / `onNavBar` 4）；其余 8 个走别的机制
+//    但磁盘实况是 —— `settings put` 只落在 3 个 handler。**计数口径必须写明**（终审 round2 N1：
+//    同一处曾写成"11 处"并被列进"全部相符"的核验结论里，而"处"有两种数法）：
+//      * 按**行数** = **11**（`onAnimationScale` 3 / `onStatusBar` 4 / `onNavBar` 4）；
+//      * 按**出现次数（处数）** = **12** —— 差在 `onNavBar` 有一行里**两处** `settings put`
+//        （`src/ui/system_tool_panel.cpp:1065` 那行同时写 navigation_mode 与 navigation_bar_height）。
+//    **两个数都对，取决于口径**；写"11 处"而不说口径就是错的（本仓 2026-09-23 终审 round2 实测）。
+//    其余 8 个 handler 走别的机制
 //    （`onSetDpi` = `wm density`、三个调频 = sysfs、`onMemoryOptimize` = `/proc/sys/vm`、
 //    `onAppFreezeToggle` = `pm hide/disable`、`onThermalControl` = 读 + 备份、`onSetFont` = 纯提示框）。
 //    故按**行为族**命名，不按机制命名；也删掉了"既不写设备存储"的说法（`onThermalControl` 落盘一份
