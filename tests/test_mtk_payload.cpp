@@ -420,6 +420,16 @@ void TestMtkPayload::patchPreloaderSecurityReportsAppliedPatternNames()
     QVERIFY(!mtkbrom::patchPreloaderSecurity(none, &applied2));
     QVERIFY2(applied2.isEmpty(), "未命中时出参必须是空的（不能残留上一次的名字）");
 
+    // **每个模式至多一条**：同一模式在镜像里出现两次，也只记一条名字
+    //（名字回答的是"改了哪几条规则"，不是"改了多少处" —— 后者随固件大小变化，钉不住）。
+    QByteArray twice = QByteArray::fromHex("10B50C680268")
+                     + QByteArray(4, '\x44')
+                     + QByteArray::fromHex("10B50C680268");
+    QStringList applied3;
+    QVERIFY(mtkbrom::patchPreloaderSecurity(twice, &applied3));
+    QCOMPARE(applied3.size(), 1);
+    QCOMPARE(applied3.at(0), QStringLiteral("ram blacklist"));
+
     // **默认实参**：不传出参照样可用（既有调用点/既有用例一字未改就能编）
     QByteArray pl2 = QByteArray::fromHex("10B50C680268");
     QVERIFY(mtkbrom::patchPreloaderSecurity(pl2));
@@ -491,8 +501,10 @@ void TestMtkPayload::patchPreloaderSecurityOptionIsExplicitAndDefaultOff()
     // ③ 开 + 未命中：**告警但不算失败**（流程仍成功 —— 没有可改的分支不是错误）
     const auto onMiss = runChain(true, kMiss);
     QVERIFY2(onMiss.first, qPrintable(onMiss.second.joined()));
-    QVERIFY2(onMiss.second.joined().contains(QStringLiteral("未命中任何已知模式")),
-             qPrintable(onMiss.second.joined()));
+    // **必须是告警行**（isError=true），不只是"文本里出现过" —— 否则把 warn 换成 say 也能过
+    //（W8-T5 审查的 M2 变异正是这样存活的）。口径：spec §3.7 要求的是"**如实告警**"。
+    QVERIFY2(onMiss.second.hasErrorLineContaining(QStringLiteral("未命中任何已知模式")),
+             qPrintable(QStringLiteral("未命中必须是**告警**行（isError=true）：\n%1").arg(onMiss.second.joined())));
 }
 
 // 原 sendPayloadFrames（addr=0/sigLen=0 的旧帧）已被 sendDa1UsesRegion1AddressAndSigLen 取代 ——

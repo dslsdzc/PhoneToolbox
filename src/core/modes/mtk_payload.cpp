@@ -975,6 +975,13 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     // 施加点选在**消费侧**：fetch 的职责是"拿到字节"，打补丁是拿它的人的决定。
     // **门控不在这里** —— 本层拿不到 QWidget；Tier 3 二次确认由调用方（FlashPanel）在用户
     // opt-in 的那一刻做（`RiskFeature::PreloaderPatch`），这里只按选项执行。
+    //
+    // ⚠️ **范围口径（W8-T5 审查 I-1，必须与代码一致）**：本修补只作用于**内存中这一份 `pre.bytes`** ——
+    // 它在 LEGACY/XFlash 两代被 `extractEmiLegacy` / `extractEmiXflash` 用来做 EMI/DRAM 初始化
+    // （见本文件上方两处 `pre.bytes` 用法）；**它不改写设备上的 preloader 分区**
+    //（刷进 preloader 分区的是磁盘上的原文件，走的是镜像写入段）。
+    // 且 `MtkGeneration::Xml` 那条链**根本不收 `pre`** ⇒ 该代际下修补结果不参与任何事。
+    // 所以文案**不许**让人读成"设备上的 preloader 已被修补"：要让设备带上修补版，需自行落盘后刷入。
     if (req.preloader.patchSecurity) {
         if (pre.bytes.isEmpty()) {
             warn(QStringLiteral("preloader 安全修补：已开启，但本次没有可用的 preloader 字节 —— "
@@ -982,11 +989,18 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                      .arg(pre.skipReason.isEmpty()
                               ? QString()
                               : QStringLiteral("（%1）").arg(pre.skipReason)));
+        } else if (gen == MtkGeneration::Xml) {
+            // 本代际不使用 preloader 字节（XmlSession 链不收 pre）⇒ 不白改、也不留"已修补"的错觉。
+            warn(QStringLiteral("preloader 安全修补：本代际（XML 链）**不使用** preloader 字节 —— "
+                                "修补结果不会参与本次刷写，故**已跳过**（未做任何改写）"));
         } else {
             QStringList applied;   // 出参在入口清空（契约见 mtk_payload.h）
             const bool any = patchPreloaderSecurity(pre.bytes, &applied);
             if (any) {
-                say(QStringLiteral("preloader 安全修补：已改写 %1 个字节模式 —— %2")
+                // 点名模式 + **说清作用范围**（只影响本次 EMI/DRAM 初始化，不写设备上的 preloader 分区）
+                say(QStringLiteral("preloader 安全修补：已改写 %1 个字节模式 —— %2"
+                                   "（**仅作用于本次 EMI/DRAM 初始化用的内存副本；"
+                                   "不改写设备上的 preloader 分区** —— 要落到设备需自行落盘后刷入）")
                         .arg(applied.size())
                         .arg(applied.join(QStringLiteral(" / "))));
             } else {

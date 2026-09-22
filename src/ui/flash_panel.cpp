@@ -891,15 +891,23 @@ void FlashPanel::onFlashClicked()
             // W8-T5：preloader 安全修补 —— **先问（默认否），选「是」再过 Tier 3 二次确认**。
             // 顺序是"先 opt-in、后确认"：确认框针对的是用户**刚表达的意图**，而不是替他预设；
             // 反过来的话，从不打补丁的用户也会先被问一次风险。
-            // 放在 preloader/网络两个提问**之后**：此时才知道"这次到底有没有 preloader 字节可打"。
+            // 位置在 preloader/网络两个提问之后：它只关心**用户意图**；"这次究竟有没有字节可打"
+            // 要到 FlashTool 侧 `resolvePreloader` 时才定 —— 本层**不预判**（也无从预判）。
             const QMessageBox::StandardButton wantPatch = QMessageBox::question(
                 this, QStringLiteral("preloader 安全修补"),
                 QStringLiteral("是否对 preloader 打安全补丁？（改写镜像内的若干校验分支）\n\n"
                                "默认否。开启后会在上传前按已知模式改写 preloader 字节 —— 这是"
-                               "**削弱设备安全机制**的操作，属「诊断与安全研究」档；只可在你自己的设备上使用。\n"
+                               "**削弱设备安全机制**的操作，属「诊断与安全研究」档；只可在你自己的设备上使用。\n\n"
+                               "⚠️ 作用范围：只改**本次用于 EMI/DRAM 初始化的那份内存副本**，"
+                               "**不改写设备上的 preloader 分区**；要让设备带上修补版，需自行落盘后刷入。\n"
                                "未命中任何已知模式时会**如实告警**（不会静默当成功）。"),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             const bool patchPreloader = (wantPatch == QMessageBox::Yes) && confirmPreloaderPatch();
+            // 答了「是」却没通过二次确认：给一条回执（否则用户以为自己选了、却什么都没发生）。
+            // 与"取消"的区别：**取消是没选，这里是选了但没确认** —— 前者静默、后者留痕。
+            if (wantPatch == QMessageBox::Yes && !patchPreloader)
+                emit outputMessage(QStringLiteral("preloader 安全修补：**未通过二次确认** —— "
+                                                  "本次不改写 preloader（需要的话请重新选择）"), false);
 
             // 预览：镜像文件名 → 目标分区（scatter 是参照表，不是判据）→ 计划不可用/用户取消都在这里收口
             mtkplan::MtkFlashPlan plan;

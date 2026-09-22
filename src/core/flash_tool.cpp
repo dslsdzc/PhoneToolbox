@@ -1274,7 +1274,7 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         req.preloader.cacheDir = params.value(QStringLiteral("preloaderCacheDir")).toString();
         // W8-T5：preloader 安全修补（**默认关**：键缺省即 false）。该键**只在用户通过 Tier 3
         // 二次确认之后**才由 FlashPanel 写入 —— 门控在 UI 侧（本层拿不到 QWidget），
-        // 见 `FlashPanel::askAndConfirmPreloaderPatch`。这里只负责键 → 选项的搬运。
+        // 见 `FlashPanel::confirmPreloaderPatch`。这里只负责键 → 选项的搬运。
         req.preloader.patchSecurity =
             params.value(QStringLiteral("patchPreloaderSecurity")).toBool();
 

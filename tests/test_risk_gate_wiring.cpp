@@ -11,7 +11,7 @@
 //  ① 接线钉：五个生产文件里 `riskui::ensureAccepted(` 的出现次数与**位置**（逐入口、函数体头部），
 //     以及每个闸门取 tier 的表达式（模式映射 / 功能映射，不是硬编的档）。
 //  ② 结构对照钉（tripwire）：
-//     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "14 个已过闸门入口
+//     * 按钮接线集合：FlashPanel 每个 `QPushButton` 的槽名集合 == "15 个已过闸门入口
 //       + 6 个按设计不过闸门入口"。**新增按钮 → 这条红 → 强迫作者回来核对新入口该不该过闸门。**
 //     * 断线复位：**本文件里凡被 `setEnabled(...)` 碰过的按钮，`clearDeviceInfo` 必须禁用**
 //       （两轮复审各撞见同一类缺口：Low-1a 的解锁/回锁/FRP、复审 ③ 的 EDL/MTK 连接类 ——
@@ -375,7 +375,7 @@ void TestRiskGateWiring::mainAsksAgreementBeforeTheMainWindow()
              "ask() 与 acceptAgreement() 之间没有 return —— 用户拒绝也会进入主界面");
 }
 
-// ② tripwire：FlashPanel 每个 QPushButton 的 clicked 槽名集合 == 14 个已过闸门入口
+// ② tripwire：FlashPanel 每个 QPushButton 的 clicked 槽名集合 == 15 个已过闸门入口
 //    + 6 个**按设计不过闸门**的入口（不写设备/不需要风险确认：文件选择、返回、刷新分区列表、
 //    选 programmer 文件、EDL 断开、MTK 断开 —— 逐条都只做本机 UI 或断开连接）。
 //    新增按钮 → 槽名不在两侧任何一边 → 本用例红 → 作者必须回来回答"这个入口要不要过闸门"。
@@ -401,7 +401,7 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
     QCOMPARE(int(connectedSlots.size()), 20);
 
     const QStringList gated = {
-        // 14 个已过闸门的入口
+        // 15 个已过闸门的入口
         QStringLiteral("onFlashClicked"), QStringLiteral("onEraseClicked"),
         QStringLiteral("onUpdateClicked"), QStringLiteral("onSideloadClicked"),
         QStringLiteral("onRunScriptClicked"), QStringLiteral("onDumpClicked"),
@@ -436,7 +436,7 @@ void TestRiskGateWiring::flashPanelButtonConnectsMatchTheGatedSet()
 //    配置备份到 /sdcard —— 是备份产物，不改设备行为，但原文那句话与磁盘不符）。
 // 本槽把这条界线**钉成机器可检**（否则下一轮复核会把同一处当缺口重报）：
 // 这 11 个 handler 的函数体里必须**一个闸门都没有**。若将来决定纳入，先在这里红 ——
-// 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（28）。
+// 作者必须回来同时改本槽、spec §3 的界线说明与接线计数（29）。
 void TestRiskGateWiring::preferenceSwitchesStayUngatedByDesign()
 {
     const QString src = readSource(QStringLiteral("/src/ui/system_tool_panel.cpp"));

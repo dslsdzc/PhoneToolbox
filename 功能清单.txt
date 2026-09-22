@@ -42,7 +42,9 @@ GitHub: https://github.com/DslsDZC/PhoneToolbox
 [√] BROM 内存协议: READ32/WRITE32 (echo 模式 + 状态字)
 [√] DA 存储命令层: EMMC 读写 / PMT 分区表 (0x60/0x58/0x4C 三种条目)
 [√] SEND_DA 上传 (16-bit XOR 校验 + 分块 + ZLP) + 跳转 DA
-[√] SBC 修补 (preloader 字节模式, 参照 mtkclient 五模式)
+[√] SBC 修补 (preloader 字节模式, 参照 mtkclient 五模式) —— **已接线** (MTK 刷写流程显式选项,
+    默认关 + Tier 3 二次确认; 命中时点名模式, 未命中如实告警; 仅作用于本次 EMI/DRAM 初始化用的内存副本,
+    不改写设备上的 preloader 分区)
 [√] 刷写路由骨架 (runBromFlash: 枚举 → 会话 → 逐分区)
 [√] DA 文件解析与选择: AllInOne 头/条目/region 5 字段 (真样本 6 文件 161 条目硬断言 + 独立 Python 解析器对拍)
 [√] DA 两阶段: DA1 (region[1] 地址/长度/签名长度) → 0xC0 就绪 → 存储信息交换 → EMI/DRAM → DA2 (保留尾部签名) → read_flash_info

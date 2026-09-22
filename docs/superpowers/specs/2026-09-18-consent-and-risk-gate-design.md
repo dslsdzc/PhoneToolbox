@@ -147,7 +147,7 @@ public:
 | `FlashPanel::onFlashClicked`（分派前） | `riskTierForMode(mode)` ≠ None 且该 tier 未接受 → `RiskConfirmDialog`；拒绝则**不发起任何操作**（静默返回，与"用户取消"同口径） |
 | `EubRecoveryDialog::onStart`（发送前） | 同上（EUB 的 tier 由 `riskTierForMode(MODE_SAMSUNG_EUB)` 给） |
 | `SystemToolPanel` 的 10 个入口（伪造设备信息 / SafetyNet / 签名伪造 / 工程模式 / SELinux 切换 / 挂载·卸载 /system / 编辑 build.prop / 换开机动画 / 卸载应用） | `riskTierForFeature(...)` 同上 |
-| `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 + **preloader 安全修补（W8-T5）** | `riskTierForFeature(Unlock / Unlock / FrpClear)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
+| `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 + **preloader 安全修补（W8-T5）** | `riskTierForFeature(Unlock / Unlock / FrpClear / **PreloaderPatch** —— 后者 Tier 3，W8-T5 补)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
 | `VulnPanel` 的"批量利用/单条利用/批量扫描" | `riskTierForFeature(RiskFeature::VulnExploit)` 同上（**扫描**也纳入：它出自 exploit DB） |
 
 **共同形态**（沿用仓内既有"未验证勾选门控"）：对话框展示 `tierWarnings()` + 完整协议入口（可展开/滚动）
