@@ -77,6 +77,9 @@ RiskTier riskTierForFeature(RiskFeature f)
     case RiskFeature::ImeiTool:       return RiskTier::Tier3Diagnostic;
     case RiskFeature::SelinuxMode:    return RiskTier::Tier3Diagnostic;
     case RiskFeature::DeviceSpoof:    return RiskTier::Tier3Diagnostic;   // spec §3 已列"设备信息伪造"，此前只有 ImeiTool 可借
+    // W8-T5：preloader 安全修补（改写镜像内校验分支 = **削弱安全机制**）。归 Tier 3 而非 Tier 2：
+    // 它不改设备存储、也不经过写路径，改的是"设备将来还信不信校验" —— 与 SelinuxMode 同族。
+    case RiskFeature::PreloaderPatch: return RiskTier::Tier3Diagnostic;
     }
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop

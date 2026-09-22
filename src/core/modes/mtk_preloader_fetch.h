@@ -47,6 +47,13 @@ struct PreloaderOptions {
     QStringList firmwareDirs;   // ① 自动导入：在这些目录里找 preloader（唯一命中才用）
     bool allowNetwork = false;  // ② 默认关闭（关闭时下载器一次都不会被调用）
     QString cacheDir;           // ② 命中后落盘目录（空 = 只留在内存）
+    // ③ W8-T5：对**拿到的 preloader 字节**做安全修补（改写镜像内的若干校验分支）。
+    //    **默认关**（与 allowNetwork 同姿态 —— 默认值本身就是"不改变任何东西"）。
+    //    施加点在**消费侧**（`mtk_payload.cpp` 的 `resolvePreloader` 之后、字节用于 EMI 之前），
+    //    不在本模块内部 —— 本模块的职责是"拿到字节"，打补丁是拿它的人的决定。
+    //    ⚠️ 属"削弱安全机制"族 ⇒ **调用方（UI）必须先过 `riskui` 的 Tier 3 二次确认**
+    //    （`RiskFeature::PreloaderPatch`）；本层不重复门控（它拿不到 QWidget）。
+    bool patchSecurity = false;
 };
 
 struct PreloaderResult {

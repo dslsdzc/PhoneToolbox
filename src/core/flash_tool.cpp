@@ -1272,6 +1272,11 @@ bool FlashTool::flashFullPackage(const QString &deviceId, DeviceDetector::Device
         req.preloader.firmwareDirs = firmwareDirs;
         req.preloader.allowNetwork = allowNetwork;
         req.preloader.cacheDir = params.value(QStringLiteral("preloaderCacheDir")).toString();
+        // W8-T5：preloader 安全修补（**默认关**：键缺省即 false）。该键**只在用户通过 Tier 3
+        // 二次确认之后**才由 FlashPanel 写入 —— 门控在 UI 侧（本层拿不到 QWidget），
+        // 见 `FlashPanel::askAndConfirmPreloaderPatch`。这里只负责键 → 选项的搬运。
+        req.preloader.patchSecurity =
+            params.value(QStringLiteral("patchPreloaderSecurity")).toBool();
 
         // 来源清单**只在网络开启时才读**（T10 审查交接）：关网时 resolvePreloader 根本不会看一眼
         // sources（mtk_preloader_fetch.cpp 的 `if (!opt.allowNetwork)` 短路在前），这份清单的

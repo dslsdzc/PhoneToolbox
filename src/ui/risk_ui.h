@@ -31,7 +31,10 @@ enum class RiskFeature {
     // —— Tier3Diagnostic 族（诊断与安全研究）——
     VulnExploit, EngineerMode, SafetyNet, SignatureSpoof, ImeiTool,
     SelinuxMode,            // setenforce 切换（削弱设备安全机制）
-    DeviceSpoof             // 伪造型号/厂商/序列号（改写设备标识 —— 协议正文第四条明写其法律边界）
+    DeviceSpoof,            // 伪造型号/厂商/序列号（改写设备标识 —— 协议正文第四条明写其法律边界）
+    PreloaderPatch          // W8-T5：改写 preloader 内的若干校验分支（**削弱安全机制** ——
+                            // 协议正文第四条把"preloader 安全修补"与 BROM 载荷并列为本版本
+                            // 提供的两项能力，并要求只用于自有设备；属本档而非写操作档）
 };
 
 // 设备模式 → tier。**全枚举覆盖**：除 MODE_UNKNOWN 外全部 Tier2Boot —— FlashPanel 在每个协议

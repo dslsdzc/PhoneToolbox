@@ -114,8 +114,8 @@ class TestRiskGateWiring : public QObject
     Q_OBJECT
 
 private slots:
-    // ① 接线钉：FlashPanel 的 14 个 handler
-    void flashPanelGatesAllFourteenHandlers();
+    // ① 接线钉：FlashPanel 的 15 个 handler（W8-T5 把 preloader 安全修补纳入后 14→15）
+    void flashPanelGatesAllFifteenHandlers();
     // ① 接线钉：其余三处（10 + 3 + 1）
     void systemToolPanelGatesTenEntries();
     void vulnPanelGatesThreeEntries();
@@ -135,22 +135,26 @@ private slots:
     void mtkBromDisplayNamePairIsConsistent();
 };
 
-// FlashPanel 的 14 个入口：每个入口的第一件事都是闸门，tier 逐个钉住取法。
-// 取档来源分两类（W2-T5 复审 L-1(b)）：
+// FlashPanel 的 15 个入口：每个入口的第一件事都是闸门，tier 逐个钉住取法。
+// 取档来源分两类（W2-T5 复审 L-1(b) + W8-T5）：
 //   * 11 个入口从**面板已有的设备模式**取（`m_deviceInfo.mode` —— 本面板没有独立的 m_currentMode，
 //     见 W2-T5 报告；不为接线新增并行状态）；
-//   * 3 个入口（解锁/回锁/FRP）改用**功能映射** —— 这三个按钮**不由模式分支启用**（ADB+已 Root /
-//     MTK 已连接 都算），拔线后闸门若按模式取会落到 MODE_UNKNOWN → tier None → 不弹窗直接放行。
-//     功能映射不随模式漂，天然 fail-closed。
-void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
+//   * 4 个入口（解锁/回锁/FRP + W8-T5 的 preloader 安全修补）改用**功能映射**：
+//     - 前三个**不由模式分支启用**（ADB+已 Root / MTK 已连接 都算），拔线后闸门若按模式取会落到
+//       MODE_UNKNOWN → tier None → 不弹窗直接放行。功能映射不随模式漂，天然 fail-closed。
+//     - preloader 修补是**跨模式的危险选项**（任何带 preloader 的 MTK 刷写都可能开），
+//       它属"削弱安全机制"族 ⇒ 必须按**功能**取 Tier 3，不能跟着刷写那次 Tier 2 走。
+void TestRiskGateWiring::flashPanelGatesAllFifteenHandlers()
 {
     const QString src = readSource(QStringLiteral("/src/ui/flash_panel.cpp"));
     QVERIFY2(!src.isNull(),
              qPrintable(QStringLiteral("读不到生产源文件：%1/src/ui/flash_panel.cpp")
                             .arg(QStringLiteral(PT_SRC_ROOT))));
 
-    // 计数：14 = 上表 14 个 handler 各一次（多一处 = 有人重复挂闸门 / 少一处 = 有人漏接线）。
-    QCOMPARE(countIn(src, kGate), 14);
+    // 计数：15 = 上表 15 个 handler 各一次（多一处 = 有人重复挂闸门 / 少一处 = 有人漏接线）。
+    // ⚠️ 这正是 W8-T5 把 preloader 修补**单独提成一个函数**（而不是内联进 onFlashClicked）的原因：
+    // 内联会让本函数出现两个闸门、把它变成 16，而"多一处"恰恰是本条要抓的信号。
+    QCOMPARE(countIn(src, kGate), 15);
 
     const QString kByMode = QStringLiteral("riskui::riskTierForMode(");
     const QString kModeSource = QStringLiteral("m_deviceInfo.mode");
@@ -180,10 +184,15 @@ void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
           "riskui::riskTierForFeature(riskui::RiskFeature::Unlock)", false },
         { "void FlashPanel::onFrpErase()",
           "riskui::riskTierForFeature(riskui::RiskFeature::FrpClear)", false },
+        // W8-T5：preloader 安全修补的二次确认（**它不是按钮，是 MTK 刷写流程里的一个提问**）——
+        // 提问在 onFlashClicked 里，**闸门单独提成一个函数**：内联会让 onFlashClicked 出现两个闸门，
+        // 把上面那条"多一处 = 有人重复挂闸门"的判据变成不可判。
+        { "bool FlashPanel::confirmPreloaderPatch()",
+          "riskui::riskTierForFeature(riskui::RiskFeature::PreloaderPatch)", false },
     };
-    QCOMPARE(int(sizeof(rows) / sizeof(rows[0])), 14);   // 表本身受检：少一行就少钉一个入口
+    QCOMPARE(int(sizeof(rows) / sizeof(rows[0])), 15);   // 表本身受检：少一行就少钉一个入口
 
-    // 两组的**条数**也钉住（复审要求的两组拆表：11 模式取档 + 3 功能取档）——
+    // 两组的**条数**也钉住（复审要求的两组拆表：11 模式取档 + 4 功能取档；W8-T5 前是 11 + 3）——
     // 只按行内 flag 判会被"整行挪组"骗过：把 unlock 那行写成 byMode=true 时，下面 region 里
     // 既没有 riskTierForMode( 也没有 m_deviceInfo.mode，仍会红；但反过来把某个模式取档的行
     // 误标 byMode=false 就少钉一处。条数是这张表的形状，必须显式。
@@ -191,7 +200,7 @@ void TestRiskGateWiring::flashPanelGatesAllFourteenHandlers()
     for (const GateRow &row : rows)
         (row.byMode ? byModeCount : byFeatureCount) += 1;
     QCOMPARE(byModeCount, 11);
-    QCOMPARE(byFeatureCount, 3);
+    QCOMPARE(byFeatureCount, 4);   // W8-T5 起 +1（preloader 安全修补）
 
     for (const GateRow &row : rows) {
         const QString signature = QString::fromUtf8(row.signature);

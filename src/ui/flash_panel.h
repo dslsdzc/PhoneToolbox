@@ -71,6 +71,16 @@ private slots:
     bool ensureEDLConnected();
     bool ensureMTKConnected();
 
+    // W8-T5：preloader 安全修补的 **Tier 3 二次确认入口** —— **闸门即本函数全部内容**。
+    // 提问留在 `onFlashClicked` 的 MTK 分支里（与同分支其它提问同款；用户答"是"才调本函数）。
+    // 之所以单独成一个函数：接线钉按「每个入口一个闸门 + **闸门必须是函数体第一件事**」判
+    // （`tests/test_risk_gate_wiring.cpp`）—— 把闸门内联进 onFlashClicked 会让那个入口出现两个闸门，
+    // 而"多一处"正是那条钉要抓的信号。
+    // **不把提问也放进本函数**：那样闸门就跑到提问之后了（第 17 行），违反"闸门第一件事"——
+    // 而现在需要它的理由只是"提问不是动作"，不值得为迁就规则去把 UX 顺序倒过来
+    //（先让用户确认一件他还没选择要做的事）。
+    bool confirmPreloaderPatch();
+
     // 固件验证
     QString validateFirmwareDirectory(const QString &dir);
 

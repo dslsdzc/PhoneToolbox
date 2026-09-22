@@ -55,8 +55,9 @@ const char *const kModeNames[] = {
 static_assert(sizeof(kModeNames) / sizeof(kModeNames[0]) == sizeof(kExpected) / sizeof(kExpected[0]),
               "kModeNames 与 kExpected 必须等长（否则失败信息会把模式名张冠李戴）");
 
-// RiskFeature 全项（16 项，**顺序 = 枚举声明顺序**）：期望档位逐项手写。
-// 分组依枚举注释：前 9 项写操作 → Tier2Boot；后 7 项诊断/绕过 → Tier3Diagnostic。
+// RiskFeature 全项（17 项，**顺序 = 枚举声明顺序**）：期望档位逐项手写。
+// 分组依枚举注释：前 9 项写操作 → Tier2Boot；后 8 项诊断/绕过 → Tier3Diagnostic
+// （W8-T5 起 16→17：新增 PreloaderPatch，属「削弱安全机制」族）。
 // （W2-T5 复审裁决新增 4 项：SystemPartitionWrite / AppUninstall / SelinuxMode / DeviceSpoof ——
 //   登记表漏项在这里红，这是本文件的核心机制。）
 struct FeatureRow {
@@ -82,9 +83,11 @@ const FeatureRow kFeatures[] = {
     {riskui::RiskFeature::ImeiTool,       "ImeiTool",       riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::SelinuxMode,    "SelinuxMode",    riskui::RiskTier::Tier3Diagnostic},
     {riskui::RiskFeature::DeviceSpoof,    "DeviceSpoof",    riskui::RiskTier::Tier3Diagnostic},
+    // W8-T5：preloader 安全修补 —— 改的是「设备将来还信不信校验」，与 SelinuxMode 同族（Tier 3）。
+    {riskui::RiskFeature::PreloaderPatch, "PreloaderPatch", riskui::RiskTier::Tier3Diagnostic},
 };
 constexpr int kFeatureCount = int(sizeof(kFeatures) / sizeof(kFeatures[0]));
-static_assert(kFeatureCount == 16, "RiskFeature 全项表必须覆盖 16 项");
+static_assert(kFeatureCount == 17, "RiskFeature 全项表必须覆盖 17 项");
 
 // RiskTier 的数值：None/Tier2Boot/Tier3Diagnostic = 0/2/3（1 留给了首屏「使用须知」）。
 // 数值本身不参与运行时逻辑（ConsentStore 用显式 key），钉住是为了让这套编号语义不被悄悄改动
@@ -128,7 +131,7 @@ private slots:
         }
     }
 
-    // 功能入口逐项：写操作 9 项 → Tier2Boot；诊断/绕过 7 项 → Tier3Diagnostic。
+    // 功能入口逐项：写操作 9 项 → Tier2Boot；诊断/绕过 8 项 → Tier3Diagnostic（W8-T5 起 +1）。
     // 变异⑤（留档）：把 EngineerMode 改成 Tier2Boot → 本槽对应项变红。
     void riskTierForFeatureMatchesEveryItem()
     {

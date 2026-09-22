@@ -603,7 +603,7 @@ bool bootToDa2Legacy(BromSession &s, const DaSelection &sel, QString *error)
     return true;
 }
 
-bool patchPreloaderSecurity(QByteArray &preloader)
+bool patchPreloaderSecurity(QByteArray &preloader, QStringList *applied)
 {
     // SBC 修补字节模式（GPLv3 子模块来源标注；规格 §2.3 SBC 位背景，§4.2 历史绕过路径）：
     // ram blacklist / seclib_sec_usbdl_enabled / Patched loader msg / sec_img_auth /
@@ -616,15 +616,23 @@ bool patchPreloaderSecurity(QByteArray &preloader)
         {"F0B58BB002AE20250C460746", "002070470000000000205374617274", "sec_img_auth"},
         {"FFC0F3400008BD", "FF4FF0000008BD", "get_vfy_policy"},
     };
+    if (applied)
+        applied->clear();          // 出参入口清空（不残留上一次调用 —— 见 mtk_payload.h 的契约）
     bool any = false;
     for (const Patch &p : kPatches) {
         const QByteArray from = QByteArray::fromHex(p.hexFrom);
         const QByteArray to = QByteArray::fromHex(p.hexTo);
         int idx = 0;
+        bool hitThisPattern = false;
         while ((idx = preloader.indexOf(from, idx)) != -1) {
             preloader.replace(idx, from.size(), to);
             any = true;
+            hitThisPattern = true;
         }
+        // **每个模式至多记一条**（与它在镜像里出现几次无关）：调用方要的是"改了哪几条规则"，
+        // 不是"改了多少处"——后者随固件大小变化，不是一个能钉住的量。
+        if (hitThisPattern && applied)
+            applied->append(QString::fromLatin1(p.name));
     }
     return any;
 }
@@ -962,6 +970,34 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         return false;
     for (const QString &line : std::as_const(pre.log))
         say(line);
+
+    // W8-T5：preloader 安全修补（**显式选项、默认关**，见 `PreloaderOptions::patchSecurity`）。
+    // 施加点选在**消费侧**：fetch 的职责是"拿到字节"，打补丁是拿它的人的决定。
+    // **门控不在这里** —— 本层拿不到 QWidget；Tier 3 二次确认由调用方（FlashPanel）在用户
+    // opt-in 的那一刻做（`RiskFeature::PreloaderPatch`），这里只按选项执行。
+    if (req.preloader.patchSecurity) {
+        if (pre.bytes.isEmpty()) {
+            warn(QStringLiteral("preloader 安全修补：已开启，但本次没有可用的 preloader 字节 —— "
+                                "**未做任何修补**%1")
+                     .arg(pre.skipReason.isEmpty()
+                              ? QString()
+                              : QStringLiteral("（%1）").arg(pre.skipReason)));
+        } else {
+            QStringList applied;   // 出参在入口清空（契约见 mtk_payload.h）
+            const bool any = patchPreloaderSecurity(pre.bytes, &applied);
+            if (any) {
+                say(QStringLiteral("preloader 安全修补：已改写 %1 个字节模式 —— %2")
+                        .arg(applied.size())
+                        .arg(applied.join(QStringLiteral(" / "))));
+            } else {
+                // **未命中 ≠ 成功**：可能这个 preloader 本就没有可改的分支（已是修补版 / 格式不符）。
+                // 如实告警，绝不静默当成功 —— 口径见 spec §3.7 的验收。
+                warn(QStringLiteral("preloader 安全修补：**未命中任何已知模式** —— 该 preloader "
+                                    "**未被改动**（5 个模式一个都没匹配上；这不是成功，"
+                                    "请自行确认目标是否已是修补版或格式不符）"));
+            }
+        }
+    }
 
     QStringList bringLog;
     XFlashSession xflash(session.usb(), chip->dacode);   // 通道未打开也能构造（只存指针/码）

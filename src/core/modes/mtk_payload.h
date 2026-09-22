@@ -213,7 +213,12 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
 
 // SBC 修补：preloader 字节模式替换（GPLv3 子模块来源标注，5 个核心模式）。
 // 返回是否发生任何替换；不匹配时原样返回。
-bool patchPreloaderSecurity(QByteArray &preloader);
+//
+// W8-T5 起加了 `applied` 出参（**默认 nullptr ⇒ 既有调用与 5 个模式的行为一字未变**）：
+// 非空时按 kPatches 的顺序填入**命中的模式名**（每个模式至多一条，与它出现几次无关），
+// 供调用方"点名命中了哪些"。**入口清空**（与 `DaSelection`/`writeExtractedDAs` 同款约定：
+// 出参不残留上一次调用的结果）。
+bool patchPreloaderSecurity(QByteArray &preloader, QStringList *applied = nullptr);
 
 // 刷写分区：listPartitions 查名 → emmcWrite(分区偏移, 镜像)。未找到返回明确错误。
 // ⚠️ **当前仅测试使用**（全仓调用点只有 tests/test_mtk_payload.cpp 两处）：生产的逐分区写

@@ -306,6 +306,10 @@ class TestMtkPayload : public QObject {
 private slots:
     void patchPreloaderSecurityReplacesPatterns();
     void patchPreloaderSecurityNoMatchReturnsFalse();
+    // W8-T5：出参点名命中的模式（含"入口清空"与"默认实参不破坏既有调用"）
+    void patchPreloaderSecurityReportsAppliedPatternNames();
+    // W8-T5：链路接线 —— **显式、默认关**；开启点名；**未命中不是成功**（如实告警）
+    void patchPreloaderSecurityOptionIsExplicitAndDefaultOff();
     void sendDa1SlaFails();
     void flashPartitionWritesAtPartitionOffset();
     void flashPartitionUnknownNameFails();
@@ -391,6 +395,104 @@ void TestMtkPayload::patchPreloaderSecurityNoMatchReturnsFalse()
     QByteArray pl = QByteArray::fromHex("DEADBEEF");
     QVERIFY(!mtkbrom::patchPreloaderSecurity(pl));
     QCOMPARE(pl, QByteArray::fromHex("DEADBEEF")); // 不变
+}
+
+// W8-T5：出参 `applied` —— 点名**命中了哪些模式**（供上层如实告知用户"改了什么"）。
+void TestMtkPayload::patchPreloaderSecurityReportsAppliedPatternNames()
+{
+    // 两个模式相邻放：第一个替换是**等长**的（6→6），不影响第二个的偏移。
+    QByteArray pl = QByteArray::fromHex("10B50C680268");     // ram blacklist
+    pl += QByteArray::fromHex("FFC0F3400008BD");             // get_vfy_policy
+    pl += QByteArray(8, '\x33');
+
+    QStringList applied;
+    applied << QStringLiteral("上一次调用的残留");            // 先塞脏值：**入口必须清空**（出参契约）
+    QVERIFY(mtkbrom::patchPreloaderSecurity(pl, &applied));
+    QCOMPARE(applied.size(), 2);
+    // 顺序 = kPatches 声明顺序（ram blacklist 在前、get_vfy_policy 在后），不是"出现顺序"
+    QCOMPARE(applied.at(0), QStringLiteral("ram blacklist"));
+    QCOMPARE(applied.at(1), QStringLiteral("get_vfy_policy"));
+
+    // 未命中：出参被清空（不留脏值）且返回 false —— 与既有语义一致
+    QByteArray none = QByteArray::fromHex("DEADBEEF");
+    QStringList applied2;
+    applied2 << QStringLiteral("残留");
+    QVERIFY(!mtkbrom::patchPreloaderSecurity(none, &applied2));
+    QVERIFY2(applied2.isEmpty(), "未命中时出参必须是空的（不能残留上一次的名字）");
+
+    // **默认实参**：不传出参照样可用（既有调用点/既有用例一字未改就能编）
+    QByteArray pl2 = QByteArray::fromHex("10B50C680268");
+    QVERIFY(mtkbrom::patchPreloaderSecurity(pl2));
+    QCOMPARE(pl2, QByteArray::fromHex("10B5012010BD"));
+}
+
+// W8-T5：链路接线。三级状态各有可观测证据 ——
+//   * 默认关   ⇒ 日志里**一个字都不提**修补（变异：把"只在开启时执行"改成无条件执行 ⇒ 本断言红）；
+//   * 开且命中 ⇒ 点名模式（含"已改写 N 个字节模式"）；
+//   * 开且未命中 ⇒ **如实告警**（"未命中任何已知模式"），且**不影响本次刷写成败**（它不是失败）。
+// 观察量取日志而非上行字节：本夹具 errorcode == 0 ⇒ 不发 0xE8、preloader 不上行，
+// "字节有没有被改"在这条链路上不可观测（见 chainAndFlashReads 的说明）。
+void TestMtkPayload::patchPreloaderSecurityOptionIsExplicitAndDefaultOff()
+{
+    mtkbrom::DaSelection sel;
+    QString err;
+    QVERIFY2(mtktest::makeSelection(kFlashHwCode, sel, &err), qPrintable(err));
+
+    const QByteArray kHit  = QByteArray::fromHex("10B50C680268") + QByteArray(16, '\x11'); // 含 ram blacklist
+    const QByteArray kMiss = QByteArray(16, '\x22');                                       // 不含任何模式
+
+    // 每条腿一整趟：临时目录里放 preloader（走"显式路径"分支，不碰网络）+ 一个镜像 + 完整读序列。
+    auto runChain = [&](bool patchOn, const QByteArray &preloader) {
+        SessionCapture cap;
+        bool ok = false;
+        QTemporaryDir dir;
+        if (!dir.isValid())
+            return std::make_pair(ok, cap);
+        const QString plPath  = writeTempImage(dir, QStringLiteral("preloader.bin"), preloader);
+        const QString imgPath = writeTempImage(dir, QStringLiteral("boot.img"), QByteArray("\xAB\xCD", 2));
+        if (plPath.isEmpty() || imgPath.isEmpty())
+            return std::make_pair(ok, cap);
+
+        auto usb = std::make_unique<MockUsbChannel>();
+        MockUsbChannel *m = usb.get();
+        mtkbrom::BromSession s(std::move(usb), mtkbrom::BromDevice{});
+        m->reads << fullSessionReads(sel, pmtEntry60(QByteArray("boot", 4), 0x10000, 0x1000));
+
+        mtkbrom::BromFlashRequest req;
+        req.daFile = daBytesForHw(kFlashHwCode);
+        req.daLabel = QStringLiteral("合成 DA");
+        req.imagePaths << imgPath;
+        req.preloader.explicitPath = plPath;      // ① 显式路径（默认关网络）
+        req.preloader.patchSecurity = patchOn;    // ← 本用例的被测开关
+
+        QString chainErr;
+        ok = mtkbrom::bromFlashOnSession(s, req, cap.logFn(), cap.progressFn(), &chainErr);
+        if (!ok)
+            cap.lines << QStringLiteral("<链路失败：%1>").arg(chainErr);
+        return std::make_pair(ok, cap);
+    };
+
+    const QString kTag = QStringLiteral("preloader 安全修补");
+
+    // ① 默认关：不出现任何修补日志（"没有消息"本身就是证据 —— 打开时必然落一条）
+    const auto off = runChain(false, kHit);
+    QVERIFY2(off.first, qPrintable(off.second.joined()));
+    QVERIFY2(!off.second.joined().contains(kTag),
+             qPrintable(QStringLiteral("默认关时不该出现修补日志：\n%1").arg(off.second.joined())));
+
+    // ② 开 + 命中：点名模式
+    const auto onHit = runChain(true, kHit);
+    QVERIFY2(onHit.first, qPrintable(onHit.second.joined()));
+    QVERIFY2(onHit.second.joined().contains(QStringLiteral("已改写 1 个字节模式")),
+             qPrintable(onHit.second.joined()));
+    QVERIFY2(onHit.second.joined().contains(QStringLiteral("ram blacklist")),
+             qPrintable(onHit.second.joined()));
+
+    // ③ 开 + 未命中：**告警但不算失败**（流程仍成功 —— 没有可改的分支不是错误）
+    const auto onMiss = runChain(true, kMiss);
+    QVERIFY2(onMiss.first, qPrintable(onMiss.second.joined()));
+    QVERIFY2(onMiss.second.joined().contains(QStringLiteral("未命中任何已知模式")),
+             qPrintable(onMiss.second.joined()));
 }
 
 // 原 sendPayloadFrames（addr=0/sigLen=0 的旧帧）已被 sendDa1UsesRegion1AddressAndSigLen 取代 ——

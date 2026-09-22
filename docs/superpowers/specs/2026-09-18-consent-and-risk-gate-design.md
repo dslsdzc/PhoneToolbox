@@ -72,7 +72,7 @@ PhoneToolbox 是一个**面向设备所有者与维修人员**的 Android 设备
 |---|---|---|---|
 | 1 | 使用须知 | 全部（首屏） | 启动时（未接受过该版本 → 弹窗阻断，未接受则退出程序） |
 | 2 | 底层引导与写操作 | EDL（oppo-edl）/ MTK BROM / 展锐 / 华为 USB Update / 三星 Odin / **EUB 救援** / 死砖修复 / FRP 清除 / Fastboot 分区刷写·擦除·格式化 / fastboot update / Sideload / ADB Root 刷入 / Bootloader 解锁·回锁 / MTK 解锁·回锁 / 内存转储 / 运行刷机脚本 / **系统分区改写（remount rw / umount / 改 build.prop / 换开机动画）/ 应用卸载（pm uninstall）** | 该版本首次进入任一项时 |
-| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 / **SELinux 模式切换（setenforce）** | 该版本首次进入任一项时 |
+| 3 | 诊断与安全研究 | 漏洞扫描与利用面板（**exploit 脚本可执行**）/ 工程模式入口 / SafetyNet 绕过检测 / 签名伪造支持检测 / 设备信息伪造指南 / IMEI 相关入口 / **SELinux 模式切换（setenforce）** / **preloader 安全修补（W8-T5，「调用方不改设备存储、但削弱设备将来的校验」—— 与 SELinux 同族故归本档）** | 该版本首次进入任一项时 |
 
 > **2026-09-20 复审裁决补登（W2-T5 复审 ②）**：首版接线只覆盖了系统工具面板里的**检测类**入口，
 > 把"**真改设备状态**"的入口漏在外面（`setenforce 0` 削弱 SELinux、remount rw 把 /system 置为可写、
@@ -147,7 +147,7 @@ public:
 | `FlashPanel::onFlashClicked`（分派前） | `riskTierForMode(mode)` ≠ None 且该 tier 未接受 → `RiskConfirmDialog`；拒绝则**不发起任何操作**（静默返回，与"用户取消"同口径） |
 | `EubRecoveryDialog::onStart`（发送前） | 同上（EUB 的 tier 由 `riskTierForMode(MODE_SAMSUNG_EUB)` 给） |
 | `SystemToolPanel` 的 10 个入口（伪造设备信息 / SafetyNet / 签名伪造 / 工程模式 / SELinux 切换 / 挂载·卸载 /system / 编辑 build.prop / 换开机动画 / 卸载应用） | `riskTierForFeature(...)` 同上 |
-| `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 | `riskTierForFeature(Unlock / Unlock / FrpClear)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
+| `FlashPanel` 的解锁 / 回锁 / FRP 3 个入口 + **preloader 安全修补（W8-T5）** | `riskTierForFeature(Unlock / Unlock / FrpClear)` —— 这三个按钮**不由模式分支启用**，按模式取档在 `MODE_UNKNOWN` 上会给 `None`（W2-T5 复审 Low-1(b)） |
 | `VulnPanel` 的"批量利用/单条利用/批量扫描" | `riskTierForFeature(RiskFeature::VulnExploit)` 同上（**扫描**也纳入：它出自 exploit DB） |
 
 **共同形态**（沿用仓内既有"未验证勾选门控"）：对话框展示 `tierWarnings()` + 完整协议入口（可展开/滚动）

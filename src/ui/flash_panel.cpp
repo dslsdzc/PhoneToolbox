@@ -888,6 +888,19 @@ void FlashPanel::onFlashClicked()
                 allowNetwork = (net == QMessageBox::Yes);
             }
 
+            // W8-T5：preloader 安全修补 —— **先问（默认否），选「是」再过 Tier 3 二次确认**。
+            // 顺序是"先 opt-in、后确认"：确认框针对的是用户**刚表达的意图**，而不是替他预设；
+            // 反过来的话，从不打补丁的用户也会先被问一次风险。
+            // 放在 preloader/网络两个提问**之后**：此时才知道"这次到底有没有 preloader 字节可打"。
+            const QMessageBox::StandardButton wantPatch = QMessageBox::question(
+                this, QStringLiteral("preloader 安全修补"),
+                QStringLiteral("是否对 preloader 打安全补丁？（改写镜像内的若干校验分支）\n\n"
+                               "默认否。开启后会在上传前按已知模式改写 preloader 字节 —— 这是"
+                               "**削弱设备安全机制**的操作，属「诊断与安全研究」档；只可在你自己的设备上使用。\n"
+                               "未命中任何已知模式时会**如实告警**（不会静默当成功）。"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            const bool patchPreloader = (wantPatch == QMessageBox::Yes) && confirmPreloaderPatch();
+
             // 预览：镜像文件名 → 目标分区（scatter 是参照表，不是判据）→ 计划不可用/用户取消都在这里收口
             mtkplan::MtkFlashPlan plan;
             QString planErr;
@@ -910,6 +923,10 @@ void FlashPanel::onFlashClicked()
                 params.insert(QStringLiteral("firmwareDirs"), firmwareDirs);
             if (allowNetwork)
                 params.insert(QStringLiteral("allowNetworkPreloader"), true);
+            // W8-T5：**只在用户真的 opt-in（且过了 Tier 3）时**才写这个键 —— 缺省即"不打补丁"，
+            // 与 `allowNetworkPreloader` 同款（非默认态才落键，FlashTool 侧 `.toBool()` 缺省 false）。
+            if (patchPreloader)
+                params.insert(QStringLiteral("patchPreloaderSecurity"), true);
         } else if (channel == QStringLiteral("samsung-odin")) {
             // Phase C：选包 → 计划预览（含两类不匹配告警 + 未验证勾选）→ 确认后把**文件列表**
             // 交给通道（通道内自行解析 PIT 并重建计划 —— 与 oppo-edl 通道传 planDir 同款口径）
@@ -1839,6 +1856,14 @@ bool FlashPanel::ensureMTKConnected()
 
     emit outputMessage("MTK 连接失败", true);
     return false;
+}
+
+bool FlashPanel::confirmPreloaderPatch()
+{
+    // 为什么在 UI 层门控：**修补是"削弱安全机制"族**（改写 preloader 内的校验分支），按 W2 的
+    // 界线（spec §3）属 **Tier 3**；而核心层拿不到 QWidget，这一次确认只能在 UI 侧收。
+    // 拒答/关窗 ⇒ false（静默返回，与"用户取消"同口径：不发起任何设备动作，也不把键写进 params）。
+    return riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::PreloaderPatch));
 }
 
 QString FlashPanel::validateFirmwareDirectory(const QString &dir)
