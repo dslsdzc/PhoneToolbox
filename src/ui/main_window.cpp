@@ -2,9 +2,11 @@
 #include "core/adb_embedded.h"
 #include "core/resource_monitor.h"
 #include "plugins/plugin_manager.h"
+#include "ui/settings_panel.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -19,15 +21,29 @@ MainWindow::MainWindow(QWidget *parent)
     , m_vulnPanel(nullptr)
     , m_imageToolPanel(nullptr)
     , m_pluginPanel(nullptr)
+    , m_settingsPanel(nullptr)
     , m_outputPanel(nullptr)
 {
     setupUI();
     setupConnections();
 
-    // F2-P：插件系统 — 启动时扫描并加载插件（华为刷写 .so 等），
-    // 加载失败仅记录到输出面板，不阻断启动
-    PluginManager::instance().scanPlugins(QCoreApplication::applicationDirPath() + "/plugins");
-    m_pluginPanel->setPlugins(PluginManager::instance().plugins());
+    // F2-P：插件系统 — 启动时扫描并加载插件（华为刷写 .so 等）。
+    // 搜索顺序：环境变量（调试/绿色版）→ exe 同目录 plugins（Windows / 构建树）
+    // → Linux 安装前缀下的 lib/phonetoolbox/plugins。
+    // 加载失败不再只写日志：PluginToolPanel 会逐项显示"加载失败 + 原因"。
+    const QStringList pluginDirs = {
+        qEnvironmentVariable("PHONETOOLBOX_PLUGIN_DIR"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/plugins"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../lib/phonetoolbox/plugins"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../lib64/phonetoolbox/plugins"),
+    };
+    for (const QString &dir : pluginDirs) {
+        if (dir.isEmpty() || !QDir(dir).exists())
+            continue;
+        PluginManager::instance().scanPlugins(dir);
+        break;
+    }
+    m_pluginPanel->setRecords(PluginManager::instance().records());
     const QStringList pluginErrors = PluginManager::instance().loadErrors();
     for (const QString &err : pluginErrors)
         m_outputPanel->appendOutput(err, true);
@@ -72,6 +88,7 @@ void MainWindow::setupUI()
     m_vulnPanel = new VulnPanel(this);
     m_imageToolPanel = new ImageToolPanel(this);
     m_pluginPanel = new PluginToolPanel(this);
+    m_settingsPanel = new SettingsPanel(this);
     m_outputPanel = new OutputPanel(this);
 
     // stack: index 0 = device info, index 1 = flash panel, index 2 = system tools,
@@ -83,6 +100,7 @@ void MainWindow::setupUI()
     m_stack->addWidget(m_vulnPanel);
     m_stack->addWidget(m_imageToolPanel);
     m_stack->addWidget(m_pluginPanel);
+    m_stack->addWidget(m_settingsPanel);
     m_stack->setCurrentIndex(0);
 
     m_rightSplitter->addWidget(m_stack);
@@ -109,6 +127,8 @@ void MainWindow::setupConnections()
             this, &MainWindow::onDeviceDisconnected);
     connect(&m_deviceDetector, &DeviceDetector::deviceModeChanged,
             this, &MainWindow::onDeviceModeChanged);
+    connect(&m_deviceDetector, &DeviceDetector::deviceInfoUpdated,
+            this, &MainWindow::onDeviceInfoUpdated);
 
     // tool panel signals
     connect(m_toolPanel, &ToolPanel::deviceSelectionChanged,
@@ -128,6 +148,12 @@ void MainWindow::setupConnections()
     connect(m_flashPanel, &FlashPanel::switchToDeviceInfo, this, [this]() {
         m_toolPanel->selectToolByIndex(0);
     });
+
+    // settings panel -> output / root agent state
+    connect(m_settingsPanel, &SettingsPanel::outputMessage,
+            this, &MainWindow::onOutputMessage);
+    connect(m_settingsPanel, &SettingsPanel::rootAgentStateChanged,
+            this, &MainWindow::onRootAgentStateChanged);
 
     // system tool panel -> output
     connect(m_systemToolPanel, &SystemToolPanel::outputMessage,
@@ -156,15 +182,20 @@ void MainWindow::setupConnections()
         m_toolPanel->selectToolByIndex(0);
     });
 
-    // plugin panel -> output
-    connect(m_pluginPanel, &PluginToolPanel::outputMessage,
-            this, &MainWindow::onOutputMessage);
 }
 
 void MainWindow::onDeviceConnected(const DeviceInfo &info)
 {
-    m_currentDevices[info.serialNumber] = info;
+    // 设备轮询会重新构造 DeviceInfo，保留 Root 代理通道状态，
+    // 否则连接状态会在下一次刷新时被清掉。
+    const DeviceInfo previous = m_currentDevices.value(info.serialNumber);
+    DeviceInfo merged = info;
+    merged.rootAgentConnected = previous.rootAgentConnected;
+    merged.rootAgentRoot = previous.rootAgentRoot;
+    m_currentDevices[info.serialNumber] = merged;
     m_toolPanel->updateDeviceList(m_currentDevices);
+    m_vulnPanel->setDevices(m_currentDevices);
+    m_settingsPanel->setDevices(m_currentDevices);
 
     QString modeStr;
     switch (info.mode) {
@@ -188,6 +219,8 @@ void MainWindow::onDeviceDisconnected(const QString &serial)
         m_outputPanel->appendOutput(QString("Device disconnected: %1").arg(serial));
         m_currentDevices.remove(serial);
         m_toolPanel->updateDeviceList(m_currentDevices);
+        m_vulnPanel->setDevices(m_currentDevices);
+        m_settingsPanel->setDevices(m_currentDevices);
 
         if (m_stack->currentIndex() == 1) {
             m_flashPanel->clearDeviceInfo();
@@ -197,11 +230,50 @@ void MainWindow::onDeviceDisconnected(const QString &serial)
     }
 }
 
+void MainWindow::onDeviceInfoUpdated(const DeviceInfo &info)
+{
+    if (!m_currentDevices.contains(info.serialNumber))
+        return;
+
+    // 后台线程只发一次“信息变化”；这里做最终的 UI 更新。
+    // 不重建设备列表，避免选中项和设备详情页被清空。
+    const DeviceInfo previous = m_currentDevices.value(info.serialNumber);
+    DeviceInfo merged = info;
+    merged.rootAgentConnected = previous.rootAgentConnected;
+    merged.rootAgentRoot = previous.rootAgentRoot;
+    m_currentDevices[info.serialNumber] = merged;
+
+    if (m_toolPanel->getSelectedDevice() == info.serialNumber)
+        updateCurrentDeviceInfo();
+}
+
+void MainWindow::onRootAgentStateChanged(const QString &serial, bool connected,
+                                         bool isRoot)
+{
+    if (!m_currentDevices.contains(serial))
+        return;
+
+    DeviceInfo &info = m_currentDevices[serial];
+    info.rootAgentConnected = connected;
+    info.rootAgentRoot = isRoot;
+
+    m_outputPanel->appendOutput(
+        QString("Root agent: %1 %2")
+            .arg(serial, !connected ? QStringLiteral("disconnected")
+                                    : (isRoot ? QStringLiteral("uid=0")
+                                              : QStringLiteral("connected"))));
+
+    if (m_toolPanel->getSelectedDevice() == serial)
+        updateCurrentDeviceInfo();
+}
+
 void MainWindow::onDeviceModeChanged(const QString &serial, DeviceDetector::DeviceMode newMode)
 {
     if (m_currentDevices.contains(serial)) {
         m_currentDevices[serial].mode = newMode;
         m_toolPanel->updateDeviceList(m_currentDevices);
+        m_vulnPanel->setDevices(m_currentDevices);
+        m_settingsPanel->setDevices(m_currentDevices);
 
         QString modeStr;
         switch (newMode) {
@@ -269,6 +341,8 @@ void MainWindow::onToolSelected(int index)
         } else {
             m_vulnPanel->clearDeviceInfo();
         }
+    } else if (index == 6) {
+        m_settingsPanel->setDevices(m_currentDevices);
     }
     m_stack->setCurrentIndex(index);
 }

@@ -115,4 +115,4 @@ pacman -S qt6-base qt6-tools cmake ninja pkg-config
 - AUTOMOC enabled — Q_OBJECT classes auto-handled
 - Member variables prefixed `m_`
 - UI panels emit `outputMessage(QString, bool isError)` and `switchToDeviceInfo()` signals
-- No unit tests yet
+- Tests: `ctest --output-on-failure` in `build/`; agent tests in `agent/build/`

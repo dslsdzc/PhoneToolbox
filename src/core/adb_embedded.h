@@ -15,6 +15,9 @@ public:
 
     bool initialize();
     QString executeCommand(const QString &command, int timeout = 30000);
+    // 参数列表版本：避免把 shell 命令先拼串再 split —— getprop 整包 dump 等
+    // 需要保留参数边界（H2）。
+    QString executeCommand(const QStringList &arguments, int timeout = 30000);
     QString getDeviceInfo(const QString &serial, const QString &prop);
 
     QString getAdbPath() const;

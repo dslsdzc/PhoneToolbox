@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- agent 只监听 127.0.0.1；INTERNET 是 Java socket 的最低要求。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Provider 的应用列表需要看到全部已安装应用（Android 11+ 包可见性）。 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- HyperOS/MIUI 13+ 额外的“获取应用列表”运行时权限；需用户允许或 pm grant。 -->
+    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
+
+    <application
+        android:label="@string/app_name"
+        android:extractNativeLibs="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 桌面端通过 am broadcast 在后台拉起 agent，不显示 Activity。 -->
+        <receiver
+            android:name=".AgentBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.local.service.START_AGENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 只对 adb shell/root 开放（Provider 内部检查 calling uid）。 -->
+        <provider
+            android:name=".AgentInfoProvider"
+            android:authorities="${applicationId}.agentinfo"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>

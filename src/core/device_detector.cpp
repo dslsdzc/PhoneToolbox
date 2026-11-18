@@ -1,5 +1,6 @@
 #include "device_detector.h"
 #include "adb_embedded.h"
+#include "device_io_busy.h"
 #include "modes/edl_9008.h"
 #include "core/odin/odin_libusb_transport.h"
 #include "core/eub/samsung_mode.h"
@@ -9,15 +10,66 @@
 #include <QProcess>
 #include <QStringList>
 #include <QDebug>
+#include <QDateTime>
 #include <QTimer>
 #include <QThread>
+#include <QScopeGuard>
 #include <QRegularExpression>
+
+namespace {
+
+// `adb shell getprop` 的标准输出：[key]: [value]
+bool parsePropDump(const QString &dump, QMap<QString, QString> &props)
+{
+    static const QRegularExpression re(QStringLiteral("^\\[([^\\]]+)\\]: \\[(.*)\\]$"));
+    int hits = 0;
+    const QStringList lines = dump.split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const QRegularExpressionMatch match = re.match(line.trimmed());
+        if (!match.hasMatch())
+            continue;
+        props.insert(match.captured(1), match.captured(2));
+        ++hits;
+    }
+    return hits > 0;
+}
+
+// adb 失败时返回 "Error..."；空输出历史上曾被返回成 "Success"。
+// 这两类都不是设备数据，不能原样塞进界面（否则会显示成
+// "Error: Command timeout 核心" / "Success%" 这种用户看不懂的东西）。
+QString cleanCommandOutput(const QString &raw)
+{
+    const QString text = raw.trimmed();
+    if (text.startsWith(QStringLiteral("Error")))
+        return QString();
+    if (text == QStringLiteral("Success"))
+        return QString();
+    return text;
+}
+
+QString readAdbBatteryLevel(const QString &deviceId)
+{
+    const QString raw = AdbEmbedded::instance().executeCommand(
+        QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId),
+        5000);
+    const QString output = cleanCommandOutput(raw);
+    if (output.isEmpty())
+        return QString();
+    const QString value = output.split(QLatin1Char(':')).value(1).trimmed();
+    return value.isEmpty() ? QString() : value + QStringLiteral("%");
+}
+
+} // namespace
 
 DeviceDetector::DeviceDetector(QObject *parent)
     : QObject(parent)
     , m_monitorTimer(new QTimer(this))
     , m_edlDetector(new EDL9008(this))
 {
+    // 探测搬到工作线程后，设备信号是跨线程投递的 —— 参数类型必须注册。
+    qRegisterMetaType<DeviceInfo>("DeviceInfo");
+    qRegisterMetaType<DeviceDetector::DeviceMode>("DeviceDetector::DeviceMode");
+
     m_monitorTimer->setInterval(2000);
     connect(m_monitorTimer, SIGNAL(timeout()), this, SLOT(checkDevices()));
 
@@ -31,7 +83,25 @@ DeviceDetector::DeviceDetector(QObject *parent)
 
 DeviceDetector::~DeviceDetector()
 {
-    stopMonitoring();
+    if (!m_thread)
+        return; // 从未启动：对象与 timer / EDL 探测器都在主线程，正常析构
+
+    if (m_thread->isRunning()) {
+        QThread *const ownerThread = QThread::currentThread();
+        // 在工作线程里停 timer，并把对象（连同 m_monitorTimer / m_edlDetector）
+        // 一起移回调用线程。moveToThread 会移动 children；否则 ~QObject 会在主线程
+        // 删除仍属于工作线程的 QTimer/EDL 探测器，Qt 会报
+        // "Timers cannot be stopped from another thread"，也是未定义行为。
+        QMetaObject::invokeMethod(this, [this, ownerThread]() {
+            m_monitorTimer->stop();
+            moveToThread(ownerThread);
+        }, Qt::BlockingQueuedConnection);
+        m_thread->quit();
+        m_thread->wait();
+    }
+
+    delete m_thread;
+    m_thread = nullptr;
 }
 
 void DeviceDetector::startMonitoring()
@@ -41,19 +111,57 @@ void DeviceDetector::startMonitoring()
         qWarning() << "Failed to initialize ADB for device monitoring";
         return;
     }
-    
-    m_monitorTimer->start();
-    qDebug() << "Device monitoring started";
+
+    if (!m_thread) {
+        m_thread = new QThread();
+        m_thread->setObjectName(QStringLiteral("DeviceDetector"));
+        // 对象连同 timer / EDL 探测器整体搬进工作线程：探测链上的 adb、fastboot、
+        // libusb 调用全是阻塞式的，留在 UI 线程会周期性冻结界面（H2）。
+        moveToThread(m_thread);
+        m_thread->start();
+    }
+
+    QMetaObject::invokeMethod(this, [this]() {
+        m_monitorTimer->start();
+        checkDevices();
+    }, Qt::QueuedConnection);
+
+    qDebug() << "Device monitoring started (worker thread)";
 }
 
 void DeviceDetector::stopMonitoring()
 {
-    m_monitorTimer->stop();
     qDebug() << "Device monitoring stopped";
+
+    if (!m_thread || !m_thread->isRunning()) {
+        m_monitorTimer->stop();
+        return;
+    }
+    if (QThread::currentThread() == m_thread) {
+        m_monitorTimer->stop();
+        return;
+    }
+    // 等正在执行的一轮探测结束再停 timer —— 避免探测结果落在已销毁的接收者上。
+    QMetaObject::invokeMethod(this, [this]() { m_monitorTimer->stop(); },
+                              Qt::BlockingQueuedConnection);
+}
+
+void DeviceDetector::forceRefresh()
+{
+    if (!m_thread || !m_thread->isRunning()) {
+        checkDevices();
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this]() { checkDevices(); }, Qt::QueuedConnection);
 }
 
 void DeviceDetector::checkDevices()
 {
+    if (m_probing)
+        return; // 上一轮还没跑完：跳过本轮，不堆积
+    m_probing = true;
+    // 异常也不能把 m_probing 永久卡在 true（那会让设备检测从此停摆）。
+    const auto guard = qScopeGuard([this]() { m_probing = false; });
     detectConnectedDevices();
 }
 
@@ -67,7 +175,14 @@ void DeviceDetector::detectConnectedDevices()
         for (const QString &deviceId : fastbootDevices) {
             try {
                 DeviceMode mode = m_fastbootDeviceModes[deviceId] ? MODE_FASTBOOTD : MODE_FASTBOOT;
-                DeviceInfo info = getFastbootDeviceInfo(deviceId);
+                // 设备详情是静态的：只在首次出现或模式变化时采集，轮询只做轻量发现。
+                DeviceInfo info;
+                const auto cached = m_currentDevices.constFind(deviceId);
+                if (cached != m_currentDevices.constEnd() && cached->mode == mode) {
+                    info = cached.value();
+                } else {
+                    info = getFastbootDeviceInfo(deviceId);
+                }
                 info.mode = mode;
                 info.isFastbootdMode = (mode == MODE_FASTBOOTD);
                 newDevices[deviceId] = info;
@@ -99,7 +214,25 @@ void DeviceDetector::detectConnectedDevices()
     if (detectADBDevices(adbDevices)) {
         for (const QString &deviceId : adbDevices) {
             DeviceMode mode = MODE_ADB;
-            DeviceInfo info = getDeviceInfo(deviceId, mode);
+            // 同 fastboot：缓存命中时不再重跑 13 条 adb 命令；
+            // 但电池等会变化的字段每 5 秒轻量刷新一次。
+            DeviceInfo info;
+            const auto cached = m_currentDevices.constFind(deviceId);
+            if (cached != m_currentDevices.constEnd() && cached->mode == mode) {
+                info = cached.value();
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                if (now - m_dynamicRefreshAt.value(deviceId, 0) >= 5000) {
+                    m_dynamicRefreshAt[deviceId] = now;
+                    const QString oldBattery = info.batteryHealth;
+                    const QString battery = readAdbBatteryLevel(deviceId);
+                    if (!battery.isEmpty())
+                        info.batteryHealth = battery;
+                    if (info.batteryHealth != oldBattery)
+                        emit deviceInfoUpdated(info);
+                }
+            } else {
+                info = getDeviceInfo(deviceId, mode);
+            }
             info.mode = mode;
             
             newDevices[deviceId] = info;
@@ -117,12 +250,19 @@ void DeviceDetector::detectConnectedDevices()
         }
     }
     
-    // 检查断开的设备
+    // 检查断开的设备。
+    // 正在被写操作占用的设备（刷机/擦除/push）不因本轮没枚举到就报断开：
+    // 刷机重启、模式切换都会让设备短暂消失，过早发 disconnected 会清空面板。
+    // 保留原条目，等写操作结束后的下一轮再判。
     for (auto it = m_currentDevices.begin(); it != m_currentDevices.end(); ++it) {
-        if (!newDevices.contains(it.key())) {
-            emit deviceDisconnected(it.key());
-            qDebug() << "Device disconnected:" << it.key();
+        if (newDevices.contains(it.key()))
+            continue;
+        if (deviceio::isBusy(it.key())) {
+            newDevices.insert(it.key(), it.value());
+            continue;
         }
+        emit deviceDisconnected(it.key());
+        qDebug() << "Device disconnected:" << it.key();
     }
     
     m_currentDevices = newDevices;
@@ -130,21 +270,22 @@ void DeviceDetector::detectConnectedDevices()
 
 bool DeviceDetector::detectADBDevices(QStringList &devices)
 {
-    QString output = AdbEmbedded::instance().executeCommand("devices -l");
-    QStringList lines = output.split('\n', Qt::SkipEmptyParts);
-    
+    // 5s 足够：设备列表只是本地 adb server 查询。旧实现用默认 30s，
+    // adb server 卡住时会让关闭窗口/停止监控等上整整半分钟。
+    const QString output = AdbEmbedded::instance().executeCommand("devices -l", 5000);
+    const QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+
     for (const QString &line : lines) {
-        if (line.contains("device") && !line.startsWith("List")) {
-            QStringList parts = line.split(' ', Qt::SkipEmptyParts);
-            if (parts.size() >= 2) {
-                QString serial = parts[0];
-                if (!serial.isEmpty()) {
-                    devices.append(serial);
-                }
-            }
-        }
+        // 只认第二列恰好是 device 的行。旧实现用 contains("device")，
+        // 会把 unauthorized/offline 之外、但描述里带 device 字样的行也吞进来。
+        const QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 2 || parts.at(1) != QStringLiteral("device"))
+            continue;
+        const QString serial = parts.at(0);
+        if (!serial.isEmpty())
+            devices.append(serial);
     }
-    
+
     return !devices.isEmpty();
 }
 
@@ -190,48 +331,173 @@ DeviceInfo DeviceDetector::getDeviceInfo(const QString &deviceId, DeviceMode mod
     info.mode = mode;
     
     if (mode == MODE_ADB) {
-        // 使用ADB获取详细信息
-        info.manufacturer = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.product.manufacturer");
-        info.model = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.product.model");
-        info.deviceName = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.product.device");
-        info.androidVersion = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.release");
-        info.buildNumber = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.display.id");
-        
+        AdbEmbedded &adb = AdbEmbedded::instance();
+
+        // 一次 getprop dump 拿全部属性（旧实现每条属性一次进程，共 8 条）。
+        // dump 解析失败（异常输出/老设备）时回退到逐条查询，行为不回退。
+        QMap<QString, QString> propDump;
+        const QString dump = adb.executeCommand(
+            QStringList() << "-s" << deviceId << "shell" << "getprop", 10000);
+        const bool dumpFailed = dump.startsWith(QStringLiteral("Error"));
+        const bool haveDump = !dumpFailed && parsePropDump(dump, propDump);
+        const auto prop = [&](const char *key) -> QString {
+            if (haveDump)
+                return propDump.value(QString::fromLatin1(key)).trimmed();
+            if (dumpFailed)
+                return QString(); // 设备无响应：不再逐条重试（避免 8×超时雪崩）
+            // 逐属性回退只给单条 5s：宁可让字段空着，也不要在 UI 线程消失后
+            // 还让关闭窗口等上 8×30s。
+            return cleanCommandOutput(adb.executeCommand(
+                QStringList() << "-s" << deviceId << "shell" << "getprop"
+                              << QString::fromLatin1(key), 5000));
+        };
+
+        info.manufacturer = prop("ro.product.manufacturer");
+        info.model = prop("ro.product.model");
+        info.deviceName = prop("ro.product.device");
+        info.androidVersion = prop("ro.build.version.release");
+        info.buildNumber = prop("ro.build.display.id");
+
         // 获取Android SDK版本
-        info.sdkVersion = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.sdk");
+        info.sdkVersion = prop("ro.build.version.sdk");
 
         // 获取安全补丁级别
-        info.securityPatch = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.version.security_patch");
+        info.securityPatch = prop("ro.build.version.security_patch");
 
         // 获取构建指纹
-        info.buildFingerprint = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.build.fingerprint");
-        
-        // 检查Root状态（通过su -c id验证实际权限）
-        QString rootCheck = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell su -c id").arg(deviceId));
-        info.isRooted = rootCheck.contains("uid=0");
+        info.buildFingerprint = prop("ro.build.fingerprint");
+
+        // Bootloader 版本与解锁状态：ADB 模式下原本完全没采集，
+        // 详情页只能显示“未知”。ro.boot.verifiedbootstate 等属性不需要 root。
+        QString bootloaderVersion = prop("ro.bootloader");
+        if (bootloaderVersion.isEmpty()
+            || bootloaderVersion.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0) {
+            bootloaderVersion = prop("ro.boot.bootloader");
+        }
+        info.bootloaderVersion = bootloaderVersion;
+
+        const QString verifiedBoot =
+            prop("ro.boot.verifiedbootstate").toLower();
+        const QString flashLocked = prop("ro.boot.flash.locked");
+        const QString vbmetaState =
+            prop("ro.boot.vbmeta.device_state").toLower();
+        const QString secureBootLock =
+            prop("ro.secureboot.lockstate").toLower();
+
+        bool bootloaderKnown = false;
+        bool bootloaderUnlocked = false;
+        if (verifiedBoot == QStringLiteral("orange")
+            || verifiedBoot == QStringLiteral("yellow")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = true;
+        } else if (verifiedBoot == QStringLiteral("green")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = false;
+        } else if (flashLocked == QStringLiteral("0")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = true;
+        } else if (flashLocked == QStringLiteral("1")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = false;
+        } else if (vbmetaState == QStringLiteral("unlocked")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = true;
+        } else if (vbmetaState == QStringLiteral("locked")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = false;
+        } else if (secureBootLock == QStringLiteral("unlocked")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = true;
+        } else if (secureBootLock == QStringLiteral("locked")) {
+            bootloaderKnown = true;
+            bootloaderUnlocked = false;
+        }
+        info.isBootloaderStateKnown = bootloaderKnown;
+        info.isBootloaderUnlocked = bootloaderUnlocked;
+
+        // ── Root 检测（三态，别再把"装了 KernelSU 但 Shell 未授权"说成未 Root）──
+        // 1) adb root / shell 本身已经是 root
+        bool shellRoot = false;
+        const QString idOut = adb.executeCommand(
+            QStringList() << "-s" << deviceId << "shell" << "id", 3000);
+        if (idOut.contains(QStringLiteral("uid=0")))
+            shellRoot = true;
+
+        // 2) 实际提权判定：逐个尝试常见 su 路径与语法，只有返回 uid=0 才算 root。
+        //    **不拿"装了 KernelSU/Magisk"当判定依据** —— 那是方案痕迹，不是当前权限。
+        if (!shellRoot) {
+            // 先试最常见的直接形式（也便于假 adb 夹具精确匹配）。
+            const QString direct = adb.executeCommand(
+                QStringList() << "-s" << deviceId << "shell" << "su" << "-c" << "id",
+                2000);
+            if (direct.contains(QStringLiteral("uid=0")))
+                shellRoot = true;
+        }
+        if (!shellRoot) {
+            const QStringList suAttempts = {
+                QStringLiteral("su 0 id"),
+                QStringLiteral("su root -c id"),
+                QStringLiteral("/system/bin/su -c id"),
+                QStringLiteral("/system/xbin/su -c id"),
+                QStringLiteral("/sbin/su -c id"),
+                QStringLiteral("/debug_ramdisk/su -c id"),
+            };
+            for (const QString &command : suAttempts) {
+                // 2s：su 不存在会立刻返回；等待授权弹窗的场景也不该拖住首连。
+                const QString out = adb.executeCommand(
+                    QStringList() << "-s" << deviceId << "shell" << "sh" << "-c"
+                                  << command, 2000);
+                if (out.contains(QStringLiteral("uid=0"))) {
+                    shellRoot = true;
+                    break;
+                }
+            }
+        }
+
+        // 3) root 方案仅作**展示信息**，不参与 isRooted 判定。
+        QStringList rootManagers;
+        const QString packages = adb.executeCommand(
+            QStringList() << "-s" << deviceId << "shell" << "pm" << "list" << "packages",
+            5000);
+        if (packages.contains(QStringLiteral("me.weishu.kernelsu")))
+            rootManagers << QStringLiteral("KernelSU");
+        if (packages.contains(QStringLiteral("com.topjohnwu.magisk")))
+            rootManagers << QStringLiteral("Magisk");
+        if (packages.contains(QStringLiteral("me.bmax.apatch")))
+            rootManagers << QStringLiteral("APatch");
+        if (packages.contains(QStringLiteral("eu.chainfire.supersu")))
+            rootManagers << QStringLiteral("SuperSU");
+
+        info.isRooted = shellRoot;
+        info.rootManager = rootManagers.join(QStringLiteral(" / "));
         
         // 获取网络信息
-        info.imei = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell service call iphonesubinfo 1 | awk -F \"'\" '{print $2}' | sed '1 d' | tr -d '.' | awk '{print $1}'").arg(deviceId)).trimmed();
+        info.imei = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell service call iphonesubinfo 1 | awk -F \"'\" '{print $2}' | sed '1 d' | tr -d '.' | awk '{print $1}'").arg(deviceId), 5000));
         
-        info.wifiMac = AdbEmbedded::instance().getDeviceInfo(deviceId, "ro.boot.wifimacaddr");
+        info.wifiMac = prop("ro.boot.wifimacaddr");
         
         // 获取硬件信息
-        info.cpuInfo = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell cat /proc/cpuinfo | grep -i processor | wc -l").arg(deviceId)).trimmed() + " 核心";
-        
-        QString ramInfo = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell cat /proc/meminfo | grep MemTotal").arg(deviceId)).trimmed();
+        const QString cores = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell cat /proc/cpuinfo | grep -i processor | wc -l").arg(deviceId), 5000));
+        if (!cores.isEmpty())
+            info.cpuInfo = cores + QStringLiteral(" 核心");
+
+        QString ramInfo = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell cat /proc/meminfo | grep MemTotal").arg(deviceId), 5000));
         if (!ramInfo.isEmpty()) {
-            info.ramSize = ramInfo.split(":").value(1).trimmed();
+            const QString ramValue = ramInfo.split(":").value(1).trimmed();
+            if (!ramValue.isEmpty())
+                info.ramSize = ramValue;
         }
         
         // 获取电池信息
-        QString batteryLevel = AdbEmbedded::instance().executeCommand(
-            QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId)).trimmed();
+        QString batteryLevel = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId), 5000));
         if (!batteryLevel.isEmpty()) {
-            info.batteryHealth = batteryLevel.split(":").value(1).trimmed() + "%";
+            const QString levelValue = batteryLevel.split(":").value(1).trimmed();
+            if (!levelValue.isEmpty())
+                info.batteryHealth = levelValue + QStringLiteral("%");
         }
         
     } else if (mode == MODE_FASTBOOT || mode == MODE_FASTBOOTD) {
@@ -341,9 +607,12 @@ DeviceInfo DeviceDetector::getFastbootDeviceInfo(const QString &deviceId)
         }
         qDebug() << "Bootloader version:" << info.bootloaderVersion;
         
-        // 检测Bootloader锁状态
+        // 检测Bootloader锁状态（三态：已解锁 / 已锁定 / 未知）
         QString bootloaderStatus = getBootloaderStatus(deviceId);
-        info.isBootloaderUnlocked = (bootloaderStatus == "已解锁");
+        info.isBootloaderStateKnown =
+            (bootloaderStatus == QStringLiteral("已解锁")
+             || bootloaderStatus == QStringLiteral("已锁定"));
+        info.isBootloaderUnlocked = (bootloaderStatus == QStringLiteral("已解锁"));
         qDebug() << "Bootloader status:" << bootloaderStatus;
         
         // 检测是否为Fastbootd模式
@@ -437,12 +706,15 @@ QString DeviceDetector::getBootloaderStatus(const QString &deviceId)
         return "已锁定";
     }
     
-    // 方法4: 通过oem unlocking状态判断
+    // 方法4: 通过oem unlocking状态判断。
+    // 只认明确的 yes/no：getFastbootVar 现在对"未返回"返回空串，
+    // 不能再把任何非空值都当成设备支持（旧实现会误报"不可解锁"）。
     QString oemUnlocking = getFastbootVar("oem unlocking", deviceId);
-    if (!oemUnlocking.isEmpty()) {
-        return oemUnlocking == "yes" ? "可解锁" : "不可解锁";
-    }
-    
+    if (oemUnlocking == "yes")
+        return "可解锁";
+    if (oemUnlocking == "no")
+        return "不可解锁";
+
     return "未知";
 }
 
@@ -483,8 +755,13 @@ QString DeviceDetector::getFastbootVar(const QString &varName, const QString &de
         }
     }
 
-    // 若未找到有效数据，返回友好提示
-    return "设备不支持此信息";
+    // 未找到有效数据返回空串。调用方用 isEmpty() 判断"设备不支持/未返回"。
+    //
+    // 旧实现返回"设备不支持此信息"这种非空文案，导致三个用户可见的错误：
+    //   1) hw_version 未命中时，hw-version 的 fallback 永远不执行；
+    //   2) getBootloaderStatus 把"非空"当成"设备支持"，于是返回"不可解锁"；
+    //   3) 产品名/型号直接显示成这句提示。
+    return QString();
 }
 
 QString DeviceDetector::executeFastbootCommand(const QString &command, const QString &deviceId)
@@ -727,10 +1004,14 @@ QString DeviceDetector::formatDeviceInfoForDisplay(const DeviceInfo &info) const
     // Bootloader版本
     displayText += QString("   Bootloader版本: %1\n").arg(formatValue(info.bootloaderVersion));
     
-    // BL锁状态
-    QString lockStatus = info.isBootloaderUnlocked ? 
-        QString("%1 已解锁").arg(getBootloaderStatusIcon(true)) : 
-        QString("%1 已锁定").arg(getBootloaderStatusIcon(false));
+    // BL锁状态（三态：未知时如实显示，不把默认 false 当成"已锁定"）
+    QString lockStatus;
+    if (!info.isBootloaderStateKnown)
+        lockStatus = QStringLiteral("未知");
+    else if (info.isBootloaderUnlocked)
+        lockStatus = QStringLiteral("%1 已解锁").arg(getBootloaderStatusIcon(true));
+    else
+        lockStatus = QStringLiteral("%1 已锁定").arg(getBootloaderStatusIcon(false));
     displayText += QString("   BL锁状态: %1\n").arg(lockStatus);
     
     // 运行模式

@@ -1,6 +1,8 @@
 #include "restart_tool.h"
 #include "adb_embedded.h"
+#include "core/root_agent/root_shell.h"
 #include <QDebug>
+#include <QRegularExpression>
 
 RestartTool::RestartTool(QObject *parent) : QObject(parent)
 {
@@ -34,7 +36,19 @@ QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::Devi
     
     QString result;
     if (currentMode == DeviceDetector::MODE_ADB) {
-        result = AdbEmbedded::instance().executeCommand(command);
+        // 统一 root 入口：root 重启命令优先走已连接的代理。
+        static const QRegularExpression rootPattern(
+            QStringLiteral("shell\\s+su\\s+-c\\s+\"([^\"]+)\""));
+        const auto match = rootPattern.match(command);
+        if (match.hasMatch()) {
+            const RootShellResult rootResult =
+                RootShell::instance().run(deviceId, match.captured(1), 10000);
+            result = rootResult.timedOut
+                ? QStringLiteral("Error: Command timeout")
+                : rootResult.combinedText();
+        } else {
+            result = AdbEmbedded::instance().executeCommand(command);
+        }
     } else {
         // 对于Fastboot模式，我们需要直接执行fastboot命令
         QProcess process;
@@ -103,11 +117,12 @@ QString RestartTool::restartDevice(const QString &deviceId, DeviceDetector::Devi
 
 bool RestartTool::checkRootPermission(const QString &deviceId)
 {
-    // 检查root权限
-    QString result = AdbEmbedded::instance().executeCommand(
-        QString("-s %1 shell su -c \"echo root\"").arg(deviceId));
-    
-    if (result.contains("root")) {
+    // 检查 root 权限：已连接代理时实际执行 echo root，否则回退 adb su。
+    const RootShellResult rootResult =
+        RootShell::instance().run(deviceId, QStringLiteral("echo root"), 5000);
+    const QString result = rootResult.combinedText();
+
+    if (rootResult.exitCode == 0 && result.contains("root")) {
         emit outputMessage("设备具有Root权限");
         return true;
     } else {

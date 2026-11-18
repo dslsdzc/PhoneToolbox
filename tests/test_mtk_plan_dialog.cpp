@@ -102,9 +102,11 @@ void TestMtkPlanDialog::minimumSizeMatchesDialogFamily()
 //    m1-struct-mut-b-*）；反向地，注释里写出该字面量或把调用换行书写会误红。
 // ⚠️ 契约：要求源码树原地存在（路径被编进二进制）—— 读不到即**硬 FAIL**、不 QSKIP
 //    （"钉在缺文件时静默失效"正是本仓反复吃亏的形态）。
+// 宏名 PT_SRC_ROOT = **仓库根**（按 stem 在 CMakeLists.txt 里定义；原先用的 Qt 自带
+// QT_TESTCASE_SOURCEDIR 展开成"目标的 SOURCE_DIR"，不是仓库根契约 —— 统一原因见该处注释）。
 void TestMtkPlanDialog::pinsInitialSizeMatchesMinimumInProductionSource()
 {
-    QFile f(QStringLiteral(QT_TESTCASE_SOURCEDIR "/src/ui/mtk_plan_dialog.cpp"));
+    QFile f(QStringLiteral(PT_SRC_ROOT "/src/ui/mtk_plan_dialog.cpp"));
     QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(f.fileName()));
     const QString src = QString::fromUtf8(f.readAll());
     QCOMPARE(src.count(QStringLiteral("setMinimumSize(880, 520)")), 1);

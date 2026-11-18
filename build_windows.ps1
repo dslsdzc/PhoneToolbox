@@ -119,6 +119,22 @@ if (Test-Path $exePath) {
         Write-Host "[+] Deploying DLLs with windeployqt..." -ForegroundColor Yellow
         $qt6Dir = (Get-Item (Get-Command cmake).Source).Directory.Parent.FullName
         & windeployqt --release --no-compiler-runtime $exePath
+
+        # 插件是 MODULE target，输出在 <build>\plugins。主程序只扫描 exe 同目录的
+        # plugins/；不复制过去的话，用户装完插件面板只会显示"0 个插件"。
+        $pluginSrc = Join-Path $BuildDir "plugins"
+        if (-not (Test-Path $pluginSrc)) {
+            $pluginSrc = Join-Path (Split-Path $exePath -Parent) "plugins"
+        }
+        $pluginDst = Join-Path (Split-Path $exePath -Parent) "plugins"
+        if (Test-Path $pluginSrc) {
+            New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+            Copy-Item (Join-Path $pluginSrc "*.dll") $pluginDst -Force -ErrorAction SilentlyContinue
+            Write-Host "[+] Copied plugins to $pluginDst" -ForegroundColor Green
+        } else {
+            Write-Host "[!] No plugins directory found at $pluginSrc" -ForegroundColor Yellow
+        }
+
         Write-Host "[+] Deployed. Distribute the entire $BuildDir\Release\ folder." -ForegroundColor Green
     } else {
         Write-Host "[+] Static EXE ready. Just distribute PhoneToolbox.exe" -ForegroundColor Green

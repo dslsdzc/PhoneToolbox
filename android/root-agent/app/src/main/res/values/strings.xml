@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- app_name 由 Gradle 的 resValue 按 -PappLabel 生成，避免固定指纹。 -->
+</resources>

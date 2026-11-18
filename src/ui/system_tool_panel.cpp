@@ -2,6 +2,7 @@
 #include "core/adb_embedded.h"
 #include "core/engineer_mode.h"
 #include "core/resource_monitor.h"
+#include "core/root_agent/root_shell.h"
 #include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门** + 功能→tier 映射
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,6 +20,9 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QCoreApplication>
+#include <QSettings>
+#include <QTimer>
+#include <QRegularExpression>
 
 static const char *kCategories[] = {
     "性能调优", "界面定制", "功能增强", "分区管理",
@@ -61,8 +65,30 @@ QString SystemToolPanel::executeAdb(const QStringList &args, int timeoutMs)
 
 QString SystemToolPanel::adbShell(const QString &cmd, int timeoutMs)
 {
-    QString dev = m_deviceInfo.serialNumber;
-    if (dev.isEmpty()) return "Error: no device";
+    const QString dev = m_deviceInfo.serialNumber;
+    if (dev.isEmpty())
+        return "Error: no device";
+
+    // 本文件的历史调用大量写成 su -c '...'。统一在这里路由：
+    // 已连接的 Root 代理优先，没代理再回退 adb shell su -c。
+    static const QRegularExpression rootPattern(
+        QStringLiteral("^su\\s+-c\\s+(['\"])([\\s\\S]*)\\1\\s*(&?)\\s*$"));
+    const QString trimmed = cmd.trimmed();
+    const auto match = rootPattern.match(trimmed);
+    if (match.hasMatch()) {
+        QString inner = match.captured(2);
+        if (!match.captured(3).isEmpty())
+            inner += QStringLiteral(" &");
+
+        const RootShellResult result = RootShell::instance().run(dev, inner, timeoutMs);
+        if (result.timedOut)
+            return "Error: timeout";
+        const QString text = result.combinedText();
+        if (text.isEmpty() && result.exitCode < 0)
+            return "Error: root command failed";
+        return text;
+    }
+
     return executeAdb({"-s", dev, "shell", cmd}, timeoutMs);
 }
 
@@ -148,8 +174,14 @@ void SystemToolPanel::setDeviceInfo(const DeviceInfo &info)
     bool recovery = (info.mode == DeviceDetector::MODE_RECOVERY);
     bool enabled = adbMode || recovery;
 
-    m_rootLabel->setText(info.isRooted ? "已 Root" : "未 Root");
-    m_rootLabel->setStyleSheet(info.isRooted ? "color:#2a82da;font-weight:bold;" : "color:#888;");
+    const QString rootText = info.isRooted
+        ? QStringLiteral("已 Root")
+        : (info.rootAgentRoot ? QStringLiteral("已 Root（代理）")
+                              : QStringLiteral("未 Root"));
+    m_rootLabel->setText(rootText);
+    m_rootLabel->setStyleSheet(info.hasRoot()
+                                   ? "color:#2a82da;font-weight:bold;"
+                                   : "color:#888;");
 
     // Enable widgets for ADB mode (most commands work without root via shell user)
     for (auto *page : m_pages) {
@@ -163,8 +195,8 @@ void SystemToolPanel::setDeviceInfo(const DeviceInfo &info)
     m_backBtn->setEnabled(true);
     if (m_perfToggleBtn) m_perfToggleBtn->setEnabled(enabled);
 
-    // Auto-fill app list on first switch
-    if (enabled && m_appList && m_appList->count() == 0)
+    // Auto-fill app list on first switch（异步，加载中不重复触发）
+    if (enabled && m_appList && m_appList->count() == 0 && !m_appListLoading)
         onAppRefreshList();
 }
 
@@ -184,6 +216,12 @@ void SystemToolPanel::clearDeviceInfo()
         if (s != m_deviceLabel && s != m_rootLabel)
             s->setText("");
     }
+    if (m_appListProc) {
+        m_appListProc->kill();
+        m_appListProc->deleteLater();
+        m_appListProc = nullptr;
+    }
+    m_appListLoading = false;
     if (m_appList) m_appList->clear();
     if (m_perfTimer) m_perfTimer->stop();
     stopMonitorProcess();
@@ -1162,54 +1200,109 @@ void SystemToolPanel::onUnmountSystem()
 
 void SystemToolPanel::onAppRefreshList()
 {
-    if (!m_appList) return;
+    if (!m_appList || m_appListLoading)
+        return;
+
     m_appList->clear();
+    m_appStatus->setText("正在获取应用列表...");
     appendOutput("正在获取应用列表...", false);
 
-    // Step 1: Get package list (format: package:/path/apk=com.example.name)
-    QString cmd;
-    switch (m_appFilter) {
-    case 1: cmd = "pm list packages -3 -f 2>/dev/null"; break;
-    case 2: cmd = "pm list packages -s -f 2>/dev/null"; break;
-    default: cmd = "pm list packages -f 2>/dev/null"; break;
-    }
-    QString r = adbShell(cmd);
-    if (r.isEmpty() || r.contains("Error")) {
-        appendOutput("获取应用列表失败", true);
-        m_appStatus->setText("获取失败");
+    if (m_deviceInfo.serialNumber.isEmpty()) {
+        m_appStatus->setText("无设备");
         return;
     }
 
-    // Step 2: Populate list with package names
-    QStringList lines = r.split('\n', Qt::SkipEmptyParts);
-    int count = 0;
-    for (const auto &line : lines) {
-        if (!line.startsWith("package:")) continue;
-        QString pkg = line.section('=', -1).trimmed();
-        if (pkg.isEmpty()) continue;
-        QString apkPath = line.section(':', 1).section('=', 0, 0).trimmed();
+    QString adb = AdbEmbedded::instance().getAdbPath();
+    if (adb.isEmpty()) {
+        AdbEmbedded::instance().initialize();
+        adb = AdbEmbedded::instance().getAdbPath();
+    }
+    if (adb.isEmpty()) {
+        m_appStatus->setText("adb 不可用");
+        return;
+    }
 
-        auto *item = new QListWidgetItem(pkg, m_appList);
+    QString cmd;
+    switch (m_appFilter) {
+    case 1: cmd = QStringLiteral("pm list packages -3 -f 2>/dev/null"); break;
+    case 2: cmd = QStringLiteral("pm list packages -s -f 2>/dev/null"); break;
+    default: cmd = QStringLiteral("pm list packages -f 2>/dev/null"); break;
+    }
+
+    if (m_appListProc) {
+        m_appListProc->kill();
+        m_appListProc->deleteLater();
+        m_appListProc = nullptr;
+    }
+
+    m_appListLoading = true;
+    m_appListQuerySerial = m_deviceInfo.serialNumber;
+    auto *process = new QProcess(this);
+    m_appListProc = process;
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &SystemToolPanel::onAppListProcFinished);
+    connect(process, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError) {
+                if (m_appListProc && m_appListProc->state() == QProcess::NotRunning)
+                    onAppListProcFinished();
+            });
+    QTimer::singleShot(15000, process, [process]() {
+        if (process->state() != QProcess::NotRunning)
+            process->kill();
+    });
+    process->start(adb, {QStringLiteral("-s"), m_deviceInfo.serialNumber,
+                         QStringLiteral("shell"), cmd});
+}
+
+void SystemToolPanel::onAppListProcFinished()
+{
+    if (!m_appListProc)
+        return;
+
+    QProcess *process = m_appListProc;
+    m_appListProc = nullptr;
+    const QString serial = m_appListQuerySerial;
+    const QString output = QString::fromLocal8Bit(process->readAll());
+    process->deleteLater();
+
+    if (serial != m_deviceInfo.serialNumber) {
+        m_appListLoading = false;
+        return;
+    }
+
+    int count = 0;
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        if (!line.startsWith(QStringLiteral("package:")))
+            continue;
+        const QString pkg = line.section(QLatin1Char('='), -1).trimmed();
+        if (pkg.isEmpty())
+            continue;
+        const QString apkPath = line.section(QLatin1Char(':'), 1)
+                                    .section(QLatin1Char('='), 0, 0)
+                                    .trimmed();
+
+        auto *item = new QListWidgetItem(pkg + QLatin1Char('\n') + apkPath, m_appList);
         item->setData(Qt::UserRole, pkg);
         item->setData(Qt::UserRole + 1, apkPath);
         item->setData(Qt::UserRole + 2, pkg);
-        item->setToolTip(pkg);
-        count++;
+        item->setToolTip(QStringLiteral("包名：%1\nAPK：%2").arg(pkg, apkPath));
+        ++count;
     }
 
-    // Step 4: Re-apply search filter
+    m_appListLoading = false;
+    m_appStatus->setText(QStringLiteral("共 %1 个应用").arg(count));
+    appendOutput(QStringLiteral("应用列表: %1 个").arg(count), false);
+
     if (m_searchBox && !m_searchBox->text().isEmpty()) {
-        QString text = m_searchBox->text();
-        for (int i = 0; i < m_appList->count(); i++) {
+        const QString text = m_searchBox->text();
+        for (int i = 0; i < m_appList->count(); ++i) {
             auto *item = m_appList->item(i);
-            bool match = item->data(Qt::UserRole).toString().contains(text, Qt::CaseInsensitive) ||
-                         item->data(Qt::UserRole + 2).toString().contains(text, Qt::CaseInsensitive);
-            item->setHidden(!match);
+            item->setHidden(!item->data(Qt::UserRole + 2).toString()
+                                 .contains(text, Qt::CaseInsensitive));
         }
     }
-
-    m_appStatus->setText(QString("共 %1 个应用").arg(count));
-    appendOutput(QString("应用列表: %1 个").arg(count), false);
 }
 
 void SystemToolPanel::onAppLaunch()
@@ -1688,7 +1781,7 @@ void SystemToolPanel::onSaveChart()
 
     QString hdrLine1 = QString("设备: %1  |  Root: %2  |  记录时间: %3")
         .arg(m_deviceInfo.serialNumber.isEmpty() ? "未知" : m_deviceInfo.serialNumber)
-        .arg(m_deviceInfo.isRooted ? "是" : "否")
+        .arg(m_deviceInfo.hasRoot() ? "是" : "否")
         .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
     p.drawText(margin, margin, chartWidth, 30, Qt::AlignLeft | Qt::AlignVCenter, hdrLine1);
 

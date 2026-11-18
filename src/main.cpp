@@ -1,8 +1,35 @@
 #include <QApplication>
 #include <QPalette>
+#include <QDir>
+#include <QFileInfo>
+#include <QTemporaryFile>
+#include <QDebug>
 #include "ui/main_window.h"
 #include "ui/agreement_dialog.h"     // W2-T5：首屏使用须知（协议正文入口）
 #include "legal/consent_store.h"     // W2-T5：留痕（本机 QSettings，不联网）
+
+// TMPDIR 指向不可写分区时（常见：TMPDIR 指到快满的盘），Qt/GTK 运行中写
+// 临时文件会失败。GTK 的图标加载甚至直接断言 abort —— 用户看到的就是
+// "启动就崩"。这里在 QApplication 之前实测一次，不可写就回退。
+static void ensureWritableTempDir()
+{
+    const QString current = QDir::tempPath();
+    QTemporaryFile probe(current + QStringLiteral("/phonetoolbox-write-probe-XXXXXX"));
+    if (probe.open()) {
+        probe.close(); // QTemporaryFile 析构时自动删除
+        return;
+    }
+
+    const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    const QString fallback =
+        (!runtime.isEmpty() && QFileInfo(runtime).isWritable())
+            ? runtime
+            : QStringLiteral("/tmp");
+
+    qputenv("TMPDIR", fallback.toLocal8Bit());
+    qWarning() << "TMPDIR is not writable:" << current
+               << "- falling back to" << fallback;
+}
 
 static void applyDarkTheme(QApplication &app)
 {
@@ -28,6 +55,9 @@ static void applyDarkTheme(QApplication &app)
 
 int main(int argc, char *argv[])
 {
+    // 必须在 QApplication / GTK 主题插件初始化之前。
+    ensureWritableTempDir();
+
     QApplication app(argc, argv);
 
     // 设置应用信息

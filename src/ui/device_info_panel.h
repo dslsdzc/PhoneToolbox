@@ -22,6 +22,7 @@ private:
     QString row(const QString &label, const QString &value) const;
 
     QTextEdit *m_infoDisplay;
+    DeviceInfo m_info;
 };
 
 #endif // DEVICE_INFO_PANEL_H

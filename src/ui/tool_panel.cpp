@@ -4,6 +4,7 @@
 #include <QGroupBox>
 #include <QFormLayout>
 #include <QLabel>
+#include <QSignalBlocker>
 
 ToolPanel::ToolPanel(QWidget *parent)
     : QWidget(parent)
@@ -69,13 +70,14 @@ void ToolPanel::setupUI()
 
     m_toolSelector = new QListWidget(this);
     m_toolSelector->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_toolSelector->setMaximumHeight(160); // 容纳 6 个工具项
+    m_toolSelector->setMaximumHeight(190); // 容纳 7 个工具项
     m_toolSelector->addItem(QStringLiteral("设备信息"));
     m_toolSelector->addItem(QStringLiteral("刷机工具"));
     m_toolSelector->addItem(QStringLiteral("系统工具"));
     m_toolSelector->addItem(QStringLiteral("漏洞扫描"));
     m_toolSelector->addItem(QStringLiteral("镜像工具"));
     m_toolSelector->addItem(QStringLiteral("插件"));
+    m_toolSelector->addItem(QStringLiteral("设置"));
     m_toolSelector->item(0)->setSelected(true);
 
     toolSelLayout->addWidget(m_toolSelector);
@@ -113,32 +115,59 @@ void ToolPanel::setupConnections()
 void ToolPanel::updateDeviceList(const QMap<QString, DeviceInfo> &devices)
 {
     m_currentDevices = devices;
-    m_deviceList->clear();
+    const QString keepSerial = m_currentSelectedDevice;
 
-    for (const DeviceInfo &info : m_currentDevices) {
-        QString displayText = QString("%1\n%2").arg(info.serialNumber).arg(info.model);
+    // clear() 会先发一次“没有选中项”，如果直接放行，主窗口会把设备详情
+    // 清成“未连接”；重建列表后必须恢复原来的选中项。
+    {
+        const QSignalBlocker blocker(m_deviceList);
+        m_deviceList->clear();
 
-        QString modeInfo;
-        switch (info.mode) {
-        case DeviceDetector::MODE_ADB: modeInfo = " [ADB]"; break;
-        case DeviceDetector::MODE_FASTBOOT: modeInfo = " [Fastboot]"; break;
-        case DeviceDetector::MODE_FASTBOOTD: modeInfo = " [Fastbootd]"; break;
-        case DeviceDetector::MODE_EDL_9008: modeInfo = " [EDL]"; break;
-        case DeviceDetector::MODE_MTK_DA: modeInfo = " [MTK DA]"; break;
-        default: modeInfo = " [unknown]"; break;
+        for (const DeviceInfo &info : m_currentDevices) {
+            QString displayText = QString("%1\n%2").arg(info.serialNumber).arg(info.model);
+
+            QString modeInfo;
+            switch (info.mode) {
+            case DeviceDetector::MODE_ADB: modeInfo = " [ADB]"; break;
+            case DeviceDetector::MODE_FASTBOOT: modeInfo = " [Fastboot]"; break;
+            case DeviceDetector::MODE_FASTBOOTD: modeInfo = " [Fastbootd]"; break;
+            case DeviceDetector::MODE_EDL_9008: modeInfo = " [EDL]"; break;
+            case DeviceDetector::MODE_MTK_DA: modeInfo = " [MTK DA]"; break;
+            default: modeInfo = " [unknown]"; break;
+            }
+
+            displayText += modeInfo;
+
+            QListWidgetItem *item = new QListWidgetItem(displayText, m_deviceList);
+            item->setData(Qt::UserRole, info.serialNumber);
         }
 
-        displayText += modeInfo;
-
-        QListWidgetItem *item = new QListWidgetItem(displayText, m_deviceList);
-        item->setData(Qt::UserRole, info.serialNumber);
+        if (m_currentDevices.isEmpty()) {
+            QListWidgetItem *item =
+                new QListWidgetItem(QStringLiteral("无设备连接"), m_deviceList);
+            item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
+        } else {
+            QListWidgetItem *target = nullptr;
+            for (int i = 0; i < m_deviceList->count(); ++i) {
+                QListWidgetItem *item = m_deviceList->item(i);
+                if (item->data(Qt::UserRole).toString() == keepSerial) {
+                    target = item;
+                    break;
+                }
+            }
+            if (!target)
+                target = m_deviceList->item(0);
+            if (target) {
+                m_deviceList->setCurrentItem(target);
+                target->setSelected(true);
+            }
+        }
     }
 
-    if (m_currentDevices.isEmpty()) {
-        QListWidgetItem *item = new QListWidgetItem(QStringLiteral("无设备连接"), m_deviceList);
-        item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
+    if (m_currentDevices.isEmpty())
         m_restartButton->setEnabled(false);
-    }
+
+    onDeviceListSelectionChanged();
 }
 
 QString ToolPanel::getSelectedDevice() const

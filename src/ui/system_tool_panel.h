@@ -52,6 +52,7 @@ private slots:
 
     // 5. 应用管理
     void onAppRefreshList();    void onAppLaunch();
+    void onAppListProcFinished();
     void onAppFreezeToggle();   void onAppUninstall();
     void onAppExtract();
 
@@ -125,6 +126,9 @@ private:
     DeviceInfo m_deviceInfo;
     QProcess *m_asyncProc = nullptr;
     QProcess *m_monitorProc = nullptr;
+    QProcess *m_appListProc = nullptr;
+    QString m_appListQuerySerial;
+    bool m_appListLoading = false;
 };
 
 #endif // SYSTEM_TOOL_PANEL_H

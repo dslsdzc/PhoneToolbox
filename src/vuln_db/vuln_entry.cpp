@@ -138,6 +138,12 @@ QJsonObject vulnEntryToJson(const VulnEntry &e)
     obj["source"] = e.source;
     if (!e.publishedDate.isEmpty()) obj["published_date"] = e.publishedDate;
     obj["is_android_specific"] = e.isAndroidSpecific;
+    if (!e.uiHtml.isEmpty() || !e.uiLua.isEmpty()) {
+        QJsonObject ui;
+        if (!e.uiHtml.isEmpty()) ui["html"] = e.uiHtml;
+        if (!e.uiLua.isEmpty()) ui["lua"] = e.uiLua;
+        obj["ui"] = ui;
+    }
     return obj;
 }
 
@@ -157,5 +163,8 @@ VulnEntry vulnEntryFromJson(const QJsonObject &obj)
     e.source = obj["source"].toString();
     e.publishedDate = obj["published_date"].toString();
     e.isAndroidSpecific = obj["is_android_specific"].toBool(true);
+    const QJsonObject ui = obj["ui"].toObject();
+    e.uiHtml = ui["html"].toString();
+    e.uiLua = ui["lua"].toString();
     return e;
 }

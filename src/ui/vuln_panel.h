@@ -10,13 +10,16 @@
 #include <functional>
 
 #include "core/device_info.h"
+#include "core/lua_sandbox.h"              // 漏洞自定义 UI（HTML + Lua）
 #include "core/modes/mtk_brom_exploit.h"   // W8-T6：载荷来源选项 / 下载器注入点
 #include "ui/brom_exploit_ui.h"            // PayloadState（载荷就绪三态）
 #include "vuln_db/vuln_db.h"
 #include "vuln_db/exploit_engine.h"
 
 class QCheckBox;
+class QDialog;
 class QLineEdit;
+class QThread;
 
 namespace legal { class ConsentStore; }
 
@@ -30,6 +33,9 @@ public:
 
     void setDeviceInfo(const DeviceInfo &info);
     void clearDeviceInfo();
+    // 设备检测层的完整列表（含未选中的设备）。BROM 界面从这里判断
+    // "有没有检测到 BROM/preloader"，不再自己枚举 USB。
+    void setDevices(const QMap<QString, DeviceInfo> &devices);
 
     // ==================== W8-T6：MTK BROM 漏洞利用区 ====================
     //
@@ -75,25 +81,25 @@ private slots:
     void onExploitSingle(const QString &cveId);
     void onEngineOutput(const QString &line);
     void onProgressChanged(const QString &entryId, ExploitPhase phase);
-    // W8-T6：MTK BROM 漏洞利用区的三个入口（解析载荷**不过闸门**：它只读文件/下载，
-    // 不碰设备；「执行利用」过 Tier 3 —— 见 .cpp 的说明）
-    void onBromResolvePayload();
-    void onBromExploitRun();
-    void onBromChipCodeChanged();
 
 private:
     void setupUI();
-    QWidget *buildBromExploitGroup();      // W8-T6：本区控件的唯一构建处（setupUI 调它）
+    // 交互模型：扫描 → 列表 → 选中条目 → 该漏洞自己的详情窗口。
+    void openVulnDetail(const QString &cveId);
+    void openBromDetail();
     void updateEntryInTable(int row, const VulnEntry &entry);
+    void updateBromRow(int row); // BROM 作为列表中的固定条目（不参与 CVE 扫描）
+    void rebuildTable();         // 从 m_db 重建列表（外部库叠加后的全量）
+    LuaSandbox::DeviceSnapshot deviceSnapshot() const;
+    LuaSandbox::BromApi makeBromApi();
+    bool resolveBromPayload(const QString &hwText, const QString &payloadPath,
+                            bool allowNetwork, QString *message);
+    bool runBromExploit(const QString &hwText, const QString &var1Text,
+                        bool allowPatched, QString *message);
     int  findRowByCveId(const QString &cveId) const;
     void appendLog(const QString &msg, bool isError = false);
     void setButtonsEnabled(bool enabled);
     void updateButtonStates();
-    // W8-T6：按 bromui::evaluateRunGate 重算「执行利用」的启用态与原因文案。
-    // 只要影响判据的东西变了（设备/芯片码/载荷状态）就必须调它 —— 三条禁用原因由
-    // tests/test_brom_exploit_ui.cpp 逐条钉住。
-    void refreshBromGate();
-    void setBromPayloadState(bromui::PayloadState state, const QString &errorText);
     QString stateIcon(VulnEntry::State state) const;
     QString severityIcon(const QString &severity) const;
 
@@ -110,22 +116,12 @@ private:
 
     // Vulnerability table
     QTableWidget *m_vulnTable;
+    QDialog *m_detailDialog = nullptr;       // 当前漏洞的详情窗口（含 BROM 的 Lua 界面）
 
     // Log
     QTextEdit *m_logOutput;
 
-    // ── W8-T6：MTK BROM 漏洞利用区 ──
-    QLineEdit   *m_bromHwCodeEdit = nullptr;
-    // var1 覆盖（W8 终审 I4）：表里没有 var1 的那 10 条芯片靠它才可达（编排层对缺 var1 响亮失败）。
-    QLineEdit   *m_bromVar1Edit = nullptr;
-    QLabel      *m_bromChipStatus = nullptr;
-    QLineEdit   *m_bromPayloadPathEdit = nullptr;
-    QCheckBox   *m_bromAllowNetworkCheck = nullptr;
-    QCheckBox   *m_bromAllowPatchedCheck = nullptr;
-    QPushButton *m_bromResolveBtn = nullptr;
-    QLabel      *m_bromPayloadStatus = nullptr;
-    QPushButton *m_bromRunBtn = nullptr;
-    QLabel      *m_bromRunReason = nullptr;
+    // ── W8-T6：MTK BROM（数据在宿主，界面与流程在 resources/brom_exploit.lua）──
     QByteArray   m_bromPayload;                          // 已解析的载荷（仅 Verified 态有值）
     bromui::PayloadState m_bromPayloadState = bromui::PayloadState::None;
     QString      m_bromPayloadError;                     // Rejected 态的原因
@@ -137,7 +133,9 @@ private:
     // Data
     VulnDb *m_db;
     ExploitEngine *m_engine;
+    QThread *m_engineThread = nullptr; // 漏洞脚本执行线程：避免超时命令卡死 UI
     DeviceInfo m_deviceInfo;
+    QMap<QString, DeviceInfo> m_devices; // 检测层全量设备（BROM 探测不另开 USB 枚举）
     QList<VulnEntry> m_currentEntries;
     bool m_isScanning = false;
     bool m_isExploiting = false;

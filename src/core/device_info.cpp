@@ -3,8 +3,11 @@
 
 DeviceInfo::DeviceInfo()
     : isBootloaderUnlocked(false)
+    , isBootloaderStateKnown(false)
     , isFastbootdMode(false)
     , isRooted(false)
+    , rootAgentConnected(false)
+    , rootAgentRoot(false)
     , mode(0)
 {
 }
@@ -43,10 +46,14 @@ QMap<QString, QVariant> DeviceInfo::toMap() const
     map["bootloaderVersion"] = bootloaderVersion;
     map["basebandVersion"] = basebandVersion;
     map["isBootloaderUnlocked"] = isBootloaderUnlocked;
+    map["isBootloaderStateKnown"] = isBootloaderStateKnown;
     map["isFastbootdMode"] = isFastbootdMode;
     
     // 系统信息
     map["isRooted"] = isRooted;
+    map["rootAgentConnected"] = rootAgentConnected;
+    map["rootAgentRoot"] = rootAgentRoot;
+    map["rootManager"] = rootManager;
     map["selinuxStatus"] = selinuxStatus;
     map["mode"] = mode;
     
@@ -77,7 +84,11 @@ QString DeviceInfo::toString() const
 QString DeviceInfo::toFastbootString() const
 {
     QString modeStr = isFastbootdMode ? "Fastbootd" : "传统Fastboot";
-    QString lockStr = isBootloaderUnlocked ? "已解锁" : "已锁定";
+    // 三态：检测失败/设备不支持时不能把默认 false 显示成"已锁定"。
+    QString lockStr = !isBootloaderStateKnown
+                          ? QStringLiteral("未知")
+                          : (isBootloaderUnlocked ? QStringLiteral("已解锁")
+                                                  : QStringLiteral("已锁定"));
     
     QString result;
     result += "Fastboot设备信息:\n";

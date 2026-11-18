@@ -3,6 +3,8 @@
 #include <QGroupBox>
 #include <QTextEdit>
 #include <QFrame>
+#include <QPushButton>
+#include <QScrollBar>
 
 DeviceInfoPanel::DeviceInfoPanel(QWidget *parent)
     : QWidget(parent)
@@ -28,7 +30,17 @@ void DeviceInfoPanel::setupUI()
     m_infoDisplay->setHtml(buildEmptyHtml());
 
     groupLayout->addWidget(m_infoDisplay);
+
     mainLayout->addWidget(infoGroup);
+}
+
+void DeviceInfoPanel::updateDeviceInfo(const DeviceInfo &info)
+{
+    // 动态刷新（电池/CPU 等）不应把用户正在看的位置弹回顶部。
+    const int scroll = m_infoDisplay->verticalScrollBar()->value();
+    m_info = info;
+    m_infoDisplay->setHtml(buildInfoHtml(info));
+    m_infoDisplay->verticalScrollBar()->setValue(scroll);
 }
 
 QString DeviceInfoPanel::escapeHtml(const QString &text) const
@@ -64,13 +76,11 @@ QString DeviceInfoPanel::buildEmptyHtml()
         "</table></body></html>";
 }
 
-void DeviceInfoPanel::updateDeviceInfo(const DeviceInfo &info)
-{
-    m_infoDisplay->setHtml(buildInfoHtml(info));
-}
+
 
 void DeviceInfoPanel::clearDeviceInfo()
 {
+    m_info = DeviceInfo();
     m_infoDisplay->setHtml(buildEmptyHtml());
 }
 
@@ -110,8 +120,17 @@ QString DeviceInfoPanel::buildInfoHtml(const DeviceInfo &info)
     // Bootloader
     {
         QString blText = info.bootloaderVersion;
-        if (!blText.isEmpty() && blText != "未知") {
-            blText += info.isBootloaderUnlocked ? " (已解锁)" : " (已锁定)";
+        if (blText.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0)
+            blText.clear();
+
+        if (info.isBootloaderStateKnown) {
+            const QString state = info.isBootloaderUnlocked
+                ? QStringLiteral("已解锁")
+                : QStringLiteral("已锁定");
+            blText = blText.isEmpty() ? state
+                                      : QStringLiteral("%1 (%2)").arg(blText, state);
+        } else if (!blText.isEmpty()) {
+            blText += QStringLiteral(" (未知)");
         }
         html += row("Bootloader:", blText);
     }
@@ -130,19 +149,20 @@ QString DeviceInfoPanel::buildInfoHtml(const DeviceInfo &info)
         html += row("当前模式:", modeStr);
     }
 
-    // Root状态
+    // Root状态：adb shell 的 su 与 Root 代理通道分开显示，避免把
+    // “代理能提权”误当成“adb shell 能直接 su”。
     {
         QString rootStatus;
         if (info.isRooted) {
-            rootStatus = "已Root";
+            rootStatus = info.rootManager.isEmpty()
+                ? QStringLiteral("已Root")
+                : QStringLiteral("已Root (%1)").arg(info.rootManager);
+        } else if (info.rootAgentRoot) {
+            rootStatus = QStringLiteral("已Root（Root 代理通道）");
+        } else if (info.rootAgentConnected) {
+            rootStatus = QStringLiteral("Root 代理已连接（未提权）");
         } else {
-            QString av = info.androidVersion;
-            if (av.contains("10") || av.contains("11") ||
-                av.contains("12") || av.contains("13")) {
-                rootStatus = "未Root (Android 10+ 建议使用Magisk)";
-            } else {
-                rootStatus = "未Root (可考虑使用SuperSU或Magisk)";
-            }
+            rootStatus = QStringLiteral("未Root");
         }
         html += row("Root状态:", rootStatus);
     }

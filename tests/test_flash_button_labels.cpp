@@ -151,9 +151,11 @@ private slots:
     // 不锁死行号（太脆），锁"只有一处"——任何分支再动它即红，迫使改动者回来读 I3 的教训。
     // ⚠️ 取材边界（终审 Minor 4）：本钉只数**字面出现次数** —— 把两条调用一起包进 `if(...)` 仍绿（唯一逃逸形态）；
     //    反向地，注释里提到该字面量或把调用换行书写会误红，改时按字形对齐即可。
+    // 宏名 PT_SRC_ROOT（仓库根；按 stem 在 CMakeLists.txt 里定义，统一下来的 —— 原先用的 Qt 自带
+    // QT_TESTCASE_SOURCEDIR 语义是"目标的 SOURCE_DIR"，不是"仓库根"，原因见该处注释）。
     void flashPanelSetsFlashButtonLabelsExactlyOnce()
     {
-        QFile f(QStringLiteral(QT_TESTCASE_SOURCEDIR "/src/ui/flash_panel.cpp"));
+        QFile f(QStringLiteral(PT_SRC_ROOT "/src/ui/flash_panel.cpp"));
         QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(f.fileName()));
         const QString src = QString::fromUtf8(f.readAll());
         QCOMPARE(src.count(QStringLiteral("m_flashBtn->setText(")), 1);

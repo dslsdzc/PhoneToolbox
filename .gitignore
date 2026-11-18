@@ -12,3 +12,26 @@ reference/
 build*/
 # 工具脚本（tools/*.py）被 import 时留下的字节码缓存；reference/ 下的同理（整目录已忽略）
 __pycache__/
+
+# Android root agent build artifacts / signing material
+android/root-agent/.gradle/
+android/root-agent/local.properties
+android/root-agent/*.jks
+android/root-agent/.jks-pass
+android/root-agent/app/src/main/jniLibs/
+
+
+# Downloaded/compiled helper tools (apktool.jar, AOT binaries, aapt2, etc.)
+tools/vendor/
+
+# Signing material / APK outputs
+*.jks
+*.jks-pass
+*.keystore
+*.apk
+
+# Logs / crash dumps
+*.log
+core
+core.*
+.PhoneToolbox.*

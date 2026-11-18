@@ -5,6 +5,7 @@
 #include "eub_recovery_dialog.h"        // Phase E Task 7：EUB 救援（Exynos USB Boot）
 #include "flash_button_labels.h"        // EUB backlog Task 3：「刷入」按钮文案/tooltip 的唯一来源
 #include "risk_confirm_dialog.h"        // W2-T5：二次确认**唯一闸门** riskui::ensureAccepted + 分级映射
+#include "core/adb_embedded.h"
 #include "core/eub/eub_libusb_transport.h"  // 真机传输在本面板构造，对话框只认抽象（IEubTransport）
 #include "core/filename_parser.h"
 #include "core/modes/spd_pac.h"         // SPD 入口：pac 内 FDL1/FDL2 自动提取 + 落盘
@@ -27,13 +28,717 @@
 #include <QCheckBox>
 #include <QApplication>
 #include <QEventLoop>                   // processEvents 的标志（ExcludeUserInputEvents，刷写期间只重绘）
+#include <QProcess>
 #include <QThread>
+#include <QTimer>
 #include <QRegularExpression>
 #include <QMap>
+#include <QLabel>
+#include <QColor>
 #include <QDateTime>
 #include <QDir>
 
 #include "ui/da_export_dialog.h"   // W8-T6：DA 切分另存的 UI 入口（本地只读）
+
+namespace {
+
+QString partitionBaseName(const QString &name)
+{
+    QString n = name.toLower();
+    if (n.endsWith(QStringLiteral("_a")) || n.endsWith(QStringLiteral("_b")))
+        n.chop(2);
+    else if (n.endsWith(QStringLiteral("-a")) || n.endsWith(QStringLiteral("-b")))
+        n.chop(2);
+    return n;
+}
+
+QString partitionFullNote(const QString &name)
+{
+    const QString n = partitionBaseName(name);
+
+    static const QMap<QString, QString> notes = {
+        {QStringLiteral("boot"),
+         QStringLiteral("用途：Linux 内核 + ramdisk，负责启动系统。\n"
+                        "风险：与当前系统版本不匹配会无法开机。\n"
+                        "建议：刷前确认镜像来自同版本 ROM；A/B 设备可切到另一槽恢复。")},
+        {QStringLiteral("init_boot"),
+         QStringLiteral("用途：Android 13+ 的 ramdisk（含 init/Magisk 修补目标）。\n"
+                        "风险：刷错会无法开机或丢失 root。\n"
+                        "建议：Magisk 修补通常刷这个分区，不要与 boot 混淆。")},
+        {QStringLiteral("vendor_boot"),
+         QStringLiteral("用途：vendor ramdisk、设备树和厂商启动配置。\n"
+                        "风险：与 boot/vendor 版本不匹配会无法开机。\n"
+                        "建议：与同版本 ROM 的 boot/vendor 一起刷。")},
+        {QStringLiteral("recovery"),
+         QStringLiteral("用途：恢复模式（Recovery）镜像。\n"
+                        "风险：刷错不影响正常开机，但会失去 Recovery/OTA 能力。\n"
+                        "建议：需要第三方 Recovery 时确认设备代号匹配。")},
+        {QStringLiteral("system"),
+         QStringLiteral("用途：Android 系统主体（framework、系统应用）。\n"
+                        "风险：刷错会无法进入系统。\n"
+                        "建议：优先刷完整包，不要只换 system。")},
+        {QStringLiteral("system_ext"),
+         QStringLiteral("用途：AOSP 系统扩展模块。\n"
+                        "风险：与 system 版本不匹配会出现系统服务崩溃。\n"
+                        "建议：与 system/product 同版本一起刷。")},
+        {QStringLiteral("product"),
+         QStringLiteral("用途：产品分区，放系统应用、资源和配置。\n"
+                        "风险：版本不匹配会导致应用缺失或开机异常。\n"
+                        "建议：与 system 同版本。")},
+        {QStringLiteral("vendor"),
+         QStringLiteral("用途：厂商驱动、HAL、固件配置。\n"
+                        "风险：与 system 版本不匹配会导致相机/信号/传感器异常。\n"
+                        "建议：使用对应厂商 ROM 的 vendor。")},
+        {QStringLiteral("odm"),
+         QStringLiteral("用途：ODM 定制驱动与配置。\n"
+                        "风险：与 vendor 不匹配会影响硬件功能。\n"
+                        "建议：跟随原厂 ROM 版本。")},
+        {QStringLiteral("vendor_dlkm"),
+         QStringLiteral("用途：vendor 内核模块。\n"
+                        "风险：与内核版本不匹配会无法加载模块（Wi-Fi/音频等）。\n"
+                        "建议：与 boot/vendor 同版本。")},
+        {QStringLiteral("system_dlkm"),
+         QStringLiteral("用途：system 内核模块。\n"
+                        "风险：与内核版本不匹配会影响模块加载。\n"
+                        "建议：与 system/boot 同版本。")},
+        {QStringLiteral("userdata"),
+         QStringLiteral("用途：用户数据（应用、照片、账号）。\n"
+                        "风险：擦除或刷错会清空全部数据，且多数设备会触发加密重建。\n"
+                        "建议：操作前备份；不要用错误镜像覆盖。")},
+        {QStringLiteral("cache"),
+         QStringLiteral("用途：系统/OTA 缓存。\n"
+                        "风险：擦除通常安全，只会丢失缓存。\n"
+                        "建议：可安全擦除；不影响用户数据。")},
+        {QStringLiteral("metadata"),
+         QStringLiteral("用途：加密元数据、密钥与 FBE 状态。\n"
+                        "风险：擦除可能导致设备无法解密，需要格式化 data。\n"
+                        "建议：非必要不要动；改动前先备份。")},
+        {QStringLiteral("persist"),
+         QStringLiteral("用途：传感器校准、IMEI、射频等持久数据。\n"
+                        "风险：刷错可能丢信号、丢 IMEI 或传感器异常，且不一定可恢复。\n"
+                        "建议：只在明确知道内容时操作；先备份。")},
+        {QStringLiteral("efs"),
+         QStringLiteral("用途：IMEI/网络校准数据（三星/高通常见）。\n"
+                        "风险：刷错可能永久丢信号。\n"
+                        "建议：高风险，必须先备份。")},
+        {QStringLiteral("nvdata"),
+         QStringLiteral("用途：NVRAM 数据、无线校准、IMEI 相关。\n"
+                        "风险：刷错可能导致无信号或 IMEI 异常。\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("nvram"),
+         QStringLiteral("用途：无线/射频校准数据。\n"
+                        "风险：刷错可能无 Wi-Fi/信号。\n"
+                        "建议：先备份。")},
+        {QStringLiteral("modem"),
+         QStringLiteral("用途：基带固件。\n"
+                        "风险：刷错可能无信号、无 IMEI。\n"
+                        "建议：使用对应型号/地区的基带。")},
+        {QStringLiteral("md1img"),
+         QStringLiteral("用途：MTK 基带固件。\n"
+                        "风险：刷错可能无信号。\n"
+                        "建议：与设备型号/ROM 匹配。")},
+        {QStringLiteral("frp"),
+         QStringLiteral("用途：恢复出厂保护（FRP）状态。\n"
+                        "风险：清除可能影响账号锁/激活状态。\n"
+                        "建议：确认设备已退出账号后再处理。")},
+        {QStringLiteral("misc"),
+         QStringLiteral("用途：启动控制信息（recovery 命令、slot 状态等）。\n"
+                        "风险：刷错可能导致启动模式异常。\n"
+                        "建议：通常不需要手动刷。")},
+        {QStringLiteral("dtbo"),
+         QStringLiteral("用途：设备树覆盖（Device Tree Overlay）。\n"
+                        "风险：与内核/平台不匹配会无法开机。\n"
+                        "建议：与 boot/vendor 同版本。")},
+        {QStringLiteral("super"),
+         QStringLiteral("用途：动态分区容器，内部包含 system/vendor/product 等逻辑分区。\n"
+                        "风险：整块刷错会同时破坏多个系统分区。\n"
+                        "建议：使用 fastbootd/逻辑分区工具，确认镜像布局。")},
+        {QStringLiteral("connsys_bt"),
+         QStringLiteral("用途：MTK 连接子系统的蓝牙固件/校准。\n"
+                        "风险：刷错可能导致蓝牙不可用或配对异常。\n"
+                        "建议：随完整 ROM 更新，不要单独刷。")},
+        {QStringLiteral("connsys_gnss"),
+         QStringLiteral("用途：MTK 连接子系统的 GNSS（GPS）固件/校准。\n"
+                        "风险：刷错可能导致定位变慢或无法定位。\n"
+                        "建议：随完整 ROM 更新。")},
+        {QStringLiteral("connsys_wifi"),
+         QStringLiteral("用途：MTK 连接子系统的 Wi-Fi 固件/校准。\n"
+                        "风险：刷错可能导致 Wi-Fi 无法打开或信号异常。\n"
+                        "建议：随完整 ROM 更新。")},
+        {QStringLiteral("ccu"),
+         QStringLiteral("用途：MTK 平台分区（ccu）。公开的 MTK 分区表没有给出稳定、统一的说明。\n"
+                        "风险：无法确认内容，单独刷写风险未知。\n"
+                        "建议：不要单独刷；只从完整包或厂商工具写入。")},
+        {QStringLiteral("dpm"),
+         QStringLiteral("用途：Dynamic Power Management firmware（动态电源管理固件）。\n"
+                        "风险：刷错可能导致待机/功耗/唤醒异常。\n"
+                        "建议：与平台/ROM 匹配，不建议单独刷。")},
+        {QStringLiteral("apusys"),
+         QStringLiteral("用途：MTK 平台分区（apusys）。公开的 MTK 分区表没有给出稳定说明。\n"
+                        "风险：无法确认内容，单独刷写风险未知。\n"
+                        "建议：不要单独刷；只从完整包或厂商工具写入。")},
+        {QStringLiteral("gpueb"),
+         QStringLiteral("用途：MTK 平台分区（gpueb）。公开的 MTK 分区表没有给出稳定说明。\n"
+                        "风险：无法确认内容，单独刷写风险未知。\n"
+                        "建议：不要单独刷；只从完整包或厂商工具写入。")},
+        {QStringLiteral("mcupm"),
+         QStringLiteral("用途：MTK MCU 电源管理固件。\n"
+                        "风险：刷错可能导致待机/休眠异常。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("sspm"),
+         QStringLiteral("用途：System Speed/Power Management firmware（系统速度/电源管理固件）。\n"
+                        "风险：刷错可能导致休眠、唤醒或功耗异常。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("scp"),
+         QStringLiteral("用途：Sensor Control Processor firmware（传感器控制处理器固件）。\n"
+                        "风险：刷错可能导致传感器失效或待机异常。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("spmfw"),
+         QStringLiteral("用途：MTK 系统电源管理固件。\n"
+                        "风险：刷错可能导致休眠/唤醒异常。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("gz"),
+         QStringLiteral("用途：Geniezone（MTK hypervisor / TrustZone OS base）。\n"
+                        "风险：刷错可能影响安全启动/虚拟化/解密。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("tee"),
+         QStringLiteral("用途：TEE 可信执行环境固件。\n"
+                        "风险：刷错可能影响指纹、支付、解密。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("vcp"),
+         QStringLiteral("用途：MTK 平台分区（vcp）。公开的 MTK 分区表没有给出稳定说明。\n"
+                        "风险：无法确认内容，单独刷写风险未知。\n"
+                        "建议：不要单独刷；只从完整包或厂商工具写入。")},
+        {QStringLiteral("pvmfw"),
+         QStringLiteral("用途：受保护虚拟机固件（pKVM）。\n"
+                        "风险：刷错可能影响虚拟化/安全功能。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("mcf_ota"),
+         QStringLiteral("用途：MTK 平台分区（mcf_ota）。公开资料没有给出稳定说明。\n"
+                        "风险：无法确认内容，单独刷写可能影响 OTA/升级流程。\n"
+                        "建议：不要单独刷；随完整包更新。")},
+        {QStringLiteral("pi_img"),
+         QStringLiteral("用途：Peripheral Interface firmware（外设接口固件）。\n"
+                        "风险：刷错可能导致外设/接口异常。\n"
+                        "建议：与平台/ROM 匹配，不建议单独刷。")},
+        {QStringLiteral("preloader_raw"),
+         QStringLiteral("用途：MTK 预引导的 raw 分区（启动链最底层）。\n"
+                        "风险：刷错极可能变砖，需要 BROM/专用工具救援。\n"
+                        "建议：只刷原厂匹配版本，刷前确认可进 BROM。")},
+        {QStringLiteral("md_sec"),
+         QStringLiteral("用途：MTK 平台安全数据分区（md_sec）。公开资料没有给出稳定说明。\n"
+                        "风险：无法确认内容，刷错可能影响基带/信号。\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("nvcfg"),
+         QStringLiteral("用途：NVRAM 配置数据。\n"
+                        "风险：刷错可能影响无线/射频配置。\n"
+                        "建议：先备份。")},
+        {QStringLiteral("protect1"),
+         QStringLiteral("用途：MTK 保护数据区。\n"
+                        "风险：内容不公开，刷错可能影响设备状态。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("protect2"),
+         QStringLiteral("用途：MTK 保护数据区。\n"
+                        "风险：内容不公开，刷错可能影响设备状态。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("proinfo"),
+         QStringLiteral("用途：产品信息/设备标识数据。\n"
+                        "风险：刷错可能改变设备标识或影响激活。\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("efuse"),
+         QStringLiteral("用途：熔丝（eFuse）数据，一次性可编程。\n"
+                        "风险：刷写可能永久改变/损坏设备，无法恢复。\n"
+                        "建议：绝对不要刷。")},
+        {QStringLiteral("otp"),
+         QStringLiteral("用途：OTP（一次性可编程）数据。\n"
+                        "风险：刷写可能永久损坏设备。\n"
+                        "建议：绝对不要刷。")},
+        {QStringLiteral("flashinfo"),
+         QStringLiteral("用途：闪存信息。\n"
+                        "风险：刷错可能影响底层识别。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("expdb"),
+         QStringLiteral("用途：异常/调试日志数据。\n"
+                        "风险：通常只影响日志，不影响系统。\n"
+                        "建议：可忽略，不建议刷写。")},
+        {QStringLiteral("para"),
+         QStringLiteral("用途：启动参数/环境数据。\n"
+                        "风险：刷错可能导致启动异常。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("pstore"),
+         QStringLiteral("用途：崩溃日志存储。\n"
+                        "风险：通常可安全忽略。\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("oops"),
+         QStringLiteral("用途：内核崩溃日志。\n"
+                        "风险：通常可安全忽略。\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("rescue"),
+         QStringLiteral("用途：救援/恢复相关数据。\n"
+                        "风险：刷错可能影响救援流程。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("dram_para"),
+         QStringLiteral("用途：DRAM 参数。\n"
+                        "风险：刷错可能导致无法开机。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("boot_para"),
+         QStringLiteral("用途：启动参数。\n"
+                        "风险：刷错可能导致启动异常。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("gsort"),
+         QStringLiteral("用途：MTK 平台数据（用途未公开）。\n"
+                        "风险：单独刷写风险未知。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("ffu"),
+         QStringLiteral("用途：固件更新数据。\n"
+                        "风险：内容随平台变化，刷错可能影响更新/启动。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("charger"),
+         QStringLiteral("用途：充电相关数据/图标。\n"
+                        "风险：刷错可能影响关机充电显示。\n"
+                        "建议：非必要不刷。")},
+        {QStringLiteral("countrycode"),
+         QStringLiteral("用途：国家/地区码配置。\n"
+                        "风险：刷错可能影响区域功能/无线配置。\n"
+                        "建议：先备份。")},
+        {QStringLiteral("opconfig"),
+         QStringLiteral("用途：运营商配置。\n"
+                        "风险：刷错可能影响运营商功能。\n"
+                        "建议：先备份。")},
+        {QStringLiteral("sec1"),
+         QStringLiteral("用途：安全相关数据区。\n"
+                        "风险：内容不公开，刷错可能影响安全启动/解密。\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("preloader"),
+         QStringLiteral("用途：MTK 预引导（启动链最底层）。\n"
+                        "风险：刷错极可能变砖，需要底层救援。\n"
+                        "建议：只刷原厂匹配版本，刷前确认设备可进 BROM。")},
+        {QStringLiteral("bootloader"),
+         QStringLiteral("用途：引导程序（bootloader/aboot）。\n"
+                        "风险：刷错设备可能完全无法启动。\n"
+                        "建议：只在明确需要时操作，并确保镜像匹配。")},
+        {QStringLiteral("lk"),
+         QStringLiteral("用途：Little Kernel 引导阶段。\n"
+                        "风险：刷错可能无法进入系统或 Fastboot。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("abl"),
+         QStringLiteral("用途：Android Bootloader（高通 ABL）。\n"
+                        "风险：刷错可能无法进入系统/Fastboot。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("xbl"),
+         QStringLiteral("用途：高通扩展引导加载程序。\n"
+                        "风险：刷错可能无法开机。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("tz"),
+         QStringLiteral("用途：TrustZone 安全环境。\n"
+                        "风险：刷错可能影响指纹、支付、解密。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("hyp"),
+         QStringLiteral("用途：Hypervisor 固件。\n"
+                        "风险：刷错可能无法开机或虚拟化异常。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("keymaster"),
+         QStringLiteral("用途：Keymaster/密钥服务固件。\n"
+                        "风险：刷错可能影响指纹、支付、解密。\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("devinfo"),
+         QStringLiteral("用途：设备信息、解锁状态等。\n"
+                        "风险：刷错可能改变/清除 BL 锁状态或设备标识。\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("seccfg"),
+         QStringLiteral("用途：安全配置/锁状态（MTK 常见）。\n"
+                        "风险：刷错可能影响解锁状态与启动。\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("logo"),
+         QStringLiteral("用途：开机 Logo。\n"
+                        "风险：刷错只影响显示，通常不影响启动。\n"
+                        "建议：确认分辨率和格式。")},
+        {QStringLiteral("splash"),
+         QStringLiteral("用途：开机动画/Logo。\n"
+                        "风险：刷错通常只影响显示。\n"
+                        "建议：确认分辨率和格式。")},
+        {QStringLiteral("abl"),
+         QStringLiteral("用途：Android Bootloader（Fastboot/Boot UI）。\\n"
+                        "风险：刷错可能无法进入系统或 Fastboot。\\n"
+                        "建议：与平台/ROM 匹配，确保可进 EDL。")},
+        {QStringLiteral("xbl"),
+         QStringLiteral("用途：Extensible Bootloader（高通第一阶段引导，初始化 DDR 并加载 TZ/ABL）。\\n"
+                        "风险：刷错可能无法开机。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("xbl_config"),
+         QStringLiteral("用途：XBL 硬件参数配置。\\n"
+                        "风险：与 xbl 不匹配可能无法开机。\\n"
+                        "建议：与 xbl 同版本。")},
+        {QStringLiteral("xbl_sc"),
+         QStringLiteral("用途：XBL 安全配置。\\n"
+                        "风险：与 xbl 不匹配可能影响安全启动。\\n"
+                        "建议：与 xbl 同版本。")},
+        {QStringLiteral("xbl_ramdump"),
+         QStringLiteral("用途：XBL ramdump 配置/调试数据。\\n"
+                        "风险：通常只影响调试，不建议单独刷。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("tz"),
+         QStringLiteral("用途：TrustZone / QTEE 安全世界。\\n"
+                        "风险：刷错可能影响指纹、支付、DRM、解密。\\n"
+                        "建议：与 xbl/abl 同版本。")},
+        {QStringLiteral("hyp"),
+         QStringLiteral("用途：Hypervisor（虚拟化层）。\\n"
+                        "风险：刷错可能无法开机或虚拟化异常。\\n"
+                        "建议：与 tz/xbl 同版本。")},
+        {QStringLiteral("keymaster"),
+         QStringLiteral("用途：硬件密钥/Keymaster 固件。\\n"
+                        "风险：刷错可能影响指纹、支付、Keystore 解密。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("devcfg"),
+         QStringLiteral("用途：设备配置（TZ 升级/硬件平台数据）。\\n"
+                        "风险：刷错可能影响安全启动。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("cmnlib"),
+         QStringLiteral("用途：Verified Boot 公共库（M 起由 LK 加载）。\\n"
+                        "风险：与 LK/TZ 不匹配可能无法通过验证启动。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("cmnlib64"),
+         QStringLiteral("用途：Verified Boot 64 位公共库。\\n"
+                        "风险：与 LK/TZ 不匹配可能无法通过验证启动。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("aop"),
+         QStringLiteral("用途：Always-On Processor 固件/电源管理。\\n"
+                        "风险：刷错可能导致待机、唤醒或功耗异常。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("aop_config"),
+         QStringLiteral("用途：AOP 配置数据。\\n"
+                        "风险：与 aop 不匹配可能影响低功耗功能。\\n"
+                        "建议：与 aop 同版本。")},
+        {QStringLiteral("cpucp"),
+         QStringLiteral("用途：CPU Control Processor（频率/电压控制）。\\n"
+                        "风险：刷错可能导致性能/功耗/温控异常。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("cpucp_dtb"),
+         QStringLiteral("用途：CPUCP 设备树。\\n"
+                        "风险：与 cpucp 不匹配可能影响频率/电压控制。\\n"
+                        "建议：与 cpucp 同版本。")},
+        {QStringLiteral("dsp"),
+         QStringLiteral("用途：ADSP/CDSP（音频与计算 DSP）固件。\\n"
+                        "风险：刷错可能导致音频、传感器或通话异常。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("modemst1"),
+         QStringLiteral("用途：Modem NVRAM 主数据（IMEI、RF 校准、运营商参数）。\\n"
+                        "风险：刷错/擦除可能无 IMEI、无信号。\\n"
+                        "建议：操作前必须备份。")},
+        {QStringLiteral("modemst2"),
+         QStringLiteral("用途：Modem NVRAM 备份数据。\\n"
+                        "风险：刷错可能影响信号恢复。\\n"
+                        "建议：操作前必须备份。")},
+        {QStringLiteral("fsg"),
+         QStringLiteral("用途：Modem 文件系统黄金备份，用于恢复 NV。\\n"
+                        "风险：刷错可能导致 Modem 初始化失败。\\n"
+                        "建议：先备份，非必要不刷。")},
+        {QStringLiteral("fsc"),
+         QStringLiteral("用途：Modem 文件系统 cookie。\\n"
+                        "风险：通常与 modemst 一起工作，刷错可能影响 NV。\\n"
+                        "建议：先备份。")},
+        {QStringLiteral("sec"),
+         QStringLiteral("用途：fuse 设置/安全启动配置（sec.dat）。\\n"
+                        "风险：刷错可能影响安全启动/OEM 设置。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("apdp"),
+         QStringLiteral("用途：调试策略（AP）。\\n"
+                        "风险：影响开发/安全调试策略。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("msadp"),
+         QStringLiteral("用途：调试策略（Modem）。\\n"
+                        "风险：影响开发/安全调试策略。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("dip"),
+         QStringLiteral("用途：SafeSwitch/防盗相关数据。\\n"
+                        "风险：刷错可能影响激活/锁定状态。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("mdtp"),
+         QStringLiteral("用途：SafeSwitch/防盗相关数据。\\n"
+                        "风险：刷错可能影响激活/锁定状态。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("dpo"),
+         QStringLiteral("用途：调试策略覆盖。\\n"
+                        "风险：影响开发调试策略。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("limits"),
+         QStringLiteral("用途：LMh（Limits Management）电压/频率限制参数。\\n"
+                        "风险：刷错可能影响性能/稳定性。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("mcfg"),
+         QStringLiteral("用途：Modem 配置（多 SIM/运营商 MBN 选择）。\\n"
+                        "风险：与基带不匹配可能影响信号。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("storsec"),
+         QStringLiteral("用途：存储安全（UFS/RPMB 保护）。\\n"
+                        "风险：刷错可能影响存储加密/启动。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("uefisecapp"),
+         QStringLiteral("用途：UEFI 安全应用。\\n"
+                        "风险：刷错可能影响安全启动。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("qupfw"),
+         QStringLiteral("用途：Qualcomm Universal Peripheral Firmware。\\n"
+                        "风险：刷错可能导致外设异常。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("shrm"),
+         QStringLiteral("用途：Shared Resource Manager。\\n"
+                        "风险：刷错可能影响资源共享/安全。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("featenabler"),
+         QStringLiteral("用途：功能使能配置。公开资料有限。\\n"
+                        "风险：内容随平台/ROM 变化。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("multiimgoem"),
+         QStringLiteral("用途：多镜像 OEM 数据。公开资料有限。\\n"
+                        "风险：内容随厂商/ROM 变化。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("multiimgqti"),
+         QStringLiteral("用途：多镜像 QTI 数据。公开资料有限。\\n"
+                        "风险：内容随平台/ROM 变化。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("imagefv"),
+         QStringLiteral("用途：固件卷镜像（ImageFV）。公开资料有限。\\n"
+                        "风险：内容随平台/ROM 变化。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("spunvm"),
+         QStringLiteral("用途：SPU/安全 VM 镜像。公开资料有限。\\n"
+                        "风险：影响安全/虚拟化相关功能。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("logfs"),
+         QStringLiteral("用途：日志文件系统。\\n"
+                        "风险：通常只影响日志，不影响系统。\\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("logdump"),
+         QStringLiteral("用途：日志转储区。\\n"
+                        "风险：通常只影响调试。\\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("rawdump"),
+         QStringLiteral("用途：原始转储区（调试/崩溃数据）。\\n"
+                        "风险：通常只影响调试。\\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("minidump"),
+         QStringLiteral("用途：小型崩溃转储。\\n"
+                        "风险：通常只影响调试。\\n"
+                        "建议：不需要刷写。")},
+        {QStringLiteral("splash"),
+         QStringLiteral("用途：开机 Logo/动画。\\n"
+                        "风险：通常只影响显示。\\n"
+                        "建议：确认分辨率和格式。")},
+        {QStringLiteral("keystore"),
+         QStringLiteral("用途：FDE/Keystore 相关数据。\\n"
+                        "风险：刷错可能影响设备解密。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("ssd"),
+         QStringLiteral("用途：SSD diag 模块数据/加密 RSA 密钥。\\n"
+                        "风险：刷错可能影响安全/诊断。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("ddr"),
+         QStringLiteral("用途：DDR 参数/校准。\\n"
+                        "风险：刷错可能无法开机。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("sbl1"),
+         QStringLiteral("用途：Secondary Boot Loader（旧高通平台）。\\n"
+                        "风险：刷错可能无法开机。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("rpm"),
+         QStringLiteral("用途：Resource Power Manager 固件。\\n"
+                        "风险：刷错可能影响电源/资源管理。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("aboot"),
+         QStringLiteral("用途：旧高通 Apps Bootloader（Fastboot）。\\n"
+                        "风险：刷错可能无法进入 Fastboot/系统。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("syscfg"),
+         QStringLiteral("用途：CPR/电压测试配置。\\n"
+                        "风险：通常不需要手动刷。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("mota"),
+         QStringLiteral("用途：OTA 升级备份分区。\\n"
+                        "风险：单独刷写可能影响升级流程。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("bluetooth"),
+         QStringLiteral("用途：蓝牙固件（高通平台）。\\n"
+                        "风险：刷错可能导致蓝牙不可用。\\n"
+                        "建议：随完整 ROM 更新。")},
+        {QStringLiteral("uefi"),
+         QStringLiteral("用途：UEFI 固件（新平台引导）。\\n"
+                        "风险：刷错可能无法开机。\\n"
+                        "建议：与平台/ROM 匹配。")},
+        {QStringLiteral("qweslicstore"),
+         QStringLiteral("用途：QWE/SLIC 存储。公开资料有限。\\n"
+                        "风险：内容不明确。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("soccp_dcd"),
+         QStringLiteral("用途：SoCCP 配置（新骁龙平台）。公开资料有限。\\n"
+                        "风险：内容不明确。\\n"
+                        "建议：不要单独刷。")},
+        {QStringLiteral("soccp_debug"),
+         QStringLiteral("用途：SoCCP 调试（新骁龙平台）。公开资料有限。\\n"
+                        "风险：内容不明确。\\n"
+                        "建议：不要单独刷。")},
+    };
+
+    QString note;
+    const auto it = notes.constFind(n);
+    if (it != notes.constEnd())
+        note = it.value();
+    else if (n.startsWith(QStringLiteral("vbmeta")))
+        note = QStringLiteral("用途：验证启动（AVB）元数据，记录各分区的哈希/签名。\n"
+                              "风险：与 boot/system 不匹配会无法开机；禁用验证可能影响 OTA/支付。\n"
+                              "建议：与同版本 ROM 一起刷，谨慎禁用验证。");
+    else if (n == QStringLiteral("cosnsys") || n.startsWith(QStringLiteral("cos_"))
+             || n.startsWith(QStringLiteral("oplus"))
+             || n.startsWith(QStringLiteral("oppo")))
+        note = QStringLiteral("用途：OPPO/ColorOS 系列厂商自定义分区（如 cosnsys），"
+                              "不是 AOSP 标准分区，内容随 ROM 版本变化。\n"
+                              "风险：具体用途未公开，单独刷写可能影响系统功能或启动。\n"
+                              "建议：优先随完整 ColorOS 包更新；不要凭分区名猜内容单独刷。");
+    else if (n == QStringLiteral("cuu") || n == QStringLiteral("dpm"))
+        note = QStringLiteral("用途：厂商自定义缩写分区（cuu / dpm 等），公开资料没有统一含义，"
+                              "不同厂商/ROM 可能完全不同。\n"
+                              "风险：无法确认内容，单独刷写风险未知。\n"
+                              "建议：不要单独刷；只从完整包或厂商刷机工具写入。");
+    else if (n.startsWith(QStringLiteral("my_")))
+        note = QStringLiteral("用途：小米/红米厂商自定义分区（my_* 系列），"
+                              "存放厂商系统资源或配置。\n"
+                              "风险：与当前 ROM 不匹配可能影响系统功能或开机。\n"
+                              "建议：随完整 MIUI/HyperOS 包更新，不建议单独刷。");
+    else if (n.startsWith(QStringLiteral("hw")) || n.startsWith(QStringLiteral("huawei")))
+        note = QStringLiteral("用途：华为/荣耀厂商自定义分区。\n"
+                              "风险：与当前固件不匹配可能影响系统功能或启动。\n"
+                              "建议：优先使用厂商完整包/刷机工具。");
+    else
+        note = QStringLiteral("用途：厂商自定义分区或未在标准分区表中登记的条目。\n"
+                              "风险：无法确认内容，单独刷写可能影响系统功能或启动。\n"
+                              "建议：优先通过完整包写入；只刷单分区时确认镜像来源与分区名完全匹配。");
+
+    const QString lowerName = name.toLower();
+    if (lowerName.endsWith(QStringLiteral("_a"))
+        || lowerName.endsWith(QStringLiteral("-a"))) {
+        note += QStringLiteral("\n\n当前是 A 槽");
+    } else if (lowerName.endsWith(QStringLiteral("_b"))
+               || lowerName.endsWith(QStringLiteral("-b"))) {
+        note += QStringLiteral("\n\n当前是 B 槽");
+    }
+    return note;
+}
+
+bool partitionHighRisk(const QString &name)
+{
+    const QString n = partitionBaseName(name);
+    return n == QStringLiteral("preloader") || n == QStringLiteral("lk")
+        || n == QStringLiteral("abl") || n == QStringLiteral("xbl")
+        || n == QStringLiteral("persist") || n == QStringLiteral("efs")
+        || n == QStringLiteral("modem") || n == QStringLiteral("radio")
+        || n.startsWith(QStringLiteral("vbmeta")) || n == QStringLiteral("frp")
+        || n == QStringLiteral("metadata") || n == QStringLiteral("bootloader")
+        || n == QStringLiteral("devinfo") || n == QStringLiteral("seccfg")
+        || n == QStringLiteral("nvdata") || n == QStringLiteral("nvram")
+        || n == QStringLiteral("md1img") || n == QStringLiteral("preloader_raw")
+        || n == QStringLiteral("efuse") || n == QStringLiteral("otp")
+        || n == QStringLiteral("proinfo") || n == QStringLiteral("md_sec")
+        || n == QStringLiteral("dram_para")
+        || n == QStringLiteral("abl") || n == QStringLiteral("xbl")
+        || n == QStringLiteral("xbl_config") || n == QStringLiteral("tz")
+        || n == QStringLiteral("hyp") || n == QStringLiteral("keymaster")
+        || n == QStringLiteral("devcfg") || n == QStringLiteral("cmnlib")
+        || n == QStringLiteral("cmnlib64")
+        || n == QStringLiteral("modemst1") || n == QStringLiteral("modemst2")
+        || n == QStringLiteral("fsg") || n == QStringLiteral("sec")
+        || n == QStringLiteral("storsec") || n == QStringLiteral("uefisecapp")
+        || n == QStringLiteral("sbl1") || n == QStringLiteral("rpm")
+        || n == QStringLiteral("aboot") || n == QStringLiteral("ddr");
+}
+
+void decoratePartitionItem(QListWidgetItem *item, const QString &name)
+{
+    item->setToolTip(partitionFullNote(name));
+    if (partitionHighRisk(name))
+        item->setForeground(QColor(QStringLiteral("#c0392b")));
+}
+
+QList<FlashTool::PartitionInfo> parseAdbPartitionOutput(const QString &output)
+{
+    QList<FlashTool::PartitionInfo> result;
+    const QStringList sections = output.split(QStringLiteral("__PT_SEP__"));
+    const QString procText = sections.value(0);
+    const QString nameText = sections.value(1);
+
+    QMap<QString, qint64> sizes;
+    const QRegularExpression spaces(QStringLiteral("\\s+"));
+    for (const QString &line : procText.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        const QStringList fields = line.trimmed().split(spaces, Qt::SkipEmptyParts);
+        if (fields.size() < 4)
+            continue;
+        bool ok = false;
+        const qint64 blocks = fields.at(2).toLongLong(&ok);
+        const QString name = fields.at(3).trimmed();
+        if (ok && blocks > 0 && !name.isEmpty())
+            sizes.insert(name, blocks * 512);
+    }
+
+    for (const QString &raw : nameText.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        const QString name = raw.trimmed();
+        if (name.isEmpty() || name.contains(QLatin1Char('/')))
+            continue;
+        FlashTool::PartitionInfo info;
+        info.name = name;
+        if (sizes.contains(name)) {
+            const qint64 bytes = sizes.value(name);
+            if (bytes >= 1024LL * 1024 * 1024)
+                info.size = QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
+            else if (bytes >= 1024 * 1024)
+                info.size = QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
+            else if (bytes >= 1024)
+                info.size = QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
+            else
+                info.size = QStringLiteral("%1 B").arg(bytes);
+        }
+        result.append(info);
+    }
+    return result;
+}
+
+QList<FlashTool::PartitionInfo> parseFastbootPartitionOutput(const QString &output)
+{
+    QMap<QString, FlashTool::PartitionInfo> partMap;
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        const QRegularExpression typeRe(
+            QStringLiteral("partition-type:(\\w+):\\s*(.+)"));
+        auto typeMatch = typeRe.match(line);
+        if (typeMatch.hasMatch()) {
+            const QString name = typeMatch.captured(1);
+            partMap[name].name = name;
+            partMap[name].type = typeMatch.captured(2).trimmed();
+            continue;
+        }
+
+        const QRegularExpression sizeRe(
+            QStringLiteral("partition-size:(\\w+):\\s*0x([0-9a-fA-F]+)"));
+        auto sizeMatch = sizeRe.match(line);
+        if (sizeMatch.hasMatch()) {
+            const QString name = sizeMatch.captured(1);
+            bool ok = false;
+            const qint64 bytes = sizeMatch.captured(2).toLongLong(&ok, 16);
+            partMap[name].name = name;
+            if (ok) {
+                if (bytes >= 1024LL * 1024 * 1024)
+                    partMap[name].size = QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
+                else if (bytes >= 1024 * 1024)
+                    partMap[name].size = QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
+                else if (bytes >= 1024)
+                    partMap[name].size = QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
+                else
+                    partMap[name].size = QStringLiteral("%1 B").arg(bytes);
+            }
+        }
+    }
+    return partMap.values();
+}
+
+} // namespace
 
 FlashPanel::FlashPanel(QWidget *parent)
     : QWidget(parent)
@@ -45,6 +750,14 @@ FlashPanel::FlashPanel(QWidget *parent)
             this, &FlashPanel::onToolOutput);
     connect(m_flashTool, &FlashTool::flashProgress,
             this, &FlashPanel::onToolProgress);
+
+    m_partitionTimer = new QTimer(this);
+    m_partitionTimer->setSingleShot(true);
+    m_partitionTimer->setInterval(15000);
+    connect(m_partitionTimer, &QTimer::timeout, this, [this]() {
+        if (m_partitionProc && m_partitionProc->state() != QProcess::NotRunning)
+            m_partitionProc->kill();
+    });
 }
 
 void FlashPanel::setupUI()
@@ -121,16 +834,27 @@ void FlashPanel::setupUI()
     mainLayout->addWidget(m_romSuggestionLabel);
 
     // 分区列表 (自动撑满)
-    QGroupBox *partGroup = new QGroupBox("分区列表", this);
-    QVBoxLayout *partLayout = new QVBoxLayout(partGroup);
+    QGroupBox *partGroup = new QGroupBox("分区选择", this);
+    QHBoxLayout *partLayout = new QHBoxLayout(partGroup);
 
+    QVBoxLayout *partListLayout = new QVBoxLayout();
     m_partitionList = new QListWidget(this);
     m_partitionList->setSelectionMode(QAbstractItemView::SingleSelection);
 
     m_refreshPartitionsBtn = new QPushButton("刷新分区", this);
 
-    partLayout->addWidget(m_partitionList, 1);
-    partLayout->addWidget(m_refreshPartitionsBtn);
+    partListLayout->addWidget(m_partitionList, 1);
+    partListLayout->addWidget(m_refreshPartitionsBtn);
+    partLayout->addLayout(partListLayout, 1);
+
+    m_partitionNote = new QLabel("选择分区后显示用途和风险说明", partGroup);
+    m_partitionNote->setWordWrap(true);
+    m_partitionNote->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    m_partitionNote->setMinimumWidth(240);
+    m_partitionNote->setMaximumWidth(380);
+    m_partitionNote->setStyleSheet("color:#888; font-size:12px; padding:4px;");
+    partLayout->addWidget(m_partitionNote);
+
     mainLayout->addWidget(partGroup, 1);
 
     // 操作按钮
@@ -253,6 +977,8 @@ void FlashPanel::setupUI()
 
 void FlashPanel::setDeviceInfo(const DeviceInfo &info)
 {
+    const QString previousSerial = m_deviceInfo.serialNumber;
+    const int previousMode = m_deviceInfo.mode;
     m_deviceInfo = info;
     m_deviceLabel->setText(QString("设备: %1").arg(
         info.serialNumber.isEmpty() ? "未知" : info.serialNumber));
@@ -353,7 +1079,7 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         // 见 onClearFrpClicked / onBrickRepairClicked 的 EDL 早退）—— 与其让用户先点一次再被拒，
         // 不如在这里就置灰并说明原因（tooltip 指明替代入口）。读回（m_dumpBtn）不受影响。
         if (m_flashTool->edlIsConnected()) {
-            m_dumpBtn->setEnabled(true);
+            updatePartitionActionState();
             m_frpBtn->setToolTip(QStringLiteral(
                 "EDL 模式不支持：Firehose 只能枚举 lun<N>，拿不到 GPT 分区名。"
                 "请改用「EDL 刷写计划…」（计划里 label=frp 的条目）"));
@@ -384,7 +1110,7 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
 
         // 已连接后显示分区操作
         if (m_flashTool->mtkIsConnected()) {
-            m_dumpBtn->setEnabled(true);
+            updatePartitionActionState();
             m_frpBtn->setEnabled(true);
             m_brickRepairBtn->setEnabled(true);
             if (!m_currentFile.isEmpty() && m_currentFile.toLower().endsWith(".img"))
@@ -420,14 +1146,18 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         return;
     }
 
-    // 选中设备自动刷新分区
-    onRefreshPartitions();
+    // 同一设备/模式的信息刷新（电池、Root 状态等）不重拉分区，
+    // 否则会清空用户已选中的分区。
+    if (previousSerial != info.serialNumber || previousMode != info.mode
+        || m_partitions.isEmpty())
+        onRefreshPartitions();
+    else
+        updatePartitionActionState();
 
     if (fastbootMode) {
         m_unlockBtn->setEnabled(true);
         m_lockBtn->setEnabled(true);
         m_sideloadBtn->setEnabled(false);
-        m_dumpBtn->setEnabled(true);
         m_bootImgBtn->setEnabled(!m_currentFile.isEmpty() &&
                                   (m_currentFile.toLower().endsWith(".img")));
         if (!m_currentFile.isEmpty()) {
@@ -440,22 +1170,36 @@ void FlashPanel::setDeviceInfo(const DeviceInfo &info)
         m_sideloadBtn->setEnabled(!m_currentFile.isEmpty() &&
                                    m_currentFile.toLower().endsWith(".zip"));
     } else if (m_deviceInfo.mode == DeviceDetector::MODE_ADB) {
-        m_dumpBtn->setEnabled(true);
-        if (m_deviceInfo.isRooted)
+        if (m_deviceInfo.hasRoot())
             m_frpBtn->setEnabled(true);
     }
+
+    updatePartitionActionState();
 }
 
 void FlashPanel::clearDeviceInfo()
 {
+    if (m_partitionProc) {
+        m_partitionProc->kill();
+        m_partitionProc->deleteLater();
+        m_partitionProc = nullptr;
+    }
+    if (m_partitionTimer)
+        m_partitionTimer->stop();
     m_deviceInfo = DeviceInfo();
     m_deviceLabel->setText("设备: 未连接");
     m_modeLabel->setText("模式: -");
     m_partitionList->clear();
+    if (m_partitionNote) {
+        m_partitionNote->setText(QStringLiteral("选择分区后显示用途和风险说明"));
+        m_partitionNote->setStyleSheet(
+            QStringLiteral("color:#888; font-size:12px; padding:4px;"));
+    }
     m_fileLabel->hide();
     m_romInfoLabel->hide();
     m_romSuggestionLabel->hide();
     m_progressBar->setVisible(false);
+    updatePartitionActionState();
     m_flashBtn->setEnabled(false);
     m_eraseBtn->setEnabled(false);
     m_dumpBtn->setEnabled(false);
@@ -619,6 +1363,8 @@ void FlashPanel::onRefreshPartitions()
 
     m_partitionList->clear();
     m_partitions.clear();
+    // 列表清空后选中项已不存在；同步按钮和右侧说明。
+    onPartitionSelectionChanged();
 
     if (mode == DeviceDetector::MODE_EDL_9008) {
         // EDL 模式: 通过 Firehose 获取分区
@@ -633,6 +1379,7 @@ void FlashPanel::onRefreshPartitions()
                 display += QString("  [%1 sectors]").arg(p.numSectors);
             QListWidgetItem *item = new QListWidgetItem(display, m_partitionList);
             item->setData(Qt::UserRole, p.name);
+            decoratePartitionItem(item, p.name);
             m_partitions.append(p.name);
         }
         emit outputMessage(QString("EDL 检测到 %1 个分区").arg(m_partitions.size()), false);
@@ -652,54 +1399,187 @@ void FlashPanel::onRefreshPartitions()
                 display += QString("  [%1 bytes]").arg(p.length);
             QListWidgetItem *item = new QListWidgetItem(display, m_partitionList);
             item->setData(Qt::UserRole, p.name);
+            decoratePartitionItem(item, p.name);
             m_partitions.append(p.name);
         }
         emit outputMessage(QString("MTK 检测到 %1 个分区").arg(m_partitions.size()), false);
         return;
     }
 
-    QList<FlashTool::PartitionInfo> details;
+    // ADB / Fastboot 的分区枚举走异步 QProcess + finished 信号，
+    // 不再在 UI 线程同步等 adb/fastboot 返回。
+    const QString serial = m_deviceInfo.serialNumber;
     if (fastbootMode) {
-        details = m_flashTool->getPartitionDetails(m_deviceInfo.serialNumber);
+        QString fastbootPath = AdbEmbedded::instance().getFastbootPath();
+        if (fastbootPath.isEmpty()) {
+            emit outputMessage(QStringLiteral("找不到 fastboot，无法读取分区"), true);
+            return;
+        }
+        startPartitionLoad(fastbootPath,
+                           {QStringLiteral("-s"), serial,
+                            QStringLiteral("getvar"), QStringLiteral("all")},
+                           mode);
     } else {
-        details = m_flashTool->getPartitionDetailsAdb(m_deviceInfo.serialNumber);
+        QString adbPath = AdbEmbedded::instance().getAdbPath();
+        if (adbPath.isEmpty()) {
+            AdbEmbedded::instance().initialize();
+            adbPath = AdbEmbedded::instance().getAdbPath();
+        }
+        if (adbPath.isEmpty()) {
+            emit outputMessage(QStringLiteral("找不到 adb，无法读取分区"), true);
+            return;
+        }
+        startPartitionLoad(
+            adbPath,
+            {QStringLiteral("-s"), serial, QStringLiteral("shell"),
+             QStringLiteral("cat /proc/partitions; echo __PT_SEP__; ls /dev/block/by-name/")},
+            mode);
     }
+}
+
+void FlashPanel::startPartitionLoad(const QString &program,
+                                    const QStringList &arguments, int mode)
+{
+    if (m_partitionProc) {
+        m_partitionProc->kill();
+        m_partitionProc->deleteLater();
+        m_partitionProc = nullptr;
+    }
+
+    m_partitionRequestSerial = m_deviceInfo.serialNumber;
+    m_partitionRequestMode = mode;
+
+    auto *process = new QProcess(this);
+    m_partitionProc = process;
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &FlashPanel::onPartitionProcFinished);
+    connect(process, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError) {
+                if (m_partitionProc && m_partitionProc->state() == QProcess::NotRunning)
+                    onPartitionProcFinished();
+            });
+
+    if (m_partitionTimer)
+        m_partitionTimer->start();
+    process->start(program, arguments);
+}
+
+void FlashPanel::onPartitionProcFinished()
+{
+    if (!m_partitionProc)
+        return;
+
+    QProcess *process = m_partitionProc;
+    m_partitionProc = nullptr;
+    if (m_partitionTimer)
+        m_partitionTimer->stop();
+
+    const QString serial = m_partitionRequestSerial;
+    const int mode = m_partitionRequestMode;
+    const QString output = QString::fromLocal8Bit(process->readAll());
+    const bool normalExit = process->exitStatus() == QProcess::NormalExit;
+    const int exitCode = process->exitCode();
+    process->deleteLater();
+
+    if (serial != m_deviceInfo.serialNumber || mode != m_deviceInfo.mode)
+        return;
+
+    const QList<FlashTool::PartitionInfo> details =
+        (mode == DeviceDetector::MODE_ADB || mode == DeviceDetector::MODE_RECOVERY)
+            ? parseAdbPartitionOutput(output)
+            : parseFastbootPartitionOutput(output);
+
+    if (details.isEmpty()) {
+        emit outputMessage(
+            normalExit && exitCode == 0
+                ? QStringLiteral("未检测到分区")
+                : QStringLiteral("分区读取失败：%1")
+                      .arg(output.trimmed().left(200)),
+            true);
+        updatePartitionActionState();
+        return;
+    }
+
+    m_partitionList->clear();
+    m_partitions.clear();
     for (const auto &pd : details) {
         QString display = pd.name;
         if (!pd.size.isEmpty())
-            display += QString("  [%1]").arg(pd.size);
+            display += QStringLiteral("  [%1]").arg(pd.size);
         if (!pd.type.isEmpty())
-            display += QString("  %1").arg(pd.type);
-        QListWidgetItem *item = new QListWidgetItem(display, m_partitionList);
+            display += QStringLiteral("  %1").arg(pd.type);
+        auto *item = new QListWidgetItem(display, m_partitionList);
         item->setData(Qt::UserRole, pd.name);
+        decoratePartitionItem(item, pd.name);
         m_partitions.append(pd.name);
     }
-    emit outputMessage(QString("已检测到 %1 个分区").arg(m_partitions.size()), false);
+    emit outputMessage(QStringLiteral("已检测到 %1 个分区").arg(m_partitions.size()), false);
+    onPartitionSelectionChanged();
+}
+
+void FlashPanel::updatePartitionActionState()
+{
+    const bool hasSelection = m_partitionList->currentItem() != nullptr;
+    const bool hasFile = !m_currentFile.isEmpty();
+    const bool hasImage = hasFile
+        && m_currentFile.toLower().endsWith(QStringLiteral(".img"));
+    const int mode = m_deviceInfo.mode;
+
+    // ADB + Root 走 push + dd，文件内容原样写入，不要求 .img 后缀；
+    // Fastboot/EDL/MTK 的镜像解析仍只接受 .img。
+    bool flashAllowed = hasSelection
+        && (mode == DeviceDetector::MODE_ADB ? hasFile : hasImage);
+    bool eraseAllowed = hasSelection;
+    bool dumpAllowed = hasSelection;
+
+    if (mode == DeviceDetector::MODE_EDL_9008) {
+        flashAllowed = flashAllowed && m_flashTool->edlIsConnected();
+        dumpAllowed = dumpAllowed && m_flashTool->edlIsConnected();
+        eraseAllowed = false;
+    } else if (mode == DeviceDetector::MODE_MTK_DA) {
+        flashAllowed = flashAllowed && m_flashTool->mtkIsConnected();
+        dumpAllowed = dumpAllowed && m_flashTool->mtkIsConnected();
+        eraseAllowed = false;
+    } else if (mode == DeviceDetector::MODE_MTK_BROM ||
+               mode == DeviceDetector::MODE_HUAWEI_USB_UPDATE ||
+               mode == DeviceDetector::MODE_SPD ||
+               mode == DeviceDetector::MODE_SAMSUNG_ODIN ||
+               mode == DeviceDetector::MODE_SAMSUNG_EUB) {
+        // 整包刷写通道：没有分区操作，「刷入」由 setDeviceInfo 单独启用。
+        flashAllowed = false;
+        eraseAllowed = false;
+        dumpAllowed = false;
+    } else if (mode == DeviceDetector::MODE_RECOVERY) {
+        // Recovery 只支持 Sideload。
+        flashAllowed = false;
+        eraseAllowed = false;
+        dumpAllowed = false;
+    }
+
+    m_flashBtn->setEnabled(flashAllowed);
+    m_eraseBtn->setEnabled(eraseAllowed);
+    m_dumpBtn->setEnabled(dumpAllowed);
 }
 
 void FlashPanel::onPartitionSelectionChanged()
 {
     QListWidgetItem *item = m_partitionList->currentItem();
-    if (item) {
-        QString part = item->data(Qt::UserRole).toString();
-        QString lower = m_currentFile.toLower();
-
-        if (m_deviceInfo.mode == DeviceDetector::MODE_EDL_9008) {
-            // EDL 模式: 只启用刷入和读取
-            m_flashBtn->setEnabled(m_flashTool->edlIsConnected() && lower.endsWith(".img"));
-            m_eraseBtn->setEnabled(false);
-        } else if (m_deviceInfo.mode == DeviceDetector::MODE_MTK_DA) {
-            // MTK 模式: 只启用刷入和读取
-            m_flashBtn->setEnabled(m_flashTool->mtkIsConnected() && lower.endsWith(".img"));
-            m_eraseBtn->setEnabled(false);
+    if (m_partitionNote) {
+        if (item) {
+            const QString name = item->data(Qt::UserRole).toString();
+            m_partitionNote->setText(partitionFullNote(name));
+            m_partitionNote->setStyleSheet(
+                partitionHighRisk(name)
+                    ? QStringLiteral("color:#c0392b; font-size:12px; padding:4px;")
+                    : QStringLiteral("color:#888; font-size:12px; padding:4px;"));
         } else {
-            m_flashBtn->setEnabled(lower.endsWith(".img"));
-            m_eraseBtn->setEnabled(true);
+            m_partitionNote->setText(QStringLiteral("选择分区后显示用途和风险说明"));
+            m_partitionNote->setStyleSheet(
+                QStringLiteral("color:#888; font-size:12px; padding:4px;"));
         }
-    } else {
-        m_flashBtn->setEnabled(false);
-        m_eraseBtn->setEnabled(false);
     }
+    updatePartitionActionState();
 }
 
 // ==================== 操作（含确认和BL检测） ====================
@@ -1325,7 +2205,7 @@ void FlashPanel::onDumpClicked()
             return;
         }
         return;
-    } else if (mode == DeviceDetector::MODE_ADB && !m_deviceInfo.isRooted) {
+    } else if (mode == DeviceDetector::MODE_ADB && !m_deviceInfo.hasRoot()) {
         // ADB 无 root: 警告
         QMessageBox::StandardButton cont = QMessageBox::question(
             this, "无 Root 权限",
@@ -1787,11 +2667,7 @@ void FlashPanel::onToolProgress(int percent)
 {
     m_progressBar->setValue(percent);
     if (percent >= 100 || percent == 0) {
-        m_flashBtn->setEnabled(m_partitionList->currentItem() &&
-                               !m_currentFile.isEmpty() &&
-                               m_currentFile.toLower().endsWith(".img"));
-        m_eraseBtn->setEnabled(m_partitionList->currentItem() != nullptr);
-        m_dumpBtn->setEnabled(m_partitionList->currentItem() != nullptr);
+        updatePartitionActionState();
         m_updateBtn->setEnabled(!m_currentFile.isEmpty() &&
                                 m_currentFile.toLower().endsWith(".zip"));
         m_sideloadBtn->setEnabled(!m_currentFile.isEmpty() &&

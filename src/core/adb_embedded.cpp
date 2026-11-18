@@ -231,17 +231,22 @@ bool AdbEmbedded::extractZip(const QString &zipPath, const QString &destDir)
 
 QString AdbEmbedded::executeCommand(const QString &command, int timeout)
 {
+    return executeCommand(command.split(' ', Qt::SkipEmptyParts), timeout);
+}
+
+QString AdbEmbedded::executeCommand(const QStringList &arguments, int timeout)
+{
     if (!m_initialized && !initialize())
         return "Error: ADB not initialized";
 
     QProcess process;
     process.setProgram(m_adbPath);
-    QStringList arguments = command.split(' ', Qt::SkipEmptyParts);
     process.setArguments(arguments);
     process.start();
 
     if (!process.waitForFinished(timeout)) {
         process.kill();
+        process.waitForFinished(2000);
         return "Error: Command timeout";
     }
 
@@ -251,7 +256,9 @@ QString AdbEmbedded::executeCommand(const QString &command, int timeout)
     if (process.exitCode() != 0)
         return "Error: " + error;
 
-    return output.isEmpty() ? "Success" : output.trimmed();
+    // 空输出就是空输出。旧实现返回 "Success"，调用方会把它当成设备数据
+    // （例如空属性显示成 "Success"），也让"输出为空但命令成功"无法区分。
+    return output.trimmed();
 }
 
 QString AdbEmbedded::getDeviceInfo(const QString &serial, const QString &prop)

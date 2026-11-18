@@ -13,6 +13,9 @@
 #include "core/device_detector.h"
 #include "core/flash_tool.h"
 
+class QProcess;
+class QTimer;
+
 class FlashPanel : public QWidget
 {
     Q_OBJECT
@@ -42,7 +45,10 @@ private slots:
     void onSideloadClicked();
     void onRunScriptClicked();
     void onPartitionSelectionChanged();
+    // 唯一来源：按当前选中分区/模式/连接状态刷新刷入、擦除、读取。
+    void updatePartitionActionState();
     void onRefreshPartitions();
+    void onPartitionProcFinished();
     void onToolOutput(const QString &msg, bool isError);
     void onToolProgress(int percent);
 
@@ -119,7 +125,14 @@ private:
 
     // 分区
     QListWidget *m_partitionList;
+    QLabel *m_partitionNote = nullptr;
     QPushButton *m_refreshPartitionsBtn;
+    QProcess *m_partitionProc = nullptr;
+    QTimer *m_partitionTimer = nullptr;
+    QString m_partitionRequestSerial;
+    int m_partitionRequestMode = -1;
+    void startPartitionLoad(const QString &program, const QStringList &arguments,
+                            int mode);
 
     // EDL 模式
     QPushButton *m_edlSelectProgBtn;

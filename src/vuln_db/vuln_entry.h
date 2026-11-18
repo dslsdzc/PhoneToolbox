@@ -55,6 +55,13 @@ struct VulnEntry {
     QString publishedDate;      // yyyy-MM-dd
     bool isAndroidSpecific = true;
 
+    // 可选的自定义界面（与 BROM 同一套机制）：
+    //   uiHtml —— 展示用 HTML（QTextBrowser 渲染，不含 JS）
+    //   uiLua  —— 沙箱 Lua 脚本（ui.* / device.* / log，可声明输入与动作）
+    // 两者都为空时走默认详情模板。
+    QString uiHtml;
+    QString uiLua;
+
     enum State { UNKNOWN, VULNERABLE, NOT_VULNERABLE, EXPLOITED, FAILED };
     State state = UNKNOWN;
 };

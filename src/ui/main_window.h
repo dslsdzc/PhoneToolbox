@@ -16,6 +16,7 @@
 #include "ui/image_tool_panel.h"
 #include "plugins/plugin_tool_panel.h"
 #include "ui/output_panel.h"
+#include "ui/settings_panel.h"
 
 class MainWindow : public QMainWindow
 {
@@ -37,6 +38,10 @@ private slots:
     void onOutputMessage(const QString &message, bool isError = false);
     void onRefreshRequested();
     void onToolSelected(int index);
+    void onRootAgentStateChanged(const QString &serial, bool connected,
+                                 bool isRoot);
+    void onDeviceInfoUpdated(const DeviceInfo &info);
+
 
 private:
     void setupUI();
@@ -54,6 +59,7 @@ private:
     VulnPanel *m_vulnPanel;
     ImageToolPanel *m_imageToolPanel;
     PluginToolPanel *m_pluginPanel;
+    SettingsPanel *m_settingsPanel;
     OutputPanel *m_outputPanel;
 
     DeviceDetector m_deviceDetector;

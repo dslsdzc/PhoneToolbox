@@ -10,6 +10,7 @@
 #include "modes/edl_handler.h"
 #include "modes/mtk_handler.h"
 #include "device_detector.h"
+#include "process_result.h"
 
 class FlashTool : public QObject
 {
@@ -144,6 +145,17 @@ signals:
     void flashProgress(int percent);
 
 private:
+    // 成败判定的唯一来源：启动成功 + 未超时 + 退出码 0。
+    // 需要解析输出（getvar / ls 等）的调用方继续用下面的 QString 包装；
+    // 但**写操作**（flash / erase / format / update / unlock / boot / sideload）
+    // 必须用 ProcessResult 判定，禁止再用 contains("FAILED") 猜。
+    ProcessResult runFastboot(const QStringList &args, int timeoutMs);
+    ProcessResult runFastbootWithDevice(const QString &deviceId,
+                                        const QStringList &extraArgs,
+                                        int timeoutMs);
+    ProcessResult runAdb(const QString &deviceId, const QStringList &args,
+                         int timeoutMs);
+
     QString executeFastboot(const QStringList &args, int timeoutMs = 30000);
     QString executeFastbootWithDevice(const QString &deviceId,
                                       const QStringList &extraArgs,

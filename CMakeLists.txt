@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(PhoneToolbox VERSION 0.0.1 LANGUAGES CXX)
+project(PhoneToolbox VERSION 0.0.1 LANGUAGES C CXX)
 
 # 选项：静态构建（Windows 单 EXE）
 option(STATIC_BUILD "Build fully static executable (single EXE on Windows)" OFF)
@@ -124,7 +124,7 @@ include_directories(
 )
 
 # 源文件列表
-file(GLOB_RECURSE SOURCES
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp"
@@ -136,7 +136,7 @@ list(FILTER SOURCES EXCLUDE REGEX "/image_engine/")
 list(FILTER SOURCES EXCLUDE REGEX "/root_patcher/")
 list(FILTER SOURCES EXCLUDE REGEX "/src/plugins/")
 
-file(GLOB_RECURSE HEADERS
+file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.h"
@@ -221,8 +221,8 @@ set_target_properties(PhoneToolbox PROPERTIES
 install(TARGETS PhoneToolbox DESTINATION bin)
 
 # ---- image_engine 静态库 ----
-file(GLOB_RECURSE IMAGE_ENGINE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.cpp")
-file(GLOB_RECURSE IMAGE_ENGINE_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.h")
+file(GLOB_RECURSE IMAGE_ENGINE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.cpp")
+file(GLOB_RECURSE IMAGE_ENGINE_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/image_engine/*.h")
 add_library(image_engine STATIC ${IMAGE_ENGINE_SOURCES} ${IMAGE_ENGINE_HEADERS})
 target_include_directories(image_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -240,9 +240,30 @@ target_link_libraries(PhoneToolbox image_engine)
 # root_patcher PUBLIC 传递 image_engine，顺序无关）
 target_link_libraries(PhoneToolbox root_patcher)
 
+# ---- Root agent 密码层（CPace + Noise，与 agent/ 共用实现）----
+if(WIN32)
+    find_package(unofficial-sodium CONFIG REQUIRED)
+    set(SODIUM_INCLUDE_DIRS "")
+    set(SODIUM_LIBRARIES unofficial::sodium::sodium)
+else()
+    pkg_check_modules(SODIUM REQUIRED libsodium)
+endif()
+
+add_subdirectory(agent/third_party/cpace)
+add_subdirectory(agent/third_party/noise-c)
+
+add_library(root_agent_crypto STATIC
+    agent/src/secure/cpace_pair.c
+    agent/src/secure/noise_channel.c)
+target_include_directories(root_agent_crypto PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/agent/src)
+target_compile_definitions(root_agent_crypto PUBLIC _GNU_SOURCE)
+target_link_libraries(root_agent_crypto PUBLIC cpace noise-c ${SODIUM_LIBRARIES})
+
+
 # ---- root_patcher 静态库 ----
-file(GLOB_RECURSE ROOT_PATCHER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.cpp")
-file(GLOB_RECURSE ROOT_PATCHER_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.h")
+file(GLOB_RECURSE ROOT_PATCHER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.cpp")
+file(GLOB_RECURSE ROOT_PATCHER_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/root_patcher/*.h")
 add_library(root_patcher STATIC ${ROOT_PATCHER_SOURCES} ${ROOT_PATCHER_HEADERS})
 target_include_directories(root_patcher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # lz4/lzma 头与库经 image_engine PUBLIC 传递；Qt6::Network 供后续下载类使用
@@ -357,7 +378,11 @@ if(ENABLE_IMAGE_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_fix.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_run.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brom_exploit_ui.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_da_export_dialog.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_da_export_dialog.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_device_detector.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_process_runner.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lua_sandbox.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_root_agent_client.cpp)
         if(IMAGE_TEST_SOURCES)
             # QTEST_APPLESS_MAIN 在每个测试文件里自带 main，多个测试源无法合链进同一可执行文件，
             # 故每个测试源独立编译为一个可执行文件（首源沿用 image_engine_tests 目标名）。
@@ -451,12 +476,33 @@ if(ENABLE_IMAGE_TESTS)
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/image_worker.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp)
+                elseif(_test_stem STREQUAL "test_device_detector")
+                    # H2：设备探测的性能回归用例。被测源为 DeviceDetector 整条探测链
+                    # （ADB 采集 / EDL 枚举 / 协议通道判据 / CPU 降级信号）。
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/device_detector.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/device_info.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/adb_embedded.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/resource_monitor.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/edl_9008.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/odin/odin_libusb_transport.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/samsung_mode.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/eub/eub_libusb_transport.cpp)
+                elseif(_test_stem STREQUAL "test_lua_sandbox")
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/lua_sandbox.cpp)
+                elseif(_test_stem STREQUAL "test_root_agent_client")
+                    set(_test_extra_sources
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/root_agent/root_agent_client.cpp)
                 elseif(_test_stem STREQUAL "test_pipeline")
                     # F5-2：flashChannelForMode 为 flash_tool.cpp 静态纯函数——整链编译 flash_tool
                     # 及其传递依赖（ADB 采集/EDL/MTK handler/SPD 路由）；插件符号（PluginManager）
                     # 经 phone_plugins 链接，见下方 add_subdirectory(src/plugins) 之后的块。
                     set(_test_extra_sources
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/flash_tool.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/root_agent/root_shell.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/adb_embedded.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/edl_handler.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_handler.cpp
@@ -743,6 +789,7 @@ if(ENABLE_IMAGE_TESTS)
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_brom.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_emmc.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_chip_table.cpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/lua_sandbox.cpp
                         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/modes/mtk_preloader_fetch.cpp)
                 elseif(_test_stem STREQUAL "test_da_export_dialog")
                     # W8-T6：DA 切分另存对话框（src/ui，不编入任何静态库）。只编**被测对话框**与它
@@ -881,13 +928,25 @@ if(ENABLE_IMAGE_TESTS)
                 # 判据与 mock 侧同款，防两侧静默分叉）；它本就与 mtk_brom.cpp 同源，这里只是加一条。
                 # W8-T6 起 test_brom_exploit_ui 也读生产源（`productionRunnerRecordsTheTargetDevice`：
                 # 生产执行器无真机可跑 ⇒ "这次打到哪台设备"的留痕只能靠结构钉，见该槽注释）。
+                # 技术债清理（统一"源码根宏"）：test_flash_button_labels / test_mtk_plan_dialog 此前
+                # 走 Qt6::Test **自带**的 QT_TESTCASE_SOURCEDIR。该宏由 Qt 的 INTERFACE 定义按
+                # `$<TARGET_PROPERTY:SOURCE_DIR>` 展开，语义是"**定义该目标的那个 CMakeLists 所在目录**"
+                # —— 只在"测试目标恰好都定义在顶层"时才等于仓库根（本仓现状如此，但**不是契约**：
+                # 测试目标一旦改在子目录 CMakeLists 里建，同一份用例的相对路径就静默换意）；它还能被
+                # 目标属性 QT_SKIP_DEFAULT_TESTCASE_DIRS 整个关掉。本仓要的语义是明确的"仓库根"
+                # ⇒ 统一到自己定义的 PT_SRC_ROOT（覆盖面也更大：7 个用例 vs 2 个）。这两条因此进名单，
+                # 用例内已改为 PT_SRC_ROOT。
                 if(_test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_edl_libusb_transport"
                    OR _test_stem STREQUAL "test_mtk_usb_ids"
                    OR _test_stem STREQUAL "test_risk_gate_wiring"
                    OR _test_stem STREQUAL "test_mtk_brom"
                    OR _test_stem STREQUAL "test_brom_exploit_ui"
-                   OR _test_stem STREQUAL "test_brom_exploit_fix")
+                   OR _test_stem STREQUAL "test_brom_exploit_fix"
+                   # 统一源码根宏（理由见上一条注释）：这两条原先是名单外的例外。
+                   OR _test_stem STREQUAL "test_flash_button_labels"
+                   OR _test_stem STREQUAL "test_mtk_plan_dialog"
+                   OR _test_stem STREQUAL "test_root_agent_client")
                     target_compile_definitions(${_test_target} PRIVATE
                         PT_SRC_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
                 endif()
@@ -973,6 +1032,19 @@ if(ENABLE_IMAGE_TESTS)
                 if(_test_stem STREQUAL "test_brom_exploit_ui")
                     target_link_libraries(${_test_target} PRIVATE Qt6::Network)
                 endif()
+                # H2：DeviceDetector 用例编入 adb_embedded.cpp —— 其下载路径要
+                # QNetworkAccessManager 符号，image_engine 不传递 Qt Network。
+                if(_test_stem STREQUAL "test_device_detector")
+                    target_link_libraries(${_test_target} PRIVATE Qt6::Network)
+                endif()
+                if(_test_stem STREQUAL "test_root_agent_client")
+                    target_link_libraries(${_test_target} PRIVATE
+                        Qt6::Network root_agent_crypto)
+                endif()
+                if(_test_stem STREQUAL "test_lua_sandbox"
+                   OR _test_stem STREQUAL "test_brom_exploit_ui")
+                    target_link_libraries(${_test_target} PRIVATE lua)
+                endif()
                 # BROM 协议测试需要 libusb（image_engine 不传递）。
                 # 注：原逻辑在 foreach 外按"末次 _test_stem"命中单目标，追加 test_mtk_payload
                 # 后 test_mtk_brom 会失去 libusb 链接（undefined symbol）；移入循环按名命中两类目标。
@@ -993,7 +1065,8 @@ if(ENABLE_IMAGE_TESTS)
                    OR _test_stem STREQUAL "test_brom_exploit_ui"
                    OR _test_stem STREQUAL "test_odin_libusb_transport"
                    OR _test_stem STREQUAL "test_eub_transport"
-                   OR _test_stem STREQUAL "test_eub_samsung_mode")
+                   OR _test_stem STREQUAL "test_eub_samsung_mode"
+                   OR _test_stem STREQUAL "test_device_detector")
                     target_include_directories(${_test_target} PRIVATE ${LIBUSB_INCLUDE_DIRS})
                     target_link_libraries(${_test_target} PRIVATE ${LIBUSB_LIBRARIES})
                 endif()
@@ -1007,9 +1080,13 @@ if(ENABLE_IMAGE_TESTS)
     endif()
 endif()
 
+# ---- Lua 运行时（vendored 5.4.7，MIT）----
+# 漏洞应用的自定义逻辑脚本在沙箱里执行；静态库，不新增运行时依赖。
+add_subdirectory(third_party/lua)
+
 # ---- 插件系统（主项目通用，F2-P）----
 add_subdirectory(src/plugins)
-target_link_libraries(PhoneToolbox phone_plugins)
+target_link_libraries(PhoneToolbox phone_plugins lua root_agent_crypto)
 
 # F5-2：test_pipeline 引用 PluginManager（phone_plugins）与 adb_embedded 的
 # QNetworkAccessManager（Qt6::Network）——目标在上一节循环已建，此处补链。

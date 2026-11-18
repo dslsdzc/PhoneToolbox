@@ -27,6 +27,13 @@ private slots:
     void percentBetween_normal();
     void percentBetween_zeroInterval_rejected();
     void percentBetween_counterWrap_rejected();
+    // 进程级指标（H1 修正）：监控对象是 PhoneToolbox 自己，不是整机
+    void parseProcSelfStat_normal();
+    void parseProcSelfStat_commWithSpacesAndParens();
+    void parseProcSelfStat_malformedRejected();
+    void processPercent_normal();
+    void processPercent_multithreadAbove100();
+    void processPercent_invalidRejected();
     void nextHighState_triggerAndRecover();
     void nextHighState_hysteresisBand();
     void nextHighState_boundaryValues();
@@ -148,6 +155,61 @@ void TestResourceMonitor::percentBetween_counterWrap_rejected()
     QCOMPARE(ResourceMonitor::percentBetween(2000, 300, 1000, 200), -1);
     // idle 回绕
     QCOMPARE(ResourceMonitor::percentBetween(1000, 300, 2000, 100), -1);
+}
+
+void TestResourceMonitor::parseProcSelfStat_normal()
+{
+    // pid (comm) state ... utime(14) stime(15)
+    // 从 state 起：0=state, 1..10=ppid..cmajflt, 11=utime, 12=stime
+    const QByteArray data(
+        "1234 (phonetoolbox) S 1 2 3 4 5 6 7 8 9 10 120 30\n");
+    quint64 ticks = 0;
+    QVERIFY(ResourceMonitor::parseProcSelfStat(data, ticks));
+    QCOMPARE(ticks, quint64(150));
+}
+
+void TestResourceMonitor::parseProcSelfStat_commWithSpacesAndParens()
+{
+    // comm 可能包含空格和括号（内核允许），必须从最后一个 ')' 之后开始解析。
+    const QByteArray data(
+        "1234 (phone toolbox (dev)) S 1 2 3 4 5 6 7 8 9 10 120 30\n");
+    quint64 ticks = 0;
+    QVERIFY(ResourceMonitor::parseProcSelfStat(data, ticks));
+    QCOMPARE(ticks, quint64(150));
+}
+
+void TestResourceMonitor::parseProcSelfStat_malformedRejected()
+{
+    quint64 ticks = 7;
+    QVERIFY(!ResourceMonitor::parseProcSelfStat(QByteArray(), ticks));
+    QVERIFY(!ResourceMonitor::parseProcSelfStat("no parens here\n", ticks));
+    QVERIFY(!ResourceMonitor::parseProcSelfStat("1 (x) S 1 2 3\n", ticks));
+    QVERIFY(!ResourceMonitor::parseProcSelfStat(
+        "1 (x) S 1 2 3 4 5 6 7 8 9 10 nope 30\n", ticks));
+    QCOMPARE(ticks, quint64(7)); // 失败不改写输出
+}
+
+void TestResourceMonitor::processPercent_normal()
+{
+    // 100 ticks / 100Hz = 1s CPU，墙钟 1s → 100%（单核满载）
+    QCOMPARE(ResourceMonitor::processPercent(100, 200, 1000, 100), 100);
+    // 20 ticks = 0.2s CPU / 1s → 20%
+    QCOMPARE(ResourceMonitor::processPercent(100, 120, 1000, 100), 20);
+    // 空闲
+    QCOMPARE(ResourceMonitor::processPercent(100, 100, 1000, 100), 0);
+}
+
+void TestResourceMonitor::processPercent_multithreadAbove100()
+{
+    // 2s CPU / 1s 墙钟 = 200%：多线程程序合法超过单核 100%。
+    QCOMPARE(ResourceMonitor::processPercent(100, 300, 1000, 100), 200);
+}
+
+void TestResourceMonitor::processPercent_invalidRejected()
+{
+    QCOMPARE(ResourceMonitor::processPercent(100, 200, 0, 100), -1);   // 零间隔
+    QCOMPARE(ResourceMonitor::processPercent(100, 200, 1000, 0), -1);  // 非法频率
+    QCOMPARE(ResourceMonitor::processPercent(200, 100, 1000, 100), -1); // 回绕
 }
 
 void TestResourceMonitor::nextHighState_triggerAndRecover()

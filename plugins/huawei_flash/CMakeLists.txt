@@ -18,6 +18,10 @@ set_target_properties(huawei_flash_plugin PROPERTIES
     AUTOMOC ON
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
 
+# 安装到主程序搜索的 Linux 插件目录（/usr/lib/phonetoolbox/plugins）。
+install(TARGETS huawei_flash_plugin
+    LIBRARY DESTINATION lib/phonetoolbox/plugins)
+
 # 协议层测试（插件内独立注册，不进入主项目测试列表）
 find_package(Qt6 QUIET COMPONENTS Test)
 if(Qt6Test_FOUND AND ENABLE_IMAGE_TESTS)

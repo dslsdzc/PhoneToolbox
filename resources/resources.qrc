@@ -15,4 +15,8 @@
     <qresource prefix="/exploit">
         <file alias="exploit-payload-sources.json">exploit-payload-sources.json</file>
     </qresource>
+    <!-- 漏洞应用的 Lua 界面脚本（BROM 是第一个完全由 HTML + Lua 描述的例子）。 -->
+    <qresource prefix="/ui">
+        <file alias="brom_exploit.lua">brom_exploit.lua</file>
+    </qresource>
 </RCC>

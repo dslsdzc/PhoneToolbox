@@ -8,6 +8,7 @@
 #include "device_info.h"
 
 class EDL9008;
+class QThread;
 struct EDLDeviceInfo;
 
 class DeviceDetector : public QObject
@@ -43,11 +44,14 @@ public:
     QString formatDeviceInfoForDisplay(const DeviceInfo &info) const;
     QString getBootloaderStatusIcon(bool isUnlocked) const;
     QString getModeDisplayName(DeviceMode mode) const;
-    void forceRefresh() { checkDevices(); }
+    // 触发一次即时探测。探测在后台线程执行，本调用立即返回（H2）。
+    void forceRefresh();
     QMap<QString, bool> m_fastbootDeviceModes; 
 
 signals:
     void deviceConnected(const DeviceInfo &info);
+    // 后台线程采集到电池等动态字段变化后通知 UI；UI 在槽里更新。
+    void deviceInfoUpdated(const DeviceInfo &info);
     void deviceDisconnected(const QString &serial);
     void deviceModeChanged(const QString &serial, DeviceMode newMode);
 
@@ -56,7 +60,10 @@ private slots:
 
 private:
     QTimer *m_monitorTimer;
+    QThread *m_thread = nullptr;   // 探测工作线程（首次 startMonitoring 时创建）
+    bool m_probing = false;        // 工作线程内防轮询堆积
     QMap<QString, DeviceInfo> m_currentDevices;
+    QMap<QString, qint64> m_dynamicRefreshAt;
     
     void detectConnectedDevices();
     DeviceMode detectDeviceMode(const QString &deviceId);

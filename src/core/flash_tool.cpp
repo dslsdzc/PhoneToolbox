@@ -1,5 +1,8 @@
 #include "flash_tool.h"
+#include "core/root_agent/root_shell.h"
 #include "adb_embedded.h"
+#include "device_io_busy.h"
+#include "process_runner.h"
 #include "core/modes/spd_storage.h"
 // Phase B Task 8：oppo-edl 通道 —— 计划层（目录 → FlashPlan）+ 会话编排 + 真机传输整链
 #include "core/edl/edl_libusb_transport.h"
@@ -24,6 +27,20 @@
 #include <QThread>
 #include <utility>      // std::as_const（遍历 Qt 容器）
 
+namespace {
+
+// 少数 fastboot 版本/机型会出现「退出码 0，但输出里明确 FAILED」。
+// 写操作在 success() 之上再叠加这一条：宁可误报失败，也不误报成功。
+bool outputIndicatesFailure(const QString &output)
+{
+    return output.contains(QStringLiteral("FAILED"))
+           || output.contains(QStringLiteral("error:"))
+           || output.contains(QStringLiteral("cannot load"))
+           || output.contains(QStringLiteral("not allowed"));
+}
+
+} // namespace
+
 // fastboot flash-all 脚本名（平台条件编译，两条分支互为对方平台的脚本）。
 // 当前全仓无调用点（W5-T5 核对：只有这 4 行定义）—— 用 [[maybe_unused]] 保留常量本身，
 // 不删：将来接线 flash-all 时两个平台的名字都要在，删了就得重新考据。
@@ -46,40 +63,55 @@ FlashTool::FlashTool(QObject *parent)
             this, &FlashTool::flashProgress);
 }
 
+ProcessResult FlashTool::runFastboot(const QStringList &args, int timeoutMs)
+{
+    ProcessResult result;
+    if (!AdbEmbedded::instance().initialize()) {
+        result.stderrText = QStringLiteral("ADB/Fastboot 初始化失败");
+        return result;
+    }
+
+    const QString fastbootPath = AdbEmbedded::instance().getFastbootPath();
+    if (fastbootPath.isEmpty()) {
+        result.stderrText = QStringLiteral("Fastboot 路径为空");
+        return result;
+    }
+
+    return runExternalProcess(fastbootPath, args, timeoutMs);
+}
+
+ProcessResult FlashTool::runFastbootWithDevice(const QString &deviceId,
+                                               const QStringList &extraArgs,
+                                               int timeoutMs)
+{
+    // 只标记这一台：探测继续跑，但这台在写期间不会被判"断开"。
+    const deviceio::Guard busy(deviceId);
+    QStringList args;
+    if (!deviceId.isEmpty()) {
+        args << "-s" << deviceId;
+    }
+    args << extraArgs;
+    return runFastboot(args, timeoutMs);
+}
+
 QString FlashTool::executeFastboot(const QStringList &args, int timeoutMs)
 {
-    if (!AdbEmbedded::instance().initialize()) {
-        return "Error: ADB/Fastboot not initialized";
+    const ProcessResult result = runFastboot(args, timeoutMs);
+    if (!result.success()) {
+        return QStringLiteral("Error: ") + result.errorSummary();
     }
-
-    QString fastbootPath = AdbEmbedded::instance().getFastbootPath();
-    if (fastbootPath.isEmpty()) {
-        return "Error: Fastboot path is empty";
-    }
-
-    QProcess process;
-    process.setProgram(fastbootPath);
-    process.setArguments(args);
-
-    process.start();
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        return "Error: Command timeout";
-    }
-
-    return process.readAllStandardOutput() + process.readAllStandardError();
+    return result.combinedOutput();
 }
 
 QString FlashTool::executeFastbootWithDevice(const QString &deviceId,
                                               const QStringList &extraArgs,
                                               int timeoutMs)
 {
-    QStringList args;
-    if (!deviceId.isEmpty()) {
-        args << "-s" << deviceId;
+    const ProcessResult result = runFastbootWithDevice(deviceId, extraArgs, timeoutMs);
+    if (!result.success()) {
+        return QStringLiteral("Error: ") + result.errorSummary();
     }
-    args << extraArgs;
-    return executeFastboot(args, timeoutMs);
+    return result.combinedOutput();
 }
 
 QStringList FlashTool::listPartitions(const QString &deviceId)
@@ -160,12 +192,16 @@ bool FlashTool::flashPartition(const QString &deviceId, const QString &partition
     emit outputMessage(QString("开始刷入 %1 到 %2...").arg(fi.fileName(), partition), false);
     emit flashProgress(10);
 
-    QString result = executeFastbootWithDevice(deviceId, {"flash", partition, imagePath}, 60000);
+    const ProcessResult result =
+        runFastbootWithDevice(deviceId, {"flash", partition, imagePath}, 60000);
 
     emit flashProgress(90);
 
-    if (result.contains("FAILED") || result.contains("failed")) {
-        emit outputMessage(QString("刷入失败: %1").arg(result), true);
+    if (!result.success() || outputIndicatesFailure(result.combinedOutput())) {
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("刷入失败: %1").arg(why), true);
         emit flashProgress(0);
         return false;
     }
@@ -180,12 +216,16 @@ bool FlashTool::erasePartition(const QString &deviceId, const QString &partition
     emit outputMessage(QString("正在擦除 %1...").arg(partition), false);
     emit flashProgress(10);
 
-    QString result = executeFastbootWithDevice(deviceId, {"erase", partition}, 30000);
+    const ProcessResult result =
+        runFastbootWithDevice(deviceId, {"erase", partition}, 30000);
 
     emit flashProgress(90);
 
-    if (result.contains("FAILED") || result.contains("failed")) {
-        emit outputMessage(QString("擦除失败: %1").arg(result), true);
+    if (!result.success() || outputIndicatesFailure(result.combinedOutput())) {
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("擦除失败: %1").arg(why), true);
         emit flashProgress(0);
         return false;
     }
@@ -200,12 +240,16 @@ bool FlashTool::formatPartition(const QString &deviceId, const QString &partitio
     emit outputMessage(QString("正在格式化分区 %1...").arg(partition), false);
     emit flashProgress(10);
 
-    QString result = executeFastbootWithDevice(deviceId, {"format", partition}, 60000);
+    const ProcessResult result =
+        runFastbootWithDevice(deviceId, {"format", partition}, 60000);
 
     emit flashProgress(90);
 
-    if (result.contains("FAILED") || result.contains("failed")) {
-        emit outputMessage(QString("格式化失败: %1").arg(result), true);
+    if (!result.success() || outputIndicatesFailure(result.combinedOutput())) {
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("格式化失败: %1").arg(why), true);
         emit flashProgress(0);
         return false;
     }
@@ -226,10 +270,14 @@ bool FlashTool::flashUpdate(const QString &deviceId, const QString &zipPath)
     emit outputMessage(QString("开始更新设备: %1").arg(fi.fileName()), false);
     emit flashProgress(5);
 
-    QString result = executeFastbootWithDevice(deviceId, {"update", zipPath}, 120000);
+    const ProcessResult result =
+        runFastbootWithDevice(deviceId, {"update", zipPath}, 120000);
 
-    if (result.contains("FAILED") || result.contains("failed")) {
-        emit outputMessage(QString("更新失败: %1").arg(result), true);
+    if (!result.success() || outputIndicatesFailure(result.combinedOutput())) {
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("更新失败: %1").arg(why), true);
         emit flashProgress(0);
         return false;
     }
@@ -255,27 +303,17 @@ bool FlashTool::adbSideload(const QString &deviceId, const QString &zipPath)
         return false;
     }
 
-    QProcess process;
-    process.setProgram(AdbEmbedded::instance().getAdbPath());
-    QStringList args;
-    if (!deviceId.isEmpty()) {
-        args << "-s" << deviceId;
-    }
-    args << "sideload" << zipPath;
-    process.setArguments(args);
+    const ProcessResult result = runAdb(deviceId, {"sideload", zipPath}, 120000);
+    const QString output = result.combinedOutput();
+    if (!output.isEmpty())
+        emit outputMessage(output, false);
 
-    emit outputMessage(QString("执行: adb %1").arg(args.join(" ")), false);
-
-    process.start();
-    if (!process.waitForFinished(120000)) {
-        process.kill();
-        emit outputMessage("Sideload 超时", true);
+    if (!result.success()) {
+        emit outputMessage(QString("Sideload 失败: %1").arg(result.errorSummary()), true);
         emit flashProgress(0);
         return false;
     }
 
-    QString result = process.readAllStandardOutput() + process.readAllStandardError();
-    emit outputMessage(result, false);
     emit flashProgress(100);
     return true;
 }
@@ -354,41 +392,57 @@ bool FlashTool::runFlashScript(const QString &scriptPath, const QString &deviceI
     return true;
 }
 
-QString FlashTool::executeAdb(const QString &deviceId, const QStringList &args,
-                               int timeoutMs)
+ProcessResult FlashTool::runAdb(const QString &deviceId, const QStringList &args,
+                                int timeoutMs)
 {
+    // 同上：按设备标记。push / dd / sideload 期间，
+    // 探测仍会刷新其他设备，也不会把这台重启中的设备判成断开。
+    const deviceio::Guard busy(deviceId);
+    ProcessResult result;
     if (!AdbEmbedded::instance().initialize()) {
-        return "Error: ADB not initialized";
+        result.stderrText = QStringLiteral("ADB 初始化失败");
+        return result;
     }
 
-    QString adbPath = AdbEmbedded::instance().getAdbPath();
+    const QString adbPath = AdbEmbedded::instance().getAdbPath();
     if (adbPath.isEmpty()) {
-        return "Error: ADB path is empty";
+        result.stderrText = QStringLiteral("ADB 路径为空");
+        return result;
     }
 
-    QProcess process;
-    process.setProgram(adbPath);
     QStringList fullArgs;
     if (!deviceId.isEmpty()) {
         fullArgs << "-s" << deviceId;
     }
     fullArgs << args;
-    process.setArguments(fullArgs);
 
     emit outputMessage(QString("执行: adb %1").arg(fullArgs.join(" ")), false);
+    return runExternalProcess(adbPath, fullArgs, timeoutMs);
+}
 
-    process.start();
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        return "Error: Command timeout";
+QString FlashTool::executeAdb(const QString &deviceId, const QStringList &args,
+                               int timeoutMs)
+{
+    // 统一 root 入口：adb shell su -c ... 优先走已连接的 Root 代理。
+    if (args.size() >= 4 && args.at(0) == QLatin1String("shell")
+        && args.at(1) == QLatin1String("su")
+        && args.at(2) == QLatin1String("-c")) {
+        const QString command = args.mid(3).join(QLatin1Char(' '));
+        const RootShellResult rootResult =
+            RootShell::instance().run(deviceId, command, timeoutMs);
+        if (rootResult.timedOut)
+            return QStringLiteral("Error: timeout");
+        const QString text = rootResult.combinedText();
+        if (text.isEmpty() && rootResult.exitCode < 0)
+            return QStringLiteral("Error: root command failed");
+        return text;
     }
 
-    QString output = process.readAllStandardOutput();
-    QString error = process.readAllStandardError();
-    if (process.exitCode() != 0) {
-        return "Error: " + error;
+    const ProcessResult result = runAdb(deviceId, args, timeoutMs);
+    if (!result.success()) {
+        return QStringLiteral("Error: ") + result.errorSummary();
     }
-    return output;
+    return result.stdoutText;
 }
 
 bool FlashTool::dumpPartition(const QString &deviceId, int deviceMode,
@@ -583,10 +637,14 @@ bool FlashTool::fastbootBoot(const QString &deviceId, const QString &imagePath)
     emit outputMessage(QString("启动临时镜像: %1").arg(fi.fileName()), false);
     emit flashProgress(10);
 
-    QString result = executeFastbootWithDevice(deviceId, {"boot", imagePath}, 60000);
+    const ProcessResult result =
+        runFastbootWithDevice(deviceId, {"boot", imagePath}, 60000);
 
-    if (result.contains("FAILED") || result.contains("failed")) {
-        emit outputMessage(QString("启动失败: %1").arg(result), true);
+    if (!result.success() || outputIndicatesFailure(result.combinedOutput())) {
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("启动失败: %1").arg(why), true);
         emit flashProgress(0);
         return false;
     }
@@ -764,10 +822,11 @@ bool FlashTool::unlockBootloader(const QString &deviceId)
 
     for (const auto &attempt : attempts) {
         emit outputMessage(QString("尝试: %1").arg(attempt.desc), false);
-        QString result = executeFastbootWithDevice(deviceId, attempt.args, 15000);
+        const ProcessResult result =
+            runFastbootWithDevice(deviceId, attempt.args, 15000);
 
-        if (!result.contains("FAILED") && !result.contains("failed")) {
-            emit outputMessage(attempt.desc + " 执行成功", false);
+        if (result.success() && !outputIndicatesFailure(result.combinedOutput())) {
+            emit outputMessage(attempt.desc + " 命令已发送", false);
             emit flashProgress(80);
 
             // 等待几秒让设备状态更新
@@ -781,12 +840,18 @@ bool FlashTool::unlockBootloader(const QString &deviceId)
                 return true;
             }
 
-            emit outputMessage("命令已执行，但解锁状态未确认", true);
-            emit flashProgress(100);
-            return true;
+            // 命令发出 ≠ 解锁成功：设备可能拒绝、可能等待用户在屏幕上确认，
+            // 也可能重启后状态还没刷新。这里必须如实报"未确认"，不能返回 true。
+            emit outputMessage(
+                "命令已发送，但无法确认解锁状态；请重启到 Fastboot 后手动复查", true);
+            emit flashProgress(0);
+            return false;
         }
 
-        emit outputMessage(QString("%1 失败: %2").arg(attempt.desc, result.trimmed()), true);
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("%1 失败: %2").arg(attempt.desc, why), true);
     }
 
     emit outputMessage("所有解锁尝试均失败。设备可能不支持解锁或已被厂商封锁。", true);
@@ -806,10 +871,11 @@ bool FlashTool::lockBootloader(const QString &deviceId)
 
     for (const auto &attempt : attempts) {
         emit outputMessage(QString("尝试: %1").arg(attempt.desc), false);
-        QString result = executeFastbootWithDevice(deviceId, attempt.args, 15000);
+        const ProcessResult result =
+            runFastbootWithDevice(deviceId, attempt.args, 15000);
 
-        if (!result.contains("FAILED") && !result.contains("failed")) {
-            emit outputMessage(attempt.desc + " 执行成功", false);
+        if (result.success() && !outputIndicatesFailure(result.combinedOutput())) {
+            emit outputMessage(attempt.desc + " 命令已发送", false);
             emit flashProgress(80);
 
             QThread::msleep(2000);
@@ -821,12 +887,16 @@ bool FlashTool::lockBootloader(const QString &deviceId)
                 return true;
             }
 
-            emit outputMessage("命令已执行，但回锁状态未确认", true);
-            emit flashProgress(100);
-            return true;
+            emit outputMessage(
+                "命令已发送，但无法确认回锁状态；请重启到 Fastboot 后手动复查", true);
+            emit flashProgress(0);
+            return false;
         }
 
-        emit outputMessage(QString("%1 失败: %2").arg(attempt.desc, result.trimmed()), true);
+        const QString why = result.success()
+                                ? result.combinedOutput().trimmed()
+                                : result.errorSummary();
+        emit outputMessage(QString("%1 失败: %2").arg(attempt.desc, why), true);
     }
 
     emit outputMessage("所有回锁尝试均失败。", true);

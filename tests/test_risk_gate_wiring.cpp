@@ -311,8 +311,9 @@ void TestRiskGateWiring::vulnPanelGatesFourEntries()
         QStringLiteral("void VulnPanel::onScan()"),
         QStringLiteral("void VulnPanel::onExploitAll()"),
         QStringLiteral("void VulnPanel::onExploitSingle(const QString &cveId)"),
-        // W8-T6：BROM 漏洞利用的**执行**入口（解析载荷那条**有意不过闸门**，见函数头注释）
-        QStringLiteral("void VulnPanel::onBromExploitRun()"),
+        // W8-T6：BROM 漏洞利用的**执行**入口（界面在 Lua，宿主入口是 runBromExploit；
+        // 解析载荷那条**有意不过闸门**）
+        QStringLiteral("bool VulnPanel::runBromExploit("),
     };
     QCOMPARE(handlers.size(), 4);
 

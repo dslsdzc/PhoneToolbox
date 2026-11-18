@@ -6,13 +6,22 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QScrollBar>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+
+#include "core/device_detector.h"
 #include <QMessageBox>
 #include <QDateTime>
 #include <QSet>
 #include <QElapsedTimer>
+#include <QThread>
 #include <QCheckBox>
+#include <QDialog>
+#include <QFormLayout>
+#include <QTextBrowser>
+
+#include "core/lua_sandbox.h"
 #include <QCryptographicHash>   // M5：载荷指纹（本机实算的 sha256 前 8 位）
 #include <QLineEdit>
 #include <memory>
@@ -23,6 +32,10 @@
 #include "ui/brom_exploit_ui.h"                           // 执行前判据（纯函数，逐条被用例钉住）
 
 namespace {
+
+// BROM 不是 CVE，也不能伪装成 CVE。这个串只用于内部路由（打开专属界面），
+// 列表里显示的是 "MTK BROM"，不会出现任何 CVE 形态的编号。
+const char kInternalBromId[] = "__brom_kamakiri__";
 
 // 载荷指纹：**本机实算**的 sha256 前 8 位（spec §3.8 要求 UI 显示它；M5 落地）。
 // 为什么强调"实算"：显示清单里那个值是回显，与手上这份字节没有因果关系；实算才有对表意义
@@ -119,13 +132,292 @@ bool runBromExploitOnDevice(const VulnPanel::BromRunRequest &req, QStringList *l
     return true;
 }
 
+QString vulnStateText(VulnEntry::State state)
+{
+    switch (state) {
+    case VulnEntry::VULNERABLE:     return QStringLiteral("存在漏洞");
+    case VulnEntry::NOT_VULNERABLE: return QStringLiteral("不受影响");
+    case VulnEntry::EXPLOITED:      return QStringLiteral("已利用");
+    case VulnEntry::FAILED:         return QStringLiteral("失败");
+    default:                        return QStringLiteral("待检测");
+    }
+}
+
+QString vulnAffectedText(const VulnEntry &entry)
+{
+    QStringList parts;
+    if (!entry.affected.androidVersionMin.isEmpty()
+        || !entry.affected.androidVersionMax.isEmpty()) {
+        parts << QStringLiteral("Android %1-%2")
+                     .arg(entry.affected.androidVersionMin.isEmpty()
+                              ? QStringLiteral("?")
+                              : entry.affected.androidVersionMin)
+                     .arg(entry.affected.androidVersionMax.isEmpty()
+                              ? QStringLiteral("?")
+                              : entry.affected.androidVersionMax);
+    }
+    if (!entry.affected.patchLevelBefore.isEmpty())
+        parts << QStringLiteral("补丁 < %1").arg(entry.affected.patchLevelBefore);
+    if (!entry.affected.platforms.isEmpty())
+        parts << entry.affected.platforms.join(QStringLiteral(", "));
+    return parts.join(QStringLiteral(" · "));
+}
+
 } // namespace
+
+// 单个漏洞的专属界面。
+//   - 有 uiLua：沙箱执行脚本，按 ui.* 声明渲染 HTML / 表单 / 状态 / 按钮；
+//   - 否则：默认模板（描述 + 执行利用）。
+// BROM 是第一个完全走 Lua 的条目；外部漏洞库也可以在自己的 JSON 里带 ui。
+class VulnDetailDialog : public QDialog
+{
+public:
+    VulnDetailDialog(const VulnEntry &entry, QWidget *parent,
+                     const LuaSandbox::DeviceSnapshot &device,
+                     const LuaSandbox::BromApi &bromApi,
+                     std::function<void(const QString &)> logger,
+                     std::function<void()> onExploit)
+        : QDialog(parent)
+        , m_cveId(entry.id)
+        , m_entry(entry)
+        , m_logger(std::move(logger))
+        , m_onExploit(std::move(onExploit))
+    {
+        setWindowTitle(QStringLiteral("%1 — 漏洞详情").arg(entry.id));
+        setMinimumSize(720, 560);
+
+        m_rootLayout = new QVBoxLayout(this);
+
+        m_title = new QLabel(this);
+        m_title->setWordWrap(true);
+        m_title->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: bold;"));
+        m_rootLayout->addWidget(m_title);
+
+        m_meta = new QLabel(this);
+        m_meta->setWordWrap(true);
+        m_meta->setStyleSheet(QStringLiteral("color: #aaa;"));
+        m_rootLayout->addWidget(m_meta);
+
+        if (!entry.uiLua.isEmpty()) {
+            m_sandbox = new LuaSandbox();
+            m_sandbox->setDevice(device);
+            m_sandbox->setBromApi(bromApi);
+            m_sandbox->setLogger(m_logger);
+
+            QString error;
+            if (!m_sandbox->run(entry.uiLua, &error)) {
+                auto *err = new QLabel(
+                    QStringLiteral("自定义界面加载失败：%1").arg(error), this);
+                err->setWordWrap(true);
+                err->setStyleSheet(QStringLiteral("color:#c0392b;"));
+                m_rootLayout->addWidget(err);
+                buildDefaultBody();
+            } else {
+                buildLuaBody();
+            }
+        } else {
+            buildDefaultBody();
+        }
+
+        updateEntry(entry);
+    }
+
+    ~VulnDetailDialog() override { delete m_sandbox; }
+
+    QString cveId() const { return m_cveId; }
+
+    void updateEntry(const VulnEntry &entry)
+    {
+        m_entry = entry;
+        m_title->setText(QStringLiteral("%1　%2").arg(entry.id, entry.summary));
+
+        const QString affected = vulnAffectedText(entry);
+        m_meta->setText(QStringLiteral("严重度：%1　CVSS：%2　状态：%3\n影响范围：%4")
+                            .arg(entry.severity)
+                            .arg(entry.cvssScore, 0, 'f', 1)
+                            .arg(vulnStateText(entry.state))
+                            .arg(affected.isEmpty() ? QStringLiteral("未声明") : affected));
+
+        if (m_exploitBtn) {
+            m_exploitBtn->setEnabled(entry.state == VulnEntry::VULNERABLE);
+            m_exploitBtn->setToolTip(
+                entry.state == VulnEntry::VULNERABLE
+                    ? QStringLiteral("对该设备执行此漏洞的利用脚本")
+                    : QStringLiteral("只有检测结果为「存在漏洞」时才可执行利用"));
+        }
+    }
+
+private:
+    void buildDefaultBody()
+    {
+        m_htmlView = new QTextBrowser(this);
+        m_htmlView->setReadOnly(true);
+        m_htmlView->setOpenExternalLinks(false);
+        m_rootLayout->addWidget(m_htmlView, 1);
+
+        if (!m_entry.uiHtml.isEmpty()) {
+            m_htmlView->setHtml(m_entry.uiHtml);
+        } else {
+            QString desc = m_entry.description;
+            if (desc.isEmpty())
+                desc = m_entry.summary;
+            if (!m_entry.cvssVector.isEmpty())
+                desc += QStringLiteral("\n\nCVSS 向量：%1").arg(m_entry.cvssVector);
+            if (!m_entry.references.isEmpty())
+                desc += QStringLiteral("\n\n参考：\n")
+                        + m_entry.references.join(QLatin1Char('\n'));
+            m_htmlView->setPlainText(desc);
+        }
+
+        auto *buttons = new QHBoxLayout();
+        if (m_onExploit) {
+            m_exploitBtn = new QPushButton(QStringLiteral("执行利用"), this);
+            connect(m_exploitBtn, &QPushButton::clicked, this, [this]() {
+                if (m_onExploit)
+                    m_onExploit();
+            });
+            buttons->addWidget(m_exploitBtn);
+        }
+        auto *closeBtn = new QPushButton(QStringLiteral("关闭"), this);
+        connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
+        buttons->addStretch();
+        buttons->addWidget(closeBtn);
+        m_rootLayout->addLayout(buttons);
+    }
+
+    void buildLuaBody()
+    {
+        m_htmlView = new QTextBrowser(this);
+        m_htmlView->setReadOnly(true);
+        m_htmlView->setOpenExternalLinks(false);
+        m_rootLayout->addWidget(m_htmlView, 1);
+
+        // 表单只建一次：动作执行后保留用户输入，不重建控件。
+        m_formWidget = new QWidget(this);
+        m_formLayout = new QFormLayout(m_formWidget);
+        m_formLayout->setContentsMargins(0, 0, 0, 0);
+        m_rootLayout->addWidget(m_formWidget);
+
+        for (const LuaSandbox::InputSpec &input : m_sandbox->inputs()) {
+            if (input.checkbox) {
+                auto *check = new QCheckBox(input.label, m_formWidget);
+                check->setChecked(input.defaultValue == QStringLiteral("1"));
+                connect(check, &QCheckBox::toggled, this,
+                        [this, id = input.id](bool on) {
+                            m_sandbox->setValue(id, on ? QStringLiteral("1")
+                                                       : QStringLiteral("0"));
+                        });
+                m_formLayout->addRow(QString(), check);
+                m_inputWidgets.insert(input.id, check);
+            } else {
+                auto *edit = new QLineEdit(input.defaultValue, m_formWidget);
+                edit->setPlaceholderText(input.label);
+                connect(edit, &QLineEdit::textChanged, this,
+                        [this, id = input.id](const QString &text) {
+                            m_sandbox->setValue(id, text);
+                        });
+                m_formLayout->addRow(input.label, edit);
+                m_inputWidgets.insert(input.id, edit);
+            }
+        }
+
+        m_statusWidget = new QWidget(this);
+        m_statusLayout = new QVBoxLayout(m_statusWidget);
+        m_statusLayout->setContentsMargins(0, 0, 0, 0);
+        m_rootLayout->addWidget(m_statusWidget);
+
+        for (const LuaSandbox::StatusSpec &status : m_sandbox->statuses()) {
+            auto *label = new QLabel(status.text, m_statusWidget);
+            label->setWordWrap(true);
+            label->setStyleSheet(QStringLiteral("font-size: 11px; color: #aaa;"));
+            m_statusLayout->addWidget(label);
+            m_statusLabels.insert(status.id, label);
+        }
+
+        m_actionLayout = new QHBoxLayout();
+        m_rootLayout->addLayout(m_actionLayout);
+
+        auto *bottom = new QHBoxLayout();
+        auto *closeBtn = new QPushButton(QStringLiteral("关闭"), this);
+        connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
+        bottom->addStretch();
+        bottom->addWidget(closeBtn);
+        m_rootLayout->addLayout(bottom);
+
+        refreshLuaUi();
+    }
+
+    void refreshLuaUi()
+    {
+        const QString html = m_sandbox->html();
+        m_htmlView->setHtml(
+            html.isEmpty()
+                ? QStringLiteral("<p>%1</p>").arg(m_entry.summary.toHtmlEscaped())
+                : html);
+
+        for (const LuaSandbox::StatusSpec &status : m_sandbox->statuses()) {
+            if (QLabel *label = m_statusLabels.value(status.id))
+                label->setText(status.text);
+        }
+
+        // 动作按钮重建：脚本可能在动作后改变数量或 enabled。
+        while (QLayoutItem *item = m_actionLayout->takeAt(0)) {
+            if (QWidget *widget = item->widget())
+                widget->deleteLater();
+            delete item;
+        }
+        for (const LuaSandbox::Action &action : m_sandbox->actions()) {
+            auto *button = new QPushButton(action.label, this);
+            button->setEnabled(action.enabled);
+            connect(button, &QPushButton::clicked, this, [this, id = action.id]() {
+                runLuaAction(id);
+            });
+            m_actionLayout->addWidget(button);
+        }
+        m_actionLayout->addStretch();
+    }
+
+    void runLuaAction(const QString &id)
+    {
+        QString error;
+        if (!m_sandbox->invokeAction(id, &error)) {
+            if (m_logger)
+                m_logger(QStringLiteral("界面动作 %1 失败：%2").arg(id, error));
+        }
+        refreshLuaUi();
+    }
+
+    QString m_cveId;
+    VulnEntry m_entry;
+    LuaSandbox *m_sandbox = nullptr;
+    QVBoxLayout *m_rootLayout = nullptr;
+    QLabel *m_title = nullptr;
+    QLabel *m_meta = nullptr;
+    QTextBrowser *m_htmlView = nullptr;
+    QWidget *m_formWidget = nullptr;
+    QFormLayout *m_formLayout = nullptr;
+    QWidget *m_statusWidget = nullptr;
+    QVBoxLayout *m_statusLayout = nullptr;
+    QHBoxLayout *m_actionLayout = nullptr;
+    QHash<QString, QWidget *> m_inputWidgets;
+    QHash<QString, QLabel *> m_statusLabels;
+    QPushButton *m_exploitBtn = nullptr;
+    std::function<void(const QString &)> m_logger;
+    std::function<void()> m_onExploit;
+};
 
 VulnPanel::VulnPanel(QWidget *parent)
     : QWidget(parent)
     , m_db(new VulnDb(this))
-    , m_engine(new ExploitEngine(this))
+    , m_engine(new ExploitEngine()) // 无 parent：稍后 moveToThread
 {
+    // 漏洞脚本全部是同步 QProcess（单条最长可到 timeoutSeconds），留在主线程
+    // 会把界面卡死。引擎整体搬到工作线程，UI 只通过 queued 回调更新。
+    qRegisterMetaType<ExploitResult>("ExploitResult");
+    m_engineThread = new QThread(this);
+    m_engineThread->setObjectName(QStringLiteral("VulnEngine"));
+    m_engine->moveToThread(m_engineThread);
+    m_engineThread->start();
     // W8-T6：载荷解析的**生产默认**——来源清单（用户配置优先，否则内置副本）+ 不落盘缓存。
     // `cacheDir` 有意留空（只留内存）：与 FlashPanel 的 preloader 获取同款口径 —— 载荷二进制
     // 只在这一步的内存里，不往用户盘上落一份（本仓不分发载荷，也不额外留下一份副本）。
@@ -133,8 +425,6 @@ VulnPanel::VulnPanel(QWidget *parent)
     m_bromPayloadOptions.cacheDir.clear();
 
     setupUI();
-    // W8-T6：初始态也要落原因（未选设备/无芯片码）—— 灰键不解释是本区最坏的形态。
-    refreshBromGate();
 
     connect(m_engine, &ExploitEngine::outputLine,
             this, &VulnPanel::onEngineOutput);
@@ -163,7 +453,27 @@ void VulnPanel::setConsentStore(legal::ConsentStore *store)
     m_consentStore = store;
 }
 
-VulnPanel::~VulnPanel() = default;
+VulnPanel::~VulnPanel()
+{
+    if (!m_engineThread)
+        return;
+
+    // 先请求取消：正在跑的脚本会在约 100ms 内被 kill，
+    // 不必等它自然超时（漏洞脚本单条可能几分钟）。
+    m_engine->requestCancel();
+
+    if (m_engineThread->isRunning()) {
+        QThread *const mainThread = QThread::currentThread();
+        // 把 engine 移回主线程再 delete；直接跨线程销毁 QObject 是未定义行为。
+        QMetaObject::invokeMethod(m_engine, [this, mainThread]() {
+            m_engine->moveToThread(mainThread);
+        }, Qt::BlockingQueuedConnection);
+        m_engineThread->quit();
+        m_engineThread->wait();
+    }
+    delete m_engine;
+    m_engine = nullptr;
+}
 
 void VulnPanel::setupUI()
 {
@@ -211,7 +521,7 @@ void VulnPanel::setupUI()
     m_vulnTable = new QTableWidget(0, 5, this);
     m_vulnTable->setHorizontalHeaderLabels({
         QString(),                  // 0: severity icon
-        QStringLiteral("CVE ID"),    // 1
+        QStringLiteral("CVE ID / 标识"), // 1
         QStringLiteral("描述 / 影响范围"), // 2
         QStringLiteral("状态"),      // 3
         QString()                   // 4: action button
@@ -230,8 +540,6 @@ void VulnPanel::setupUI()
     tableLayout->addWidget(m_vulnTable);
     mainLayout->addWidget(tableGroup, 1);
 
-    // ── W8-T6：MTK BROM 漏洞利用区 ──
-    mainLayout->addWidget(buildBromExploitGroup());
 
     // ── Log output ──
     QGroupBox *logGroup = new QGroupBox(QStringLiteral("输出日志"), this);
@@ -244,11 +552,287 @@ void VulnPanel::setupUI()
     logLayout->addWidget(m_logOutput);
     mainLayout->addWidget(logGroup, 0);
 
+    // 内置列表只有 BROM 这一条：它不是 CVE，走芯片级路由；
+    // 普通漏洞全部来自用户加载的外部库（可叠加多个）。
+    updateBromRow(0);
+
     // ── Connections ──
     connect(m_backBtn, &QPushButton::clicked, this, &VulnPanel::switchToDeviceInfo);
     connect(m_loadDbBtn, &QPushButton::clicked, this, &VulnPanel::onLoadDatabase);
     connect(m_scanBtn, &QPushButton::clicked, this, &VulnPanel::onScan);
     connect(m_exploitAllBtn, &QPushButton::clicked, this, &VulnPanel::onExploitAll);
+    connect(m_vulnTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+        if (auto *item = m_vulnTable->item(row, 1))
+            openVulnDetail(item->text());
+    });
+}
+
+void VulnPanel::openVulnDetail(const QString &cveId)
+{
+    // BROM 是列表里的固定条目，但有自己完全独立的界面。
+    if (cveId == QString::fromLatin1(kInternalBromId)) {
+        openBromDetail();
+        return;
+    }
+
+    VulnEntry entry;
+    bool found = false;
+    for (const auto &e : m_currentEntries) {
+        if (e.id == cveId) {
+            entry = e;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        return;
+
+    if (m_detailDialog) {
+        m_detailDialog->close(); // WA_DeleteOnClose + destroyed 回调会把指针置空
+        m_detailDialog = nullptr;
+    }
+
+    auto *dialog = new VulnDetailDialog(
+        entry, this, deviceSnapshot(), LuaSandbox::BromApi(),
+        [this](const QString &line) { appendLog(line); },
+        [this, cveId]() { onExploitSingle(cveId); });
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QObject::destroyed, this, [this]() {
+        m_detailDialog = nullptr;
+    });
+    m_detailDialog = dialog;
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void VulnPanel::openBromDetail()
+{
+    QFile script(QStringLiteral(":/ui/brom_exploit.lua"));
+    if (!script.open(QIODevice::ReadOnly)) {
+        appendLog(QStringLiteral("内置 BROM 界面脚本缺失（:/ui/brom_exploit.lua）"), true);
+        return;
+    }
+
+    VulnEntry entry;
+    entry.id = QStringLiteral("MTK BROM（非 CVE）");
+    entry.summary = QStringLiteral("MTK BROM 漏洞利用（kamakiri 路径）");
+    entry.description = QStringLiteral(
+        "芯片级漏洞利用。按芯片 hw_code 查硬件地址表；载荷需自备。");
+    entry.uiLua = QString::fromUtf8(script.readAll());
+
+    if (m_detailDialog) {
+        m_detailDialog->close();
+        m_detailDialog = nullptr;
+    }
+
+    auto *dialog = new VulnDetailDialog(
+        entry, this, deviceSnapshot(), makeBromApi(),
+        [this](const QString &line) { appendLog(line); },
+        nullptr);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QObject::destroyed, this, [this]() {
+        m_detailDialog = nullptr;
+    });
+    m_detailDialog = dialog;
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+LuaSandbox::DeviceSnapshot VulnPanel::deviceSnapshot() const
+{
+    LuaSandbox::DeviceSnapshot snapshot;
+    snapshot.serial = m_deviceInfo.serialNumber;
+    snapshot.model = m_deviceInfo.model;
+    snapshot.manufacturer = m_deviceInfo.manufacturer;
+    snapshot.androidVersion = m_deviceInfo.androidVersion;
+    snapshot.sdk = m_deviceInfo.sdkVersion;
+    snapshot.securityPatch = m_deviceInfo.securityPatch;
+    return snapshot;
+}
+
+// BROM 的宿主能力面：只给底层操作，界面和流程全在 resources/brom_exploit.lua。
+LuaSandbox::BromApi VulnPanel::makeBromApi()
+{
+    LuaSandbox::BromApi api;
+
+    // 复用设备检测层的结果（DeviceDetector 每 2s 轮询并识别 MODE_MTK_BROM），
+    // 不再在 BROM 界面里另开一次 libusb 枚举 —— 否则同一件事有两套检测。
+    api.scan = [this]() -> QString {
+        QStringList bromDevices;
+        for (auto it = m_devices.constBegin(); it != m_devices.constEnd(); ++it) {
+            const DeviceInfo &info = it.value();
+            if (info.mode != DeviceDetector::MODE_MTK_BROM)
+                continue;
+            bromDevices << QStringLiteral("%1（%2）").arg(it.key(), info.model);
+        }
+        if (bromDevices.isEmpty()) {
+            return QStringLiteral(
+                "设备列表中没有 BROM/preloader 设备。请让设备进入 BROM 模式，"
+                "等上方设备列表识别后再打开本界面。");
+        }
+        return QStringLiteral("设备检测到 %1 台：%2")
+            .arg(bromDevices.size())
+            .arg(bromDevices.join(QStringLiteral("；")));
+    };
+
+    api.chipStatus = [](const QString &hwText, const QString &var1Text) -> QString {
+        bromui::GateInputs in;
+        in.deviceSelected = true;
+        in.hwCodeText = hwText;
+        in.var1Text = var1Text;
+        in.payload = bromui::PayloadState::Verified; // 只取芯片摘要，不参与执行判定
+        return bromui::evaluateRunGate(in).chipSummary;
+    };
+
+    api.gate = [this](const QString &hwText, const QString &var1Text,
+                      bool payloadReady) -> LuaSandbox::BromGate {
+        bromui::GateInputs in;
+        in.deviceSelected = !m_deviceInfo.serialNumber.isEmpty();
+        in.hwCodeText = hwText;
+        in.var1Text = var1Text;
+        in.payload = payloadReady ? bromui::PayloadState::Verified : m_bromPayloadState;
+        in.payloadError = m_bromPayloadError;
+        const bromui::RunGate gate = bromui::evaluateRunGate(in);
+        return LuaSandbox::BromGate{gate.canRun, gate.chipSummary, gate.reason};
+    };
+
+    api.resolve = [this](const QString &hwText, const QString &payloadPath,
+                         bool allowNetwork, QString *message) {
+        return resolveBromPayload(hwText, payloadPath, allowNetwork, message);
+    };
+
+    api.run = [this](const QString &hwText, const QString &var1Text,
+                     bool allowPatched, QString *message) {
+        return runBromExploit(hwText, var1Text, allowPatched, message);
+    };
+
+    return api;
+}
+
+bool VulnPanel::resolveBromPayload(const QString &hwText, const QString &payloadPath,
+                                   bool allowNetwork, QString *message)
+{
+    mtkbrom::ExploitPayloadOptions opt = m_bromPayloadOptions;
+    opt.explicitPath = payloadPath.trimmed();
+    opt.allowNetwork = allowNetwork;
+    if (opt.sourceListPath.isEmpty())
+        opt.sourceListPath = bromui::defaultSourceListPath();
+
+    quint16 hwCode = 0;
+    const QString hint = bromui::parseHwCodeText(hwText, &hwCode, nullptr)
+                             ? bromui::formatHwCodeHint(hwCode)
+                             : QString();
+
+    appendLog(QStringLiteral("解析 MTK BROM 载荷（芯片提示 %1；来源 %2；网络 %3）")
+                  .arg(hint.isEmpty() ? QStringLiteral("（无）") : hint,
+                       opt.explicitPath.isEmpty() ? QStringLiteral("来源清单")
+                                                  : QStringLiteral("显式文件"),
+                       opt.allowNetwork ? QStringLiteral("开") : QStringLiteral("关（默认）")));
+
+    QByteArray payload;
+    QStringList log;
+    QString error;
+    const mtkbrom::ExploitDownloader downloader =
+        m_bromDownloader ? m_bromDownloader : mtkbrom::makeQtExploitDownloader();
+    const bool ok =
+        mtkbrom::resolveExploitPayload(opt, hint, payload, &log, &error, downloader);
+
+    for (const QString &line : log)
+        appendLog(QStringLiteral("  %1").arg(line));
+
+    if (!ok) {
+        m_bromPayload.clear();
+        m_bromPayloadState = bromui::PayloadState::Rejected;
+        m_bromPayloadError = error;
+        if (message)
+            *message = error;
+        return false;
+    }
+
+    m_bromPayload = payload;
+    m_bromPayloadState = bromui::PayloadState::Verified;
+    m_bromPayloadError.clear();
+    if (message) {
+        *message = QStringLiteral("✔ 已就绪（%1 字节 · sha256 前 8 位 %2）")
+                       .arg(payload.size())
+                       .arg(payloadFingerprint(payload));
+    }
+    return true;
+}
+
+bool VulnPanel::runBromExploit(const QString &hwText, const QString &var1Text,
+                               bool allowPatched, QString *message)
+{
+    if (!riskui::ensureAccepted(this,
+                                riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit),
+                                m_consentStore)) {
+        if (message)
+            *message = QStringLiteral("未接受风险确认，已取消");
+        return false;
+    }
+
+    quint16 hwCode = 0;
+    QString perr;
+    if (!bromui::parseHwCodeText(hwText, &hwCode, &perr)) {
+        if (message)
+            *message = QStringLiteral("芯片码不可用：%1").arg(perr);
+        return false;
+    }
+
+    bromui::GateInputs in;
+    in.deviceSelected = !m_deviceInfo.serialNumber.isEmpty();
+    in.hwCodeText = hwText;
+    in.var1Text = var1Text;
+    in.payload = m_bromPayloadState;
+    in.payloadError = m_bromPayloadError;
+    const bromui::RunGate gate = bromui::evaluateRunGate(in);
+    if (!gate.canRun) {
+        if (message)
+            *message = QStringLiteral("执行条件未满足：%1").arg(gate.reason);
+        return false;
+    }
+
+    appendLog(QStringLiteral("开始 MTK BROM 漏洞利用（kamakiri 路径） —— 目标芯片 0x%1；"
+                             "作用于当前 USB 上枚举到的 BROM 设备（不是设备列表里选中的那台；"
+                             "芯片码在握手后现场核对）")
+                  .arg(hwCode, 4, 16, QLatin1Char('0')));
+
+    BromRunRequest req;
+    req.hwCode = hwCode;
+    req.payload = m_bromPayload;
+    req.allowPatchedGeneration = allowPatched;
+    if (const mtkbrom::ChipHwAddrs *addrs = mtkbrom::lookupChipHwAddrs(hwCode)) {
+        const bromui::Var1Resolution var1 = bromui::resolveVar1(*addrs, var1Text);
+        if (var1.source == bromui::Var1Source::FromInput)
+            req.var1 = var1.value;
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    QStringList log;
+    QString error;
+    const BromRunner runner = m_bromRunner ? m_bromRunner : BromRunner(runBromExploitOnDevice);
+    const bool ok = runner(req, &log, &error);
+
+    for (const QString &line : log)
+        appendLog(QStringLiteral("  %1").arg(line));
+
+    if (ok) {
+        appendLog(QStringLiteral("✔ 触发序列完成（耗时 %1ms）。判据只有 ack：载荷已回 ack、"
+                                 "触发控制传输已发出 —— 设备是否真的进入可利用状态，本仓无真机验证。")
+                      .arg(timer.elapsed()));
+        if (message)
+            *message = QStringLiteral("✔ 触发序列完成（判据只有 ack，未真机验证）");
+        return true;
+    }
+
+    appendLog(QStringLiteral("✘ 执行失败（耗时 %1ms）：%2").arg(timer.elapsed()).arg(error),
+              true);
+    if (message)
+        *message = QStringLiteral("✘ 执行失败：%1").arg(error);
+    return false;
 }
 
 // W8-T6：MTK BROM 漏洞利用区（载荷来源 / 目标芯片 / 执行 / 日志 —— 日志落在本面板的输出日志区）。
@@ -261,135 +845,6 @@ void VulnPanel::setupUI()
 //     显式开启的网络获取 —— 没有"内置一份"这个选项。
 //   * daMode / var1：前者固定 false（kamakiri 路径的上游取值）；后者按"表优先 → 显式覆盖 → 响亮失败"，
 //     本区**不暴露**覆盖口（缺 var1 的芯片由 runBromExploit 响亮失败，不静默 0）。
-QWidget *VulnPanel::buildBromExploitGroup()
-{
-    QGroupBox *group = new QGroupBox(QStringLiteral("MTK BROM 漏洞利用（kamakiri 路径）"), this);
-    QVBoxLayout *v = new QVBoxLayout(group);
-
-    // —— 目标芯片（hw_code）——
-    QHBoxLayout *chipRow = new QHBoxLayout();
-    chipRow->addWidget(new QLabel(QStringLiteral("目标芯片 hw_code："), group));
-    m_bromHwCodeEdit = new QLineEdit(group);
-    m_bromHwCodeEdit->setObjectName(QStringLiteral("bromHwCodeEdit"));
-    m_bromHwCodeEdit->setPlaceholderText(QStringLiteral("如 0x6735"));
-    m_bromHwCodeEdit->setMaximumWidth(120);
-    chipRow->addWidget(m_bromHwCodeEdit);
-
-    // var1 覆盖（W8 终审 I4）：上游 hwconfig 里有 10 条芯片三要素齐但**没给 var1**，而编排层对缺
-    // var1 是**响亮失败**（不默认 0）—— 没有这个输入框，那 10 条就是"按钮说就绪、点下去必失败"。
-    // 留空 = 用芯片表里的值（表优先由 runBromExploit 保证）；填了 = 表没有时由它兜底。
-    chipRow->addSpacing(12);
-    chipRow->addWidget(new QLabel(QStringLiteral("var1 覆盖："), group));
-    m_bromVar1Edit = new QLineEdit(group);
-    m_bromVar1Edit->setObjectName(QStringLiteral("bromVar1Edit"));
-    m_bromVar1Edit->setPlaceholderText(QStringLiteral("留空 = 用表里的值；表没有则必须填"));
-    m_bromVar1Edit->setMaximumWidth(160);
-    m_bromVar1Edit->setToolTip(QStringLiteral(
-        "触发控制传输的 wIndex（0x00..0xFF，十六进制）。\n"
-        "查表优先：芯片表里有值就用表里的（这是逐芯片实测常量，比手填可靠）；\n"
-        "只有表里没有（上游对 10 条芯片未给）时才需要在这里显式填 —— 不填则该芯片不可执行"
-        "（编排层不会替你猜 0，也不会 bruteforce 扫描）。"));
-    chipRow->addWidget(m_bromVar1Edit);
-    chipRow->addStretch();
-    v->addLayout(chipRow);
-
-    m_bromChipStatus = new QLabel(group);
-    m_bromChipStatus->setObjectName(QStringLiteral("bromChipStatus"));
-    m_bromChipStatus->setWordWrap(true);
-    m_bromChipStatus->setStyleSheet(QStringLiteral("font-size: 11px;"));
-    v->addWidget(m_bromChipStatus);
-
-    // —— 载荷来源 ——
-    QHBoxLayout *payloadRow = new QHBoxLayout();
-    payloadRow->addWidget(new QLabel(QStringLiteral("载荷来源："), group));
-    m_bromPayloadPathEdit = new QLineEdit(group);
-    m_bromPayloadPathEdit->setObjectName(QStringLiteral("bromPayloadPathEdit"));
-    m_bromPayloadPathEdit->setPlaceholderText(
-        QStringLiteral("载荷文件（留空 = 按来源清单获取，需勾选下面的网络开关）"));
-    // I5（W8 终审）：spec §8 的"sha256 只保证与清单一致、**不保证内容安全**"此前**只存在于 spec 一行**
-    // —— UI 却把 sha256 当安全属性讲。写进 tooltip（用户能读到的地方）与下方的说明行。
-    m_bromPayloadPathEdit->setToolTip(QStringLiteral(
-        "你的载荷文件，或留空改从来源清单获取（清单里是 URL + sha256）。\n"
-        "⚠️ sha256 只保证「与来源清单声明的那一份**一致**」—— 它挡的是传输损坏与串包，"
-        "**不保证内容安全**：上游可能变更实现、清单本身也可能被改。载荷是第三方产物，请自行确认来源。"));
-    payloadRow->addWidget(m_bromPayloadPathEdit, 1);
-    auto *payloadBrowse = new QPushButton(QStringLiteral("选择…"), group);
-    payloadRow->addWidget(payloadBrowse);
-    m_bromAllowNetworkCheck = new QCheckBox(QStringLiteral("允许网络获取"), group);
-    m_bromAllowNetworkCheck->setObjectName(QStringLiteral("bromAllowNetworkCheck"));
-    m_bromAllowNetworkCheck->setToolTip(QStringLiteral(
-        "默认关闭（关着时下载器一次都不会被调用）。开启后按来源清单下载，"
-        "并逐条做 sha256 fail-closed 校验 —— 校验不过的字节一律丢弃。"));
-    payloadRow->addWidget(m_bromAllowNetworkCheck);
-    v->addLayout(payloadRow);
-
-    QHBoxLayout *resolveRow = new QHBoxLayout();
-    m_bromResolveBtn = new QPushButton(QStringLiteral("解析载荷"), group);
-    m_bromResolveBtn->setObjectName(QStringLiteral("bromResolveButton"));
-    resolveRow->addWidget(m_bromResolveBtn);
-    m_bromPayloadStatus = new QLabel(group);
-    m_bromPayloadStatus->setObjectName(QStringLiteral("bromPayloadStatus"));
-    m_bromPayloadStatus->setWordWrap(true);
-    m_bromPayloadStatus->setStyleSheet(QStringLiteral("font-size: 11px;"));
-    resolveRow->addWidget(m_bromPayloadStatus, 1);
-    v->addLayout(resolveRow);
-
-    // —— 执行 ——
-    QHBoxLayout *runRow = new QHBoxLayout();
-    m_bromRunBtn = new QPushButton(QStringLiteral("执行利用"), group);
-    m_bromRunBtn->setObjectName(QStringLiteral("bromRunButton"));
-    m_bromRunBtn->setEnabled(false);      // 判据由 refreshBromGate 给（初始必然未就绪）
-    runRow->addWidget(m_bromRunBtn);
-    m_bromAllowPatchedCheck = new QCheckBox(QStringLiteral("允许已修补代际（V6）"), group);
-    m_bromAllowPatchedCheck->setObjectName(QStringLiteral("bromAllowPatchedCheck"));
-    m_bromAllowPatchedCheck->setToolTip(QStringLiteral(
-        "默认关 = 已修补代际（V6 / XML）直接早退（fail-closed）。本仓没有逐设备的 BROM 补丁判据，"
-        "这里用的是来自公开报告的粗判据（会有假阳性）—— 开启只代表「允许尝试」，不保证有意义。"));
-    runRow->addWidget(m_bromAllowPatchedCheck);
-    runRow->addStretch();
-    v->addLayout(runRow);
-
-    m_bromRunReason = new QLabel(group);
-    m_bromRunReason->setObjectName(QStringLiteral("bromRunReason"));
-    m_bromRunReason->setWordWrap(true);
-    m_bromRunReason->setStyleSheet(QStringLiteral("font-size: 11px; color: #e67e22;"));
-    v->addWidget(m_bromRunReason);
-
-    auto *note = new QLabel(QStringLiteral(
-        "⚠️ 执行**作用于当前 USB 上枚举到的 BROM 设备**（多台时直接拒绝）—— 不是左侧设备列表里选中的"
-        "那台；芯片码会在握手后与设备自报值核对（不符即拒）。执行日志会记下目标设备的 VID:PID 与端口。\n"
-        "本仓库不分发任何利用载荷二进制：来源清单只存 URL + sha256，载荷来自你自己的文件"
-        "或你显式开启的网络获取。\n"
-        "⚠️ sha256 只保证「与来源清单声明的那一份一致」，**不保证内容安全**（上游可能变更实现、"
-        "清单本身也可能被改）—— 它是防传输损坏与串包的，不是对载荷可信性的保证。\n"
-        "真机未验证 —— 详见功能清单里的诚实边界。"), group);
-    // 暴露给用例（仓内对话框/面板同款约定）：这段"诚实边界"文案是产品对用户的承诺面，要能被钉住。
-    note->setObjectName(QStringLiteral("bromBoundaryNote"));
-    note->setWordWrap(true);
-    note->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
-    v->addWidget(note);
-
-    // —— 连接 ——
-    connect(m_bromHwCodeEdit, &QLineEdit::textChanged,
-            this, &VulnPanel::onBromChipCodeChanged);
-    // var1 只影响判据（不改变已解析载荷的归属），故直接重算闸门 —— 不走 onBromChipCodeChanged
-    //（那条会作废已解析的载荷：芯片码变了，按芯片提示挑的来源就不再可信；var1 与来源无关）。
-    connect(m_bromVar1Edit, &QLineEdit::textChanged,
-            this, &VulnPanel::refreshBromGate);
-    connect(m_bromResolveBtn, &QPushButton::clicked,
-            this, &VulnPanel::onBromResolvePayload);
-    connect(m_bromRunBtn, &QPushButton::clicked,
-            this, &VulnPanel::onBromExploitRun);
-    connect(payloadBrowse, &QPushButton::clicked, this, [this]() {
-        const QString path = QFileDialog::getOpenFileName(
-            this, QStringLiteral("选择利用载荷文件"), QString(),
-            QStringLiteral("载荷 (*.bin);;所有文件 (*)"));
-        if (!path.isEmpty())
-            m_bromPayloadPathEdit->setText(path);
-    });
-
-    return group;
-}
 
 void VulnPanel::setDeviceInfo(const DeviceInfo &info)
 {
@@ -399,10 +854,10 @@ void VulnPanel::setDeviceInfo(const DeviceInfo &info)
         .arg(info.androidVersion.isEmpty() ? "?" : info.androidVersion)
         .arg(info.securityPatch.isEmpty() ? "未知" : info.securityPatch));
 
-    m_rootLabel->setText(info.isRooted
+    m_rootLabel->setText(info.hasRoot()
         ? QStringLiteral("已Root")
         : QStringLiteral("未Root"));
-    m_rootLabel->setStyleSheet(info.isRooted
+    m_rootLabel->setStyleSheet(info.hasRoot()
         ? "color: #c0392b; font-weight: bold;"
         : "color: #666;");
 
@@ -422,7 +877,11 @@ void VulnPanel::setDeviceInfo(const DeviceInfo &info)
     }
 
     updateButtonStates();
-    refreshBromGate();   // W8-T6：设备来了/换了 → 「执行利用」的判据跟着重算
+}
+
+void VulnPanel::setDevices(const QMap<QString, DeviceInfo> &devices)
+{
+    m_devices = devices;
 }
 
 void VulnPanel::clearDeviceInfo()
@@ -433,7 +892,6 @@ void VulnPanel::clearDeviceInfo()
     m_riskLabel->setText("");
 
     updateButtonStates();
-    refreshBromGate();   // W8-T6：拔线/取消选中 → 执行键必须**当场禁用**（不留"拔线后仍可点"）
 }
 
 void VulnPanel::updateButtonStates()
@@ -579,18 +1037,60 @@ void VulnPanel::updateEntryInTable(int row, const VulnEntry &entry)
     stateItem->setForeground(QColor(stateColor));
     m_vulnTable->setItem(row, 3, stateItem);
 
-    // Column 4: exploit button
+    // Column 4: 打开该漏洞的专属界面（利用按钮移到详情窗口里）
     auto *btnWidget = new QWidget();
     auto *btnLayout = new QHBoxLayout(btnWidget);
     btnLayout->setContentsMargins(2, 2, 2, 2);
-    auto *exploitBtn = new QPushButton(QStringLiteral("利用"), btnWidget);
-    exploitBtn->setMaximumWidth(60);
-    exploitBtn->setEnabled(entry.state == VulnEntry::VULNERABLE);
-    QString cveId = entry.id;
-    connect(exploitBtn, &QPushButton::clicked, this, [this, cveId]() {
-        onExploitSingle(cveId);
+    auto *detailBtn = new QPushButton(QStringLiteral("详情"), btnWidget);
+    detailBtn->setMaximumWidth(60);
+    const QString cveId = entry.id;
+    connect(detailBtn, &QPushButton::clicked, this, [this, cveId]() {
+        openVulnDetail(cveId);
     });
-    btnLayout->addWidget(exploitBtn);
+    btnLayout->addWidget(detailBtn);
+    btnLayout->addStretch();
+    m_vulnTable->setCellWidget(row, 4, btnWidget);
+}
+
+// BROM 的固定条目：它不来自漏洞库、不参与 CVE 扫描，但必须和普通漏洞一样
+// 出现在列表里，用户才能用同一套"选中 → 详情"的交互进入它。
+void VulnPanel::updateBromRow(int row)
+{
+    if (row < 0)
+        return;
+    if (m_vulnTable->rowCount() <= row)
+        m_vulnTable->setRowCount(row + 1);
+
+    auto *iconItem = new QTableWidgetItem(QStringLiteral("⚙"));
+    iconItem->setTextAlignment(Qt::AlignCenter);
+    iconItem->setForeground(QColor(QStringLiteral("#8e44ad")));
+    m_vulnTable->setItem(row, 0, iconItem);
+
+    // 明确标注"非 CVE"：BROM 利用按芯片 hw_code 路由，不对应任何 CVE 编号。
+    m_vulnTable->setItem(row, 1,
+                         new QTableWidgetItem(QStringLiteral("MTK BROM（非 CVE）")));
+
+    auto *descItem = new QTableWidgetItem(
+        QStringLiteral("MTK BROM 漏洞利用（kamakiri）\n"
+                       "芯片级利用，不参与 CVE 扫描；点「详情」进入专属界面"));
+    descItem->setToolTip(QStringLiteral(
+        "与 CVE 列表不同：BROM 利用按芯片 hw_code 查硬件地址表，"
+        "需要用户自备载荷（本仓不分发载荷二进制）。"));
+    m_vulnTable->setItem(row, 2, descItem);
+
+    auto *stateItem = new QTableWidgetItem(QStringLiteral("独立入口"));
+    stateItem->setForeground(QColor(QStringLiteral("#8e44ad")));
+    m_vulnTable->setItem(row, 3, stateItem);
+
+    auto *btnWidget = new QWidget();
+    auto *btnLayout = new QHBoxLayout(btnWidget);
+    btnLayout->setContentsMargins(2, 2, 2, 2);
+    auto *detailBtn = new QPushButton(QStringLiteral("详情"), btnWidget);
+    detailBtn->setMaximumWidth(60);
+    connect(detailBtn, &QPushButton::clicked, this, [this]() {
+        openVulnDetail(QString::fromLatin1(kInternalBromId));
+    });
+    btnLayout->addWidget(detailBtn);
     btnLayout->addStretch();
     m_vulnTable->setCellWidget(row, 4, btnWidget);
 }
@@ -599,45 +1099,69 @@ void VulnPanel::updateEntryInTable(int row, const VulnEntry &entry)
 
 void VulnPanel::onLoadDatabase()
 {
-    QString path = QFileDialog::getOpenFileName(this,
-        QStringLiteral("选择漏洞数据库文件"),
+    // 支持一次选多个库；每次都**合并**到现有库（按 id 去重），不是替换。
+    const QStringList paths = QFileDialog::getOpenFileNames(this,
+        QStringLiteral("选择漏洞数据库文件（可多选，会与已加载的库合并）"),
         QString(),
         QStringLiteral("漏洞数据库 (*.json);;所有文件 (*)"));
-    if (path.isEmpty())
+    if (paths.isEmpty())
         return;
 
-    QFileInfo fi(path);
-    appendLog(QStringLiteral("加载漏洞数据库: %1").arg(fi.fileName()));
+    const int before = m_db->entryCount();
+    int loadedFiles = 0;
+    QStringList failedFiles;
 
-    if (!m_db->loadFromFile(path)) {
-        appendLog(QStringLiteral("加载失败: 文件格式错误或无法读取"), true);
-        QMessageBox::warning(this,
-            QStringLiteral("加载失败"),
-            QStringLiteral("无法加载漏洞数据库文件。\n请确保文件是有效的 JSON 格式。"));
-        return;
+    for (const QString &path : paths) {
+        const QFileInfo fi(path);
+        if (m_db->loadFromFile(path)) {
+            ++loadedFiles;
+            appendLog(QStringLiteral("加载漏洞数据库: %1").arg(fi.fileName()));
+        } else {
+            failedFiles << fi.fileName();
+            appendLog(QStringLiteral("加载失败: %1（格式错误或无法读取）").arg(fi.fileName()),
+                      true);
+        }
     }
 
-    // Update table
+    rebuildTable();
+
+    const int after = m_db->entryCount();
+    appendLog(QStringLiteral("合并完成：成功 %1 个文件，新增 %2 条，当前共 %3 条")
+                  .arg(loadedFiles)
+                  .arg(after - before)
+                  .arg(after));
+
+    int c = 0, h = 0, m = 0, l = 0;
+    for (const auto &e : m_currentEntries) {
+        const QString s = e.severity.toUpper();
+        if (s == "CRITICAL") ++c;
+        else if (s == "HIGH") ++h;
+        else if (s == "MEDIUM") ++m;
+        else if (s == "LOW") ++l;
+    }
+    appendLog(QStringLiteral("当前库 | ★ CRITICAL: %1  ▲ HIGH: %2  ● MEDIUM: %3  ○ LOW: %4")
+                  .arg(c).arg(h).arg(m).arg(l));
+
+    if (!failedFiles.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("部分文件加载失败"),
+            QStringLiteral("以下文件未能加载：\n%1")
+                .arg(failedFiles.join(QLatin1Char('\n'))));
+    }
+}
+
+void VulnPanel::rebuildTable()
+{
     m_vulnTable->setRowCount(0);
     m_currentEntries = m_db->getAllEntries();
 
     for (const auto &e : m_currentEntries) {
-        int row = m_vulnTable->rowCount();
+        const int row = m_vulnTable->rowCount();
         m_vulnTable->insertRow(row);
         updateEntryInTable(row, e);
     }
 
-    // Severity breakdown
-    int c = 0, h = 0, m = 0, l = 0;
-    for (const auto &e : m_currentEntries) {
-        QString s = e.severity.toUpper();
-        if (s == "CRITICAL") c++;
-        else if (s == "HIGH") h++;
-        else if (s == "MEDIUM") m++;
-        else if (s == "LOW") l++;
-    }
-    appendLog(QStringLiteral("已加载 %1 个条目 | ★ CRITICAL: %2  ▲ HIGH: %3  ● MEDIUM: %4  ○ LOW: %5")
-        .arg(m_currentEntries.size()).arg(c).arg(h).arg(m).arg(l));
+    // BROM 固定条目：普通漏洞之后，永远在列表里。
+    updateBromRow(m_vulnTable->rowCount());
 
     updateButtonStates();
 }
@@ -670,7 +1194,7 @@ void VulnPanel::onScan()
         .arg(m_deviceInfo.androidVersion.isEmpty() ? "?" : m_deviceInfo.androidVersion)
         .arg(m_deviceInfo.sdkVersion.isEmpty() ? "?" : m_deviceInfo.sdkVersion)
         .arg(m_deviceInfo.securityPatch.isEmpty() ? "未知" : m_deviceInfo.securityPatch)
-        .arg(m_deviceInfo.isRooted ? " · 已Root" : ""));
+        .arg(m_deviceInfo.hasRoot() ? " · 已Root" : ""));
 
     // 1. VulnMatcher: filter by device info
     VulnMatcher matcher(m_currentEntries);
@@ -755,10 +1279,11 @@ void VulnPanel::onScan()
     m_riskLabel->setText(QStringLiteral("风险评分: %1").arg(riskScore));
     m_riskLabel->setStyleSheet(QString("color: %1; font-size: 11px; font-weight: bold;").arg(riskColor));
 
-    // 3. Refresh table
+    // 3. Refresh table（普通条目之后保持 BROM 固定条目在列表末尾）
     for (int row = 0; row < m_currentEntries.size(); ++row) {
         updateEntryInTable(row, m_currentEntries[row]);
     }
+    updateBromRow(m_currentEntries.size());
 
     // Check if any vulnerable
     bool hasVuln = false;
@@ -787,9 +1312,6 @@ void VulnPanel::onExploitAll()
     m_isExploiting = true;
     setButtonsEnabled(false);
 
-    QElapsedTimer timer;
-    timer.start();
-
     // Collect vulnerable entries
     QList<VulnEntry> vulnEntries;
     for (auto &e : m_currentEntries) {
@@ -805,41 +1327,66 @@ void VulnPanel::onExploitAll()
     }
 
     appendLog(QStringLiteral("开始利用 %1 个漏洞 ──────────────────").arg(vulnEntries.size()));
-
-    int successCount = 0, failCount = 0;
     for (const auto &e : vulnEntries) {
         appendLog(QStringLiteral("  ── %1 [%2] CVSS %3 ──")
             .arg(e.id, e.severity).arg(e.cvssScore, 0, 'f', 1));
-
-        ExploitResult result = m_engine->runFull(e);
-
-        int idx = -1;
-        for (int i = 0; i < m_currentEntries.size(); ++i) {
-            if (m_currentEntries[i].id == e.id) {
-                idx = i;
-                break;
-            }
-        }
-
-        if (idx >= 0) {
-            m_currentEntries[idx].state = result.state;
-            updateEntryInTable(idx, m_currentEntries[idx]);
-        }
-
-        if (result.state == VulnEntry::EXPLOITED) {
-            successCount++;
-            appendLog(QStringLiteral("  ✔ %1: 利用成功").arg(e.id));
-        } else {
-            failCount++;
-            appendLog(QStringLiteral("  ✘ %1: %2").arg(e.id, result.error), true);
-        }
-        appendLog(QString()); // separator
     }
 
-    appendLog(QStringLiteral("全部完成 · %1 成功, %2 失败 · 耗时 %3ms")
-        .arg(successCount).arg(failCount).arg(timer.elapsed()));
-    m_isExploiting = false;
-    setButtonsEnabled(true);
+    const qint64 startedAt = QDateTime::currentMSecsSinceEpoch();
+    m_engine->resetCancel();
+
+    // 整批提交到引擎线程执行。runFull 内部是同步 QProcess（单条最长可达
+    // timeoutSeconds），放在 UI 线程会把窗口卡死。结果逐条 queued 回主线程。
+    QMetaObject::invokeMethod(m_engine, [this, vulnEntries, startedAt]() {
+        int successCount = 0;
+        int failCount = 0;
+
+        for (const auto &entry : vulnEntries) {
+            const ExploitResult result = m_engine->runFull(entry);
+            if (result.state == VulnEntry::EXPLOITED)
+                ++successCount;
+            else
+                ++failCount;
+
+            QMetaObject::invokeMethod(this, [this, entry, result]() {
+                int idx = -1;
+                for (int i = 0; i < m_currentEntries.size(); ++i) {
+                    if (m_currentEntries[i].id == entry.id) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx >= 0) {
+                    m_currentEntries[idx].state = result.state;
+                    updateEntryInTable(idx, m_currentEntries[idx]);
+                }
+
+                if (result.state == VulnEntry::EXPLOITED)
+                    appendLog(QStringLiteral("  ✔ %1: 利用成功").arg(entry.id));
+                else
+                    appendLog(QStringLiteral("  ✘ %1: %2").arg(entry.id, result.error), true);
+                appendLog(QString()); // separator
+
+                if (m_detailDialog
+                    && static_cast<VulnDetailDialog *>(m_detailDialog)->cveId() == entry.id) {
+                    for (const auto &e : m_currentEntries) {
+                        if (e.id == entry.id) {
+                            static_cast<VulnDetailDialog *>(m_detailDialog)->updateEntry(e);
+                            break;
+                        }
+                    }
+                }
+            }, Qt::QueuedConnection);
+        }
+
+        const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - startedAt;
+        QMetaObject::invokeMethod(this, [this, successCount, failCount, elapsed]() {
+            appendLog(QStringLiteral("全部完成 · %1 成功, %2 失败 · 耗时 %3ms")
+                .arg(successCount).arg(failCount).arg(elapsed));
+            m_isExploiting = false;
+            setButtonsEnabled(true);
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
 }
 
 void VulnPanel::onExploitSingle(const QString &cveId)
@@ -851,8 +1398,8 @@ void VulnPanel::onExploitSingle(const QString &cveId)
         return;
     }
 
-    int row = findRowByCveId(cveId);
-    if (row < 0) return;
+    if (findRowByCveId(cveId) < 0)
+        return;
 
     VulnEntry entry;
     for (const auto &e : m_currentEntries) {
@@ -867,24 +1414,59 @@ void VulnPanel::onExploitSingle(const QString &cveId)
         return;
     }
 
+    if (m_isExploiting)
+        return;
+    m_isExploiting = true;
+    setButtonsEnabled(false);
+
     appendLog(QStringLiteral("  利用 %1  [%2] CVSS %3")
         .arg(cveId, entry.severity).arg(entry.cvssScore, 0, 'f', 1));
 
-    ExploitResult result = m_engine->runFull(entry);
+    m_engine->resetCancel();
 
-    for (auto &e : m_currentEntries) {
-        if (e.id == cveId) {
-            e.state = result.state;
-            updateEntryInTable(row, e);
-            break;
-        }
-    }
+    // 单条同样放到引擎线程：一条脚本跑满 timeoutSeconds 也不能冻结界面。
+    QMetaObject::invokeMethod(m_engine, [this, entry, cveId]() {
+        const ExploitResult result = m_engine->runFull(entry);
 
-    if (result.state == VulnEntry::EXPLOITED) {
-        appendLog(QStringLiteral("  ✔ %1: 利用成功").arg(cveId));
-    } else {
-        appendLog(QStringLiteral("  ✘ %1: %2").arg(cveId, result.error), true);
-    }
+        QMetaObject::invokeMethod(this, [this, cveId, result]() {
+            for (auto &e : m_currentEntries) {
+                if (e.id == cveId) {
+                    e.state = result.state;
+                    break;
+                }
+            }
+
+            // 异步期间表格可能被重排，回调里按 CVE 重新定位。
+            const int row = findRowByCveId(cveId);
+            if (row >= 0) {
+                for (const auto &e : m_currentEntries) {
+                    if (e.id == cveId) {
+                        updateEntryInTable(row, e);
+                        break;
+                    }
+                }
+            }
+
+            if (result.state == VulnEntry::EXPLOITED)
+                appendLog(QStringLiteral("  ✔ %1: 利用成功").arg(cveId));
+            else
+                appendLog(QStringLiteral("  ✘ %1: %2").arg(cveId, result.error), true);
+
+            // 详情窗口正开着同一个漏洞时，同步刷新它的状态与按钮。
+            if (m_detailDialog
+                && static_cast<VulnDetailDialog *>(m_detailDialog)->cveId() == cveId) {
+                for (const auto &e : m_currentEntries) {
+                    if (e.id == cveId) {
+                        static_cast<VulnDetailDialog *>(m_detailDialog)->updateEntry(e);
+                        break;
+                    }
+                }
+            }
+
+            m_isExploiting = false;
+            setButtonsEnabled(true);
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
 }
 
 void VulnPanel::onEngineOutput(const QString &line)
@@ -909,173 +1491,3 @@ void VulnPanel::onProgressChanged(const QString &entryId, ExploitPhase phase)
 // ==================== W8-T6：MTK BROM 漏洞利用区 ====================
 
 // 判据全部来自 `bromui::evaluateRunGate`（纯函数，用例逐条钉住）——本函数只做"算 → 落控件"。
-void VulnPanel::refreshBromGate()
-{
-    bromui::GateInputs in;
-    in.deviceSelected = !m_deviceInfo.serialNumber.isEmpty();
-    in.hwCodeText     = m_bromHwCodeEdit->text();
-    in.var1Text       = m_bromVar1Edit->text();
-    in.payload        = m_bromPayloadState;
-    in.payloadError   = m_bromPayloadError;
-
-    const bromui::RunGate gate = bromui::evaluateRunGate(in);
-
-    m_bromChipStatus->setText(gate.chipSummary);
-    m_bromRunBtn->setEnabled(gate.canRun);
-    // 原因文案两处同源（按钮 tooltip + 下方状态行）：灰着不解释是本区最坏的形态 ——
-    // 用户会以为"没设备/坏了"，而不是"芯片码填错了"。
-    // 口径（控制方 2026-09-22 裁决①）：**说清作用于哪台** —— 本入口现场枚举 USB（多台即拒），
-    // 打的是枚举到的那台，不是设备列表里选中的那台（芯片码会在握手后与设备自报值核对）。
-    const QString reason = gate.canRun
-        ? QStringLiteral("就绪：作用于**当前 USB 上枚举到的 BROM 设备**（芯片码现场核对，执行日志会记下 "
-                         "VID:PID 与端口）—— 不是设备列表里选中的那台；执行前会弹一次"
-                         "「诊断与安全研究」（Tier 3）的风险确认")
-        : gate.reason;
-    m_bromRunBtn->setToolTip(reason);
-    m_bromRunReason->setText(reason);
-}
-
-void VulnPanel::setBromPayloadState(bromui::PayloadState state, const QString &errorText)
-{
-    m_bromPayloadState = state;
-    m_bromPayloadError = errorText;
-    if (state != bromui::PayloadState::Verified)
-        m_bromPayload.clear();          // 非放行态不保留字节（fail-closed：判据与数据不脱钩）
-
-    switch (state) {
-    case bromui::PayloadState::None:
-        m_bromPayloadStatus->setText(QStringLiteral("载荷：未解析"));
-        break;
-    case bromui::PayloadState::Verified:
-        // M5（W8 终审）：spec §3.8 要求显示"命中条目名与 **sha256 前 8 位**"，此前成功态只显示
-        // 字节数、哈希前缀只在失败路径打印。这里显示**本机实算**的指纹（不是回显清单里的值）——
-        // 用户可拿它与清单/来源页对表；条目名在上一行的来源日志里（resolveExploitPayload 的 note）。
-        m_bromPayloadStatus->setText(QStringLiteral("载荷：✔ 已就绪（%1 字节 · sha256 前 8 位 %2）")
-                                         .arg(m_bromPayload.size())
-                                         .arg(payloadFingerprint(m_bromPayload)));
-        break;
-    case bromui::PayloadState::Rejected:
-        m_bromPayloadStatus->setText(QStringLiteral("载荷：✘ %1").arg(errorText));
-        break;
-    }
-    refreshBromGate();
-}
-
-void VulnPanel::onBromChipCodeChanged()
-{
-    // 芯片码一变，已解析的载荷**一律作废**：来源是按芯片提示挑的（逐芯片条目优先于通用条目，
-    // 见 resolveExploitPayload），换了芯片还留着旧字节 = 拿 A 芯片的载荷去跑 B 芯片。
-    // 代价是改一次芯片码要重新解析一次；用缓存（若用户配了 cacheDir）不会重复下载。
-    if (m_bromPayloadState != bromui::PayloadState::None) {
-        const bool wasVerified = (m_bromPayloadState == bromui::PayloadState::Verified);
-        setBromPayloadState(bromui::PayloadState::None, QString());
-        if (wasVerified)
-            appendLog(QStringLiteral("目标芯片已改动 —— 已解析的载荷作废，请重新点「解析载荷」"), false);
-    }
-    refreshBromGate();
-}
-
-void VulnPanel::onBromResolvePayload()
-{
-    // 本入口**不过 tier3 门控**：它只读本地文件、或按用户**显式**勾选的网络开关取一份字节，
-    // 不碰设备、不改设备状态（W2 的界线：改设备状态才弹二次确认）。设备动作只在「执行利用」那道，
-    // 那里过 Tier 3（见 onBromExploitRun）。
-    mtkbrom::ExploitPayloadOptions opt = m_bromPayloadOptions;
-    opt.explicitPath = m_bromPayloadPathEdit->text().trimmed();   // 用户当场给的文件优先
-    opt.allowNetwork = m_bromAllowNetworkCheck->isChecked();      // 用户当场的选择优先
-    if (opt.sourceListPath.isEmpty())
-        opt.sourceListPath = bromui::defaultSourceListPath();
-
-    // 芯片提示的形态必须与清单的 chipHint 一致（`0x%04x`）—— 形态对不上会**静默**少试逐芯片来源。
-    quint16 hwCode = 0;
-    const QString hint = bromui::parseHwCodeText(m_bromHwCodeEdit->text(), &hwCode, nullptr)
-                             ? bromui::formatHwCodeHint(hwCode)
-                             : QString();
-
-    appendLog(QStringLiteral("解析 MTK BROM 载荷（芯片提示 %1；来源 %2；网络 %3）")
-                  .arg(hint.isEmpty() ? QStringLiteral("（无）") : hint,
-                       opt.explicitPath.isEmpty() ? QStringLiteral("来源清单")
-                                                  : QStringLiteral("显式文件"),
-                       opt.allowNetwork ? QStringLiteral("开") : QStringLiteral("关（默认）")));
-
-    QByteArray payload;
-    QStringList log;
-    QString err;
-    const mtkbrom::ExploitDownloader downloader =
-        m_bromDownloader ? m_bromDownloader : mtkbrom::makeQtExploitDownloader();
-    const bool ok = mtkbrom::resolveExploitPayload(opt, hint, payload, &log, &err, downloader);
-
-    for (const QString &line : log)
-        appendLog(QStringLiteral("  %1").arg(line), false);
-
-    if (!ok) {
-        appendLog(QStringLiteral("  ✘ %1").arg(err), true);
-        setBromPayloadState(bromui::PayloadState::Rejected, err);
-        return;
-    }
-    m_bromPayload = payload;
-    setBromPayloadState(bromui::PayloadState::Verified, QString());
-    // M5：成功路径也把 sha256 前 8 位打出来（此前只有失败路径带哈希）—— 用户可据此对表。
-    appendLog(QStringLiteral("  ✔ 载荷就绪：%1 字节 · sha256 前 8 位 %2 —— 可以执行"
-                             "（sha256 只证「与清单声明的一致」，不证内容安全；执行前会弹一次风险确认）")
-                  .arg(int(payload.size()))
-                  .arg(payloadFingerprint(payload)));
-}
-
-void VulnPanel::onBromExploitRun()
-{
-    // W8-T6：执行前过 W2 的 tier 3 二次确认 —— **复用唯一闸门** `riskui::ensureAccepted`，
-    // 不另起一套。取档用 `riskTierForFeature(VulnExploit)`（== Tier3Diagnostic）：BROM 载荷与
-    // 扫描/批量利用/单条利用**同族同档**（绕过安全机制，spec §5 的 VulnPanel 行）。
-    if (!riskui::ensureAccepted(this, riskui::riskTierForFeature(riskui::RiskFeature::VulnExploit),
-                                m_consentStore))
-        return;
-    if (!m_bromRunBtn->isEnabled())
-        return;   // 双保险：判据在 refreshBromGate；按钮灰着也挡不住程序化调用（与 EUB onStart 同款）
-
-    quint16 hwCode = 0;
-    QString perr;
-    if (!bromui::parseHwCodeText(m_bromHwCodeEdit->text(), &hwCode, &perr)) {
-        appendLog(QStringLiteral("芯片码不可用：%1").arg(perr), true);
-        return;
-    }
-
-    // 首行就把"作用于哪台"写清楚（控制方 2026-09-22 裁决①）：**当前 USB 上枚举到的**那台，
-    // 不是设备列表里选中的那台 —— 执行器随后会把该设备的 VID:PID/端口落进日志。
-    appendLog(QStringLiteral("开始 MTK BROM 漏洞利用（kamakiri 路径） —— 目标芯片 0x%1；"
-                             "作用于**当前 USB 上枚举到的 BROM 设备**（不是设备列表里选中的那台；"
-                             "芯片码在握手后现场核对）")
-                  .arg(hwCode, 4, 16, QLatin1Char('0')));
-
-    BromRunRequest req;
-    req.hwCode = hwCode;
-    req.payload = m_bromPayload;
-    req.allowPatchedGeneration = m_bromAllowPatchedCheck->isChecked();
-    // var1 覆盖：**只在用户填了、且芯片表没有时**才带上（判据 = `bromui::resolveVar1`，与闸门同一个
-    // 函数，不是各写一份）。表里有值时留空 ⇒ 编排层的"表优先"语义照旧。
-    if (const mtkbrom::ChipHwAddrs *addrs = mtkbrom::lookupChipHwAddrs(hwCode)) {
-        const bromui::Var1Resolution var1 = bromui::resolveVar1(*addrs, m_bromVar1Edit->text());
-        if (var1.source == bromui::Var1Source::FromInput)
-            req.var1 = var1.value;
-    }
-
-    QElapsedTimer timer;
-    timer.start();
-    QStringList log;
-    QString err;
-    const BromRunner runner = m_bromRunner ? m_bromRunner : BromRunner(runBromExploitOnDevice);
-    const bool ok = runner(req, &log, &err);
-
-    for (const QString &line : log)
-        appendLog(QStringLiteral("  %1").arg(line), false);
-
-    if (ok) {
-        // 判据只有 ack：照实说 —— 本仓没有"设备真的进入可利用状态"的证据链（无真机）。
-        appendLog(QStringLiteral("✔ 触发序列完成（耗时 %1ms）。判据只有 **ack**：载荷已回 ack、"
-                                 "触发控制传输已发出 —— 设备是否真的进入可利用状态，本仓无真机验证。")
-                      .arg(timer.elapsed()), false);
-    } else {
-        appendLog(QStringLiteral("✘ 执行失败（耗时 %1ms）：%2").arg(timer.elapsed()).arg(err), true);
-    }
-    refreshBromGate();
-}
