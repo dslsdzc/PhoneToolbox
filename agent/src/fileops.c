@@ -367,6 +367,24 @@ int push_commit(push_session *session, char *error, size_t error_len)
     close(session->fd);
     session->fd = -1;
 
+    // Re-check at commit time: the target may have changed between push_begin
+    // and now. Never replace a symlink/directory or an existing file that the
+    // caller did not authorize as overwritable.
+    struct stat target_st;
+    if (fstatat(session->dir_fd, session->target_name, &target_st,
+                AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!session->overwrite || S_ISLNK(target_st.st_mode)
+            || !S_ISREG(target_st.st_mode)) {
+            set_error(error, error_len, "target changed before commit");
+            push_abort(session);
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        set_error(error, error_len, "cannot re-check target");
+        push_abort(session);
+        return -1;
+    }
+
     if (renameat(session->dir_fd, session->temp_name,
                  session->dir_fd, session->target_name) != 0) {
         set_error(error, error_len, "rename failed");
