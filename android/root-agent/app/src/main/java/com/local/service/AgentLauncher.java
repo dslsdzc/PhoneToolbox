@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.security.SecureRandom;
 import java.util.Arrays;
@@ -62,6 +63,13 @@ final class AgentLauncher {
                 Log.i("AgentLauncher", "starting native agent");
                 final SharedPreferences prefs =
                         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                // A used code means the previous agent paired successfully.
+                // Rotate before restarting so the old code cannot be replayed.
+                final File usedFlag = new File(app.getFilesDir(), "pair_code_used");
+                if (usedFlag.exists()) {
+                    prefs.edit().putString(KEY_PAIR_CODE, generatePairCode()).apply();
+                    usedFlag.delete();
+                }
                 final int oldPid = prefs.getInt(KEY_PID, -1);
                 if (oldPid > 0) {
                     // Verify identity before killing: PID reuse otherwise turns
@@ -107,6 +115,14 @@ final class AgentLauncher {
                         final int paired =
                                 line.substring(7).trim().equals("1") ? 1 : 0;
                         prefs.edit().putInt(KEY_PAIRED, paired).apply();
+                    } else if (line.startsWith("PAIRING_OK=")) {
+                        // One-time code: keep pair_code_used for this agent
+                        // process, but show/persist a fresh code for the next
+                        // restart (the next AgentLauncher.start rotates again
+                        // and removes the flag).
+                        prefs.edit().putString(KEY_PAIR_CODE,
+                                generatePairCode()).apply();
+                        Log.i("AgentLauncher", "pairing complete; rotated code");
                     } else if (line.startsWith("PID=")) {
                         final int pid = Integer.parseInt(line.substring(4));
                         prefs.edit().putInt(KEY_PID, pid).apply();

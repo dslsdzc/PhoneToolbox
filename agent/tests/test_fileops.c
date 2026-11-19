@@ -99,6 +99,28 @@ int main(void)
     CHECK(push_begin(&push, link_path, 1, "0644", wrong_sha, 1,
                      error, sizeof(error)) != 0);
 
+    // intermediate-directory symlink: even a non-symlink final component must
+    // not be reached through a symlinked directory.
+    char real_dir[512];
+    char linked_dir[512];
+    char nested_file[512];
+    snprintf(real_dir, sizeof(real_dir), "%s/real", directory);
+    snprintf(linked_dir, sizeof(linked_dir), "%s/linked", directory);
+    snprintf(nested_file, sizeof(nested_file), "%s/file", real_dir);
+    CHECK(mkdir(real_dir, 0755) == 0);
+    FILE *nested = fopen(nested_file, "w");
+    CHECK(nested != NULL);
+    CHECK(fputs("nested", nested) >= 0);
+    fclose(nested);
+    CHECK(symlink(real_dir, linked_dir) == 0);
+    char via_link[512];
+    snprintf(via_link, sizeof(via_link), "%s/file", linked_dir);
+    CHECK(pull_read(via_link, 0, &symlink_byte, 1, &symlink_got,
+                    error, sizeof(error)) != 0);
+    unlink(linked_dir);
+    unlink(nested_file);
+    rmdir(real_dir);
+
     // 路径穿越拒绝
     CHECK(push_begin(&push, "/tmp/../etc/passwd", 1, "0644", sha256, 1,
                      error, sizeof(error)) != 0);

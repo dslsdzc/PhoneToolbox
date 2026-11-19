@@ -15,11 +15,90 @@
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW 0
 #endif
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
 
 static void set_error(char *error, size_t error_len, const char *message)
 {
     if (error && error_len > 0)
         snprintf(error, error_len, "%s", message);
+}
+
+// Open an absolute path without following symlinks in any component. This
+// closes the lstat()-then-open() race for pull/sha256, where an attacker could
+// swap an intermediate directory for a symlink.
+static int open_readonly_nofollow(const char *path)
+{
+    if (!path || path[0] != '/')
+        return open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+
+    int dir = open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (dir < 0)
+        return -1;
+
+    const char *cursor = path;
+    while (*cursor != '\0') {
+        while (*cursor == '/')
+            ++cursor;
+        if (*cursor == '\0')
+            break;
+
+        char name[256];
+        size_t length = 0;
+        while (cursor[length] != '\0' && cursor[length] != '/'
+               && length < sizeof(name) - 1) {
+            name[length] = cursor[length];
+            ++length;
+        }
+        if (cursor[length] != '\0' && cursor[length] != '/') {
+            close(dir);
+            return -1;
+        }
+        name[length] = '\0';
+
+        const char *next = cursor + length;
+        while (*next == '/')
+            ++next;
+        if (strcmp(name, "..") == 0) {
+            close(dir);
+            return -1;
+        }
+        if (strcmp(name, ".") == 0) {
+            cursor = next;
+            continue;
+        }
+
+        const int fd = openat(dir, name,
+                              O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                                  | (*next != '\0' ? O_DIRECTORY : 0));
+        close(dir);
+        if (fd < 0)
+            return -1;
+        dir = fd;
+        cursor = next;
+    }
+    return dir;
+}
+
+static void fsync_parent_directory(const char *path)
+{
+    char parent[4096];
+    if (snprintf(parent, sizeof(parent), "%s", path)
+        >= (int) sizeof(parent))
+        return;
+    char *slash = strrchr(parent, '/');
+    if (!slash)
+        return;
+    if (slash == parent)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    const int fd = open(parent, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+    }
 }
 
 static int mode_from_text(const char *text, mode_t *mode)
@@ -39,7 +118,7 @@ static int mode_from_text(const char *text, mode_t *mode)
 
 static int sha256_file(const char *path, char out_hex[65])
 {
-    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = open_readonly_nofollow(path);
     if (fd < 0)
         return -1;
 
@@ -238,6 +317,7 @@ int push_commit(push_session *session, char *error, size_t error_len)
         push_abort(session);
         return -1;
     }
+    fsync_parent_directory(session->target_path);
 
     free(session->temp_path);
     free(session->target_path);
@@ -308,7 +388,7 @@ int pull_read(const char *path, uint64_t offset, uint8_t *buffer, size_t length,
         return -1;
     }
 
-    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = open_readonly_nofollow(path);
     if (fd < 0) {
         set_error(error, error_len, "cannot open file");
         return -1;

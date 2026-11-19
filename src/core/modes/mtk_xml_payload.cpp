@@ -143,6 +143,95 @@ bool xmlDa1Handshake(XmlSession &x, QStringList *log, QString *error)
     return true;
 }
 
+// GET-HW-INFO：命令 → DOWNLOAD-FILE → OK@len → 数据帧 → CMD:END/START。
+// 只把 <storage> 交给调用方；任何一步失败都返回 false（绝不假设 eMMC）。
+bool xmlGetStorageType(XmlSession &x, QString *storage,
+                       QStringList *log, QString *error)
+{
+    if (!storage)
+        return false;
+    const QString command = XmlSession::envelope(
+        QStringLiteral("GET-HW-INFO"),
+        {QStringLiteral("<target_file>MEM://0x7fe83c138700:0x200000</target_file>")});
+    if (!x.sendCommand(command, nullptr, true, error))
+        return false;
+
+    XmlSession::Result file;
+    if (!x.readCommandResult(file, log, error))
+        return false;
+    if (file.command != QStringLiteral("CMD:DOWNLOAD-FILE")) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 未返回 DOWNLOAD-FILE（收到 %1）")
+                                .arg(file.command.isEmpty() ? QStringLiteral("(空)") : file.command);
+        return false;
+    }
+
+    QString response;
+    if (!x.getResponse(response, error) || !response.startsWith(QStringLiteral("OK@0x"))) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 未收到 OK@len（收到 %1）").arg(response);
+        return false;
+    }
+    bool ok = false;
+    const quint64 length = response.mid(5).toULongLong(&ok, 16);
+    if (!ok || length == 0 || length > 4u * 1024u * 1024u) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 长度非法（%1）").arg(response);
+        return false;
+    }
+    if (!x.ack(error))
+        return false;
+    if (!x.getResponse(response, error) || response != QStringLiteral("OK")) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 数据阶段未被接受（%1）").arg(response);
+        return false;
+    }
+    if (!x.ack(error))
+        return false;
+
+    QByteArray data;
+    while (quint64(data.size()) < length) {
+        quint32 datatype = 0;
+        quint32 frameLength = 0;
+        if (!x.xreadHeader(datatype, frameLength, error))
+            return false;
+        QByteArray payload;
+        if (!x.readPayload(frameLength, payload, error))
+            return false;
+        if (datatype == 1)
+            data += payload;
+    }
+    if (quint64(data.size()) != length) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 数据长度不符（%1 != %2）")
+                                .arg(data.size()).arg(length);
+        return false;
+    }
+    if (!x.ack(error))
+        return false;
+
+    XmlSession::Result end;
+    if (!x.readCommandResult(end, log, error))
+        return false;
+    if (end.command != QStringLiteral("CMD:END") || end.text != QStringLiteral("OK")) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 收尾不是 CMD:END/OK（%1/%2）")
+                                .arg(end.command, end.text);
+        return false;
+    }
+    if (!x.ack(error))
+        return false;
+    XmlSession::Result start;
+    if (!x.readCommandResult(start, log, error)
+        || start.command != QStringLiteral("CMD:START")) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 收尾缺少 CMD:START");
+        return false;
+    }
+
+    const QString info = QString::fromUtf8(data);
+    const QString type = XmlSession::field(info, QStringLiteral("storage")).trimmed();
+    if (type.isEmpty()) {
+        if (error) *error = QStringLiteral("XML：GET-HW-INFO 未包含 <storage>");
+        return false;
+    }
+    *storage = type;
+    return true;
+}
+
 // —— Phase D2+D3 Task 10：WRITE-FLASH / READ-FLASH 数据通路 ——
 //
 // **与上游的分歧（有意）**：① 读路径要求"设备宣布长度 == 请求长度"（上游 `XL:517-518` 直接用宣布值覆盖请求值，

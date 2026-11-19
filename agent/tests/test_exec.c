@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define CHECK(cond)                                                              \
     do {                                                                         \
@@ -52,6 +53,22 @@ int main(void)
     CHECK(result.timed_out == 1);
     CHECK(elapsed_ms(&started, &finished) < 2000);
     exec_result_free(&result);
+
+    // Explicit cancel: a readable cancel pipe kills the process group.
+    int cancel_pipe[2];
+    CHECK(pipe(cancel_pipe) == 0);
+    const char cancel_byte = 'x';
+    CHECK(write(cancel_pipe[1], &cancel_byte, 1) == 1);
+    const char *cancellable_argv[] = {"/bin/sh", "-c", "sleep 5", NULL};
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    CHECK(run_command_cancellable(cancellable_argv, 5000, 4096,
+                                  cancel_pipe[0], &result) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    CHECK(result.canceled == 1);
+    CHECK(elapsed_ms(&started, &finished) < 2000);
+    exec_result_free(&result);
+    close(cancel_pipe[0]);
+    close(cancel_pipe[1]);
 
     const char *long_argv[] = {"/bin/sh", "-c", "printf 1234567890", NULL};
     CHECK(run_command(long_argv, 2000, 4, &result) == 0);

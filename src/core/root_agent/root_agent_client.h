@@ -54,6 +54,8 @@ public:
     // 走 agent 的 shell 通道（/bin/sh -c）。agent 会按 dangerous 能力授权，
     // 未授权时直接拒绝，调用方不应改用 adb su 绕过。
     void execShell(const QString &command, int timeoutMs = 30000);
+    // 请求取消正在执行的命令（同一连接发送 cancel；agent 会 kill 进程组）。
+    void cancelExec(int execId);
 
     // 通过 agent 判断 root：执行 id，检查 uid=0。
     void detectRoot();

@@ -69,6 +69,10 @@ namespace mtkbrom {
 
 // ---- devctrl 子命令（XFP:5-74 整表核过）----
 enum XDevCtrl : quint32 {
+    X_CTRL_GET_EMMC_INFO        = 0x040001,   // XFP:40；回包 <II = (type, block_size)
+    X_CTRL_GET_NAND_INFO        = 0x040002,   // XFP:41；回包至少 <IIII
+    X_CTRL_GET_NOR_INFO         = 0x040003,   // XFP:42；回包至少 <IIQ
+    X_CTRL_GET_UFS_INFO         = 0x040004,   // XFP:43；回包至少 <IIQQQ
     X_CTRL_GET_CHIP_ID          = 0x04000D,   // XFP:53；回包 5×u16：(hw_code, hw_sub_code, hw_version, sw_version, chip_evolution)
     X_CTRL_GET_PACKET_LENGTH    = 0x040007,   // XFP:47；回包 <II = (write_packet_length, read_packet_length)
     X_CTRL_GET_CONNECTION_AGENT = 0x04000A,   // XFP:50；回包字符串（b"brom" / b"preloader"）
@@ -102,6 +106,19 @@ enum class PartitionCata {
                // ⚠️ 契约（T11 审查更正）：**不得**被调用方"两者都试" —— 集成层（bromFlashOnSession）对 PMT 与 Unknown
                //    都是**明确拒绝**（不猜读法）。本注释原写"调用方按两者都试处理"与实现矛盾，已改。
 };
+
+enum class XStorageType {
+    Emmc,
+    Nand,
+    Nor,
+    Ufs,
+    Unknown
+};
+
+// 设备实际存储类型（XFL:440-568 的 get_{emmc,nand,nor,ufs}_info 顺序）。
+// 任一探测查询失败都按"不是该类型"继续；四种都没有非零 type 才报 Unknown。
+bool xflashDetectStorage(XFlashSession &x, XStorageType &out,
+                         QStringList *log = nullptr, QString *error = nullptr);
 
 // ① 七步握手（XFL:979-995，入口在 `0xC0` 已校验之后）：sync(0x434E5953) → SETUP_ENV(20B)
 //    → SETUP_HW_INIT(4B) → 读回必须 == "SYNC"。两处 setup 的 status 非 0 即失败（比上游更严，见文件头）。

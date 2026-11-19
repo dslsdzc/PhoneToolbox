@@ -9,6 +9,8 @@
 #include <sodium.h>
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +30,69 @@ static const char *audit_peer_id(protocol_context *context, char hex[65])
     sodium_bin2hex(hex, 65, context->peer_public,
                    sizeof(context->peer_public));
     return hex;
+}
+
+static int pair_used_path(protocol_context *context, char *path, size_t path_len)
+{
+    if (!context || !context->state_dir)
+        return -1;
+    return snprintf(path, path_len, "%s/pair_code_used", context->state_dir)
+                   < (int) path_len
+        ? 0
+        : -1;
+}
+
+static int pair_code_used(protocol_context *context)
+{
+    char path[4096];
+    if (pair_used_path(context, path, sizeof(path)) != 0)
+        return -1;
+    return access(path, F_OK) == 0 ? 1 : 0;
+}
+
+static int mark_pair_code_used(protocol_context *context)
+{
+    char path[4096];
+    if (pair_used_path(context, path, sizeof(path)) != 0)
+        return -1;
+    const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    const char value = '1';
+    const int wrote = write(fd, &value, 1);
+    close(fd);
+    if (wrote != 1) {
+        unlink(path);
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    int client_fd;
+    int cancel_fd;
+    volatile int stop;
+} exec_cancel_watch;
+
+// 命令执行期间主线程阻塞在 run_command；这个观察者只 poll 客户端 socket：
+// 断线或收到任何新帧（桌面 cancel）都向 cancel pipe 写一个字节，run_command
+// 会 kill 整个进程组。它不消费 socket 数据。
+static void *exec_cancel_thread(void *argument)
+{
+    exec_cancel_watch *watch = (exec_cancel_watch *) argument;
+    while (!watch->stop) {
+        struct pollfd fd;
+        fd.fd = watch->client_fd;
+        fd.events = POLLIN;
+        fd.revents = 0;
+        const int ready = poll(&fd, 1, 100);
+        if (ready > 0 && (fd.revents & (POLLIN | POLLHUP | POLLERR))) {
+            const char byte = 'x';
+            (void) write(watch->cancel_fd, &byte, 1);
+            break;
+        }
+    }
+    return NULL;
 }
 
 // Pair codes have only 10^6 possibilities. A per-connection sleep() can be
@@ -339,7 +404,25 @@ static int handle_exec(const protocol_context *context, const cJSON *root, int i
     }
 
     exec_result result = {0};
-    const int run = run_command(argv, timeout_ms, context->max_output, &result);
+    int cancel_pipe[2] = {-1, -1};
+    exec_cancel_watch watch = {context->client_fd, -1, 0};
+    pthread_t watcher;
+    int watcher_started = 0;
+    if (pipe2(cancel_pipe, O_CLOEXEC) == 0) {
+        watch.cancel_fd = cancel_pipe[1];
+        watcher_started = pthread_create(&watcher, NULL, exec_cancel_thread,
+                                         &watch) == 0;
+    }
+    const int run = run_command_cancellable(
+        argv, timeout_ms, context->max_output,
+        cancel_pipe[0] >= 0 ? cancel_pipe[0] : -1, &result);
+    watch.stop = 1;
+    if (watcher_started)
+        pthread_join(watcher, NULL);
+    if (cancel_pipe[0] >= 0) {
+        close(cancel_pipe[0]);
+        close(cancel_pipe[1]);
+    }
 
     char hash[65];
     argv_hash(argv, hash);
@@ -371,6 +454,7 @@ static int handle_exec(const protocol_context *context, const cJSON *root, int i
             cJSON_AddStringToObject(object, "op", "exit");
             cJSON_AddNumberToObject(object, "code", result.exit_code);
             cJSON_AddBoolToObject(object, "timed_out", result.timed_out);
+            cJSON_AddBoolToObject(object, "canceled", result.canceled);
             cJSON_AddBoolToObject(object, "truncated", result.truncated);
             cJSON_AddBoolToObject(object, "signaled", result.signaled);
             send_result = send_json(context, object);
@@ -550,6 +634,11 @@ static int serve_pair(protocol_context *context, const uint8_t *payload,
     int result = -1;
 
     if (op && strcmp(op, "pair_start") == 0) {
+        // 配对码一次性：成功配对后写 pair_code_used，APK 重启时轮换新码。
+        if (pair_code_used(context) != 0) {
+            send_error(context, 0, "pairing_disabled", "pair code already used");
+            goto done;
+        }
         // 允许多台电脑配对：这里不再拒绝已配对状态，重复公钥在 confirm 阶段去重。
         if (!context->pair_code || context->pair_code[0] == '\0') {
             send_error(context, 0, "pairing_disabled", "no pair code provided");
@@ -640,13 +729,21 @@ static int serve_pair(protocol_context *context, const uint8_t *payload,
             send_error(context, 0, "io_error", "cannot update peers.txt");
             goto done;
         }
+        if (mark_pair_code_used(context) != 0) {
+            send_error(context, 0, "io_error", "cannot mark pair code used");
+            goto done;
+        }
         if (peers_add(context->state_dir, context->pair_client_static,
                      context->pair_client_name, context->pair_capabilities,
                      error, sizeof(error)) != 0) {
+            char used_path[4096];
+            if (pair_used_path(context, used_path, sizeof(used_path)) == 0)
+                unlink(used_path);
             send_error(context, 0, "io_error", error);
             goto done;
         }
 
+        printf("PAIRING_OK=1\n");
         printf("PAIRED=1\n");
         fflush(stdout);
 
@@ -924,6 +1021,17 @@ int protocol_serve_client(protocol_context *context)
                 cJSON_AddStringToObject(pong, "version", AGENT_VERSION);
                 cJSON_AddNumberToObject(pong, "uid", (int)getuid());
                 result = send_json(context, pong);
+            }
+        } else if (strcmp(op, "cancel") == 0) {
+            // The exec watcher already killed the process group when it saw
+            // this frame; just acknowledge so the stream stays in sync.
+            cJSON *reply = cJSON_CreateObject();
+            if (!reply) {
+                result = -1;
+            } else {
+                cJSON_AddNumberToObject(reply, "id", id);
+                cJSON_AddStringToObject(reply, "op", "cancel_ok");
+                result = send_json(context, reply);
             }
         } else if (strcmp(op, "exec") == 0) {
             result = handle_exec(context, root, id);

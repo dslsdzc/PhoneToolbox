@@ -162,6 +162,21 @@ QList<QByteArray> xmlWriteTailReads()
          + textReads(QStringLiteral("<host><command>CMD:START</command></host>"));
 }
 
+// GET-HW-INFO 的读序列：OK → DOWNLOAD-FILE → OK@0x100 → OK → 数据 → CMD:END/START。
+QList<QByteArray> xmlHwInfoReads()
+{
+    const QByteArray info =
+        "<da_hw_info><storage>EMMC</storage>"
+        "<emmc><block_size>0x200</block_size></emmc></da_hw_info>";
+    const QString length = QString::number(info.size(), 16);
+    return textReads(QStringLiteral("OK"))
+         + xmlDwnFileReads(0x1000, quint32(info.size()))
+         + textReads(QStringLiteral("OK@0x") + length)
+         + textReads(QStringLiteral("OK"))
+         + frameReads(1, info)
+         + xmlWriteTailReads();
+}
+
 // XML 命令的**线上字节**（xsendText：XML + NUL；写帧断言用）
 QByteArray xmlFrame(const QString &xml) { return xml.toUtf8() + QByteArray(1, '\0'); }
 
@@ -1603,6 +1618,8 @@ void TestMtkPayload::bromFlashOnSessionRoutesXflashEndToEnd()
              << statusReads(0) << statusReads(0) << statusReads(0)                               // checksum_level
              << statusReads(0) << statusReads(0) << frameReads(1, QByteArray("brom")) << statusReads(0)
              << statusReads(0) << statusReads(0) << statusReads(0)                               // boot_to（无 EMI）
+             // 存储类型探测：GET_EMMC_INFO = 2×status + 回包 + 尾部 status
+             << statusReads(0) << statusReads(0) << frameReads(1, le32(1) + le32(512)) << statusReads(0)
              << statusReads(0) << statusReads(0) << frameReads(1, le32(0x200) + le32(0x400)) << statusReads(0)
              << statusReads(0) << statusReads(0) << frameReads(1, QByteArray(10, '\0')) << statusReads(0)
              << statusReads(0) << statusReads(0) << frameReads(1, le32(0x64))                     // CATA（唯一无尾部 status）
@@ -1691,6 +1708,7 @@ void TestMtkPayload::bromFlashOnSessionRoutesXmlEndToEnd()
              << xmlDeviceStartReads()                                 // 设备发 CMD:START
              << xmlCommandReads() << xmlCommandReads()
              << xmlCommandReads() << xmlCommandReads()                // setup_env + 2×hw_init + host_info
+             << xmlHwInfoReads()                                      // GET-HW-INFO → storage=EMMC
              // 分区表：READ-FLASH（noack）→ UpFile → 裸 OK@0x2000 → ack/OK → 数据帧 → 逐帧 ack/OK → CMD:START
              << textReads(QStringLiteral("OK"))
              << xmlUploadFileReads()
@@ -1785,6 +1803,7 @@ void TestMtkPayload::bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure()
              << xmlDeviceStartReads()
              << xmlCommandReads() << xmlCommandReads()
              << xmlCommandReads() << xmlCommandReads()
+             << xmlHwInfoReads()
              << textReads(QStringLiteral("OK"))
              << xmlUploadFileReads()
              << textReads(QStringLiteral("OK@0x2000"))
@@ -1804,7 +1823,7 @@ void TestMtkPayload::bromFlashOnSessionFlushesLogLinesBeforeXmlWriteFailure()
     const QString joined = cap.joined();
     QVERIFY2(joined.contains(QStringLiteral("XML：GPT 读出 1 个分区")), qPrintable(joined));
     QVERIFY2(joined.contains(QStringLiteral("计划：1 个分区")), qPrintable(joined));
-    QVERIFY2(joined.contains(QStringLiteral("写入分区 boot（2 字节）")), qPrintable(joined));
+    QVERIFY2(joined.contains(QStringLiteral("写入分区 boot（2 字节")), qPrintable(joined));
     QCOMPARE(cap.progress.size(), 0);            // 一个分区都没写成
 }
 
@@ -1834,6 +1853,7 @@ void TestMtkPayload::bromFlashOnSessionRejectsEmptyXmlGptTable()
              << xmlDeviceStartReads()
              << xmlCommandReads() << xmlCommandReads()
              << xmlCommandReads() << xmlCommandReads()
+             << xmlHwInfoReads()
              << textReads(QStringLiteral("OK"))
              << xmlUploadFileReads()
              << textReads(QStringLiteral("OK@0x2000"))

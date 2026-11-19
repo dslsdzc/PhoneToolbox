@@ -10,6 +10,8 @@
   ```bash
   adb shell am broadcast -a com.phonetoolbox.agent.START -e pair_code 123456
   ```
+  广播 Receiver 受 `android.permission.DUMP` 保护（adb shell 可用，普通 App 不可）。
+- 配对码一次性：成功后 agent 写 `state/pair_code_used`，旧码立即失效；下次启动由桌面端广播新码。
 - 配对码、`agent.out`、`peers.txt` 都在 `/data/data/com.phonetoolbox.agent/files/`，不会写到日志。
 
 ## 构建 agent

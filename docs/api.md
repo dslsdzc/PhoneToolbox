@@ -31,7 +31,7 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/agent
 prev_hex timestamp peer_hex op argv_sha256 exit entry_hex
 ```
 
-`peer_hex` 是已认证会话的 Noise 静态公钥（64 hex）；明文开发模式回退为 `stage1`。
+`peer_hex` 是已认证会话的 Noise 静态公钥（64 hex）；明文开发模式回退为 `stage1`。打开日志时会逐条重算哈希链；损坏的链会被隔离为 `audit.log.corrupt.<pid>`，不会静默续写。超过 8 MiB 时轮换到 `audit.log.1`，并用 `audit.log.prev` 保存跨文件锚点。
 
 ### `/apps`
 
@@ -82,8 +82,10 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
 - 配对后 peers 保存在 APK 私有目录 `peers.txt`；每台电脑一行；
 - 会话握手会从 msg1 读取真实发起方公钥，必须命中 `peers.txt`；
 - 每条命令前检查 peer 仍在 `peers.txt`，删除配对会立即吊销现有会话；
+- **配对码一次性**：成功配对后设备写 `pair_code_used`，旧码立即失效；APK/桌面端在下次启动时轮换新码；
 - **配对即完整授权**：配对成功后，这台电脑可以以 root 身份执行任意命令、读写任意文件，没有按应用、按命令或按操作的细粒度权限隔离；只与可信电脑配对；
 - 配对码、CPace 密钥和确认 MAC 不写入日志；失败只记录 `pair: confirm MAC mismatch`。
+- 全局配对失败限速：所有连接共享 1 次/秒的失败额度，不再依赖线程内 `sleep()`。
 
 ### 控制帧 JSON op
 
@@ -93,8 +95,11 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
 | `exec` | `id`、`argv` 或 `shell`+`command`、`timeout_ms` | 执行命令，返回 `stdout` / `stderr` / `exit` |
 | `push` | `path`、`size`、`mode` | 上传文件，随后发二进制帧 |
 | `pull` | `path` | 下载文件，先返回 `pull_meta`，再发二进制帧 |
+| `cancel` | `id` | 取消正在执行的命令（kill 整个进程组） |
 | `stat` | `path` | 返回文件状态 |
 | `shutdown` | — | 停止 agent |
+
+`exit` 结果包含 `timed_out`、`canceled`、`truncated`、`signaled` 四个布尔字段。
 
 ### agent CLI
 

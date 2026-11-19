@@ -93,6 +93,25 @@ int main(void)
     CHECK(token_at(copy, 0, third_prev, sizeof(third_prev)) == 0);
     CHECK(strcmp(third_prev, second_entry) == 0);
 
+    // Tampering with an existing entry must not be silently extended: the
+    // corrupt log is quarantined and a fresh chain starts.
+    FILE *tamper = fopen(path, "r+");
+    CHECK(tamper != NULL);
+    char first_line[512];
+    CHECK(fgets(first_line, sizeof(first_line), tamper) != NULL);
+    size_t first_len = strlen(first_line);
+    CHECK(first_len > 2);
+    first_line[first_len - 2] = (first_line[first_len - 2] == '0') ? '1' : '0';
+    CHECK(fseek(tamper, 0, SEEK_SET) == 0);
+    CHECK(fwrite(first_line, 1, first_len, tamper) == first_len);
+    fclose(tamper);
+
+    CHECK(audit_open(&log, path) == 0);
+    CHECK(audit_append(&log, "peer3", "exec", "dddddddd", 0) == 0);
+    audit_close(&log);
+    CHECK(read_lines(path, lines, &count) == 0);
+    CHECK(count == 1);
+
     unlink(path);
     rmdir(directory);
 

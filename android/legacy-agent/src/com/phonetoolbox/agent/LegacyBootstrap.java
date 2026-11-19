@@ -47,6 +47,9 @@ public final class LegacyBootstrap extends BroadcastReceiver {
             if (!state.isDirectory()) {
                 state.mkdirs();
             }
+            // A desktop-supplied code always starts a new pairing round.
+            if (pairCode != null && pairCode.trim().length() > 0)
+                new File(state, "pair_code_used").delete();
             // Persist the pair code before touching the running binary: an
             // in-place overwrite fails with ETXTBSY on old yaffs kernels.
             final String resolvedCode = resolvePairCode(context, pairCode);

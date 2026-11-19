@@ -84,6 +84,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // Pairing rotates the stored code; refresh whenever the activity
+        // comes back to the foreground.
+        mPairCodeView.setText(AgentLauncher.getOrCreatePairCode(this));
         refreshPeers();
     }
 

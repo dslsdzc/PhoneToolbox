@@ -189,6 +189,51 @@ bool xflashGetRamInfo(XFlashSession &x, QByteArray *raw, QString *error)
     return true;
 }
 
+// 设备实际存储类型。探测失败按"不是该类型"继续；四个都失败/type==0 → Unknown。
+// 顺序照上游 reinit()：emmc → nand → nor → ufs。
+bool xflashDetectStorage(XFlashSession &x, XStorageType &out,
+                         QStringList *log, QString *error)
+{
+    auto say = [log](const QString &m) { if (log) *log << m; };
+    out = XStorageType::Unknown;
+
+    struct Probe {
+        quint32 subcmd;
+        int minimum;
+        XStorageType type;
+        const char *name;
+    };
+    static const Probe probes[] = {
+        {X_CTRL_GET_EMMC_INFO, 8, XStorageType::Emmc, "eMMC"},
+        {X_CTRL_GET_NAND_INFO, 16, XStorageType::Nand, "NAND"},
+        {X_CTRL_GET_NOR_INFO, 16, XStorageType::Nor, "NOR"},
+        {X_CTRL_GET_UFS_INFO, 24, XStorageType::Ufs, "UFS"},
+    };
+
+    for (const Probe &probe : probes) {
+        QByteArray reply;
+        QString probe_error;
+        if (!devCtrlQuery(x, probe.subcmd, reply, &probe_error))
+            continue;
+        if (reply.size() < probe.minimum)
+            continue;
+        const quint32 type = le32At(reply, 0);
+        if (type == 0)
+            continue;
+        out = probe.type;
+        if (probe.type == XStorageType::Emmc) {
+            say(QStringLiteral("设备存储类型：eMMC（block_size=%1）").arg(le32At(reply, 4)));
+        } else {
+            say(QStringLiteral("设备存储类型：%1").arg(QLatin1String(probe.name)));
+        }
+        return true;
+    }
+
+    if (error)
+        *error = QStringLiteral("XFlash：无法识别设备存储类型（eMMC/NAND/NOR/UFS 均未返回有效 type）—— 拒绝按 eMMC 用户区盲目写入");
+    return false;
+}
+
 // ---- ④ 载荷发送（T5）----
 
 // EMI（DRAM 初始化数据，XFL:251-270）。读帧数：INIT_EXT_RAM 的 status + send_param 的一次 status = 2 帧。

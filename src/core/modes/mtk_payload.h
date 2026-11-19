@@ -232,6 +232,6 @@ bool flashPartition(BromSession &s, DaStorage &st, const QString &name,
 // 调用方复用同一份 parts 时**计划表 == 写表**（A-37 的语义变更，理由见 .cpp 调用点注释）。
 bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
                              const QString &name, const QByteArray &image,
-                             QString *error = nullptr);
+                             QString *error = nullptr, quint64 baseOffset = 0);
 
 } // namespace mtkbrom

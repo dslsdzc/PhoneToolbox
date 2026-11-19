@@ -66,6 +66,8 @@ XFlash / XML 的分区表为 GPT（主 GPT；512/4096 探测 + 头/条目双 CRC
 
 **验证状态**：离线验证（真 DA / preloader / GPT 样本 + mock 逐帧）；真机全链未验证（三代皆是）；XML 代无真实设备样本（帧与命令全部来自上游 mtkclient 源码）。
 
+**存储类型门**：XFlash 通过 `GET_EMMC_INFO` / `GET_NAND_INFO` / `GET_NOR_INFO` / `GET_UFS_INFO` 读取设备实际类型；XML 通过 `GET-HW-INFO` 的 `<storage>` 读取。只允许 eMMC 用户区，UFS/NAND/NOR 或无法识别时 fail-closed。镜像按 4 MiB 分块读写，不再整包 `readAll()`。
+
 ## 展锐 SPD（ResearchDownload）
 
 展锐 ResearchDownload 模式（VID `0x1782`）：

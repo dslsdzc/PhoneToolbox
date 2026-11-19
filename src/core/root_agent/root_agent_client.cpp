@@ -509,7 +509,9 @@ void RootAgentClient::handleMessage(const QJsonObject &object)
         if (!m_execInProgress)
             return;
         const bool timedOut = object.value(QStringLiteral("timed_out")).toBool();
-        finishExec(object.value(QStringLiteral("code")).toInt(-1), timedOut);
+        const bool canceled = object.value(QStringLiteral("canceled")).toBool();
+        finishExec(object.value(QStringLiteral("code")).toInt(-1),
+                   timedOut || canceled);
         return;
     }
 }
@@ -588,6 +590,16 @@ void RootAgentClient::detectRoot()
     exec({QStringLiteral("id")}, 5000);
 }
 
+void RootAgentClient::cancelExec(int execId)
+{
+    if (!m_authenticated || execId <= 0)
+        return;
+    QJsonObject object;
+    object[QStringLiteral("op")] = QStringLiteral("cancel");
+    object[QStringLiteral("id")] = execId;
+    sendJson(object);
+}
+
 void RootAgentClient::sendJson(const QJsonObject &object)
 {
     const QByteArray json = QJsonDocument(object).toJson(QJsonDocument::Compact);
@@ -663,8 +675,8 @@ void RootAgentClient::finishExec(int exitCode, bool timedOut)
 void RootAgentClient::onExecTimeout()
 {
     emit errorOccurred(QStringLiteral("命令超时（客户端兜底）"));
+    cancelExec(m_execId);
     finishExec(-1, true);
-    disconnectFromAgent();
 }
 
 void RootAgentClient::cleanupSocket()

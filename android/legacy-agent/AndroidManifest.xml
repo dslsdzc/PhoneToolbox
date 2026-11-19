@@ -14,7 +14,8 @@
         android:allowBackup="false">
         <receiver
             android:name=".LegacyBootstrap"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="com.phonetoolbox.agent.START" />

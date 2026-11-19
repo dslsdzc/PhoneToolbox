@@ -72,6 +72,13 @@ void exec_result_free(exec_result *result)
 int run_command(const char *const argv[], int timeout_ms, size_t max_output,
                 exec_result *result)
 {
+    return run_command_cancellable(argv, timeout_ms, max_output, -1, result);
+}
+
+int run_command_cancellable(const char *const argv[], int timeout_ms,
+                            size_t max_output, int cancel_fd,
+                            exec_result *result)
+{
     if (!argv || !argv[0] || !result)
         return -1;
     memset(result, 0, sizeof(*result));
@@ -132,9 +139,11 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
     int stdout_open = 1;
     int stderr_open = 1;
     int timed_out = 0;
+    int canceled = 0;
 
-    while (!timed_out && (!child_done || stdout_open || stderr_open)) {
-        struct pollfd fds[2];
+    while (!timed_out && !canceled
+           && (!child_done || stdout_open || stderr_open)) {
+        struct pollfd fds[3];
         nfds_t count = 0;
         if (stdout_open) {
             fds[count].fd = stdout_pipe[0];
@@ -144,6 +153,14 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         }
         if (stderr_open) {
             fds[count].fd = stderr_pipe[0];
+            fds[count].events = POLLIN;
+            fds[count].revents = 0;
+            ++count;
+        }
+        int cancel_index = -1;
+        if (cancel_fd >= 0) {
+            cancel_index = (int) count;
+            fds[count].fd = cancel_fd;
             fds[count].events = POLLIN;
             fds[count].revents = 0;
             ++count;
@@ -165,6 +182,13 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
 
         if (count > 0)
             poll(fds, count, poll_timeout);
+
+        if (cancel_index >= 0
+            && (fds[cancel_index].revents & (POLLIN | POLLHUP | POLLERR))) {
+            kill(-pid, SIGKILL);
+            canceled = 1;
+            break;
+        }
 
         // 读 stdout/stderr（非阻塞，直到 EAGAIN）。
         for (int stream = 0; stream < 2; ++stream) {
@@ -211,7 +235,7 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         }
     }
 
-    if (timed_out) {
+    if (timed_out || canceled) {
         kill(-pid, SIGKILL);
         // Do not wait for background grandchildren to close inherited pipes.
         if (stdout_open) {
@@ -240,6 +264,7 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         result->exit_code = -1;
 
     result->timed_out = timed_out;
+    result->canceled = canceled;
     result->truncated = out.truncated || err.truncated;
     result->stdout_data = out.data;
     result->stdout_length = out.length;

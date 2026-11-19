@@ -70,6 +70,7 @@ private:
     bool isLegacyDevice(const QString &serial);
     int deviceSdk(const QString &serial);
     QString legacyPairCode(const QString &serial);
+    QString rotateLegacyPairCode(const QString &serial);
     void refreshPackage(const QString &serial);
     void maybeLaunchAgent(const QString &serial, const QString &package);
     void autoConnect(const QString &serial);

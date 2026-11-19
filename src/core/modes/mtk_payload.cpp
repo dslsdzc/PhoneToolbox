@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QThread>
 #include <optional>
+#include <limits>
 #include <utility>   // std::as_const（遍历 Qt 容器，不得用 qAsConst）
 
 #include "core/modes/mtk_chip_table.h"     // lookupChip / ChipInfo / DaMode（代际判定）
@@ -638,13 +639,14 @@ bool patchPreloaderSecurity(QByteArray &preloader, QStringList *applied)
 }
 
 bool flashPartitionWithTable(DaStorage &st, const QList<EmPartition> &parts,
-                             const QString &name, const QByteArray &image, QString *error)
+                             const QString &name, const QByteArray &image,
+                             QString *error, quint64 baseOffset)
 {
     // 查名（规格 §3.6 分区表）→ emmcWrite（规格 §3.5 Legacy 命令集）。表由调用方一次读好传进来：
     // read_pmt 是**设备往返**，逐分区各读一次是 N+1 次（会话级已有一份权威表）。
     for (const EmPartition &p : parts) {
         if (p.name == name) {
-            if (!st.emmcWrite(p.offsetBytes, image, kEmmcPartUser, error))
+            if (!st.emmcWrite(p.offsetBytes + baseOffset, image, kEmmcPartUser, error))
                 return false;
             return true;
         }
@@ -1051,10 +1053,19 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
         }
         refs = toPartitionRefs(deviceParts);
     } else if (gen == MtkGeneration::XFlash) {
-        // A-28 存储类型门：在**任何分区表读与任何写之前**过（拒绝整条 XFlash 写路径，而不是读到一半再拒）。
-        // 注：门**不在**"任何设备读之前" —— 走到这里时引导链（握手/EMI/DA2 上传）已经跑完、做过大量设备读。
-        if (!requireEmmcUserStorage(storageDescriptor(kXStorageEmmc, kXEmmcPartUser), say, error))
+        // A-28 存储类型门：从设备实际查询 eMMC/NAND/NOR/UFS，而不是把
+        // eMMC 常量当成"检查"。非 eMMC 一律拒绝。
+        XStorageType storageType = XStorageType::Unknown;
+        QStringList storageLog;
+        if (!xflashDetectStorage(xflash, storageType, &storageLog, error))
             return false;
+        for (const QString &line : std::as_const(storageLog))
+            say(line);
+        if (storageType != XStorageType::Emmc) {
+            if (error) *error = QStringLiteral("设备存储类型不是 eMMC 用户区 —— 本期只支持 eMMC，拒绝按 UFS/NAND/NOR 偏移写入");
+            return false;
+        }
+        say(QStringLiteral("写入存储：EMMC-USER（设备探测）"));
         XPacketLength pl;
         if (!xflashGetPacketLength(xflash, pl, error))     // 铁律 14：拿不到写分块就**不写**
             return false;
@@ -1087,10 +1098,20 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
                                QStringLiteral("XFlash"), refs, partAddr, say, error))
             return false;
     } else {   // Xml
-        // A-28 存储类型门：在**任何分区表读与任何写之前**过（拒绝整条 XML 写路径，而不是读到一半再拒）。
-        // 注：门**不在**"任何设备读之前" —— 走到这里时引导链（DA1 上传 / CMD:START 握手）已经跑完。
-        if (!requireEmmcUserStorage(kXmlStoreEmmcUser, say, error))
+        // A-28 存储类型门：GET-HW-INFO 读 DA 的 <storage>，不再把 EMMC-USER
+        // 常量当成"检查"。非 eMMC 一律拒绝。
+        QString storageType;
+        QStringList storageLog;
+        if (!xmlGetStorageType(xml, &storageType, &storageLog, error))
             return false;
+        for (const QString &line : std::as_const(storageLog))
+            say(line);
+        if (storageType.compare(QStringLiteral("EMMC"), Qt::CaseInsensitive) != 0) {
+            if (error) *error = QStringLiteral("设备存储类型为 %1 —— 本期只支持 eMMC 用户区，拒绝按 UFS/NAND/NOR 偏移写入")
+                                    .arg(storageType);
+            return false;
+        }
+        say(QStringLiteral("写入存储：EMMC-USER（设备探测）"));
         // 分区表：**READ-FLASH + 同一个 mtkgpt**（T1 的解析器；spec §9 已核，`XC:474-484` 的区间读。
         // 上游 XML 侧没有"先问设备总扇区数"的命令 —— 分区表就是按字节偏移读回来的）
         if (!loadGptPartitions(xmlSectorReader(xml), QStringLiteral("XML"), refs, partAddr, say, error))
@@ -1110,6 +1131,8 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
     say(QStringLiteral("计划：%1 个分区，合计 %2 字节").arg(plan.entries.size()).arg(plan.totalBytes));
 
     // 逐分区写（失败即停；错误含分区名与已写字节 —— 由 flashPartitionWithTable 填）
+    // 按 4 MiB 分块读写，避免大镜像 readAll() 造成 OOM 和 32 位 int 偏移溢出。
+    constexpr quint64 kMtkChunkBytes = 4u * 1024u * 1024u;
     quint64 written = 0;
     for (const mtkplan::PlanEntry &e : std::as_const(plan.entries)) {
         QFile f(e.imagePath);
@@ -1117,47 +1140,72 @@ bool bromFlashOnSession(BromSession &session, const BromFlashRequest &req,
             if (error) *error = QStringLiteral("无法读取镜像：%1").arg(e.imagePath);
             return false;
         }
-        const QByteArray image = f.readAll();
-        f.close();
-        if (image.size() != qsizetype(e.imageSize)) {
-            if (error) *error = QStringLiteral("镜像 %1 读入字节数与计划不符（%2 != %3）")
-                                    .arg(e.imagePath).arg(image.size()).arg(e.imageSize);
+        if (quint64(f.size()) != e.imageSize) {
+            if (error) *error = QStringLiteral("镜像 %1 文件大小与计划不符（%2 != %3）")
+                                    .arg(e.imagePath).arg(f.size()).arg(e.imageSize);
             return false;
         }
-        say(QStringLiteral("写入分区 %1（%2 字节）…").arg(e.partition).arg(image.size()));
-        if (gen == MtkGeneration::Legacy) {
-            // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt（A-37）。
-            // ⚠️ 语义变更（控制方 2026-09-19 裁决接受）：由此**计划表 == 写表** —— 预览用的那张表
-            // 与逐分区写的偏移出自同一次读。旧实现是"计划用读#1、每个分区写各用一次新读"，
-            // 若某次写入覆盖了分区表存储区导致表漂移，旧实现会读到变化后的表（静默改变写入目标），
-            // 新实现继续按旧快照的偏移写。选新语义的理由：**用户批准的是预览里那张表**，
-            // 计划与写入必须同源。真机上"表漂移"这一场景未验证、无用例覆盖（mock 里表恒定）。
-            if (!flashPartitionWithTable(*storage, deviceParts, e.partition, image, error))
-                return false;
-        } else if (gen == MtkGeneration::XFlash) {
+        say(QStringLiteral("写入分区 %1（%2 字节，%3 字节/块）…")
+                .arg(e.partition).arg(e.imageSize).arg(kMtkChunkBytes));
+
+        quint64 baseAddr = 0;
+        if (gen != MtkGeneration::Legacy) {
             const auto it = partAddr.constFind(e.partition);
             if (it == partAddr.constEnd()) {     // 计划条目名必来自设备表 → 缺 = 内部错位
                 if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
                 return false;
             }
-            if (!xflashWriteData(xflash, it.value(), image, kXStorageEmmc, kXEmmcPartUser,
-                                 xWritePacketLength, nullptr, error))
-                return false;
-        } else {
-            // XML：`<partition>` = **存储描述符**（不是分区名）、`<offset>` = **GPT 条目地址**
-            // （上游 `writeflash(addr=partition.sector * pagesize)`：`v6.py:1095-1097`；
-            //  `mtk_da_handler.py:544-548`）—— 地址取自查表时填的 partAddr（first_lba × 扇区）
-            const auto it = partAddr.constFind(e.partition);
-            if (it == partAddr.constEnd()) {     // 计划条目名必来自设备表 → 缺 = 内部错位
-                if (error) *error = QStringLiteral("内部错误：分区 %1 不在设备表地址映射里").arg(e.partition);
-                return false;
-            }
-            if (!xmlWritePartition(xml, kXmlStoreEmmcUser, image, nullptr, error, it.value()))
-                return false;
+            baseAddr = it.value();
         }
-        written += quint64(image.size());
-        if (progress)
-            progress(written, plan.totalBytes);
+
+        quint64 offset = 0;
+        while (offset < e.imageSize) {
+            const quint64 remaining = e.imageSize - offset;
+            const quint64 want = qMin<quint64>(kMtkChunkBytes, remaining);
+            const QByteArray chunk = f.read(qint64(want));
+            if (quint64(chunk.size()) != want) {
+                if (error) *error = QStringLiteral("镜像 %1 在偏移 %2 处读取不足（%3 != %4）")
+                                        .arg(e.imagePath).arg(offset)
+                                        .arg(chunk.size()).arg(want);
+                return false;
+            }
+            if (gen == MtkGeneration::Legacy) {
+                // 复用会话级读到的 deviceParts：**不再**逐分区重读 read_pmt（A-37）。
+                // ⚠️ 语义变更（控制方 2026-09-19 裁决接受）：由此**计划表 == 写表** —— 预览用的那张表
+                // 与逐分区写的偏移出自同一次读。旧实现是"计划用读#1、每个分区写各用一次新读"，
+                // 若某次写入覆盖了分区表存储区导致表漂移，旧实现会读到变化后的表（静默改变写入目标），
+                // 新实现继续按旧快照的偏移写。选新语义的理由：**用户批准的是预览里那张表**，
+                // 计划与写入必须同源。真机上"表漂移"这一场景未验证、无用例覆盖（mock 里表恒定）。
+                if (!flashPartitionWithTable(*storage, deviceParts, e.partition,
+                                             chunk, error, offset))
+                    return false;
+            } else if (gen == MtkGeneration::XFlash) {
+                if (offset > std::numeric_limits<quint64>::max() - baseAddr) {
+                    if (error) *error = QStringLiteral("分区 %1 写入地址溢出").arg(e.partition);
+                    return false;
+                }
+                if (!xflashWriteData(xflash, baseAddr + offset, chunk,
+                                     kXStorageEmmc, kXEmmcPartUser,
+                                     xWritePacketLength, nullptr, error))
+                    return false;
+            } else {
+                // XML：`<partition>` = **存储描述符**（不是分区名）、`<offset>` = **GPT 条目地址**
+                // （上游 `writeflash(addr=partition.sector * pagesize)`：`v6.py:1095-1097`；
+                //  `mtk_da_handler.py:544-548`）—— 地址取自查表时填的 partAddr（first_lba × 扇区）
+                if (offset > std::numeric_limits<quint64>::max() - baseAddr) {
+                    if (error) *error = QStringLiteral("分区 %1 写入地址溢出").arg(e.partition);
+                    return false;
+                }
+                if (!xmlWritePartition(xml, kXmlStoreEmmcUser, chunk, nullptr,
+                                       error, baseAddr + offset))
+                    return false;
+            }
+            written += quint64(chunk.size());
+            if (progress)
+                progress(written, plan.totalBytes);
+            offset += quint64(chunk.size());
+        }
+        f.close();
     }
 
     // 收尾：失败只告警（数据已落盘）

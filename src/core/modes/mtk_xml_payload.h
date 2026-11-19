@@ -82,6 +82,11 @@ namespace mtkbrom {
 // （`mtk_xml_session.h` 的约定），故这里显式核对 `out.command`。
 bool xmlDa1Handshake(XmlSession &x, QStringList *log, QString *error = nullptr);
 
+// GET-HW-INFO（XL:760-830）：读 DA 自述文件，取出 `<storage>`（EMMC/UFS/NAND/NOR）。
+// 失败即失败（不做"假设 eMMC"）：调用方必须拒绝在未知存储类型上写入。
+bool xmlGetStorageType(XmlSession &x, QString *storage,
+                       QStringList *log = nullptr, QString *error = nullptr);
+
 // SET-RUNTIME-PARAMETER（XL:167-186 + XC:98-136）：version="1.1"、checksum_level=NONE、
 // battery_exist=AUTO-DETECT、da_log_level 为**字符串**（TRACE..ERROR，XL 的 LogLevel）、
 // log_channel=UART、system_os=LINUX，外加独立的 `<adv>` 块的 initialize_dram=YES。

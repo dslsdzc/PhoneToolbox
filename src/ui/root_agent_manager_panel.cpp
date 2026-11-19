@@ -439,6 +439,16 @@ QString RootAgentManagerPanel::legacyPairCode(const QString &serial)
     return code;
 }
 
+QString RootAgentManagerPanel::rotateLegacyPairCode(const QString &serial)
+{
+    QSettings settings;
+    const QString key = settingsKey(serial, QStringLiteral("pairCode"));
+    const QString code = QString::number(QRandomGenerator::global()->bounded(1000000))
+                             .rightJustified(6, QLatin1Char('0'));
+    settings.setValue(key, code);
+    return code;
+}
+
 bool RootAgentManagerPanel::queryProvider(const QString &serial,
                                           const QString &package,
                                           quint16 *port, bool *paired,
@@ -817,6 +827,22 @@ RootAgentClient *RootAgentManagerPanel::clientFor(const QString &serial)
                 appendLog(QStringLiteral("配对成功：这台电脑已获得完整 Root 权限，正在建立 Noise 连接…"));
                 session.client->setIdentity(clientPrivate, agentPublic);
                 session.client->connectToAgent();
+
+                if (isLegacyDevice(serial)) {
+                    // Pair code is single-use on the device. Rotate the local
+                    // code and restart the legacy agent with the fresh one.
+                    const QString fresh = rotateLegacyPairCode(serial);
+                    if (m_currentSerial == serial)
+                        m_pairCodeEdit->setText(fresh);
+                    QTimer::singleShot(5000, this, [this, serial]() {
+                        if (!m_sessions.contains(serial))
+                            return;
+                        Session &s = m_sessions[serial];
+                        s.lastLaunchAttempt = 0;
+                        maybeLaunchAgent(serial,
+                                         QString::fromLatin1(kAgentPackage));
+                    });
+                }
             });
     connect(client, &RootAgentClient::execFinished, this,
             [this, serial](int exitCode, const QString &stdoutText,

@@ -206,11 +206,35 @@ int main(int argc, char **argv)
     fclose(peers);
     CHECK(strncmp(line, client_hex, 64) == 0);
 
+    // The code is single-use: a second pair_start must be rejected even while
+    // the first paired session is still alive.
+    const int fd2 = connect_localhost(port);
+    CHECK(fd2 >= 0);
+    cJSON *second = cJSON_CreateObject();
+    CHECK(second != NULL);
+    cJSON_AddStringToObject(second, "op", "pair_start");
+    cJSON_AddStringToObject(second, "public_data", public_hex);
+    cJSON_AddStringToObject(second, "client_static", client_hex);
+    cJSON_AddStringToObject(second, "client_name", "second-desktop");
+    CHECK(send_pair_json(fd2, second) == 0);
+    cJSON_Delete(second);
+    cJSON *second_response = recv_json(fd2);
+    CHECK(second_response != NULL);
+    const cJSON *second_op =
+        cJSON_GetObjectItemCaseSensitive(second_response, "op");
+    CHECK(cJSON_IsString(second_op)
+          && strcmp(second_op->valuestring, "error") == 0);
+    cJSON_Delete(second_response);
+    close(fd2);
+
     close(fd);
     kill(pid, SIGTERM);
     waitpid(pid, NULL, 0);
     fclose(output);
 
+    char used_path[512];
+    snprintf(used_path, sizeof(used_path), "%s/pair_code_used", state_dir);
+    unlink(used_path);
     unlink(peers_path);
     char identity_path[512];
     snprintf(identity_path, sizeof(identity_path), "%s/identity.key", state_dir);
