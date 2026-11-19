@@ -69,9 +69,9 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
   adb shell am broadcast -a com.local.service.START_AGENT \
     -n com.phonetoolbox.agent/com.local.service.AgentBootReceiver
   ```
-- Android 1.0–4.4：使用 `android/legacy-agent` 的 legacy APK，带极简 Activity，固定监听 `127.0.0.1:32145`。**配对码只在手机 Activity 屏幕上显示**；Receiver 只启动服务，不接受广播里的配对码，桌面端必须手动输入：
+- Android 1.0–4.4：使用 `android/legacy-agent` 的 legacy APK，带极简 Activity，固定监听 `127.0.0.1:32145`。**配对码只在手机 Activity 屏幕上显示**；APK 没有导出 Receiver，桌面端通过打开 Activity 启动服务，配对码必须手动输入：
   ```bash
-  adb shell am broadcast -a com.phonetoolbox.agent.START
+  adb shell am start -n com.phonetoolbox.agent/.LegacyActivity
   ```
 
 ### 传输与配对

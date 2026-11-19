@@ -26,7 +26,7 @@ public class AgentBootReceiver extends BroadcastReceiver {
         Log.i("AgentBoot", "START_AGENT broadcast received");
         final PendingResult pending = goAsync();
         final CountDownLatch started = new CountDownLatch(1);
-        Thread launcher = AgentLauncher.start(context.getApplicationContext(),
+        Thread launcher = AgentLauncher.startIfNotRunning(context.getApplicationContext(),
                 new AgentLauncher.Listener() {
                     @Override
                     public void onStarted(int port, int pid) {

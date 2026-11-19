@@ -70,6 +70,23 @@ int main(void)
     // 覆盖保护
     CHECK(push_begin(&push, target, sizeof(data) - 1, "0644", sha256, 0,
                      error, sizeof(error)) != 0);
+
+    // overwrite=0 的提交竞态：目标在 begin 之后出现，linkat 必须原子拒绝。
+    char race[512];
+    snprintf(race, sizeof(race), "%s/race.bin", directory);
+    CHECK(push_begin(&push, race, sizeof(data) - 1, "0644", sha256, 0,
+                     error, sizeof(error)) == 0);
+    CHECK(push_write(&push, 0, (const uint8_t *)data, sizeof(data) - 1,
+                     error, sizeof(error)) == 0);
+    FILE *race_file = fopen(race, "w");
+    CHECK(race_file != NULL);
+    CHECK(fputs("existing", race_file) >= 0);
+    fclose(race_file);
+    CHECK(push_commit(&push, error, sizeof(error)) != 0);
+    CHECK(read_text(race, text, sizeof(text)) == 0);
+    CHECK(strcmp(text, "existing") == 0);
+    unlink(race);
+
     CHECK(push_begin(&push, target, sizeof(data) - 1, "0644", sha256, 1,
                      error, sizeof(error)) == 0);
     CHECK(push_write(&push, 0, (const uint8_t *)data, sizeof(data) - 1,

@@ -1,8 +1,6 @@
 package com.phonetoolbox.agent;
 
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -23,7 +21,7 @@ import java.util.Locale;
  * desktop: an adb-only attacker must not be able to pair without seeing the
  * device screen. The receiver only starts/stops the local agent.
  */
-public final class LegacyBootstrap extends BroadcastReceiver {
+public final class LegacyBootstrap {
     private static final String ASSET_NAME = "phone_agent";
     private static final String BINARY_NAME = "phone_agent";
     private static final String SCRIPT_NAME = "start-agent.sh";
@@ -33,13 +31,6 @@ public final class LegacyBootstrap extends BroadcastReceiver {
     // Fixed device-side port: the desktop can adb-forward to it without
     // reading the app-private agent.out file (unavailable before run-as).
     static final int AGENT_PORT = 32145;
-
-    @Override
-    public void onReceive(Context context, Intent intent) {
-        // Deliberately ignore Intent extras: a pair code must come from the
-        // on-device Activity, not from adb.
-        start(context);
-    }
 
     static final class PairCodeChoice {
         final String code;

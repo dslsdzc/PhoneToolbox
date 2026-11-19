@@ -32,7 +32,6 @@
 namespace {
 constexpr quint16 kLegacyAgentPort = 32145;
 constexpr char kAgentPackage[] = "com.phonetoolbox.agent";
-constexpr char kLegacyStartAction[] = "com.phonetoolbox.agent.START";
 } // namespace
 
 RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
@@ -629,22 +628,23 @@ void RootAgentManagerPanel::maybeLaunchAgent(const QString &serial,
         return;
 
     if (isLegacyDevice(serial)) {
+        // No exported receiver: open the on-device Activity, which starts the
+        // agent and shows the pair code locally.
         QProcess start;
         start.start(adbPath, {QStringLiteral("-s"), serial,
                               QStringLiteral("shell"), QStringLiteral("am"),
-                              QStringLiteral("broadcast"),
-                              QStringLiteral("-a"),
-                              QString::fromLatin1(kLegacyStartAction)});
+                              QStringLiteral("start"), QStringLiteral("-n"),
+                              QStringLiteral("com.phonetoolbox.agent/.LegacyActivity")});
         if (!start.waitForFinished(5000)) {
             start.kill();
-            appendLog(QStringLiteral("后台拉起 legacy 代理失败（超时）"), true);
+            appendLog(QStringLiteral("打开 legacy 代理界面失败（超时）"), true);
             return;
         }
         if (start.exitCode() != 0) {
-            appendLog(QStringLiteral("后台拉起 legacy 代理失败"), true);
+            appendLog(QStringLiteral("打开 legacy 代理界面失败"), true);
             return;
         }
-        appendLog(QStringLiteral("已后台拉起 legacy 代理（API %1），等待端口…")
+        appendLog(QStringLiteral("已打开 legacy 代理界面（API %1），等待端口…")
                       .arg(deviceSdk(serial)));
         QTimer::singleShot(2500, this, [this, serial]() { autoConnect(serial); });
         return;

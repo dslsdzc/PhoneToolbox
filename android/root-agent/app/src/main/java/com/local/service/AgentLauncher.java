@@ -54,7 +54,19 @@ final class AgentLauncher {
     }
 
     // 返回启动线程；listener 可选，回调发生在后台线程。
-    static Thread start(final Context context, final Listener listener) {
+    static void clearPairCodeUsed(final Context context) {
+        final Context app = context.getApplicationContext();
+        final File used = new File(app.getFilesDir(), "pair_code_used");
+        used.delete();
+        try {
+            Runtime.getRuntime().exec(new String[]{"su", "-c",
+                    "rm -f " + used.getAbsolutePath()}).waitFor();
+        } catch (Exception ignored) {
+        }
+    }
+
+    // Start only when no agent is running; safe for boot/receiver callers.
+    static Thread startIfNotRunning(final Context context, final Listener listener) {
         if (!STARTING.compareAndSet(false, true))
             return null;
         final Context app = context.getApplicationContext();
@@ -145,12 +157,54 @@ final class AgentLauncher {
             } finally {
                 STARTING.set(false);
                 if (restartAfterExit[0]) {
-                    new Thread(() -> start(app, null), "agent-restart").start();
+                    new Thread(() -> startIfNotRunning(app, null),
+                               "agent-restart").start();
                 }
             }
         }, "agent-launcher");
         thread.start();
         return thread;
+    }
+
+    // Stop the recorded agent and clear runtime state. Pairing data is kept.
+    static void stop(final Context context) {
+        final Context app = context.getApplicationContext();
+        final SharedPreferences prefs =
+                app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        final int pid = prefs.getInt(KEY_PID, -1);
+        if (pid > 0 && isOurAgent(pid)) {
+            try {
+                Runtime.getRuntime().exec(new String[]{"kill", String.valueOf(pid)});
+            } catch (Exception ignored) {
+            }
+            try {
+                Runtime.getRuntime().exec(
+                        new String[]{"su", "-c", "kill " + pid}).waitFor();
+            } catch (Exception ignored) {
+            }
+        }
+        prefs.edit().remove(KEY_PID).remove(KEY_PORT).apply();
+    }
+
+    // Explicit restart: stop, wait for the launcher thread to release STARTING,
+    // then start once. Regenerating a pair code must go through this path.
+    static void restart(final Context context, final Listener listener) {
+        final Context app = context.getApplicationContext();
+        new Thread(() -> {
+            stop(app);
+            for (int i = 0; i < 60 && STARTING.get(); ++i) {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException ignored) {
+                }
+            }
+            if (STARTING.get()) {
+                if (listener != null)
+                    listener.onFailed("旧服务未退出，重启失败");
+                return;
+            }
+            startIfNotRunning(app, listener);
+        }, "agent-restart").start();
     }
 
     private static boolean isOurAgent(int pid) {

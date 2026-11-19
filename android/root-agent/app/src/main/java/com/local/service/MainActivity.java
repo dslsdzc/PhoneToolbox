@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.Gravity;
+import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -52,6 +53,9 @@ public class MainActivity extends Activity {
 
         mStatus = findViewById(R.id.status);
         mPairCodeView = findViewById(R.id.pair_code);
+        mPairCodeView.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        mPairCodeView.setContentDescription("配对码，请查看屏幕");
         mPackageView = findViewById(R.id.package_name);
         mPeerList = findViewById(R.id.peer_list);
         mPeerEmpty = findViewById(R.id.peer_empty);
@@ -70,15 +74,20 @@ public class MainActivity extends Activity {
         refreshPeers.setOnClickListener(v -> refreshPeers());
         regenerate.setOnClickListener(v -> {
             final String code = AgentLauncher.generatePairCode();
-            getSharedPreferences(AgentLauncher.PREFS, MODE_PRIVATE).edit()
-                    .putString(AgentLauncher.KEY_PAIR_CODE, code).apply();
-            mPairCodeView.setText(code);
-            // 新码必须进 agent 进程；否则界面显示和进程参数会不一致。
-            restartAgent();
+            new Thread(() -> {
+                // The new code must be the one the restarted agent uses.
+                AgentLauncher.clearPairCodeUsed(MainActivity.this);
+                getSharedPreferences(AgentLauncher.PREFS, MODE_PRIVATE).edit()
+                        .putString(AgentLauncher.KEY_PAIR_CODE, code).apply();
+                runOnUiThread(() -> {
+                    mPairCodeView.setText(code);
+                    restartAgent();
+                });
+            }, "regenerate-pair-code").start();
         });
 
-        // 打开 APK 即自动拉起 agent（先清理旧 pid，避免多个实例）。
-        mStatus.postDelayed(this::restartAgent, 400);
+        // 打开 APK 时仅在未运行时启动，不打断正在运行的服务。
+        mStatus.postDelayed(this::startAgentIfNeeded, 400);
     }
 
     @Override
@@ -230,20 +239,23 @@ public class MainActivity extends Activity {
     }
 
     private void restartAgent() {
-        // AgentLauncher 会先 kill 上一个 pid，避免多实例。
-        startAgent();
+        launchAgent(true);
     }
 
-    private void startAgent() {
+    private void startAgentIfNeeded() {
+        launchAgent(false);
+    }
+
+    private void launchAgent(final boolean restart) {
         final String binary = agentPath();
         if (!new File(binary).canExecute()) {
             mStatus.setText("服务不可执行：" + binary);
             return;
         }
 
-        mStatus.setText("正在请求授权并启动服务…");
+        mStatus.setText(restart ? "正在重启服务…" : "正在请求授权并启动服务…");
         mPort = -1;
-        AgentLauncher.start(this, new AgentLauncher.Listener() {
+        final AgentLauncher.Listener listener = new AgentLauncher.Listener() {
             @Override
             public void onStarted(int port, int pid) {
                 mPort = port;
@@ -262,27 +274,20 @@ public class MainActivity extends Activity {
             public void onFailed(String error) {
                 runOnUiThread(() -> mStatus.setText("启动失败：" + error));
             }
-        });
+        };
+
+        if (restart) {
+            AgentLauncher.restart(this, listener);
+        } else if (AgentLauncher.startIfNotRunning(this, listener) == null) {
+            mStatus.setText("服务已在运行");
+        }
     }
 
     private void stopAgent() {
-        final int pid = getSharedPreferences(AgentLauncher.PREFS, MODE_PRIVATE)
-                .getInt(AgentLauncher.KEY_PID, -1);
-        if (pid <= 0) {
-            mStatus.setText("没有记录到运行中的服务");
-            return;
-        }
-
+        mStatus.setText("正在停止服务…");
         new Thread(() -> {
-            try {
-                Runtime.getRuntime().exec(
-                        new String[]{"su", "-c", "kill " + pid}).waitFor();
-                getSharedPreferences(AgentLauncher.PREFS, MODE_PRIVATE).edit()
-                        .remove(AgentLauncher.KEY_PID).apply();
-                runOnUiThread(() -> mStatus.setText("已停止"));
-            } catch (Exception exception) {
-                runOnUiThread(() -> mStatus.setText("停止失败：" + exception.getMessage()));
-            }
+            AgentLauncher.stop(this);
+            runOnUiThread(() -> mStatus.setText("已停止"));
         }).start();
     }
 }

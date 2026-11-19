@@ -22,6 +22,18 @@
 #define AT_SYMLINK_NOFOLLOW 0x100
 #endif
 
+#if defined(__ANDROID__) && __ANDROID_API__ < 21
+#include <sys/syscall.h>
+// Old bionic does not export linkat(), but the kernel syscall is available.
+static int legacy_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                         const char *newpath, int flags)
+{
+    return (int) syscall(__NR_linkat, olddirfd, oldpath, newdirfd, newpath,
+                         flags);
+}
+#define linkat legacy_linkat
+#endif
+
 static void set_error(char *error, size_t error_len, const char *message)
 {
     if (error && error_len > 0)
@@ -385,11 +397,27 @@ int push_commit(push_session *session, char *error, size_t error_len)
         return -1;
     }
 
-    if (renameat(session->dir_fd, session->temp_name,
-                 session->dir_fd, session->target_name) != 0) {
-        set_error(error, error_len, "rename failed");
-        push_abort(session);
-        return -1;
+    if (session->overwrite) {
+        if (renameat(session->dir_fd, session->temp_name,
+                     session->dir_fd, session->target_name) != 0) {
+            set_error(error, error_len, "rename failed");
+            push_abort(session);
+            return -1;
+        }
+    } else {
+        // Atomic no-replace commit: linkat fails with EEXIST if the target was
+        // created after the preliminary check; there is no fstatat/rename race.
+        if (linkat(session->dir_fd, session->temp_name,
+                   session->dir_fd, session->target_name, 0) != 0) {
+            const int link_errno = errno;
+            set_error(error, error_len,
+                      link_errno == EEXIST
+                          ? "target exists (overwrite not allowed)"
+                          : "link failed");
+            push_abort(session);
+            return -1;
+        }
+        (void) unlinkat(session->dir_fd, session->temp_name, 0);
     }
     // Durability of the directory entry, not just the file content.
     fsync(session->dir_fd);

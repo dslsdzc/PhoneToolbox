@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -39,6 +40,9 @@ public final class LegacyActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // FLAG_SECURE exists since API 1: block screenshots/recents/previews.
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE);
         setTitle("PhoneToolbox Agent");
 
         ScrollView scroll = new ScrollView(this);
@@ -64,6 +68,7 @@ public final class LegacyActivity extends Activity {
         mCode = text(LegacyBootstrap.getOrCreatePairCode(this), 34, true);
         mCode.setGravity(Gravity.CENTER_HORIZONTAL);
         mCode.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        hardenPairCodeView();
         root.addView(mCode, topMargin(dp(4)));
 
         mCodeHint = text("桌面端必须手动输入此码，不会通过 adb 自动读取。", 12, false);
@@ -266,6 +271,24 @@ public final class LegacyActivity extends Activity {
                         Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    // API 4+ can replace the accessibility text; API 16+ can remove the node.
+    // Reflection keeps the same APK running on Android 1.0 (API 1).
+    private void hardenPairCodeView() {
+        try {
+            View.class.getMethod("setContentDescription", CharSequence.class)
+                    .invoke(mCode, "配对码，请查看屏幕");
+        } catch (Throwable ignored) {
+        }
+        try {
+            final java.lang.reflect.Field field =
+                    View.class.getField("IMPORTANT_FOR_ACCESSIBILITY_NO");
+            final int no = field.getInt(null);
+            View.class.getMethod("setImportantForAccessibility", int.class)
+                    .invoke(mCode, Integer.valueOf(no));
+        } catch (Throwable ignored) {
+        }
     }
 
     private TextView text(String value, int sizeSp, boolean bold) {
