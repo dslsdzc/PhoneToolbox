@@ -10,6 +10,7 @@ typedef struct {
     const char *state_dir;  // identity.key / peers.txt 所在目录
     const char *pair_code;  // 首次配对短码；为空则不允许配对
     int allow_plaintext;    // 开发开关；默认关闭
+    int io_timeout_ms;      // 连接读写超时；<=0 使用默认 10000ms
     size_t max_frame;
     size_t max_output;
 } server_config;

@@ -199,7 +199,7 @@ void TestRootAgentClient::noiseSession()
 
     QFile peers(agent.stateDir.filePath(QStringLiteral("peers.txt")));
     QVERIFY(peers.open(QIODevice::WriteOnly));
-    peers.write(QStringLiteral("%1 test-client\n")
+    peers.write(QStringLiteral("%1 test-client exec,push,pull\n")
                     .arg(QLatin1String(clientPublicHex))
                     .toUtf8());
     peers.close();

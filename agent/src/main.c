@@ -1,4 +1,5 @@
 #include "secure/identity.h"
+#include "legacy_compat.h"
 #include "server.h"
 #include "util.h"
 
@@ -12,7 +13,8 @@ static void usage(const char *program)
 {
     fprintf(stderr,
             "usage: %s [--port N] [--state-dir DIR] [--audit PATH]"
-            " [--allow-plaintext] [--token HEX] [--pair-code CODE]\n"
+            " [--allow-plaintext] [--token HEX] [--pair-code CODE]"
+            " [--io-timeout-ms N]\n"
             "       %s --list-peers --state-dir DIR\n"
             "       %s --remove-peer HEX --state-dir DIR\n"
             "  --port            listen port (0 = kernel assigned; printed as PORT=<n>)\n"
@@ -21,13 +23,17 @@ static void usage(const char *program)
             "  --allow-plaintext development mode (token auth, no Noise)\n"
             "  --token           token for --allow-plaintext (random when omitted)\n"
             "  --pair-code       short code for first-time CPace pairing\n"
+            "  --io-timeout-ms   socket read/write timeout (default 10000)\n"
             "  --list-peers      print paired computers (PEER=<hex>\\t<name>\\t<caps>)\n"
             "  --remove-peer     remove one paired computer by static public key hex\n",
-            program, program);
+            program, program, program);
 }
 
 int main(int argc, char **argv)
 {
+#if defined(AGENT_LEGACY_STATIC)
+    legacy_randombytes_install();
+#endif
     if (sodium_init() < 0) {
         fprintf(stderr, "libsodium initialization failed\n");
         return 1;
@@ -39,6 +45,7 @@ int main(int argc, char **argv)
     const char *state_dir = NULL;
     const char *pair_code = NULL;
     int allow_plaintext = 0;
+    int io_timeout_ms = 0;
     int list_peers = 0;
     const char *remove_peer_hex = NULL;
     char default_state[4096];
@@ -57,6 +64,8 @@ int main(int argc, char **argv)
             allow_plaintext = 1;
         } else if (strcmp(argv[i], "--pair-code") == 0 && i + 1 < argc) {
             pair_code = argv[++i];
+        } else if (strcmp(argv[i], "--io-timeout-ms") == 0 && i + 1 < argc) {
+            io_timeout_ms = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--list-peers") == 0) {
             list_peers = 1;
         } else if (strcmp(argv[i], "--remove-peer") == 0 && i + 1 < argc) {
@@ -139,6 +148,7 @@ int main(int argc, char **argv)
     config.state_dir = state_dir;
     config.pair_code = pair_code;
     config.allow_plaintext = allow_plaintext;
+    config.io_timeout_ms = io_timeout_ms;
 
     const int result = server_run(&config);
 

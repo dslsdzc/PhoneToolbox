@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.phonetoolbox.agent"
+    android:versionCode="1"
+    android:versionName="0.1.0-beta04-legacy">
+
+    <uses-sdk android:minSdkVersion="1" android:targetSdkVersion="3" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:label="PhoneToolbox Agent"
+        android:allowBackup="false">
+        <receiver
+            android:name=".LegacyBootstrap"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.phonetoolbox.agent.START" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

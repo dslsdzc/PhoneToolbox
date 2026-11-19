@@ -58,6 +58,13 @@ RootAgentClient::RootAgentClient(QObject *parent)
         cleanupSocket();
     });
 
+    m_handshakeTimer = new QTimer(this);
+    m_handshakeTimer->setSingleShot(true);
+    connect(m_handshakeTimer, &QTimer::timeout, this, [this]() {
+        emit errorOccurred(QStringLiteral("agent 握手超时"));
+        onSocketDisconnected();
+    });
+
     m_execTimer = new QTimer(this);
     m_execTimer->setSingleShot(true);
     connect(m_execTimer, &QTimer::timeout, this, &RootAgentClient::onExecTimeout);
@@ -146,10 +153,6 @@ void RootAgentClient::handlePairMessage(const QJsonObject &object)
 
         uint8_t mac[32];
         pairMac(clientKey, m_pairClientPublic, agentPublic, mac);
-        qWarning() << "pair debug: client" << toHex(m_pairClientPublic, 32)
-                   << "agent" << toHex(agentPublic, 32)
-                   << "key" << toHex(clientKey, CPACE_KEY_LEN)
-                   << "mac" << toHex(mac, 32);
 
         m_pairAgentPublicHex = toHex(agentPublic, sizeof(agentPublic));
         m_pairPhase = 2;
@@ -252,8 +255,13 @@ void RootAgentClient::connectToAgent(int timeoutMs)
         return;
     }
 
-    if (m_socket)
+    if (m_socket) {
+        // cleanupSocket() resets pairing state; preserve the CPace intent that
+        // pair() set before calling us.
+        const bool pairing = m_pairing;
         cleanupSocket();
+        m_pairing = pairing;
+    }
 
     m_buffer.clear();
     m_authenticated = false;
@@ -264,6 +272,8 @@ void RootAgentClient::connectToAgent(int timeoutMs)
             this, &RootAgentClient::onReadyRead);
     connect(m_socket, &QTcpSocket::errorOccurred,
             this, &RootAgentClient::onSocketError);
+    connect(m_socket, &QTcpSocket::disconnected,
+            this, &RootAgentClient::onSocketDisconnected);
 
     m_connectTimer->start(timeoutMs);
     m_socket->connectToHost(QHostAddress::LocalHost, m_localPort);
@@ -272,6 +282,7 @@ void RootAgentClient::connectToAgent(int timeoutMs)
 void RootAgentClient::disconnectFromAgent()
 {
     m_connectTimer->stop();
+    m_handshakeTimer->stop();
     m_execTimer->stop();
     cleanupSocket();
     emit disconnected();
@@ -280,6 +291,9 @@ void RootAgentClient::disconnectFromAgent()
 void RootAgentClient::onSocketConnected()
 {
     m_connectTimer->stop();
+    // The TCP socket may be accepted while the peer never finishes CPace or
+    // Noise; do not let the UI stay in "connecting" forever.
+    m_handshakeTimer->start(10000);
 
     if (m_pairing) {
         static const char ad[] = "PhoneToolbox/root-agent/1";
@@ -359,7 +373,15 @@ void RootAgentClient::onSocketError()
 {
     if (m_socket)
         emit errorOccurred(m_socket->errorString());
+    onSocketDisconnected();
+}
+
+void RootAgentClient::onSocketDisconnected()
+{
+    const bool hadSocket = (m_socket != nullptr);
     cleanupSocket();
+    if (hadSocket)
+        emit disconnected();
 }
 
 void RootAgentClient::onReadyRead()
@@ -406,6 +428,7 @@ void RootAgentClient::onReadyRead()
             }
             m_handshaking = false;
             m_authenticated = true;
+            m_handshakeTimer->stop();
             emit connected();
             continue;
         }
@@ -456,6 +479,7 @@ void RootAgentClient::handleMessage(const QJsonObject &object)
     if (op == QStringLiteral("auth_ok")) {
         m_authenticated = true;
         m_connectTimer->stop();
+        m_handshakeTimer->stop();
         emit connected();
         return;
     }
@@ -646,9 +670,12 @@ void RootAgentClient::onExecTimeout()
 void RootAgentClient::cleanupSocket()
 {
     m_connectTimer->stop();
+    m_handshakeTimer->stop();
     m_execTimer->stop();
     m_authenticated = false;
     m_handshaking = false;
+    m_pairing = false;
+    m_pairPhase = 0;
     m_execInProgress = false;
     m_buffer.clear();
     m_execStdout.clear();

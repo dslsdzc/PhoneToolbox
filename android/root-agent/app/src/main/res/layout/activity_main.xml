@@ -33,6 +33,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
+            android:background="#FFF3CD"
+            android:padding="12dp"
+            android:text="注意：配对即授予完整 Root 权限\n配对成功后，这台电脑可以以 root 身份执行任意命令、读写任意文件、安装或卸载应用。本应用没有按应用或按操作的权限隔离。只与你信任的电脑配对。"
+            android:textColor="#7A3E00"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
             android:text="首次配对码" />
 
         <TextView
@@ -112,7 +122,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
-            android:text="首次启动需要在授权管理器中允许本应用。服务只监听 127.0.0.1，桌面端必须通过 adb forward 才能连接；不做开机自启。"
+            android:text="服务只监听 127.0.0.1，桌面端必须通过 adb forward 才能连接。配对后不提供细粒度权限控制，删除已配对电脑会立即吊销其会话。"
             android:textSize="12sp" />
     </LinearLayout>
 </ScrollView>

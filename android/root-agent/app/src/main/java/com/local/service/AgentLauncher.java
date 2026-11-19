@@ -5,11 +5,11 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.BufferedReader;
-import java.io.File;
 import java.io.InputStreamReader;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 启动/守护 native root agent。
@@ -22,6 +22,11 @@ final class AgentLauncher {
     static final String KEY_PORT = "agent_port";
     static final String KEY_PAIRED = "paired";
     static final String KEY_PID = "agent_pid";
+
+    // One agent per app process. The flag stays set while the launcher thread
+    // is alive (i.e. until the agent exits), so concurrent broadcasts cannot
+    // start a second instance.
+    private static final AtomicBoolean STARTING = new AtomicBoolean(false);
 
     interface Listener {
         void onStarted(int port, int pid);
@@ -49,6 +54,8 @@ final class AgentLauncher {
 
     // 返回启动线程；listener 可选，回调发生在后台线程。
     static Thread start(final Context context, final Listener listener) {
+        if (!STARTING.compareAndSet(false, true))
+            return null;
         final Context app = context.getApplicationContext();
         Thread thread = new Thread(() -> {
             try {
@@ -57,10 +64,14 @@ final class AgentLauncher {
                         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
                 final int oldPid = prefs.getInt(KEY_PID, -1);
                 if (oldPid > 0) {
-                    try {
-                        Runtime.getRuntime().exec(
-                                new String[]{"su", "-c", "kill " + oldPid}).waitFor();
-                    } catch (Exception ignored) {
+                    // Verify identity before killing: PID reuse otherwise turns
+                    // a stale preference into a kill of an unrelated process.
+                    if (isOurAgent(oldPid)) {
+                        try {
+                            Runtime.getRuntime().exec(
+                                    new String[]{"su", "-c", "kill " + oldPid}).waitFor();
+                        } catch (Exception ignored) {
+                        }
                     }
                     prefs.edit().remove(KEY_PID).apply();
                 }
@@ -69,9 +80,7 @@ final class AgentLauncher {
                 final String agentPath =
                         app.getApplicationInfo().nativeLibraryDir + "/libservice.so";
                 final String stateDir = app.getFilesDir().getAbsolutePath();
-                final File external = app.getExternalFilesDir(null);
-                final String auditDir = (external != null ? external : app.getFilesDir())
-                        .getAbsolutePath();
+                final String auditDir = app.getFilesDir().getAbsolutePath();
                 final String auditPath = auditDir + "/audit.log";
                 final String commandLine = agentPath
                         + " --port 0"
@@ -115,9 +124,32 @@ final class AgentLauncher {
                 Log.e("AgentLauncher", "start failed", exception);
                 if (listener != null)
                     listener.onFailed(exception.getMessage());
+            } finally {
+                STARTING.set(false);
             }
         }, "agent-launcher");
         thread.start();
         return thread;
+    }
+
+    private static boolean isOurAgent(int pid) {
+        Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", "cat /proc/" + pid + "/cmdline"});
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+            char[] buffer = new char[512];
+            int got = reader.read(buffer);
+            if (got <= 0)
+                return false;
+            final String command = new String(buffer, 0, got);
+            return command.contains("libservice.so");
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (process != null)
+                process.destroy();
+        }
     }
 }

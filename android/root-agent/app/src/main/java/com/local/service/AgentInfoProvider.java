@@ -12,9 +12,7 @@ import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.Binder;
 
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -103,17 +101,23 @@ public class AgentInfoProvider extends ContentProvider {
     }
 
     private String readAudit(Context context) {
+        // Prefer the private file used by current builds; keep reading the old
+        // external location once for migration. Show the newest 256 KiB.
+        File privateFile = new File(context.getFilesDir(), "audit.log");
         File external = context.getExternalFilesDir(null);
-        File file = new File(external != null ? external : context.getFilesDir(), "audit.log");
+        File legacyFile = new File(external != null ? external : context.getFilesDir(),
+                "audit.log");
+        File file = privateFile.exists() ? privateFile : legacyFile;
         if (!file.exists())
             return "";
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            StringBuilder builder = new StringBuilder();
-            char[] buffer = new char[8192];
-            int got;
-            while ((got = reader.read(buffer)) > 0 && builder.length() < 256 * 1024)
-                builder.append(buffer, 0, got);
-            return builder.toString();
+        try (java.io.RandomAccessFile reader =
+                     new java.io.RandomAccessFile(file, "r")) {
+            final long length = reader.length();
+            final long start = Math.max(0L, length - 256L * 1024L);
+            reader.seek(start);
+            byte[] data = new byte[(int) (length - start)];
+            reader.readFully(data);
+            return new String(data, "UTF-8");
         } catch (Exception exception) {
             return "audit read error: " + exception.getMessage();
         }

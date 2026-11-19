@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QSet>
 #include <QRegularExpression>
 #include <QSettings>
@@ -28,6 +29,12 @@
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+
+namespace {
+constexpr quint16 kLegacyAgentPort = 32145;
+constexpr char kAgentPackage[] = "com.phonetoolbox.agent";
+constexpr char kLegacyStartAction[] = "com.phonetoolbox.agent.START";
+} // namespace
 
 RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
     : QWidget(parent)
@@ -39,11 +46,14 @@ RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
     layout->addWidget(title);
 
     auto *hint = new QLabel(
-        QStringLiteral("每台设备独立配对/密钥/会话。配对码从设备 APK 界面手动输入；"
-                       "配对后自动获取端口并连接，Root 代理拥有完整执行能力。"),
+        QStringLiteral("每台设备独立配对/密钥/会话。Android 5.0+ 从 APK 界面输入配对码，"
+                       "Android 1.0–4.4 自动配对。\n"
+                       "注意：配对成功即授予完整 Root 权限：可执行任意命令、读写任意文件，"
+                       "没有按应用或按操作的权限隔离。只与你信任的电脑配对。"),
         this);
     hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("color: #888; font-size: 11px;"));
+    hint->setStyleSheet(QStringLiteral(
+        "color: #9a4b00; background: #fff3cd; padding: 6px; font-size: 11px;"));
     layout->addWidget(hint);
 
     m_table = new QTableWidget(0, 5, this);
@@ -134,10 +144,26 @@ RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
                 session.connecting = false;
                 session.paired = false;
                 session.packageScanned = true;
-                session.state = QStringLiteral("已安装，等待配对");
 
-                appendLog(QStringLiteral("已安装 %1。请在手机上查看配对码，输入后点「配对并连接」。")
-                              .arg(packageId));
+                const bool legacy = isLegacyDevice(serial);
+                session.state = legacy ? QStringLiteral("已安装，自动配对…")
+                                       : QStringLiteral("已安装，等待配对");
+
+                if (legacy) {
+                    appendLog(QStringLiteral("已安装 legacy 代理 %1，自动启动并配对…")
+                                  .arg(packageId));
+                    maybeLaunchAgent(serial, packageId);
+                    QTimer::singleShot(3500, this, [this, serial]() {
+                        if (!m_sessions.contains(serial))
+                            return;
+                        Session &s = m_sessions[serial];
+                        if (!s.connected && !s.connecting)
+                            pairAndConnect(serial);
+                    });
+                } else {
+                    appendLog(QStringLiteral("已安装 %1。请在手机上查看配对码，输入后点「配对并连接」。")
+                                  .arg(packageId));
+                }
                 updateRow(serial);
                 autoConnect(serial);
             });
@@ -334,6 +360,10 @@ void RootAgentManagerPanel::loadConfig(const QString &serial)
     };
 
     m_pairCodeEdit->clear();
+    const bool legacy = isLegacyDevice(serial);
+    m_pairCodeEdit->setReadOnly(legacy);
+    if (legacy)
+        m_pairCodeEdit->setText(legacyPairCode(serial));
     updateRow(serial);
 }
 
@@ -356,6 +386,57 @@ bool RootAgentManagerPanel::ensureAdb(QString *adbPath)
     if (adbPath)
         *adbPath = path;
     return !path.isEmpty();
+}
+
+int RootAgentManagerPanel::deviceSdk(const QString &serial)
+{
+    if (serial.isEmpty())
+        return -1;
+
+    Session &session = m_sessions[serial];
+    if (session.sdk > 0)
+        return session.sdk;
+
+    QString adbPath;
+    if (!ensureAdb(&adbPath))
+        return -1;
+
+    QProcess process;
+    process.start(adbPath, {QStringLiteral("-s"), serial,
+                            QStringLiteral("shell"), QStringLiteral("getprop"),
+                            QStringLiteral("ro.build.version.sdk")});
+    if (!process.waitForFinished(5000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        return -1;
+    }
+
+    bool ok = false;
+    const int sdk = QString::fromLocal8Bit(process.readAllStandardOutput())
+                        .trimmed()
+                        .toInt(&ok);
+    if (ok && sdk > 0)
+        session.sdk = sdk;
+    return session.sdk;
+}
+
+bool RootAgentManagerPanel::isLegacyDevice(const QString &serial)
+{
+    const int sdk = deviceSdk(serial);
+    return sdk > 0 && sdk < 21;
+}
+
+QString RootAgentManagerPanel::legacyPairCode(const QString &serial)
+{
+    QSettings settings;
+    const QString key = settingsKey(serial, QStringLiteral("pairCode"));
+    QString code = settings.value(key).toString();
+    if (code.isEmpty()) {
+        code = QString::number(QRandomGenerator::global()->bounded(1000000))
+                   .rightJustified(6, QLatin1Char('0'));
+        settings.setValue(key, code);
+    }
+    return code;
 }
 
 bool RootAgentManagerPanel::queryProvider(const QString &serial,
@@ -419,6 +500,20 @@ bool RootAgentManagerPanel::discoverPort(const QString &serial,
                                          quint16 *port, bool *paired,
                                          QString *error)
 {
+    if (isLegacyDevice(serial)) {
+        // Android 1.0-4.4 has no `content` command and the APK has no
+        // Activity/Provider. The agent always listens on a fixed port; the
+        // desktop adb-forwards to it and keeps pairing state locally.
+        if (!port) {
+            if (error)
+                *error = QStringLiteral("无效的端口参数");
+            return false;
+        }
+        *port = kLegacyAgentPort;
+        if (paired)
+            *paired = true;
+        return true;
+    }
     return queryProvider(serial, package, port, paired, error);
 }
 
@@ -433,6 +528,9 @@ QString RootAgentManagerPanel::discoverPackage(const QString &serial, QString *e
             *error = QStringLiteral("没有选中设备");
         return QString();
     }
+
+    if (isLegacyDevice(serial))
+        return QString::fromLatin1(kAgentPackage);
 
     QString adbPath;
     if (!ensureAdb(&adbPath)) {
@@ -501,6 +599,12 @@ bool RootAgentManagerPanel::ensurePackage(const QString &serial,
     if (!package || !error)
         return false;
 
+    if (isLegacyDevice(serial)) {
+        // Legacy APK always uses the fixed package name and has no Provider.
+        *package = QString::fromLatin1(kAgentPackage);
+        return true;
+    }
+
     const QString configured = packageFor(serial);
     if (!configured.isEmpty()) {
         *package = configured;
@@ -542,6 +646,31 @@ void RootAgentManagerPanel::maybeLaunchAgent(const QString &serial,
     QString adbPath;
     if (!ensureAdb(&adbPath))
         return;
+
+    if (isLegacyDevice(serial)) {
+        const QString code = legacyPairCode(serial);
+        QProcess start;
+        start.start(adbPath, {QStringLiteral("-s"), serial,
+                              QStringLiteral("shell"), QStringLiteral("am"),
+                              QStringLiteral("broadcast"),
+                              QStringLiteral("-a"),
+                              QString::fromLatin1(kLegacyStartAction),
+                              QStringLiteral("--es"),
+                              QStringLiteral("pair_code"), code});
+        if (!start.waitForFinished(5000)) {
+            start.kill();
+            appendLog(QStringLiteral("后台拉起 legacy 代理失败（超时）"), true);
+            return;
+        }
+        if (start.exitCode() != 0) {
+            appendLog(QStringLiteral("后台拉起 legacy 代理失败"), true);
+            return;
+        }
+        appendLog(QStringLiteral("已后台拉起 legacy 代理（API %1），等待端口…")
+                      .arg(deviceSdk(serial)));
+        QTimer::singleShot(2500, this, [this, serial]() { autoConnect(serial); });
+        return;
+    }
 
     // 用显式广播拉起无界面的 AgentBootReceiver；不要用 am start，
     // 那会把 APK 的 Activity 带到前台。
@@ -685,7 +814,7 @@ RootAgentClient *RootAgentManagerPanel::clientFor(const QString &serial)
                 session.connecting = true;
                 session.state = QStringLiteral("配对成功，连接中…");
                 updateRow(serial);
-                appendLog(QStringLiteral("配对成功，建立 Noise 连接…"));
+                appendLog(QStringLiteral("配对成功：这台电脑已获得完整 Root 权限，正在建立 Noise 连接…"));
                 session.client->setIdentity(clientPrivate, agentPublic);
                 session.client->connectToAgent();
             });
@@ -799,18 +928,27 @@ void RootAgentManagerPanel::autoConnect(const QString &serial)
 
 void RootAgentManagerPanel::onPairAndConnect()
 {
-    if (m_currentSerial.isEmpty()) {
+    pairAndConnect(m_currentSerial);
+}
+
+void RootAgentManagerPanel::pairAndConnect(const QString &serial)
+{
+    if (serial.isEmpty()) {
         appendLog(QStringLiteral("先选中设备"), true);
         return;
     }
 
-    const QString code = m_pairCodeEdit->text().trimmed();
+    const bool legacy = isLegacyDevice(serial);
+    QString code = legacy ? legacyPairCode(serial)
+                          : m_pairCodeEdit->text().trimmed();
     if (code.isEmpty()) {
         appendLog(QStringLiteral("请输入 APK 显示的配对码"), true);
         return;
     }
+    if (legacy)
+        m_pairCodeEdit->setText(code);
 
-    Session &session = m_sessions[m_currentSerial];
+    Session &session = m_sessions[serial];
     if (session.client) {
         session.client->disconnectFromAgent();
         session.client->stopForward();
@@ -820,7 +958,7 @@ void RootAgentManagerPanel::onPairAndConnect()
 
     QString package;
     QString packageError;
-    if (!ensurePackage(m_currentSerial, &package, &packageError)) {
+    if (!ensurePackage(serial, &package, &packageError)) {
         appendLog(QStringLiteral("识别包名失败：%1").arg(packageError), true);
         return;
     }
@@ -828,7 +966,7 @@ void RootAgentManagerPanel::onPairAndConnect()
     quint16 port = 0;
     bool paired = false;
     QString error;
-    if (!discoverPort(m_currentSerial, package, &port, &paired, &error)) {
+    if (!discoverPort(serial, package, &port, &paired, &error)) {
         appendLog(QStringLiteral("获取端口失败：%1").arg(error), true);
         return;
     }
@@ -839,8 +977,8 @@ void RootAgentManagerPanel::onPairAndConnect()
         return;
     }
 
-    RootAgentClient *client = clientFor(m_currentSerial);
-    client->setSerial(m_currentSerial);
+    RootAgentClient *client = clientFor(serial);
+    client->setSerial(serial);
 
     if (!client->startForward(adbPath, port, &error)) {
         appendLog(QStringLiteral("adb forward 失败：%1").arg(error), true);
@@ -850,7 +988,7 @@ void RootAgentManagerPanel::onPairAndConnect()
     session.port = port;
     session.connecting = true;
     session.state = QStringLiteral("配对中…");
-    updateRow(m_currentSerial);
+    updateRow(serial);
     // Root 代理配对即授予完整 root 能力；不再单独询问“允许危险操作”。
     client->pair(code, 10000, true);
 }
@@ -864,8 +1002,11 @@ void RootAgentManagerPanel::onInstallAgent()
 
     if (QMessageBox::question(
             this, QStringLiteral("安装 Root 代理"),
-            QStringLiteral("将为本机生成一个随机包名/应用名，重打包模板 APK 并安装到当前设备。\n\n"
-                           "安装后需要在手机上允许 root 授权，并输入 APK 显示的配对码。继续？"),
+            QStringLiteral("将安装 PhoneToolbox Agent（固定包名 com.phonetoolbox.agent）。\n\n"
+                           "注意：配对成功即授予完整 Root 权限：可执行任意命令、读写任意文件，"
+                           "没有按应用或按操作的权限隔离。\n\n"
+                           "Android 1.0–4.4 使用 legacy 静态代理，安装后自动启动并配对；"
+                           "Android 5.0+ 需要打开一次 APK 查看配对码。继续？"),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
         return;
 
@@ -899,6 +1040,12 @@ void RootAgentManagerPanel::onShowAudit()
 {
     if (m_currentSerial.isEmpty()) {
         appendLog(QStringLiteral("先选中设备"), true);
+        return;
+    }
+
+    if (isLegacyDevice(m_currentSerial)) {
+        appendLog(QStringLiteral("legacy 设备（Android 1.0–4.4）没有 Provider；"
+                                 "审计记录在设备端 agent 的 state/audit.log。"), true);
         return;
     }
 

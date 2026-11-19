@@ -23,7 +23,15 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/agent
 
 ### `/audit`
 
-返回一列 `audit`：hash-chain 审计日志文本，最多读取 256 KiB。文件位于 APK 外部私有目录（`getExternalFilesDir()/audit.log`，回退到 `getFilesDir()`）。
+返回一列 `audit`：hash-chain 审计日志文本，最多读取**最后** 256 KiB。文件位于 APK 私有目录 `getFilesDir()/audit.log`（0600；旧版本的外部目录文件仅作迁移回退）。
+
+记录格式：
+
+```
+prev_hex timestamp peer_hex op argv_sha256 exit entry_hex
+```
+
+`peer_hex` 是已认证会话的 Noise 静态公钥（64 hex）；明文开发模式回退为 `stage1`。
 
 ### `/apps`
 
@@ -61,15 +69,21 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
   adb shell am broadcast -a com.local.service.START_AGENT \
     -n com.phonetoolbox.agent/com.local.service.AgentBootReceiver
   ```
+- Android 1.0–4.4：使用 `android/legacy-agent` 的 legacy APK，没有 Activity/Provider，固定监听 `127.0.0.1:32145`。桌面端广播传入配对码，由 APK 写入启动脚本：
+  ```bash
+  adb shell am broadcast -a com.phonetoolbox.agent.START -e pair_code 123456
+  ```
 
 ### 传输与配对
 
 - 会话：`Noise_IK_25519_ChaChaPoly_SHA256`，prologue `PhoneToolbox/root-agent/1`；
-- 首次配对：CPace + APK 界面显示的 6 位码；
+- 首次配对：CPace + APK 界面显示的 6 位码（legacy APK 由桌面端生成并传入）；
 - 帧类型：`0x01` JSON、`0x02` 二进制块、`0x10` 配对控制、`0x11` Noise 握手、`0x12` Noise 传输；
 - 配对后 peers 保存在 APK 私有目录 `peers.txt`；每台电脑一行；
 - 会话握手会从 msg1 读取真实发起方公钥，必须命中 `peers.txt`；
-- 每条命令前检查 peer 仍在 `peers.txt`，删除配对会立即吊销现有会话。
+- 每条命令前检查 peer 仍在 `peers.txt`，删除配对会立即吊销现有会话；
+- **配对即完整授权**：配对成功后，这台电脑可以以 root 身份执行任意命令、读写任意文件，没有按应用、按命令或按操作的细粒度权限隔离；只与可信电脑配对；
+- 配对码、CPace 密钥和确认 MAC 不写入日志；失败只记录 `pair: confirm MAC mismatch`。
 
 ### 控制帧 JSON op
 
@@ -85,10 +99,13 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
 ### agent CLI
 
 ```text
-phone_agent --port 0 --state-dir DIR --audit PATH --pair-code CODE
+phone_agent --port 0 --state-dir DIR --audit PATH --pair-code CODE \
+  [--io-timeout-ms N]
 phone_agent --list-peers --state-dir DIR
 phone_agent --remove-peer HEX --state-dir DIR
 ```
+
+`--io-timeout-ms` 限制单个连接的读/写等待（默认 10000ms）；未认证连接和空闲会话不会无限占用线程。
 
 `--list-peers` 每行输出：
 

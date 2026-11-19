@@ -49,14 +49,31 @@ QString cleanCommandOutput(const QString &raw)
 
 QString readAdbBatteryLevel(const QString &deviceId)
 {
-    const QString raw = AdbEmbedded::instance().executeCommand(
-        QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId),
-        5000);
-    const QString output = cleanCommandOutput(raw);
-    if (output.isEmpty())
-        return QString();
-    const QString value = output.split(QLatin1Char(':')).value(1).trimmed();
-    return value.isEmpty() ? QString() : value + QStringLiteral("%");
+    // Parse dumpsys on the host: Android 1.x-4.x toolbox has no grep/head.
+    const QString output = cleanCommandOutput(AdbEmbedded::instance().executeCommand(
+        QString("-s %1 shell dumpsys battery").arg(deviceId), 5000));
+    for (const QString &line : output.split(QLatin1Char('\n'))) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith(QStringLiteral("level:"), Qt::CaseInsensitive)) {
+            const QString value = trimmed.section(QLatin1Char(':'), 1).trimmed();
+            if (!value.isEmpty())
+                return value + QStringLiteral("%");
+        }
+    }
+
+    // Some legacy builds have no battery service; read the sysfs node directly.
+    const QString capacity = cleanCommandOutput(
+        AdbEmbedded::instance().executeCommand(
+            QString("-s %1 shell cat /sys/class/power_supply/battery/capacity")
+                .arg(deviceId),
+            3000));
+    if (!capacity.isEmpty()) {
+        bool ok = false;
+        const int percent = capacity.toInt(&ok);
+        if (ok && percent >= 0 && percent <= 100)
+            return QString::number(percent) + QStringLiteral("%");
+    }
+    return QString();
 }
 
 } // namespace
@@ -471,34 +488,54 @@ DeviceInfo DeviceDetector::getDeviceInfo(const QString &deviceId, DeviceMode mod
         info.isRooted = shellRoot;
         info.rootManager = rootManagers.join(QStringLiteral(" / "));
         
-        // 获取网络信息
-        info.imei = cleanCommandOutput(adb.executeCommand(
-            QString("-s %1 shell service call iphonesubinfo 1 | awk -F \"'\" '{print $2}' | sed '1 d' | tr -d '.' | awk '{print $1}'").arg(deviceId), 5000));
-        
-        info.wifiMac = prop("ro.boot.wifimacaddr");
-        
-        // 获取硬件信息
-        const QString cores = cleanCommandOutput(adb.executeCommand(
-            QString("-s %1 shell cat /proc/cpuinfo | grep -i processor | wc -l").arg(deviceId), 5000));
-        if (!cores.isEmpty())
-            info.cpuInfo = cores + QStringLiteral(" 核心");
+        // 获取网络信息。旧设备没有 awk/sed/tr，优先读属性。
+        QString imei = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell getprop gsm.sim.imei").arg(deviceId), 3000)).trimmed();
+        if (imei.isEmpty())
+            imei = cleanCommandOutput(adb.executeCommand(
+                QString("-s %1 shell getprop persist.radio.imei").arg(deviceId), 3000)).trimmed();
+        info.imei = imei;
 
-        QString ramInfo = cleanCommandOutput(adb.executeCommand(
-            QString("-s %1 shell cat /proc/meminfo | grep MemTotal").arg(deviceId), 5000));
-        if (!ramInfo.isEmpty()) {
-            const QString ramValue = ramInfo.split(":").value(1).trimmed();
-            if (!ramValue.isEmpty())
-                info.ramSize = ramValue;
+        info.wifiMac = prop("ro.boot.wifimacaddr");
+
+        // 获取硬件信息。旧 toolbox 没有 grep/wc，原始输出在主机侧解析。
+        const QString cpuinfo = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell cat /proc/cpuinfo").arg(deviceId), 5000));
+        int cpuCores = 0;
+        // Old kernels may only have a single "Processor : ARMv7" model line;
+        // count numbered processor entries, not the model string.
+        const QRegularExpression processorRe(
+            QStringLiteral("^processor\\s*:\\s*\\d+"),
+            QRegularExpression::CaseInsensitiveOption);
+        for (const QString &line : cpuinfo.split(QLatin1Char('\n'))) {
+            if (processorRe.match(line.trimmed()).hasMatch())
+                ++cpuCores;
         }
-        
+        if (cpuCores <= 0) {
+            const QString cpuList = cleanCommandOutput(adb.executeCommand(
+                QString("-s %1 shell ls /sys/devices/system/cpu/").arg(deviceId), 5000));
+            const QRegularExpression cpuRe(QStringLiteral("^cpu\\d+$"));
+            for (const QString &line : cpuList.split(QLatin1Char('\n'))) {
+                if (cpuRe.match(line.trimmed()).hasMatch())
+                    ++cpuCores;
+            }
+        }
+        if (cpuCores > 0)
+            info.cpuInfo = QString::number(cpuCores) + QStringLiteral(" 核心");
+
+        const QString meminfo = cleanCommandOutput(adb.executeCommand(
+            QString("-s %1 shell cat /proc/meminfo").arg(deviceId), 5000));
+        for (const QString &line : meminfo.split(QLatin1Char('\n'))) {
+            if (line.trimmed().startsWith(QStringLiteral("MemTotal:"))) {
+                info.ramSize = line.section(QLatin1Char(':'), 1).trimmed();
+                break;
+            }
+        }
+
         // 获取电池信息
-        QString batteryLevel = cleanCommandOutput(adb.executeCommand(
-            QString("-s %1 shell dumpsys battery | grep level: | head -1").arg(deviceId), 5000));
-        if (!batteryLevel.isEmpty()) {
-            const QString levelValue = batteryLevel.split(":").value(1).trimmed();
-            if (!levelValue.isEmpty())
-                info.batteryHealth = levelValue + QStringLiteral("%");
-        }
+        const QString battery = readAdbBatteryLevel(deviceId);
+        if (!battery.isEmpty())
+            info.batteryHealth = battery;
         
     } else if (mode == MODE_FASTBOOT || mode == MODE_FASTBOOTD) {
         // 获取Fastboot设备信息

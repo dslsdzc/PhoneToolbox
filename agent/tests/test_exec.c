@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define CHECK(cond)                                                              \
     do {                                                                         \
@@ -11,6 +12,12 @@
             return 1;                                                            \
         }                                                                        \
     } while (0)
+
+static long elapsed_ms(const struct timespec *start, const struct timespec *end)
+{
+    return (end->tv_sec - start->tv_sec) * 1000L
+        + (end->tv_nsec - start->tv_nsec) / 1000000L;
+}
 
 int main(void)
 {
@@ -32,6 +39,18 @@ int main(void)
     const char *slow_argv[] = {"/bin/sh", "-c", "sleep 2", NULL};
     CHECK(run_command(slow_argv, 100, 4096, &result) == 0);
     CHECK(result.timed_out == 1);
+    exec_result_free(&result);
+
+    // A background grandchild inherits stdout/stderr. The timeout must still
+    // apply after the shell exits, and the whole process group must be killed.
+    const char *background_argv[] = {"/bin/sh", "-c", "sleep 5 &", NULL};
+    struct timespec started;
+    struct timespec finished;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    CHECK(run_command(background_argv, 200, 4096, &result) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    CHECK(result.timed_out == 1);
+    CHECK(elapsed_ms(&started, &finished) < 2000);
     exec_result_free(&result);
 
     const char *long_argv[] = {"/bin/sh", "-c", "printf 1234567890", NULL};

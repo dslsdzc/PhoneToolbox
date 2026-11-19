@@ -16,10 +16,14 @@ else()
     pkg_check_modules(SODIUM REQUIRED libsodium)
 endif()
 
-find_package(Threads REQUIRED)
+if(NOT AGENT_LEGACY_STATIC)
+    find_package(Threads REQUIRED)
+endif()
 
 add_subdirectory(third_party/cpace)
 add_subdirectory(third_party/noise-c)
+
+option(AGENT_LEGACY_STATIC "Build a non-PIE static ARM agent for Android 1.x/4.x" OFF)
 
 add_library(agent_core STATIC
     src/frame.c
@@ -32,6 +36,10 @@ add_library(agent_core STATIC
     src/secure/identity.c
     src/secure/noise_channel.c
     third_party/cjson/cJSON.c)
+if(AGENT_LEGACY_STATIC)
+    target_sources(agent_core PRIVATE src/legacy_compat.c)
+    target_compile_definitions(agent_core PUBLIC AGENT_LEGACY_STATIC=1)
+endif()
 
 target_include_directories(agent_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -41,14 +49,20 @@ target_include_directories(agent_core PUBLIC
 target_compile_definitions(agent_core PUBLIC _GNU_SOURCE)
 target_compile_options(agent_core PRIVATE -Wall -Wextra -Wpedantic)
 
-target_link_libraries(agent_core PUBLIC ${SODIUM_LIBRARIES} cpace noise-c Threads::Threads)
+target_link_libraries(agent_core PUBLIC ${SODIUM_LIBRARIES} cpace noise-c)
+if(NOT AGENT_LEGACY_STATIC)
+    target_link_libraries(agent_core PUBLIC Threads::Threads)
+endif()
 
 add_executable(phone_agent
     src/main.c
     src/server.c)
 target_link_libraries(phone_agent PRIVATE agent_core)
 target_compile_options(phone_agent PRIVATE -Wall -Wextra -Wpedantic)
-if(ANDROID)
+if(AGENT_LEGACY_STATIC)
+    # Android 1.0–4.4: non-PIE static ARM executable, no dynamic linker/bionic ABI.
+    target_link_options(phone_agent PRIVATE -static)
+elseif(ANDROID)
     target_link_options(phone_agent PRIVATE -pie)
 endif()
 
@@ -56,7 +70,7 @@ if(NOT ANDROID)
     enable_testing()
 
     foreach(test_name IN ITEMS test_frame test_util test_exec test_fileops test_audit
-                              test_cpace test_noise)
+                              test_cpace test_noise test_peer_records)
         add_executable(${test_name} tests/${test_name}.c)
         target_link_libraries(${test_name} PRIVATE agent_core)
         add_test(NAME ${test_name} COMMAND ${test_name})
@@ -82,6 +96,10 @@ if(NOT ANDROID)
         add_test(NAME test_protocol
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_protocol.py
+                    $<TARGET_FILE:phone_agent>)
+        add_test(NAME test_connection_timeout
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_connection_timeout.py
                     $<TARGET_FILE:phone_agent>)
     endif()
 endif()

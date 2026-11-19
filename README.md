@@ -14,7 +14,7 @@ Android 设备多功能工具箱 —— 通过 ADB / Fastboot / EDL / MTK BROM �
 | Root 修补 | Magisk / KernelSU / APatch 共 8 个入口，boot / init_boot 修补与模块安装 |
 | 系统工具 | 性能监控、界面定制、分区管理、应用管理、安全隐私、开发调试、维修诊断 |
 | 漏洞扫描 / 利用 | 本地 JSON 漏洞库匹配，三段式检测 → 利用 → 验证 |
-| Root 代理 | Android 端 APK + Noise 加密通道，支持 root 命令、文件传输、审计与多电脑配对 |
+| Root 代理 | Android 端 APK + Noise 加密通道，支持 root 命令、文件传输、审计与多电脑配对；Android 1.0–4.4 使用 legacy 静态代理 |
 | 设备侧 API | APK 通过 ContentProvider 提供 ADB 不易获取的数据（应用列表、审计等） |
 | 插件 | 独立 `.so` 协议插件（QPluginLoader + ProtocolPlugin 接口） |
 
@@ -76,6 +76,23 @@ tools/build_root_agent_apk.sh
 
 默认包名 `com.phonetoolbox.agent`，可用 `--app-id` / `--label` 覆盖。
 
+Android 1.0–4.4 使用独立的 legacy APK（minSdk 1，静态 ARM agent）：
+
+```bash
+android/legacy-agent/build.sh
+```
+
+legacy 代理没有界面和 Provider，固定监听 `127.0.0.1:32145`，由桌面端通过广播传入配对码。构建细节和 libsodium 交叉编译的 `ac_cv_c_bigendian=no` 要求见 [android/legacy-agent/README.md](android/legacy-agent/README.md)。
+
+### 安全模型
+
+Root 代理的配对不是细粒度授权：
+
+- **配对成功即授予完整 Root 权限**：可执行任意命令、读写任意文件、安装或卸载应用；
+- 没有按应用、按命令或按操作的权限隔离；
+- 只与可信电脑配对；删除已配对电脑会立即吊销其会话；
+- 配对码、CPace 密钥和确认 MAC 不写入日志。
+
 ## 测试
 
 ```bash
@@ -113,6 +130,7 @@ src/ui/              界面与设置面板
 src/vuln_db/         漏洞库、匹配与利用引擎
 agent/               Android native root agent
 android/root-agent/  APK 壳与 ContentProvider
+android/legacy-agent/ Android 1.0–4.4 legacy APK（minSdk 1，静态 ARM agent）
 tests/               Qt Test 测试
 docs/                设计、协议事实与验证记录
 third_party/         桌面端第三方源码

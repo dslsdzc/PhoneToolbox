@@ -16,7 +16,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+#define MAX_ACTIVE_CONNECTIONS 32
+
+static volatile int active_connections;
+
+#if defined(__ANDROID__) && __ANDROID_API__ < 21
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
+static int legacy_accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags)
+{
+    const int out = accept(fd, addr, len);
+    if (out >= 0 && (flags & SOCK_CLOEXEC))
+        fcntl(out, F_SETFD, FD_CLOEXEC);
+    return out;
+}
+#define accept4 legacy_accept4
+#endif
 
 typedef struct {
     int client_fd;
@@ -59,6 +79,7 @@ static void *serve_client_job(void *argument)
     free(job->pair_code);
     free(job->token);
     free(job);
+    __sync_sub_and_fetch(&active_connections, 1);
     return NULL;
 }
 
@@ -135,6 +156,25 @@ int server_run(const server_config *config)
             break;
         }
 
+        // Bound unauthenticated/trickling connections: each accepted socket
+        // gets an I/O deadline, and only a fixed number of workers may run.
+        if (__sync_add_and_fetch(&active_connections, 1) > MAX_ACTIVE_CONNECTIONS) {
+            __sync_sub_and_fetch(&active_connections, 1);
+            close(client_fd);
+            continue;
+        }
+
+        const int io_timeout_ms = config->io_timeout_ms > 0
+            ? config->io_timeout_ms
+            : 10000;
+        struct timeval io_timeout;
+        io_timeout.tv_sec = io_timeout_ms / 1000;
+        io_timeout.tv_usec = (io_timeout_ms % 1000) * 1000;
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout,
+                   sizeof(io_timeout));
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout,
+                   sizeof(io_timeout));
+
         // 帧是「4 字节头 + payload」两次写。不开 TCP_NODELAY 时 Nagle 会把
         // 小包攒到对端延迟 ACK，本地回环也会出现约 40ms 的固定往返。
         int nodelay = 1;
@@ -144,6 +184,7 @@ int server_run(const server_config *config)
         client_job *job = calloc(1, sizeof(*job));
         if (!job) {
             close(client_fd);
+            __sync_sub_and_fetch(&active_connections, 1);
             continue;
         }
         job->client_fd = client_fd;
@@ -165,6 +206,7 @@ int server_run(const server_config *config)
             free(job->token);
             free(job);
             close(client_fd);
+            __sync_sub_and_fetch(&active_connections, 1);
             continue;
         }
 
@@ -175,10 +217,14 @@ int server_run(const server_config *config)
             free(job->token);
             free(job);
             close(client_fd);
+            __sync_sub_and_fetch(&active_connections, 1);
             continue;
         }
         pthread_detach(thread);
     }
+
+    while (__sync_fetch_and_add(&active_connections, 0) > 0)
+        usleep(10000);
 
     if (audit_ptr)
         audit_close(audit_ptr);

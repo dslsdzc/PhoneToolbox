@@ -23,6 +23,8 @@
 #include <QSettings>
 #include <QTimer>
 #include <QRegularExpression>
+#include <QHash>
+#include <QSet>
 
 static const char *kCategories[] = {
     "性能调优", "界面定制", "功能增强", "分区管理",
@@ -591,20 +593,13 @@ void SystemToolPanel::startMonitorProcess()
         appendOutput("无法启动监控: ADB 或设备未就绪", true);
         return;
     }
-    if (m_monitorProc) { m_monitorProc->kill(); m_monitorProc->deleteLater(); }
-    m_monitorProc = new QProcess(this);
-    m_monitorProc->setProgram(adb);
-    m_monitorProc->setArguments({"-s", m_deviceInfo.serialNumber, "shell"});
-    m_monitorProc->start();
-    if (!m_monitorProc->waitForStarted(5000)) {
-        appendOutput("监控进程启动失败", true);
+    // One-shot adb shell calls avoid the pty echo of a persistent shell;
+    // Android 1.x-4.x adbd rejects `shell -T`.
+    if (m_monitorProc) {
+        m_monitorProc->kill();
         m_monitorProc->deleteLater();
         m_monitorProc = nullptr;
-        return;
     }
-    // Flush initial shell banner/prompt
-    m_monitorProc->waitForReadyRead(300);
-    m_monitorProc->readAllStandardOutput();
 }
 
 void SystemToolPanel::stopMonitorProcess()
@@ -618,36 +613,21 @@ void SystemToolPanel::stopMonitorProcess()
 
 QString SystemToolPanel::monitorExec(const QString &cmd, int timeoutMs)
 {
-    if (!m_monitorProc || m_monitorProc->state() != QProcess::Running)
-        return "Error: monitor process not running";
+    QString adb = AdbEmbedded::instance().getAdbPath();
+    if (adb.isEmpty() || m_deviceInfo.serialNumber.isEmpty())
+        return "Error: adb or device not ready";
 
-    // Discard stale output
-    m_monitorProc->readAllStandardOutput();
-
-    // Write command + end marker
-    QByteArray input = cmd.toUtf8();
-    if (!input.endsWith('\n')) input += '\n';
-    input += "echo __MON_END__\n";
-    m_monitorProc->write(input);
-
-    // Read until end marker or timeout
-    QString output;
-    auto deadline = QDateTime::currentDateTime().addMSecs(timeoutMs);
-    while (QDateTime::currentDateTime() < deadline) {
-        if (m_monitorProc->waitForReadyRead(qMin(200, deadline.msecsTo(QDateTime::currentDateTime())))) {
-            output += QString::fromUtf8(m_monitorProc->readAllStandardOutput());
-            if (output.contains("__MON_END__")) {
-                return output.section("__MON_END__", 0, 0).trimmed();
-            }
-        } else {
-            break;
-        }
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(adb, {QStringLiteral("-s"), m_deviceInfo.serialNumber,
+                        QStringLiteral("shell"), cmd});
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        process.waitForFinished(1000);
+        appendOutput("设备命令超时，监控暂停", true);
+        return "Error: timeout";
     }
-
-    appendOutput("监控进程响应超时，正在重启...", true);
-    stopMonitorProcess();
-    startMonitorProcess();
-    return "Error: timeout";
+    return QString::fromUtf8(process.readAll()).trimmed();
 }
 
 //  1. 性能调优 — 实时监控
@@ -663,7 +643,7 @@ void SystemToolPanel::onPerfTimerToggle()
         stopMonitorProcess();
     } else {
         startMonitorProcess();
-        if (!m_monitorProc) return;
+        if (m_deviceInfo.serialNumber.isEmpty()) return;
         m_perfTimer->start();
         m_perfToggleBtn->setText("⏸ 暂停");
         onPerformancePoll();
@@ -683,12 +663,25 @@ void SystemToolPanel::onPerformancePoll()
         return;
     }
 
-    // Detect core count and split into per-core charts on first poll
+    // Detect core count on the host side: old toolbox lacks grep/wc.
     if (m_cpuCoreCount == 0) {
-        QString countResult = monitorExec(
-            "ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l", 5000);
-        if (!countResult.isEmpty() && !countResult.contains("Error"))
-            m_cpuCoreCount = countResult.trimmed().toInt();
+        QSet<int> cores;
+        const QString cpuList = monitorExec(QStringLiteral("ls /sys/devices/system/cpu/"));
+        const QRegularExpression cpuRe(QStringLiteral("^cpu(\\d+)$"));
+        for (const QString &line : cpuList.split('\n', Qt::SkipEmptyParts)) {
+            const auto match = cpuRe.match(line.trimmed());
+            if (match.hasMatch())
+                cores.insert(match.captured(1).toInt());
+        }
+        m_cpuCoreCount = cores.size();
+        if (m_cpuCoreCount <= 0) {
+            const QString cpuinfo = monitorExec(QStringLiteral("cat /proc/cpuinfo"));
+            for (const QString &line : cpuinfo.split('\n')) {
+                if (line.trimmed().startsWith(QStringLiteral("processor"),
+                                              Qt::CaseInsensitive))
+                    ++m_cpuCoreCount;
+            }
+        }
         if (m_cpuCoreCount <= 0 || m_cpuCoreCount > 64)
             m_cpuCoreCount = 1;
 
@@ -730,86 +723,112 @@ void SystemToolPanel::onPerformancePoll()
 
         appendOutput(QString("检测到 %1 个 CPU 核心，已初始化监控").arg(m_cpuCoreCount), false);
 
-        // Try to force GPU clock on (Qualcomm) — no-op if path doesn't exist
-        monitorExec("echo 1 > /sys/class/kgsl/kgsl-3d0/force_clk_on 2>/dev/null; echo ok", 2000);
+        // Old devices have no `||`, `$()`, `head` or `awk`; probe one file at a time.
+        auto isBadValue = [](const QString &value) {
+            const QString text = value.trimmed();
+            return text.isEmpty()
+                || text.contains(QStringLiteral("No such file"))
+                || text.contains(QStringLiteral("not found"))
+                || text.contains(QStringLiteral("Permission denied"))
+                || text.startsWith(QStringLiteral("Error:"));
+        };
+        auto firstLine = [](const QString &value) {
+            return value.section('\n', 0, 0).trimmed();
+        };
 
-        // Detect GPU type and max freq for proper Y range
-        QString gpuDetect = monitorExec(
-            "echo 'name:'; "
-            "cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null || "
-            "cat /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies 2>/dev/null | head -1 || "
-            "cat /sys/class/misc/mali0/device/gpu_type 2>/dev/null || "
-            "cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null | head -1 || "
-            "echo 'GPU'; "
-            "echo '---max:'; "
-            "cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq 2>/dev/null || "
-            "cat /sys/class/kgsl/kgsl-3d0/max_gpuclk 2>/dev/null || "
-            "cat /sys/class/misc/mali0/device/devfreq/max_freq 2>/dev/null || "
-            "cat /sys/kernel/gpu/gpu_max_freq 2>/dev/null || "
-            "cat /sys/class/devfreq/*gpu*/max_freq 2>/dev/null | head -1 || echo 0"
-        , 5000);
-        QStringList gpuParts = gpuDetect.split("---max:");
-        QString gpuName = gpuParts.value(0).remove("name:").trimmed();
-        double gpuMaxMHz = gpuParts.value(1).trimmed().toDouble() / 1000.0;
-        if (!gpuName.isEmpty() && m_gpuChart && !gpuName.contains("Error")) {
-            if (!gpuName.startsWith("GPU"))
-                m_gpuChart->setTitle(gpuName);
-            appendOutput(QString("检测到 GPU: %1").arg(gpuName), false);
-        }
-        if (gpuMaxMHz > 100 && m_gpuChart)
-            m_gpuChart->setYRange(0, gpuMaxMHz);
-
-        // Detect which GPU freq path works — cache the FULL path for subsequent polls
-        m_gpuFreqPath = monitorExec(
-            "r=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null) && echo \"/sys/class/kgsl/kgsl-3d0/gpuclk:$r\" && exit 0; "
-            "r=$(cat /sys/class/kgsl/kgsl-3d0/devfreq/cur_freq 2>/dev/null) && echo \"/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq:$r\" && exit 0; "
-            "r=$(cat /sys/class/misc/mali0/device/devfreq/cur_freq 2>/dev/null) && echo \"/sys/class/misc/mali0/device/devfreq/cur_freq:$r\" && exit 0; "
-            "r=$(cat /sys/devices/platform/13000000.mali/devfreq/cur_freq 2>/dev/null) && echo \"/sys/devices/platform/13000000.mali/devfreq/cur_freq:$r\" && exit 0; "
-            "r=$(cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null) && echo \"/sys/kernel/gpu/gpu_freq_table:$r\" && exit 0; "
-            "r=$(cat /sys/devices/platform/*gpu*/devfreq/cur_freq 2>/dev/null) && echo \"/sys/devices/platform/*gpu*/devfreq/cur_freq:$r\" && exit 0; "
-            "r=$(cat /sys/class/devfreq/*gpu*/cur_freq 2>/dev/null) && echo \"/sys/class/devfreq/*gpu*/cur_freq:$r\" && exit 0; "
-            "r=$(cat /sys/class/devfreq/*/cur_freq 2>/dev/null | head -1) && echo \"/sys/class/devfreq/*/cur_freq:$r\" && exit 0; "
-            "r=$(awk -F'[: ]' '/freq=/{print $2; exit}' /proc/gpufreq/gpufreq_opp_dump 2>/dev/null) && echo \"/proc/gpufreq/gpufreq_opp_dump:$r\" && exit 0; "
-            "echo '/none:0'"
-        , 5000);
-        // m_gpuFreqPath is "fullpath:value" — keep just the path
-        {
-            int colon = m_gpuFreqPath.indexOf(':');
-            if (colon > 0) {
-                QString path = m_gpuFreqPath.left(colon);
-                if (path != "/none") {
-                    appendOutput(QString("GPU 路径已缓存: %1").arg(path), false);
-                    m_gpuFreqPath = path;
-                } else {
-                    m_gpuFreqPath.clear();
-                }
-            } else {
-                m_gpuFreqPath.clear();
+        const char *gpuNamePaths[] = {
+            "/sys/class/kgsl/kgsl-3d0/gpu_model",
+            "/sys/class/kgsl/kgsl-3d0/gpu_available_frequencies",
+            "/sys/class/misc/mali0/device/gpu_type",
+            "/sys/kernel/gpu/gpu_freq_table",
+            "/proc/gpuinfo",
+        };
+        QString gpuName;
+        for (const char *path : gpuNamePaths) {
+            const QString value = monitorExec(
+                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
+            if (!isBadValue(value)) {
+                gpuName = firstLine(value);
+                break;
             }
         }
 
-        // Enumerate thermal zones and pick the best match
-        QString zoneRaw = monitorExec(
-            "for z in /sys/class/thermal/thermal_zone*; do "
-            "idx=${z#/sys/class/thermal/thermal_zone}; "
-            "echo \"$idx:$(cat $z/type 2>/dev/null):$(cat $z/temp 2>/dev/null)\"; done"
-        , 5000);
+        const char *gpuMaxPaths[] = {
+            "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq",
+            "/sys/class/kgsl/kgsl-3d0/max_gpuclk",
+            "/sys/class/misc/mali0/device/devfreq/max_freq",
+            "/sys/kernel/gpu/gpu_max_freq",
+        };
+        double gpuMaxMHz = 0.0;
+        for (const char *path : gpuMaxPaths) {
+            const QString value = monitorExec(
+                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
+            if (isBadValue(value))
+                continue;
+            gpuMaxMHz = firstLine(value).toDouble() / 1000.0;
+            if (gpuMaxMHz > 0.0)
+                break;
+        }
+        if (!gpuName.isEmpty() && m_gpuChart) {
+            if (!gpuName.startsWith(QStringLiteral("GPU")))
+                m_gpuChart->setTitle(gpuName);
+            appendOutput(QStringLiteral("检测到 GPU: %1").arg(gpuName), false);
+        }
+        if (gpuMaxMHz > 100.0 && m_gpuChart)
+            m_gpuChart->setYRange(0, gpuMaxMHz);
+
+        const char *gpuFreqPaths[] = {
+            "/sys/class/kgsl/kgsl-3d0/gpuclk",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
+            "/sys/class/misc/mali0/device/devfreq/cur_freq",
+            "/sys/devices/platform/13000000.mali/devfreq/cur_freq",
+            "/sys/kernel/gpu/gpu_freq_table",
+            "/sys/class/devfreq/*gpu*/cur_freq",
+            "/proc/gpufreq/gpufreq_opp_dump",
+        };
+        m_gpuFreqPath.clear();
+        for (const char *path : gpuFreqPaths) {
+            const QString value = monitorExec(
+                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
+            if (!isBadValue(value)) {
+                m_gpuFreqPath = QString::fromLatin1(path);
+                appendOutput(QStringLiteral("GPU 路径已缓存: %1").arg(m_gpuFreqPath), false);
+                break;
+            }
+        }
+
+        // Probe thermal zones one by one; Android 1.x-4.x may have none.
+        const QString thermalList = monitorExec(QStringLiteral("ls /sys/class/thermal/"));
+        QStringList zones;
+        const QRegularExpression zoneRe(QStringLiteral("^thermal_zone(\\d+)$"));
+        for (const QString &line : thermalList.split('\n', Qt::SkipEmptyParts)) {
+            const auto match = zoneRe.match(line.trimmed());
+            if (match.hasMatch())
+                zones.append(match.captured(1));
+        }
         int bestScore = -1, bestZone = -1;
         QString bestName;
-        for (const auto &line : zoneRaw.split('\n', Qt::SkipEmptyParts)) {
-            QStringList parts = line.split(':');
-            if (parts.size() < 3) continue;
-            QString type = parts[1].toLower();
+        for (const QString &zone : zones.mid(0, 24)) {
+            const QString type = firstLine(monitorExec(
+                QStringLiteral("cat /sys/class/thermal/thermal_zone%1/type").arg(zone),
+                1500));
+            if (isBadValue(type))
+                continue;
+            const QString lower = type.toLower();
             int score = 0;
-            if (type.contains("cpu") || type.contains("tsens") || type.contains("ap") || type.contains("soc"))
+            if (lower.contains("cpu") || lower.contains("tsens") || lower.contains("ap") || lower.contains("soc"))
                 score = 10;
-            else if (type.contains("bat") || type.contains("bms") || type.contains("charger"))
+            else if (lower.contains("bat") || lower.contains("bms") || lower.contains("charger"))
                 score = 8;
-            else if (type.contains("board") || type.contains("skin") || type.contains("case") || type.contains("back") || type.contains("xo_therm"))
+            else if (lower.contains("board") || lower.contains("skin") || lower.contains("case") || lower.contains("back") || lower.contains("xo_therm"))
                 score = 5;
-            else if (type.contains("gpu") || type.contains("gpuss") || type.contains("kgsl"))
+            else if (lower.contains("gpu") || lower.contains("gpuss") || lower.contains("kgsl"))
                 score = 3;
-            if (score > bestScore) { bestScore = score; bestZone = parts[0].toInt(); bestName = parts[1]; }
+            if (score > bestScore) {
+                bestScore = score;
+                bestZone = zone.toInt();
+                bestName = type;
+            }
         }
         m_tempZoneIndex = bestZone;
         if (m_tempChart) {
@@ -834,80 +853,113 @@ void SystemToolPanel::onPerformancePoll()
         m_swapFullHistory.clear();
     }
 
-    // Build per-core freq read commands
-    QString cpuCmd;
-    for (int i = 0; i < m_cpuCoreCount; i++) {
-        cpuCmd += QString(
-            "f_cur=$(cat /sys/devices/system/cpu/cpu%1/cpufreq/cpuinfo_cur_freq 2>/dev/null || "
-            "cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_cur_freq 2>/dev/null || echo 0); "
-            "f_max=$(cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_max_freq 2>/dev/null || echo 0); "
-            "echo \"$f_cur $f_max\"; "
-        ).arg(i);
+    // Collect all metrics with plain `cat` and parse on the host. Old toolbox
+    // has no grep/awk/head and no `$()`; markers keep sections apart.
+    QString cmd;
+    for (int i = 0; i < m_cpuCoreCount; ++i) {
+        cmd += QStringLiteral("echo __CPU%1_CUR__\n").arg(i);
+        cmd += QStringLiteral("cat /sys/devices/system/cpu/cpu%1/cpufreq/cpuinfo_cur_freq\n").arg(i);
+        cmd += QStringLiteral("echo __CPU%1_SCALING__\n").arg(i);
+        cmd += QStringLiteral("cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_cur_freq\n").arg(i);
+        cmd += QStringLiteral("echo __CPU%1_MAX__\n").arg(i);
+        cmd += QStringLiteral("cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_max_freq\n").arg(i);
+    }
+    cmd += QStringLiteral("echo __GPU__\n");
+    if (!m_gpuFreqPath.isEmpty())
+        cmd += QStringLiteral("cat %1\n").arg(m_gpuFreqPath);
+    cmd += QStringLiteral("echo __TEMP__\n");
+    if (m_tempZoneIndex >= 0)
+        cmd += QStringLiteral("cat /sys/class/thermal/thermal_zone%1/temp\n").arg(m_tempZoneIndex);
+    cmd += QStringLiteral("echo __MEM__\ncat /proc/meminfo\n");
+    cmd += QStringLiteral("echo __GOV__\ncat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor\n");
+
+    const QString raw = monitorExec(cmd, 5000);
+    if (raw.isEmpty() || raw.startsWith(QStringLiteral("Error:"))) {
+        m_polling = false;
+        return;
     }
 
-    // Batch collect all metrics in one shell call
-    // Use cached GPU path if available, otherwise full fallback chain
-    QString gpuSection;
-    if (!m_gpuFreqPath.isEmpty()) {
-        gpuSection = QString("gpu_freq=$(cat %1 2>/dev/null || echo 0); echo \"$gpu_freq\"; ")
-            .arg(m_gpuFreqPath);
-    } else {
-        gpuSection =
-            "gpu_freq=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null || "
-            "cat /sys/class/kgsl/kgsl-3d0/devfreq/cur_freq 2>/dev/null || "
-            "cat /sys/class/misc/mali0/device/devfreq/cur_freq 2>/dev/null || "
-            "cat /sys/devices/platform/13000000.mali/devfreq/cur_freq 2>/dev/null || "
-            "cat /sys/kernel/gpu/gpu_freq_table 2>/dev/null | head -1 || "
-            "cat /sys/devices/platform/*gpu*/devfreq/cur_freq 2>/dev/null | head -1 || "
-            "cat /sys/class/devfreq/*gpu*/cur_freq 2>/dev/null | head -1 || "
-            "cat /sys/class/devfreq/*/cur_freq 2>/dev/null | head -1 || "
-            "awk -F'[: ]' '/freq=/{print $2; exit}' /proc/gpufreq/gpufreq_opp_dump 2>/dev/null || echo 0); "
-            "echo \"$gpu_freq\"; ";
+    QHash<QString, QString> sections;
+    QString section;
+    for (const QString &line : raw.split('\n')) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith(QStringLiteral("__"))
+            && trimmed.endsWith(QStringLiteral("__"))
+            && trimmed.size() > 4) {
+            section = trimmed.mid(2, trimmed.size() - 4);
+            continue;
+        }
+        // Merged stderr from missing sysfs nodes must not become a value.
+        if (trimmed.startsWith(QStringLiteral("cat:"))
+            || trimmed.startsWith(QStringLiteral("ls:"))
+            || trimmed.contains(QStringLiteral("No such file"))
+            || trimmed.contains(QStringLiteral("not found"))
+            || trimmed.contains(QStringLiteral("Permission denied")))
+            continue;
+        if (!section.isEmpty())
+            sections[section] += line + QLatin1Char('\n');
     }
-    QString cmd = cpuCmd + "echo '---'; " + gpuSection
-        + "echo '---'; "
-        + (m_tempZoneIndex >= 0
-            ? QString("cat /sys/class/thermal/thermal_zone%1/temp 2>/dev/null || ").arg(m_tempZoneIndex)
-            : "")
-        + "echo 0; "
-        "echo '---'; "
-        "awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} /SwapTotal/{s=$2} /SwapFree/{f=$2} "
-        "END{printf \"%.1f %.1f\", (1-a/t)*100, (s>0?(1-f/s)*100:0)}' "
-        "/proc/meminfo 2>/dev/null || echo \"0 0\"; "
-        "echo '---'; "
-        "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo ''";
 
-    QString raw = monitorExec(cmd, 5000);
-    if (raw.isEmpty() || raw.contains("Error")) { m_polling = false; return; }
+    const auto firstNumber = [](const QString &text) {
+        static const QRegularExpression numberRe(
+            QStringLiteral("^\\s*(\\d+(?:\\.\\d+)?)"));
+        const auto match = numberRe.match(text);
+        return match.hasMatch() ? match.captured(1).toDouble() : 0.0;
+    };
 
-    QStringList parts = raw.split("---");
-    if (parts.size() < 5) { m_polling = false; return; }
-
-    // CPU freqs — each line is "cur_khz max_khz"
-    QString cpuSection = parts[0].trimmed();
-    QStringList freqLines = cpuSection.split('\n', Qt::SkipEmptyParts);
-    int count = qMin(freqLines.size(), m_cpuCoreCount);
-    for (int i = 0; i < count; i++) {
-        QStringList vals = freqLines[i].trimmed().split(' ', Qt::SkipEmptyParts);
-        double curMHz = vals.value(0).toDouble() / 1000.0;
-        double maxMHz = vals.value(1).toDouble() / 1000.0;
+    for (int i = 0; i < m_cpuCoreCount; ++i) {
+        double cur = firstNumber(sections.value(QStringLiteral("CPU%1_CUR").arg(i)));
+        if (cur <= 0.0)
+            cur = firstNumber(sections.value(QStringLiteral("CPU%1_SCALING").arg(i)));
+        const double max = firstNumber(sections.value(QStringLiteral("CPU%1_MAX").arg(i)));
+        const double curMHz = cur / 1000.0;
+        const double maxMHz = max / 1000.0;
         if (i < m_cpuCharts.size()) {
             if (maxMHz > 0.0)
                 m_cpuCharts[i]->setYRange(0.0, maxMHz);
             m_cpuCharts[i]->addValue(curMHz);
         }
-        // Record full history
         if (i < m_cpuFullHistory.size())
             m_cpuFullHistory[i].append(curMHz);
     }
 
-    // GPU, Temp, Mem (+Swap)
-    double gpuFreq = parts[1].trimmed().toDouble() / 1000.0;
-    double temp    = parts[2].trimmed().toDouble() / 1000.0;
-    QStringList memParts = parts[3].trimmed().split(' ', Qt::SkipEmptyParts);
-    double memPct  = memParts.value(0).toDouble();
-    double swapPct = memParts.value(1).toDouble();
-    QString gov    = parts[4].trimmed();
+    double gpuFreq = firstNumber(sections.value(QStringLiteral("GPU"))) / 1000.0;
+    double temp = firstNumber(sections.value(QStringLiteral("TEMP")));
+    if (temp > 1000.0)
+        temp /= 1000.0;
+
+    qint64 memTotal = 0, memFree = 0, memBuffers = 0, memCached = 0;
+    qint64 memAvailable = 0, swapTotal = 0, swapFree = 0;
+    for (const QString &line : sections.value(QStringLiteral("MEM")).split('\n')) {
+        const int colon = line.indexOf(QLatin1Char(':'));
+        if (colon <= 0)
+            continue;
+        const QString key = line.left(colon).trimmed();
+        const double value = firstNumber(line.mid(colon + 1));
+        if (key == QStringLiteral("MemTotal")) memTotal = qint64(value);
+        else if (key == QStringLiteral("MemFree")) memFree = qint64(value);
+        else if (key == QStringLiteral("MemAvailable")) memAvailable = qint64(value);
+        else if (key == QStringLiteral("Buffers")) memBuffers = qint64(value);
+        else if (key == QStringLiteral("Cached")) memCached = qint64(value);
+        else if (key == QStringLiteral("SwapTotal")) swapTotal = qint64(value);
+        else if (key == QStringLiteral("SwapFree")) swapFree = qint64(value);
+    }
+    double memPct = 0.0;
+    if (memTotal > 0) {
+        const qint64 available = memAvailable > 0
+            ? memAvailable
+            : memFree + memBuffers + memCached;
+        memPct = (1.0 - double(available) / double(memTotal)) * 100.0;
+        memPct = qBound(0.0, memPct, 100.0);
+    }
+    double swapPct = 0.0;
+    if (swapTotal > 0) {
+        swapPct = (1.0 - double(swapFree) / double(swapTotal)) * 100.0;
+        swapPct = qBound(0.0, swapPct, 100.0);
+    }
+    const QString gov = sections.value(QStringLiteral("GOV"))
+                            .trimmed()
+                            .section('\n', 0, 0);
 
     m_gpuChart->addValue(gpuFreq);
     m_tempChart->addValue(temp);

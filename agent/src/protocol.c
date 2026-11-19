@@ -9,16 +9,61 @@
 #include <sodium.h>
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHUNK_SIZE (48u * 1024u)
 
-static int send_payload(protocol_context *context, const uint8_t *payload,
-                        uint32_t length)
+// 已认证会话的审计 peer 字段 = Noise 静态公钥（64 hex）；明文开发模式回退
+// 到旧的 "stage1" 标记。公钥不是秘密，且能区分不同的已配对电脑。
+static const char *audit_peer_id(protocol_context *context, char hex[65])
 {
+    if (!context || sodium_is_zero(context->peer_public,
+                                   sizeof(context->peer_public)))
+        return "stage1";
+    sodium_bin2hex(hex, 65, context->peer_public,
+                   sizeof(context->peer_public));
+    return hex;
+}
+
+// Pair codes have only 10^6 possibilities. A per-connection sleep() can be
+// bypassed by opening many connections, so failures reserve global 1-second
+// slots. Successful pairing is not delayed.
+static pthread_mutex_t pair_rate_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int64_t pair_rate_next_ms;
+
+static void pair_rate_wait(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return;
+    const int64_t now = (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    int64_t wait_ms = 1000;
+
+    pthread_mutex_lock(&pair_rate_mutex);
+    if (now < pair_rate_next_ms) {
+        wait_ms = pair_rate_next_ms - now;
+        pair_rate_next_ms += 1000;
+    } else {
+        pair_rate_next_ms = now + 1000;
+    }
+    pthread_mutex_unlock(&pair_rate_mutex);
+
+    if (wait_ms > 0) {
+        struct timespec req;
+        req.tv_sec = (time_t) (wait_ms / 1000);
+        req.tv_nsec = (long) ((wait_ms % 1000) * 1000000);
+        while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+        }
+    }
+}
+
+static int send_payload(protocol_context *context, const uint8_t *payload,
+                        uint32_t length){
     if (!context || !payload || length == 0)
         return -1;
 
@@ -332,8 +377,11 @@ static int handle_exec(const protocol_context *context, const cJSON *root, int i
         }
     }
 
-    if (context->audit)
-        audit_append(context->audit, "stage1", "exec", hash, result.exit_code);
+    if (context->audit) {
+        char peer_hex[65];
+        audit_append(context->audit, audit_peer_id(context, peer_hex), "exec",
+                     hash, result.exit_code);
+    }
 
     exec_result_free(&result);
     return send_result;
@@ -386,8 +434,11 @@ static int handle_pull(const protocol_context *context, const cJSON *root, int i
         return -1;
     cJSON_AddNumberToObject(done, "id", id);
     cJSON_AddStringToObject(done, "op", "pull_done");
-    if (context->audit)
-        audit_append(context->audit, "stage1", "pull", sha256, 0);
+    if (context->audit) {
+        char peer_hex[65];
+        audit_append(context->audit, audit_peer_id(context, peer_hex), "pull",
+                     sha256, 0);
+    }
     return send_json(context, done);
 }
 
@@ -567,16 +618,10 @@ static int serve_pair(protocol_context *context, const uint8_t *payload,
         pair_confirm_mac(context->pair_client_key, context->pair_client_static,
                          context->identity->public_key, expected);
         if (sodium_memcmp(received, expected, sizeof(expected)) != 0) {
-            // 6 位配对码只有 10^6 空间；失败后强制延迟，在线爆破降到 1 次/秒。
-            sleep(1);
-            char client_hex[65], agent_hex[65], key_hex[65], recv_hex[65], expected_hex[65];
-            sodium_bin2hex(client_hex, sizeof(client_hex), context->pair_client_static, 32);
-            sodium_bin2hex(agent_hex, sizeof(agent_hex), context->identity->public_key, 32);
-            sodium_bin2hex(key_hex, sizeof(key_hex), context->pair_client_key, CPACE_KEY_LEN);
-            sodium_bin2hex(recv_hex, sizeof(recv_hex), received, 32);
-            sodium_bin2hex(expected_hex, sizeof(expected_hex), expected, 32);
-            fprintf(stderr, "pair debug: client=%s agent=%s key=%s recv=%s expected=%s\n",
-                    client_hex, agent_hex, key_hex, recv_hex, expected_hex);
+            // 6 位配对码只有 10^6 空间；失败后全局限速，在线爆破降到 1 次/秒。
+            pair_rate_wait();
+            // 绝不要把 CPace 密钥、MAC 或配对码写进日志。
+            fprintf(stderr, "pair: confirm MAC mismatch\n");
             send_error(context, 0, "pair_failed", "confirm MAC mismatch");
             goto done;
         }
@@ -832,8 +877,12 @@ int protocol_serve_client(protocol_context *context)
                     result = -1;
                     break;
                 }
-                if (context->audit)
-                    audit_append(context->audit, "stage1", "push", "n/a", 0);
+                if (context->audit) {
+                    char peer_hex[65];
+                    audit_append(context->audit,
+                                 audit_peer_id(context, peer_hex), "push",
+                                 "n/a", 0);
+                }
                 cJSON *done = cJSON_CreateObject();
                 if (!done) {
                     result = -1;

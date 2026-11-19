@@ -112,6 +112,9 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         _exit(127);
     }
 
+    // 父进程也设置一次，闭合“父进程尚未设置组、子进程已经 exit”的竞态窗口。
+    (void) setpgid(pid, pid);
+
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
@@ -130,7 +133,7 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
     int stderr_open = 1;
     int timed_out = 0;
 
-    while (!child_done || stdout_open || stderr_open) {
+    while (!timed_out && (!child_done || stdout_open || stderr_open)) {
         struct pollfd fds[2];
         nfds_t count = 0;
         if (stdout_open) {
@@ -147,14 +150,17 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         }
 
         int poll_timeout = 100;
-        if (!child_done && deadline > 0) {
+        if (deadline > 0) {
             const int64_t remaining = deadline - monotonic_ms();
             if (remaining <= 0) {
+                // The main child may already have exited while a background
+                // grandchild still holds the pipes; kill the whole group.
                 kill(-pid, SIGKILL);
                 timed_out = 1;
-            } else if (remaining < poll_timeout) {
-                poll_timeout = (int)remaining;
+                break;
             }
+            if (remaining < poll_timeout)
+                poll_timeout = (int)remaining;
         }
 
         if (count > 0)
@@ -205,9 +211,23 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         }
     }
 
+    if (timed_out) {
+        kill(-pid, SIGKILL);
+        // Do not wait for background grandchildren to close inherited pipes.
+        if (stdout_open) {
+            close(stdout_pipe[0]);
+            stdout_open = 0;
+        }
+        if (stderr_open) {
+            close(stderr_pipe[0]);
+            stderr_open = 0;
+        }
+    }
+
     if (!child_done) {
         // 理论上循环退出前已经等到；保险起见再 wait。
-        waitpid(pid, &status, 0);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
     }
 
     if (WIFEXITED(status)) {
@@ -216,6 +236,8 @@ int run_command(const char *const argv[], int timeout_ms, size_t max_output,
         result->signaled = 1;
         result->exit_code = -1;
     }
+    if (timed_out)
+        result->exit_code = -1;
 
     result->timed_out = timed_out;
     result->truncated = out.truncated || err.truncated;

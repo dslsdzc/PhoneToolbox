@@ -20,6 +20,13 @@ Windows static build (requires vcpkg with Qt6 + libusb):
 .\build_windows.ps1 -Static
 ```
 
+Legacy Android 1.0–4.4 agent APK (minSdk 1, static ARM):
+```bash
+android/legacy-agent/build.sh
+```
+Requires NDK r10e, Android 3 sysroot, and libsodium 1.0.22 cross-compiled with
+`ac_cv_c_bigendian=no`; see `android/legacy-agent/README.md`.
+
 ## Architecture Overview
 
 PhoneToolbox is a **Qt6/C++17** desktop app for Android device management across 6 modes: ADB, Fastboot, Fastbootd, EDL 9008, MTK DA, Recovery.
@@ -116,3 +123,4 @@ pacman -S qt6-base qt6-tools cmake ninja pkg-config
 - Member variables prefixed `m_`
 - UI panels emit `outputMessage(QString, bool isError)` and `switchToDeviceInfo()` signals
 - Tests: `ctest --output-on-failure` in `build/`; agent tests in `agent/build/`
+- Legacy agent: build with `AGENT_LEGACY_STATIC=ON` + `android/legacy-agent/build.sh`; verify on API 1/API 10 emulators that `agent.out` reports `PORT=32145` and CPace pairing writes `peers.txt`

@@ -12,6 +12,9 @@
 #include <QStringList>
 #include <QXmlStreamReader>
 
+#include <cmath>
+#include <limits>
+
 namespace edl {
 namespace {
 
@@ -145,12 +148,18 @@ bool jsonU64(const QJsonObject &o, const QString &key, quint64 *out)
 {
     const QJsonValue v = o.value(key);
     if (v.isDouble()) {
-        *out = quint64(v.toDouble());
+        const double d = v.toDouble();
+        // JSON numbers are IEEE-754 doubles. Reject NaN/Inf, negatives,
+        // fractions and values that cannot be represented exactly.
+        if (!std::isfinite(d) || d < 0.0 || std::floor(d) != d
+            || d > 9007199254740992.0)  // 2^53
+            return false;
+        *out = quint64(d);
         return true;
     }
     if (v.isString()) {
         bool ok = false;
-        const quint64 n = v.toString().toULongLong(&ok);
+        const quint64 n = v.toString().trimmed().toULongLong(&ok);
         if (ok) {
             *out = n;
             return true;
@@ -469,6 +478,19 @@ quint32 parseLunCount(const FirehoseResponse &r)
 // 会话级小工具
 // ---------------------------------------------------------------------------
 
+bool hasCompleteResponse(const QByteArray &buf)
+{
+    const int start = buf.indexOf("<response");
+    if (start < 0)
+        return false;
+    const int openEnd = buf.indexOf('>', start);
+    if (openEnd < 0)
+        return false;
+    if (openEnd > start && buf.at(openEnd - 1) == '/')
+        return true;
+    return buf.indexOf("</response>", openEnd + 1) >= 0;
+}
+
 bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseResponse &resp,
                          int timeoutMs, QString *error)
 {
@@ -506,10 +528,13 @@ bool firehoseSendCommand(IEdlTransport &t, const QByteArray &xml, FirehoseRespon
     QElapsedTimer clock;
     clock.start();
     int reads = 0;
-    while (!buf.contains("<response") && reads < kMaxReadsPerResponse
+    while (!hasCompleteResponse(buf) && reads < kMaxReadsPerResponse
            && clock.elapsed() < timeoutMs) {
         QString readErr;
-        const QByteArray chunk = t.read(4096, timeoutMs, &readErr);
+        const int remaining = timeoutMs - int(clock.elapsed());
+        if (remaining <= 0)
+            break;
+        const QByteArray chunk = t.read(4096, remaining, &readErr);
         if (chunk.isEmpty())
             break;                       // 超时/掉线（read 约定：超时 → 空 + error）
         buf += chunk;

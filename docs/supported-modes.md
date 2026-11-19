@@ -19,6 +19,17 @@
 
 正常 Android 系统模式。设备信息、系统工具、应用管理、漏洞扫描与利用均在此模式运行。
 
+### Android 1.0–4.4 兼容
+
+旧系统的 `toolbox` 没有 `grep`、`wc`、`head`、`awk`、`sed` 或 `$(...)`，因此设备信息、性能监控和分区检测改为：
+
+- 远端只执行 `cat` / `ls` / `dumpsys` 等基础命令，在桌面端解析原始输出；
+- 电池优先 `dumpsys battery`，失败回退 `/sys/class/power_supply/battery/capacity`；
+- 分区优先 `/proc/mtd` 的友好名称，再探测 `/dev/block/by-name`、`/dev/block/bootdevice/by-name`、`/dev/block/platform/*/by-name`；`/proc/partitions` 的块单位按 1 KiB 处理；
+- legacy Root 代理是 minSdk 1 的静态 ARM 可执行文件，固定端口 32145，没有 Activity/Provider。
+
+交叉编译 libsodium 时必须设置 `ac_cv_c_bigendian=no`，否则 configure 会把 ARM 误判成 big-endian，SHA-256/SHA-512 与 CPace 会算错。
+
 ## Fastboot / Fastbootd
 
 - **Fastboot**：传统 Bootloader 模式。

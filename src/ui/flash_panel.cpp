@@ -661,40 +661,97 @@ void decoratePartitionItem(QListWidgetItem *item, const QString &name)
 QList<FlashTool::PartitionInfo> parseAdbPartitionOutput(const QString &output)
 {
     QList<FlashTool::PartitionInfo> result;
-    const QStringList sections = output.split(QStringLiteral("__PT_SEP__"));
-    const QString procText = sections.value(0);
-    const QString nameText = sections.value(1);
-
     QMap<QString, qint64> sizes;
-    const QRegularExpression spaces(QStringLiteral("\\s+"));
-    for (const QString &line : procText.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-        const QStringList fields = line.trimmed().split(spaces, Qt::SkipEmptyParts);
-        if (fields.size() < 4)
+    QStringList names;
+
+    const auto formatSize = [](qint64 bytes) -> QString {
+        if (bytes >= 1024LL * 1024 * 1024)
+            return QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
+        if (bytes >= 1024 * 1024)
+            return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
+        if (bytes >= 1024)
+            return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
+        return QStringLiteral("%1 B").arg(bytes);
+    };
+
+    const QStringList sections = output.split(QStringLiteral("__PT_SEP__"));
+    for (const QString &section : sections) {
+        const QString text = section.trimmed();
+        if (text.isEmpty())
             continue;
-        bool ok = false;
-        const qint64 blocks = fields.at(2).toLongLong(&ok);
-        const QString name = fields.at(3).trimmed();
-        if (ok && blocks > 0 && !name.isEmpty())
-            sizes.insert(name, blocks * 512);
+
+        // Legacy MTD: mtd0: 22600000 00008000 "system"
+        const QRegularExpression mtdRe(
+            QStringLiteral("^mtd(\\d+):\\s+([0-9a-fA-F]+)\\s+[0-9a-fA-F]+\\s+\"([^\"]+)\""),
+            QRegularExpression::MultilineOption);
+        auto mtdMatches = mtdRe.globalMatch(text);
+        bool parsedMtd = false;
+        while (mtdMatches.hasNext()) {
+            const auto match = mtdMatches.next();
+            bool ok = false;
+            const qint64 bytes = match.captured(2).toLongLong(&ok, 16);
+            const QString name = match.captured(3);
+            if (!ok || name.isEmpty())
+                continue;
+            sizes.insert(name, bytes);
+            sizes.insert(QStringLiteral("mtdblock%1").arg(match.captured(1)), bytes);
+            if (!names.contains(name))
+                names.append(name);
+            parsedMtd = true;
+        }
+        if (parsedMtd)
+            continue;
+
+        // /proc/partitions: major minor blocks name. Linux reports 1 KiB blocks.
+        bool parsedPartitions = false;
+        for (const QString &line : text.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            const QString trimmedLine = line.trimmed();
+            if (trimmedLine.startsWith(QStringLiteral("major"))
+                || trimmedLine.startsWith(QStringLiteral("dev:")))
+                continue;
+            const QStringList fields = trimmedLine.split(
+                QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+            if (fields.size() < 4)
+                continue;
+            bool ok = false;
+            const qint64 blocks = fields.at(2).toLongLong(&ok);
+            const QString name = fields.at(3);
+            if (!ok || name.isEmpty())
+                continue;
+            if (!sizes.contains(name))
+                sizes.insert(name, blocks * 1024);
+            parsedPartitions = true;
+        }
+        if (parsedPartitions)
+            continue;
+
+        // by-name directory listing (or a fallback name list).
+        for (const QString &line : text.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+            const QString name = line.trimmed();
+            if (name.isEmpty() || name.contains(QLatin1Char('/'))
+                || name.contains(QStringLiteral("No such"))
+                || name.contains(QStringLiteral("not found"))
+                || name.startsWith(QStringLiteral("cat:"))
+                || name.startsWith(QStringLiteral("ls:")))
+                continue;
+            if (!names.contains(name))
+                names.append(name);
+        }
     }
 
-    for (const QString &raw : nameText.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-        const QString name = raw.trimmed();
-        if (name.isEmpty() || name.contains(QLatin1Char('/')))
-            continue;
+    // If only /proc/partitions was readable, use its device names as a fallback.
+    if (names.isEmpty()) {
+        for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it) {
+            if (!it.key().startsWith(QStringLiteral("mtdblock")))
+                names.append(it.key());
+        }
+    }
+
+    for (const QString &name : names) {
         FlashTool::PartitionInfo info;
         info.name = name;
-        if (sizes.contains(name)) {
-            const qint64 bytes = sizes.value(name);
-            if (bytes >= 1024LL * 1024 * 1024)
-                info.size = QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
-            else if (bytes >= 1024 * 1024)
-                info.size = QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
-            else if (bytes >= 1024)
-                info.size = QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
-            else
-                info.size = QStringLiteral("%1 B").arg(bytes);
-        }
+        if (sizes.contains(name) && sizes.value(name) > 0)
+            info.size = formatSize(sizes.value(name));
         result.append(info);
     }
     return result;
@@ -1432,7 +1489,12 @@ void FlashPanel::onRefreshPartitions()
         startPartitionLoad(
             adbPath,
             {QStringLiteral("-s"), serial, QStringLiteral("shell"),
-             QStringLiteral("cat /proc/partitions; echo __PT_SEP__; ls /dev/block/by-name/")},
+             QStringLiteral("cat /proc/partitions; echo __PT_SEP__; "
+                            "cat /proc/mtd 2>/dev/null; echo __PT_SEP__; "
+                            "ls /dev/block/by-name/ 2>/dev/null; echo __PT_SEP__; "
+                            "ls /dev/block/bootdevice/by-name/ 2>/dev/null; echo __PT_SEP__; "
+                            "ls /dev/block/platform/*/by-name/ 2>/dev/null; echo __PT_SEP__; "
+                            "ls /dev/block/platform/*/*/by-name/ 2>/dev/null")},
             mode);
     }
 }

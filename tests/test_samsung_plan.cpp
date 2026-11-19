@@ -32,7 +32,7 @@ private slots:
     void skipsEntriesWithoutImageName();
     void fallsBackToUniquePitEntry();
     void warnsBothMismatchDirections();
-    void warnsWhenImageLargerThanPartition();
+    void refusesWhenImageLargerThanPartition();
     void summarisesSmallImages();
     void reportsMd5FooterState();
     void loadsPitFromPackage();
@@ -164,7 +164,7 @@ void TestSamsungPlan::warnsBothMismatchDirections()
     QVERIFY(missingInPit);
 }
 
-void TestSamsungPlan::warnsWhenImageLargerThanPartition()
+void TestSamsungPlan::refusesWhenImageLargerThanPartition()
 {
     QTemporaryDir dir;
     // 分区 1024 扇区 × 512 = 512 KiB；镜像 600000 字节 > 512 KiB
@@ -176,11 +176,9 @@ void TestSamsungPlan::warnsWhenImageLargerThanPartition()
     QString err;
     QVERIFY2(odin::parsePit(buildPit(es), pit, &err), qPrintable(err));
     odin::SamsungPlan plan;
-    QVERIFY2(odin::buildSamsungPlan({tar}, pit, plan, &err), qPrintable(err));
-    bool warned = false;
-    for (const QString &w : std::as_const(plan.warnings))
-        warned = warned || w.contains(QStringLiteral("放不下"));
-    QVERIFY(warned);
+    // 已知分区容量且镜像更大：必须在计划阶段硬拒绝，不能只告警后继续下发。
+    QVERIFY(!odin::buildSamsungPlan({tar}, pit, plan, &err));
+    QVERIFY2(err.contains(QStringLiteral("大于分区")), qPrintable(err));
 }
 
 void TestSamsungPlan::summarisesSmallImages()

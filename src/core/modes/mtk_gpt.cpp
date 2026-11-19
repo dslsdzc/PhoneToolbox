@@ -126,6 +126,19 @@ bool parseAt(const QByteArray &raw, quint32 sectorSize, int headerPos, int entri
         return false;
     }
 
+    const quint64 firstUsable = rdU64(hdr, 0x28);
+    const quint64 lastUsable = rdU64(hdr, 0x30);
+    if (firstUsable < 2 || firstUsable > lastUsable) {
+        if (error) *error = QStringLiteral("GPT 可用 LBA 区间异常（first=%1 last=%2）")
+                                .arg(firstUsable).arg(lastUsable);
+        return false;
+    }
+    if (diskSectors > 0 && lastUsable >= diskSectors) {
+        if (error) *error = QStringLiteral("GPT 可用 LBA 超出磁盘（last_usable=%1 diskSectors=%2）")
+                                .arg(lastUsable).arg(diskSectors);
+        return false;
+    }
+
     quint32 entryCount = 0;
     quint32 entrySize = 0;
     if (!entryGeometry(hdr, &entryCount, &entrySize)) {
@@ -166,6 +179,35 @@ bool parseAt(const QByteArray &raw, quint32 sectorSize, int headerPos, int entri
         p.name = nameOf(e);
         if (p.lastLba < p.firstLba)
             continue;                                   // 端点反了的条目跳过（不静默产出负长度）
+        if (p.lastLba > lastUsable) {
+            if (error) *error = QStringLiteral("GPT 分区 %1 的末 LBA %2 超出可用区间 [%3,%4]")
+                                    .arg(p.name).arg(p.lastLba)
+                                    .arg(firstUsable).arg(lastUsable);
+            return false;
+        }
+        if (diskSectors > 0 && p.lastLba >= diskSectors) {
+            if (error) *error = QStringLiteral("GPT 分区 %1 的末 LBA %2 超出磁盘 %3")
+                                    .arg(p.name).arg(p.lastLba).arg(diskSectors);
+            return false;
+        }
+        // offsetBytes()/sizeBytes() 是纯乘法；在产生 Partition 之前拒绝任何
+        // 会让 firstLba * sectorSize 或 (last-first+1) * sectorSize 溢出的条目。
+        if (p.lastLba >= std::numeric_limits<quint64>::max() / quint64(sectorSize)) {
+            if (error) *error = QStringLiteral("GPT 分区 %1 的末 LBA %2 过大，拒绝计算偏移")
+                                    .arg(p.name).arg(p.lastLba);
+            return false;
+        }
+        for (const Partition &prev : t.partitions) {
+            if (!p.name.isEmpty() && prev.name == p.name) {
+                if (error) *error = QStringLiteral("GPT 分区名重复：%1").arg(p.name);
+                return false;
+            }
+            if (p.firstLba <= prev.lastLba && prev.firstLba <= p.lastLba) {
+                if (error) *error = QStringLiteral("GPT 分区重叠：%1 与 %2")
+                                        .arg(prev.name, p.name);
+                return false;
+            }
+        }
         t.partitions.append(p);
     }
     out = t;
@@ -344,7 +386,12 @@ QByteArray testBuildSyntheticGpt(quint32 sectorSize, quint32 sectorCount, quint6
     wrU64(raw, hdrPos + 0x18, 1);                                 // current_lba
     wrU64(raw, hdrPos + 0x20, sectorCount - 1);                   // backup_lba
     wrU64(raw, hdrPos + 0x28, 34);                                // first_usable
-    wrU64(raw, hdrPos + 0x30, sectorCount - 34);                  // last_usable
+    // Keep the synthetic header semantically valid even for the tiny images
+    // used by tests (sectorCount may be smaller than the usual 34-sector tail).
+    const quint64 lastUsable = qMax<quint64>(
+        sectorCount > 34 ? quint64(sectorCount) - 34 : 2,
+        firstLba + 1);
+    wrU64(raw, hdrPos + 0x30, lastUsable);                        // last_usable
     wrU64(raw, hdrPos + 0x48, 2);                                 // part_entry_start_lba
     wrU32(raw, hdrPos + 0x50, entryCount);
     wrU32(raw, hdrPos + 0x54, entrySize);

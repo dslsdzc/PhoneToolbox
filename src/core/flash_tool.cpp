@@ -658,28 +658,53 @@ QStringList FlashTool::listPartitionsAdb(const QString &deviceId)
 {
     QStringList partitions;
 
-    // 方式1: ls /dev/block/by-name/
-    QString result = executeAdb(deviceId, {"shell", "ls", "/dev/block/by-name/"}, 10000);
-    if (!result.startsWith("Error")) {
-        QStringList lines = result.split('\n', Qt::SkipEmptyParts);
-        for (const QString &line : lines) {
-            QString name = line.trimmed();
-            if (!name.isEmpty() && !name.contains("/")) {
+    // Modern by-name layouts, then the platform/*/by-name paths used by
+    // Android 2.x-4.x. Inexistent paths simply return no names.
+    const QStringList byNamePaths = {
+        QStringLiteral("/dev/block/by-name/"),
+        QStringLiteral("/dev/block/bootdevice/by-name/"),
+        QStringLiteral("/dev/block/platform/*/by-name/"),
+        QStringLiteral("/dev/block/platform/*/*/by-name/"),
+    };
+    for (const QString &path : byNamePaths) {
+        const QString result = executeAdb(
+            deviceId, {"shell", "ls", path}, 10000);
+        if (result.startsWith(QStringLiteral("Error")))
+            continue;
+        for (const QString &line : result.split('\n', Qt::SkipEmptyParts)) {
+            const QString name = line.trimmed();
+            if (!name.isEmpty() && !name.contains(QLatin1Char('/'))
+                && !name.contains(QStringLiteral("No such"))
+                && !partitions.contains(name))
                 partitions.append(name);
-            }
         }
     }
 
-    // 如果上面没结果，尝试 /dev/block/bootdevice/by-name/
+    // Android 1.x-2.x MTD devices: /proc/mtd carries the friendly names.
     if (partitions.isEmpty()) {
-        result = executeAdb(deviceId, {"shell", "ls", "/dev/block/bootdevice/by-name/"}, 10000);
-        if (!result.startsWith("Error")) {
-            QStringList lines = result.split('\n', Qt::SkipEmptyParts);
-            for (const QString &line : lines) {
-                QString name = line.trimmed();
-                if (!name.isEmpty() && !name.contains("/")) {
-                    partitions.append(name);
-                }
+        const QString mtd = executeAdb(
+            deviceId, {"shell", "cat", "/proc/mtd"}, 10000);
+        if (!mtd.startsWith(QStringLiteral("Error"))) {
+            const QRegularExpression re(
+                QStringLiteral("^mtd\\d+:.*\"([^\"]+)\""),
+                QRegularExpression::MultilineOption);
+            auto matches = re.globalMatch(mtd);
+            while (matches.hasNext())
+                partitions.append(matches.next().captured(1));
+        }
+    }
+
+    // Last resort: raw /proc/partitions device names.
+    if (partitions.isEmpty()) {
+        const QString proc = executeAdb(
+            deviceId, {"shell", "cat", "/proc/partitions"}, 10000);
+        if (!proc.startsWith(QStringLiteral("Error"))) {
+            for (const QString &line : proc.split('\n', Qt::SkipEmptyParts)) {
+                const QStringList fields = line.trimmed().split(
+                    QRegularExpression(QStringLiteral("\\s+")),
+                    Qt::SkipEmptyParts);
+                if (fields.size() >= 4)
+                    partitions.append(fields.at(3));
             }
         }
     }
@@ -690,50 +715,57 @@ QStringList FlashTool::listPartitionsAdb(const QString &deviceId)
 QList<FlashTool::PartitionInfo> FlashTool::getPartitionDetailsAdb(const QString &deviceId)
 {
     QList<PartitionInfo> result;
+    QMap<QString, qint64> sizes;
 
-    // 读取 /proc/partitions 获取大小
-    QString procResult = executeAdb(deviceId, {"shell", "cat", "/proc/partitions"}, 10000);
-    if (procResult.startsWith("Error")) {
-        // 降级为只用分区名
-        QStringList names = listPartitionsAdb(deviceId);
-        for (const QString &name : names) {
-            PartitionInfo pi;
-            pi.name = name;
-            result.append(pi);
-        }
-        return result;
-    }
-
-    // 解析 /proc/partitions: major minor blocks name
-    QMap<QString, qint64> partSizes;
-    QStringList lines = procResult.split('\n', Qt::SkipEmptyParts);
-    for (const QString &line : lines) {
-        QStringList fields = line.split(' ', Qt::SkipEmptyParts);
-        if (fields.size() >= 4) {
-            bool ok;
-            qint64 blocks = fields[2].toLongLong(&ok);
-            QString name = fields[3].trimmed();
-            if (ok && blocks > 0 && !name.isEmpty()) {
-                partSizes[name] = blocks * 512; // blocks are 512-byte sectors
-            }
+    // Legacy MTD names and sizes: mtd0: 22600000 00008000 "system"
+    const QString mtd = executeAdb(deviceId, {"shell", "cat", "/proc/mtd"}, 10000);
+    if (!mtd.startsWith(QStringLiteral("Error"))) {
+        const QRegularExpression re(
+            QStringLiteral("^mtd(\\d+):\\s+([0-9a-fA-F]+)\\s+[0-9a-fA-F]+\\s+\"([^\"]+)\""),
+            QRegularExpression::MultilineOption);
+        auto matches = re.globalMatch(mtd);
+        while (matches.hasNext()) {
+            const auto match = matches.next();
+            bool ok = false;
+            const qint64 bytes = match.captured(2).toLongLong(&ok, 16);
+            if (!ok)
+                continue;
+            sizes.insert(match.captured(3), bytes);
+            sizes.insert(QStringLiteral("mtdblock%1").arg(match.captured(1)), bytes);
         }
     }
 
-    // 获取分区名列表
-    QStringList names = listPartitionsAdb(deviceId);
+    // /proc/partitions reports 1 KiB blocks, not 512-byte sectors.
+    const QString procResult = executeAdb(
+        deviceId, {"shell", "cat", "/proc/partitions"}, 10000);
+    if (!procResult.startsWith(QStringLiteral("Error"))) {
+        const QRegularExpression spaces(QStringLiteral("\\s+"));
+        for (const QString &line : procResult.split('\n', Qt::SkipEmptyParts)) {
+            const QStringList fields = line.trimmed().split(spaces, Qt::SkipEmptyParts);
+            if (fields.size() < 4)
+                continue;
+            bool ok = false;
+            const qint64 blocks = fields.at(2).toLongLong(&ok);
+            const QString name = fields.at(3);
+            if (ok && blocks > 0 && !name.isEmpty() && !sizes.contains(name))
+                sizes.insert(name, blocks * 1024);
+        }
+    }
+
+    const QStringList names = listPartitionsAdb(deviceId);
     for (const QString &name : names) {
         PartitionInfo pi;
         pi.name = name;
-        if (partSizes.contains(name)) {
-            qint64 bytes = partSizes[name];
-            if (bytes >= 1024 * 1024 * 1024)
-                pi.size = QString("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
+        if (sizes.contains(name)) {
+            const qint64 bytes = sizes.value(name);
+            if (bytes >= 1024LL * 1024 * 1024)
+                pi.size = QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
             else if (bytes >= 1024 * 1024)
-                pi.size = QString("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
+                pi.size = QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 0);
             else if (bytes >= 1024)
-                pi.size = QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
+                pi.size = QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
             else
-                pi.size = QString("%1 B").arg(bytes);
+                pi.size = QStringLiteral("%1 B").arg(bytes);
         }
         result.append(pi);
     }

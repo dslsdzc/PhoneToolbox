@@ -130,7 +130,7 @@ int main(int argc, char **argv)
     snprintf(peers_path, sizeof(peers_path), "%s/peers.txt", state_dir);
     FILE *peers = fopen(peers_path, "w");
     CHECK(peers != NULL);
-    fprintf(peers, "%s test-client\n", client_hex);
+    fprintf(peers, "%s test-client exec,push,pull\n", client_hex);
     fclose(peers);
 
     int pipefd[2];

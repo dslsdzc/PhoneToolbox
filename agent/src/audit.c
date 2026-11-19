@@ -50,9 +50,14 @@ int audit_open(audit_log *log, const char *path)
         return -1;
     log->fd = -1;
 
-    const int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    const int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd < 0)
         return -1;
+    // Older builds created 0644 audit.log; tighten it on open.
+    if (fchmod(fd, 0600) != 0) {
+        close(fd);
+        return -1;
+    }
 
     if (recover_prev(fd, log->prev) != 0) {
         close(fd);

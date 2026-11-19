@@ -199,8 +199,10 @@ bool buildSamsungPlan(const QStringList &tarMd5Files, const PitTable &pit,
             plan.warnings << QStringLiteral("分区 %1 未声明大小（blockCount=0），无法核对镜像 %2 是否放得下")
                                  .arg(pe.partitionName, e.imageFile);
         } else if (e.sizeBytes > partBytes) {
-            plan.warnings << QStringLiteral("镜像 %1（%2 字节）大于分区 %3（%4 字节），放不下 —— 请核对包与机型")
-                                 .arg(e.imageFile).arg(e.sizeBytes).arg(pe.partitionName).arg(partBytes);
+            setErr(error, QStringLiteral("镜像 %1（%2 字节）大于分区 %3（%4 字节），拒绝构建刷写计划 —— 请核对包与机型")
+                       .arg(e.imageFile).arg(e.sizeBytes)
+                       .arg(pe.partitionName).arg(partBytes));
+            return false;
         } else if (e.sizeBytes < partBytes) {
             ++smallImages;                              // 规则 7 的降噪：逐条太吵，最后出一条汇总
         }

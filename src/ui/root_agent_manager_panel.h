@@ -47,6 +47,7 @@ private:
         bool connected = false;
         bool connecting = false;
         bool packageScanned = false;
+        int sdk = -1;
         qint64 lastPackageScan = 0;
         qint64 lastLaunchAttempt = 0;
         QString state = QStringLiteral("未连接");
@@ -65,6 +66,10 @@ private:
                        quint16 *port, bool *paired, QString *error);
     QString discoverPackage(const QString &serial, QString *error);
     bool ensurePackage(const QString &serial, QString *package, QString *error);
+    void pairAndConnect(const QString &serial);
+    bool isLegacyDevice(const QString &serial);
+    int deviceSdk(const QString &serial);
+    QString legacyPairCode(const QString &serial);
     void refreshPackage(const QString &serial);
     void maybeLaunchAgent(const QString &serial, const QString &package);
     void autoConnect(const QString &serial);

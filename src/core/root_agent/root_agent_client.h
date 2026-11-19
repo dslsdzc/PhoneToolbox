@@ -74,6 +74,7 @@ private slots:
     void onSocketConnected();
     void onReadyRead();
     void onSocketError();
+    void onSocketDisconnected();
     void onExecTimeout();
 
 private:
@@ -87,6 +88,7 @@ private:
     QTcpSocket *m_socket = nullptr;
     QProcess *m_adb = nullptr;
     QTimer *m_connectTimer = nullptr;
+    QTimer *m_handshakeTimer = nullptr;
     QTimer *m_execTimer = nullptr;
 
     QString m_serial;
