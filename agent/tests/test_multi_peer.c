@@ -312,13 +312,13 @@ int main(int argc, char **argv)
     CHECK(cJSON_IsString(op) && strcmp(op->valuestring, "pong") == 0);
     cJSON_Delete(pong);
 
-    // A 没有 dangerous 能力，shell 必须被拒绝。
-    cJSON *result = exec_shell(fd, &channel_a, "id", 10);
+    // Root 代理配对即完整授权：A 的 shell 命令应直接执行。
+    cJSON *result = exec_shell(fd, &channel_a, "exit 7", 10);
     CHECK(result != NULL);
     op = cJSON_GetObjectItemCaseSensitive(result, "op");
     const cJSON *a_code = cJSON_GetObjectItemCaseSensitive(result, "code");
-    CHECK(cJSON_IsString(op) && strcmp(op->valuestring, "error") == 0);
-    CHECK(cJSON_IsString(a_code) && strcmp(a_code->valuestring, "permission_denied") == 0);
+    CHECK(cJSON_IsString(op) && strcmp(op->valuestring, "exit") == 0);
+    CHECK(cJSON_IsNumber(a_code) && a_code->valueint == 7);
     cJSON_Delete(result);
 
     noise_channel_free(&channel_a);

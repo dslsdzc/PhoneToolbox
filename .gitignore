@@ -32,6 +32,6 @@ tools/vendor/
 
 # Logs / crash dumps
 *.log
-core
+/core
 core.*
 .PhoneToolbox.*

@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 #define AGENT_PROTOCOL_VERSION 1
-#define AGENT_VERSION "0.1.0"
+#define AGENT_VERSION "0.1.0-beta04"
 
 // 帧 payload 首字节：
 //   0x01 = JSON 控制帧（UTF-8）

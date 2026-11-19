@@ -2,7 +2,7 @@
 
 Android 设备多功能工具箱 —— 通过 ADB / Fastboot / EDL / MTK BROM 等协议进行设备诊断、刷写、镜像处理和 Root 修补。
 
-当前版本：`v0.0.1-beta03`。部分底层刷写链仍处于离线验证阶段，请先阅读 [支持模式与验证状态](docs/supported-modes.md)。
+当前版本：`v0.0.1-beta04`。部分底层刷写链仍处于离线验证阶段，请先阅读 [支持模式与验证状态](docs/supported-modes.md)。
 
 ## 功能
 
@@ -16,6 +16,7 @@ Android 设备多功能工具箱 —— 通过 ADB / Fastboot / EDL / MTK BROM �
 | 漏洞扫描 / 利用 | 本地 JSON 漏洞库匹配，三段式检测 → 利用 → 验证 |
 | Root 代理 | Android 端 APK + Noise 加密通道，支持 root 命令、文件传输、审计与多电脑配对 |
 | 设备侧 API | APK 通过 ContentProvider 提供 ADB 不易获取的数据（应用列表、审计等） |
+| 插件 | 独立 `.so` 协议插件（QPluginLoader + ProtocolPlugin 接口） |
 
 ## 支持模式
 
@@ -119,9 +120,14 @@ agent/third_party/   agent 第三方源码
 tools/               构建与辅助脚本
 ```
 
-## 漏洞库
+## API 与扩展
 
-在程序内加载本地 JSON 漏洞库；示例和字段说明见 [docs/vulndb.md](docs/vulndb.md)。
+- [设备 Provider / Root 代理 / 桌面端接口 / 插件接口](docs/api.md)
+- [漏洞库 JSON 格式](docs/vulndb.md)
+- [支持模式与验证状态](docs/supported-modes.md)
+- [第三方组件与许可证](docs/third-party.md)
+
+漏洞库在程序内加载本地 JSON；插件通过 `$PHONETOOLBOX_PLUGIN_DIR` 或 `plugins/` 目录加载。
 
 ## 第三方组件
 
