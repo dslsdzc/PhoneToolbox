@@ -28,6 +28,10 @@ signals:
     void outputMessage(const QString &msg, bool isError);
     void switchToDeviceInfo();
 
+private:
+    QString readGpuNode(const QString &path, bool *needsRoot);
+    bool probeGpuFrequencyPath(bool reportFailure);
+
 private slots:
     void onCategoryChanged(int index);
 
@@ -108,6 +112,10 @@ private:
     QVector<double> m_gpuFullHistory, m_tempFullHistory, m_memFullHistory, m_swapFullHistory;
     int m_tempZoneIndex = 0;
     QString m_gpuFreqPath;
+    QString m_gpuName;
+    double m_gpuMaxMHz = 0.0;
+    bool m_gpuNeedsRoot = false;
+    int m_gpuProbeCounter = 0;
     // 2. 界面定制
     QLabel *m_dpiStatus, *m_animStatus;
     // 4. 分区管理

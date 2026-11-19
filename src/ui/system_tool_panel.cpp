@@ -32,6 +32,39 @@ static const char *kCategories[] = {
 };
 static const int kCategoryCount = 7;
 
+namespace {
+QString shellQuoteSingle(const QString &value)
+{
+    return QStringLiteral("'") + value + QStringLiteral("'");
+}
+
+double gpuToMHz(double value)
+{
+    if (value <= 0.0)
+        return 0.0;
+    if (value >= 10000000.0)   // Hz
+        return value / 1000000.0;
+    if (value >= 10000.0)      // kHz
+        return value / 1000.0;
+    return value;              // already MHz
+}
+
+bool gpuValueIsBad(const QString &value)
+{
+    const QString text = value.trimmed();
+    return text.isEmpty()
+        || text.contains(QStringLiteral("No such file"))
+        || text.contains(QStringLiteral("not found"))
+        || text.contains(QStringLiteral("Permission denied"))
+        || text.startsWith(QStringLiteral("Error:"));
+}
+
+QString firstLineOf(const QString &value)
+{
+    return value.section('\n', 0, 0).trimmed();
+}
+} // namespace
+
 SystemToolPanel::SystemToolPanel(QWidget *parent)
     : QWidget(parent)
     , m_asyncProc(nullptr)
@@ -168,7 +201,21 @@ void SystemToolPanel::onCategoryChanged(int index)
 
 void SystemToolPanel::setDeviceInfo(const DeviceInfo &info)
 {
+    const QString previousSerial = m_deviceInfo.serialNumber;
+    const bool hadRootAgent = m_deviceInfo.rootAgentConnected;
     m_deviceInfo = info;
+    if (!hadRootAgent && info.rootAgentConnected && m_gpuFreqPath.isEmpty())
+        m_gpuProbeCounter = 19; // Root just became available: retry next poll
+    if (previousSerial != info.serialNumber) {
+        // Cached sysfs paths belong to the previous phone.
+        m_gpuFreqPath.clear();
+        m_gpuName.clear();
+        m_gpuMaxMHz = 0.0;
+        m_gpuNeedsRoot = false;
+        m_gpuProbeCounter = 19; // probe on the next poll
+        if (m_gpuChart)
+            m_gpuChart->setTitle(QStringLiteral("GPU 频率"));
+    }
     m_deviceLabel->setText(QString("设备: %1").arg(
         info.serialNumber.isEmpty() ? "未知" : info.serialNumber));
 
@@ -630,6 +677,156 @@ QString SystemToolPanel::monitorExec(const QString &cmd, int timeoutMs)
     return QString::fromUtf8(process.readAll()).trimmed();
 }
 
+QString SystemToolPanel::readGpuNode(const QString &path, bool *needsRoot)
+{
+    if (m_deviceInfo.serialNumber.isEmpty())
+        return QString();
+
+    QString value = monitorExec(QStringLiteral("cat %1").arg(path), 2000);
+    if (!gpuValueIsBad(value)) {
+        if (needsRoot) *needsRoot = false;
+        return value;
+    }
+
+    // Root-only nodes (MTK Mali on newer kernels) are readable only through
+    // the paired Root agent or a real adb su. Remember which path worked.
+    value = adbShell(QStringLiteral("su -c %1")
+                         .arg(shellQuoteSingle(QStringLiteral("cat %1").arg(path))),
+                     3000);
+    if (!gpuValueIsBad(value)) {
+        if (needsRoot) *needsRoot = true;
+        return value;
+    }
+    return QString();
+}
+
+bool SystemToolPanel::probeGpuFrequencyPath(bool reportFailure)
+{
+    static const char *paths[] = {
+        "/sys/class/devfreq/*mali*/cur_freq",
+        "/sys/class/devfreq/*kgsl*/cur_freq",
+        "/sys/class/devfreq/*gpu*/cur_freq",
+        "/sys/class/kgsl/kgsl-3d0/gpuclk",
+        "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
+        "/sys/class/kgsl/kgsl-3d0/clock_mhz",
+        "/sys/class/kgsl/kgsl-3d0/gpu_clock",
+        "/sys/class/misc/mali0/device/devfreq/cur_freq",
+        "/sys/devices/platform/13000000.mali/devfreq/cur_freq",
+        "/sys/kernel/gpu/gpu_freq_table",
+        "/proc/gpufreq/gpufreq_opp_dump",
+        "/proc/gpufreq/gpufreq_var_dump",
+    };
+
+    m_gpuFreqPath.clear();
+    m_gpuNeedsRoot = false;
+    if (m_deviceInfo.serialNumber.isEmpty())
+        return false;
+
+    // Probe model/max once per device, not on every 0.5s poll.
+    if (m_gpuName.isEmpty()) {
+        static const char *namePaths[] = {
+            "/sys/class/misc/mali0/device/gpuinfo",
+            "/sys/class/devfreq/*mali*/name",
+            "/sys/class/kgsl/kgsl-3d0/gpu_model",
+            "/sys/class/misc/mali0/device/gpu_type",
+            "/sys/kernel/gpu/gpu_freq_table",
+            "/proc/gpuinfo",
+        };
+        for (const char *path : namePaths) {
+            const QString value = readGpuNode(QLatin1String(path), nullptr);
+            if (!value.isEmpty()) {
+                m_gpuName = firstLineOf(value);
+                break;
+            }
+        }
+        if (m_gpuName.isEmpty()) {
+            const QString surfaceFlinger = monitorExec(
+                QStringLiteral("dumpsys SurfaceFlinger"), 3000);
+            const QRegularExpression glesRe(
+                QStringLiteral("GLES:\\s*[^,]+,\\s*([^,\\n]+)"));
+            const auto match = glesRe.match(surfaceFlinger);
+            if (match.hasMatch())
+                m_gpuName = match.captured(1).trimmed();
+        }
+        if (!m_gpuName.isEmpty()) {
+            if (m_gpuChart && !m_gpuName.startsWith(QStringLiteral("GPU")))
+                m_gpuChart->setTitle(m_gpuName);
+            appendOutput(QStringLiteral("检测到 GPU: %1").arg(m_gpuName), false);
+        }
+    }
+
+    if (m_gpuMaxMHz <= 0.0) {
+        static const char *maxPaths[] = {
+            "/sys/class/devfreq/*mali*/max_freq",
+            "/sys/class/devfreq/*gpu*/max_freq",
+            "/sys/class/devfreq/*kgsl*/max_freq",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq",
+            "/sys/class/kgsl/kgsl-3d0/max_gpuclk",
+            "/sys/class/misc/mali0/device/devfreq/max_freq",
+            "/sys/kernel/gpu/gpu_max_freq",
+            "/sys/class/kgsl/kgsl-3d0/gpu_available_frequencies",
+        };
+        for (const char *path : maxPaths) {
+            const QString value = readGpuNode(QLatin1String(path), nullptr);
+            if (value.isEmpty())
+                continue;
+            m_gpuMaxMHz = gpuToMHz(firstLineOf(value).toDouble());
+            if (m_gpuMaxMHz > 0.0)
+                break;
+        }
+        if (m_gpuMaxMHz > 100.0 && m_gpuChart)
+            m_gpuChart->setYRange(0, m_gpuMaxMHz);
+    }
+
+    for (const char *path : paths) {
+        bool needsRoot = false;
+        const QString value = readGpuNode(QLatin1String(path), &needsRoot);
+        if (value.isEmpty())
+            continue;
+        m_gpuFreqPath = QString::fromLatin1(path);
+        m_gpuNeedsRoot = needsRoot;
+        appendOutput(QStringLiteral("GPU 频率节点: %1%2")
+                         .arg(m_gpuFreqPath,
+                              m_gpuNeedsRoot ? QStringLiteral("（root）")
+                                             : QString()),
+                     false);
+        return true;
+    }
+
+    // MTK often names the devfreq node "13000000.mali" and keeps cur_freq
+    // unreadable to the shell user until the Root agent is connected.
+    const QString devfreqList =
+        monitorExec(QStringLiteral("ls /sys/class/devfreq/"), 3000);
+    for (const QString &raw : devfreqList.split('\n', Qt::SkipEmptyParts)) {
+        const QString name = raw.trimmed();
+        const QString lower = name.toLower();
+        if (!lower.contains(QStringLiteral("mali"))
+            && !lower.contains(QStringLiteral("gpu"))
+            && !lower.contains(QStringLiteral("kgsl")))
+            continue;
+        const QString path =
+            QStringLiteral("/sys/class/devfreq/%1/cur_freq").arg(name);
+        bool needsRoot = false;
+        const QString value = readGpuNode(path, &needsRoot);
+        if (value.isEmpty())
+            continue;
+        m_gpuFreqPath = path;
+        m_gpuNeedsRoot = needsRoot;
+        appendOutput(QStringLiteral("GPU 频率节点: %1%2")
+                         .arg(m_gpuFreqPath,
+                              m_gpuNeedsRoot ? QStringLiteral("（root）")
+                                             : QString()),
+                     false);
+        return true;
+    }
+
+    if (reportFailure) {
+        appendOutput(QStringLiteral("未找到可读的 GPU 频率节点（已尝试 sysfs 与 root），"
+                                    "连接 Root 代理后会自动重试"), true);
+    }
+    return false;
+}
+
 //  1. 性能调优 — 实时监控
 // =====================================================================
 
@@ -644,6 +841,8 @@ void SystemToolPanel::onPerfTimerToggle()
     } else {
         startMonitorProcess();
         if (m_deviceInfo.serialNumber.isEmpty()) return;
+        if (m_gpuFreqPath.isEmpty())
+            probeGpuFrequencyPath(true);
         m_perfTimer->start();
         m_perfToggleBtn->setText("⏸ 暂停");
         onPerformancePoll();
@@ -661,6 +860,14 @@ void SystemToolPanel::onPerformancePoll()
         m_perfToggleBtn->setText("▶ 开始监控");
         m_polling = false;
         return;
+    }
+
+    // Root may connect after this page was first built (and the initial probe
+    // failed). Retry about every 10 seconds instead of caching "no GPU" until
+    // the app restarts.
+    if (m_gpuFreqPath.isEmpty() && ++m_gpuProbeCounter >= 20) {
+        m_gpuProbeCounter = 0;
+        probeGpuFrequencyPath(false);
     }
 
     // Detect core count on the host side: old toolbox lacks grep/wc.
@@ -735,67 +942,9 @@ void SystemToolPanel::onPerformancePoll()
         auto firstLine = [](const QString &value) {
             return value.section('\n', 0, 0).trimmed();
         };
-
-        const char *gpuNamePaths[] = {
-            "/sys/class/kgsl/kgsl-3d0/gpu_model",
-            "/sys/class/kgsl/kgsl-3d0/gpu_available_frequencies",
-            "/sys/class/misc/mali0/device/gpu_type",
-            "/sys/kernel/gpu/gpu_freq_table",
-            "/proc/gpuinfo",
-        };
-        QString gpuName;
-        for (const char *path : gpuNamePaths) {
-            const QString value = monitorExec(
-                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
-            if (!isBadValue(value)) {
-                gpuName = firstLine(value);
-                break;
-            }
-        }
-
-        const char *gpuMaxPaths[] = {
-            "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq",
-            "/sys/class/kgsl/kgsl-3d0/max_gpuclk",
-            "/sys/class/misc/mali0/device/devfreq/max_freq",
-            "/sys/kernel/gpu/gpu_max_freq",
-        };
-        double gpuMaxMHz = 0.0;
-        for (const char *path : gpuMaxPaths) {
-            const QString value = monitorExec(
-                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
-            if (isBadValue(value))
-                continue;
-            gpuMaxMHz = firstLine(value).toDouble() / 1000.0;
-            if (gpuMaxMHz > 0.0)
-                break;
-        }
-        if (!gpuName.isEmpty() && m_gpuChart) {
-            if (!gpuName.startsWith(QStringLiteral("GPU")))
-                m_gpuChart->setTitle(gpuName);
-            appendOutput(QStringLiteral("检测到 GPU: %1").arg(gpuName), false);
-        }
-        if (gpuMaxMHz > 100.0 && m_gpuChart)
-            m_gpuChart->setYRange(0, gpuMaxMHz);
-
-        const char *gpuFreqPaths[] = {
-            "/sys/class/kgsl/kgsl-3d0/gpuclk",
-            "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
-            "/sys/class/misc/mali0/device/devfreq/cur_freq",
-            "/sys/devices/platform/13000000.mali/devfreq/cur_freq",
-            "/sys/kernel/gpu/gpu_freq_table",
-            "/sys/class/devfreq/*gpu*/cur_freq",
-            "/proc/gpufreq/gpufreq_opp_dump",
-        };
-        m_gpuFreqPath.clear();
-        for (const char *path : gpuFreqPaths) {
-            const QString value = monitorExec(
-                QStringLiteral("cat %1").arg(QLatin1String(path)), 2000);
-            if (!isBadValue(value)) {
-                m_gpuFreqPath = QString::fromLatin1(path);
-                appendOutput(QStringLiteral("GPU 路径已缓存: %1").arg(m_gpuFreqPath), false);
-                break;
-            }
-        }
+        // Model, max frequency and the readable cur_freq node are cached by
+        // probeGpuFrequencyPath(), which retries when Root connects later.
+        probeGpuFrequencyPath(false);
 
         // Probe thermal zones one by one; Android 1.x-4.x may have none.
         const QString thermalList = monitorExec(QStringLiteral("ls /sys/class/thermal/"));
@@ -855,6 +1004,14 @@ void SystemToolPanel::onPerformancePoll()
 
     // Collect all metrics with plain `cat` and parse on the host. Old toolbox
     // has no grep/awk/head and no `$()`; markers keep sections apart.
+    QString gpuRootValue;
+    if (m_gpuNeedsRoot && !m_gpuFreqPath.isEmpty()) {
+        gpuRootValue = adbShell(
+            QStringLiteral("su -c %1")
+                .arg(shellQuoteSingle(QStringLiteral("cat %1").arg(m_gpuFreqPath))),
+            2500);
+    }
+
     QString cmd;
     for (int i = 0; i < m_cpuCoreCount; ++i) {
         cmd += QStringLiteral("echo __CPU%1_CUR__\n").arg(i);
@@ -865,8 +1022,10 @@ void SystemToolPanel::onPerformancePoll()
         cmd += QStringLiteral("cat /sys/devices/system/cpu/cpu%1/cpufreq/scaling_max_freq\n").arg(i);
     }
     cmd += QStringLiteral("echo __GPU__\n");
-    if (!m_gpuFreqPath.isEmpty())
+    if (!m_gpuFreqPath.isEmpty() && !m_gpuNeedsRoot)
         cmd += QStringLiteral("cat %1\n").arg(m_gpuFreqPath);
+    else
+        cmd += QStringLiteral("echo 0\n");
     cmd += QStringLiteral("echo __TEMP__\n");
     if (m_tempZoneIndex >= 0)
         cmd += QStringLiteral("cat /sys/class/thermal/thermal_zone%1/temp\n").arg(m_tempZoneIndex);
@@ -906,6 +1065,22 @@ void SystemToolPanel::onPerformancePoll()
         const auto match = numberRe.match(text);
         return match.hasMatch() ? match.captured(1).toDouble() : 0.0;
     };
+    const auto gpuNumber = [&](const QString &text) {
+        if (m_gpuFreqPath.contains(QStringLiteral("gpufreq_opp_dump"))
+            || m_gpuFreqPath.contains(QStringLiteral("gpufreq_var_dump"))) {
+            static const QRegularExpression freqRe(
+                QStringLiteral("freq\\s*[=:]\\s*(\\d+)"));
+            const auto match = freqRe.match(text);
+            if (match.hasMatch())
+                return match.captured(1).toDouble();
+        }
+        return firstNumber(text);
+    };
+
+    if (m_gpuNeedsRoot && !gpuRootValue.isEmpty()
+        && !gpuRootValue.startsWith(QStringLiteral("Error:"))) {
+        sections[QStringLiteral("GPU")] = gpuRootValue;
+    }
 
     for (int i = 0; i < m_cpuCoreCount; ++i) {
         double cur = firstNumber(sections.value(QStringLiteral("CPU%1_CUR").arg(i)));
@@ -923,7 +1098,7 @@ void SystemToolPanel::onPerformancePoll()
             m_cpuFullHistory[i].append(curMHz);
     }
 
-    double gpuFreq = firstNumber(sections.value(QStringLiteral("GPU"))) / 1000.0;
+    double gpuFreq = gpuToMHz(gpuNumber(sections.value(QStringLiteral("GPU"))));
     double temp = firstNumber(sections.value(QStringLiteral("TEMP")));
     if (temp > 1000.0)
         temp /= 1000.0;

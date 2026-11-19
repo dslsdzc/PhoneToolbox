@@ -12,7 +12,7 @@ Android 设备多功能工具箱 —— 通过 ADB / Fastboot / EDL / MTK BROM �
 | 刷机 | Fastboot / Fastbootd / EDL / MTK DA / MTK BROM；GPT 分区、A/B 槽、super 动态分区、稀疏镜像 |
 | 镜像处理 | 29 种格式识别、17 种解包、sparse ↔ raw、tar/tar.md5 打包、EROFS/ext4 浏览 |
 | Root 修补 | Magisk / KernelSU / APatch 共 8 个入口，boot / init_boot 修补与模块安装 |
-| 系统工具 | 性能监控、界面定制、分区管理、应用管理、安全隐私、开发调试、维修诊断 |
+| 系统工具 | 性能监控（CPU/GPU 频率与温度；GPU 节点仅 root 可读时自动经 Root 代理重试）、界面定制、分区管理、应用管理、安全隐私、开发调试、维修诊断 |
 | 漏洞扫描 / 利用 | 本地 JSON 漏洞库匹配，三段式检测 → 利用 → 验证 |
 | Root 代理 | Android 端 APK + Noise 加密通道，支持 root 命令、文件传输、审计与多电脑配对；Android 1.0–4.4 使用 legacy 静态代理 |
 | 设备侧 API | APK 通过 ContentProvider 提供 ADB 不易获取的数据（应用列表、审计等） |
