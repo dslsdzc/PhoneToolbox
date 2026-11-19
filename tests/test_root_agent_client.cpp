@@ -173,9 +173,7 @@ void TestRootAgentClient::execTimeout()
     client.connectToAgent(3000);
     QTRY_VERIFY_WITH_TIMEOUT(connected.count() == 1, 5000);
 
-    client.exec({QStringLiteral("/bin/sh"), QStringLiteral("-c"),
-                 QStringLiteral("sleep 2")},
-                100);
+    client.exec({QStringLiteral("/bin/sleep"), QStringLiteral("2")}, 100);
     QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 5000);
 
     const QList<QVariant> args = finished.takeFirst();

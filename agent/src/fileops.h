@@ -6,9 +6,10 @@
 
 typedef struct {
     int fd;
+    int dir_fd;
     int active;
-    char *temp_path;
-    char *target_path;
+    char *temp_name;
+    char *target_name;
     uint64_t expected_size;
     uint64_t written;
     char expected_sha256[65];

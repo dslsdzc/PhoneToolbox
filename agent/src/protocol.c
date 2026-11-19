@@ -270,8 +270,15 @@ static void argv_hash(const char *const argv[], char out_hex[65])
     crypto_hash_sha256_state state;
     crypto_hash_sha256_init(&state);
     for (size_t i = 0; argv[i]; ++i) {
-        crypto_hash_sha256_update(&state, (const unsigned char *)argv[i], strlen(argv[i]));
-        crypto_hash_sha256_update(&state, (const unsigned char *)"\n", 1);
+        const size_t length = strlen(argv[i]);
+        const uint8_t prefix[4] = {
+            (uint8_t)((length >> 24) & 0xff),
+            (uint8_t)((length >> 16) & 0xff),
+            (uint8_t)((length >> 8) & 0xff),
+            (uint8_t)(length & 0xff),
+        };
+        crypto_hash_sha256_update(&state, prefix, sizeof(prefix));
+        crypto_hash_sha256_update(&state, (const unsigned char *)argv[i], length);
     }
     uint8_t digest[32];
     crypto_hash_sha256_final(&state, digest);
@@ -330,12 +337,23 @@ static int command_is_dangerous(const char *const argv[])
         "dd", "mkfs", "mkfs.ext4", "fastboot", "flash", "erase",
         "format", "wipe", "rm", "reboot", "shutdown", NULL
     };
+    // Interpreters can turn an allowed argv into an arbitrary command. In a
+    // restricted capability mode they must be treated as dangerous too.
+    static const char *const interpreters[] = {
+        "sh", "ash", "bash", "busybox", "toybox", "env", "nice", "nohup",
+        "setsid", "timeout", "xargs", "find", "python", "python3", "perl",
+        "ruby", "node", "php", "lua", "awk", "sed", NULL
+    };
     const char *base = argv[0];
     const char *slash = strrchr(base, '/');
     if (slash)
         base = slash + 1;
     for (int i = 0; blocked[i]; ++i) {
         if (strcmp(base, blocked[i]) == 0)
+            return 1;
+    }
+    for (int i = 0; interpreters[i]; ++i) {
+        if (strcmp(base, interpreters[i]) == 0)
             return 1;
     }
     for (int i = 1; argv[i]; ++i) {
@@ -929,6 +947,7 @@ int protocol_serve_client(protocol_context *context)
     push_session push;
     memset(&push, 0, sizeof(push));
     push.fd = -1;
+    push.dir_fd = -1;
 
     int result = 0;
     while (result == 0) {

@@ -117,6 +117,8 @@ int main(void)
     snprintf(via_link, sizeof(via_link), "%s/file", linked_dir);
     CHECK(pull_read(via_link, 0, &symlink_byte, 1, &symlink_got,
                     error, sizeof(error)) != 0);
+    CHECK(push_begin(&push, via_link, 1, "0644", sha256, 1,
+                     error, sizeof(error)) != 0);
     unlink(linked_dir);
     unlink(nested_file);
     rmdir(real_dir);

@@ -488,8 +488,11 @@ void RootAgentClient::handleMessage(const QJsonObject &object)
         const QString code = object.value(QStringLiteral("code")).toString();
         const QString message = object.value(QStringLiteral("message")).toString();
         emit errorOccurred(QStringLiteral("%1: %2").arg(code, message));
-        if (!m_authenticated)
+        if (!m_authenticated) {
             cleanupSocket();
+        } else if (m_execInProgress) {
+            finishExec(-1, false);
+        }
         return;
     }
 

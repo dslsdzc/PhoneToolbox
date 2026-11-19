@@ -59,6 +59,7 @@ final class AgentLauncher {
             return null;
         final Context app = context.getApplicationContext();
         Thread thread = new Thread(() -> {
+            final boolean[] restartAfterExit = {false};
             try {
                 Log.i("AgentLauncher", "starting native agent");
                 final SharedPreferences prefs =
@@ -116,13 +117,14 @@ final class AgentLauncher {
                                 line.substring(7).trim().equals("1") ? 1 : 0;
                         prefs.edit().putInt(KEY_PAIRED, paired).apply();
                     } else if (line.startsWith("PAIRING_OK=")) {
-                        // One-time code: keep pair_code_used for this agent
-                        // process, but show/persist a fresh code for the next
-                        // restart (the next AgentLauncher.start rotates again
-                        // and removes the flag).
+                        // One-time code: persist a fresh code and restart so
+                        // the next pairing round uses it immediately. The used
+                        // flag stays set until start() rotates it.
                         prefs.edit().putString(KEY_PAIR_CODE,
                                 generatePairCode()).apply();
-                        Log.i("AgentLauncher", "pairing complete; rotated code");
+                        Log.i("AgentLauncher", "pairing complete; rotating code");
+                        restartAfterExit[0] = true;
+                        process.destroy();
                     } else if (line.startsWith("PID=")) {
                         final int pid = Integer.parseInt(line.substring(4));
                         prefs.edit().putInt(KEY_PID, pid).apply();
@@ -142,6 +144,9 @@ final class AgentLauncher {
                     listener.onFailed(exception.getMessage());
             } finally {
                 STARTING.set(false);
+                if (restartAfterExit[0]) {
+                    new Thread(() -> start(app, null), "agent-restart").start();
+                }
             }
         }, "agent-launcher");
         thread.start();
