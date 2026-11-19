@@ -12,6 +12,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+
 static void set_error(char *error, size_t error_len, const char *message)
 {
     if (error && error_len > 0)
@@ -35,7 +39,7 @@ static int mode_from_text(const char *text, mode_t *mode)
 
 static int sha256_file(const char *path, char out_hex[65])
 {
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return -1;
 
@@ -304,7 +308,7 @@ int pull_read(const char *path, uint64_t offset, uint8_t *buffer, size_t length,
         return -1;
     }
 
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         set_error(error, error_len, "cannot open file");
         return -1;

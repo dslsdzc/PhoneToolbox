@@ -92,6 +92,10 @@ int main(void)
     snprintf(link_path, sizeof(link_path), "%s/link", directory);
     CHECK(symlink(target, link_path) == 0);
     CHECK(pull_meta(link_path, &size, remote_sha, error, sizeof(error)) != 0);
+    uint8_t symlink_byte = 0;
+    size_t symlink_got = 0;
+    CHECK(pull_read(link_path, 0, &symlink_byte, 1, &symlink_got,
+                    error, sizeof(error)) != 0);
     CHECK(push_begin(&push, link_path, 1, "0644", wrong_sha, 1,
                      error, sizeof(error)) != 0);
 
