@@ -64,7 +64,22 @@ javac -source 8 -target 8 -Xlint:-options \
     -d "$OUT/classes" @"$OUT/sources.txt"
 
 echo "==> d8 (min-api 1)"
-"$D8" --min-api 1 --lib "$ANDROID_JAR" --output "$OUT/dex" \
+D8_CMD=("$D8")
+R8_JAR="${R8_JAR:-}"
+if [ -z "$R8_JAR" ]; then
+    for candidate in "$SDK"/cmdline-tools/*/lib/r8.jar; do
+        if [ -f "$candidate" ]; then
+            R8_JAR="$candidate"
+            break
+        fi
+    done
+fi
+if [ -n "$R8_JAR" ] && [ -f "$R8_JAR" ]; then
+    # Some SDK build-tools d8 builds crash on anonymous classes; the
+    # cmdline-tools R8 jar ships a working D8.
+    D8_CMD=(java -cp "$R8_JAR" com.android.tools.r8.D8)
+fi
+"${D8_CMD[@]}" --min-api 1 --lib "$ANDROID_JAR" --output "$OUT/dex" \
     $(find "$OUT/classes" -name '*.class')
 
 echo "==> aapt2 link"

@@ -69,9 +69,9 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
   adb shell am broadcast -a com.local.service.START_AGENT \
     -n com.phonetoolbox.agent/com.local.service.AgentBootReceiver
   ```
-- Android 1.0–4.4：使用 `android/legacy-agent` 的 legacy APK，没有 Activity/Provider，固定监听 `127.0.0.1:32145`。桌面端广播传入配对码，由 APK 写入启动脚本：
+- Android 1.0–4.4：使用 `android/legacy-agent` 的 legacy APK，带极简 Activity，固定监听 `127.0.0.1:32145`。**配对码只在手机 Activity 屏幕上显示**；Receiver 只启动服务，不接受广播里的配对码，桌面端必须手动输入：
   ```bash
-  adb shell am broadcast -a com.phonetoolbox.agent.START -e pair_code 123456
+  adb shell am broadcast -a com.phonetoolbox.agent.START
   ```
 
 ### 传输与配对
@@ -82,7 +82,7 @@ adb shell content query --uri content://com.phonetoolbox.agent.agentinfo/apps
 - 配对后 peers 保存在 APK 私有目录 `peers.txt`；每台电脑一行；
 - 会话握手会从 msg1 读取真实发起方公钥，必须命中 `peers.txt`；
 - 每条命令前检查 peer 仍在 `peers.txt`，删除配对会立即吊销现有会话；
-- **配对码一次性**：成功配对后设备写 `pair_code_used`，旧码立即失效；APK/桌面端在下次启动时轮换新码；
+- **配对码一次性**：成功配对后设备写 `pair_code_used`，旧码立即失效；现代 APK 自动轮换，legacy 在手机 Activity 点「重新生成配对码」；
 - **配对即完整授权**：配对成功后，这台电脑可以以 root 身份执行任意命令、读写任意文件，没有按应用、按命令或按操作的细粒度权限隔离；只与可信电脑配对；
 - 配对码、CPace 密钥和确认 MAC 不写入日志；失败只记录 `pair: confirm MAC mismatch`。
 - 全局配对失败限速：所有连接共享 1 次/秒的失败额度，不再依赖线程内 `sleep()`。

@@ -2,16 +2,16 @@
 
 给 Android 1.0–4.4（API 1–19）准备的极小 APK：
 
-- `minSdkVersion 1`，无 Activity、无 Provider、无界面；
+- `minSdkVersion 1`，带一个极简 Activity（配对码/启动/停止/已配对电脑），无 Provider；
 - 静态 ARM 可执行文件 `assets/phone_agent`（NDK r10e，`android-3`，non-PIE，`-static`）；
 - 启动后解压到应用私有目录，优先用 `su` 启动，失败则回退到应用 uid；
 - agent 固定监听 `127.0.0.1:32145`，桌面端直接 `adb forward`，不依赖旧系统没有的 `content` 命令；
-- 桌面端通过广播传入配对码：
+- **配对码只在手机 Activity 屏幕上显示/生成**。Receiver 只负责启动服务，不读取也不接受 adb 广播里的 `pair_code`；桌面端必须手动输入，不能通过 adb 自动读取。
   ```bash
-  adb shell am broadcast -a com.phonetoolbox.agent.START -e pair_code 123456
+  adb shell am broadcast -a com.phonetoolbox.agent.START
   ```
   广播 Receiver 受 `android.permission.DUMP` 保护（adb shell 可用，普通 App 不可）。
-- 配对码一次性：成功后 agent 写 `state/pair_code_used`，旧码立即失效；下次启动由桌面端广播新码。
+- 配对码一次性：成功后 agent 写 `state/pair_code_used`，旧码立即失效；在 Activity 点「重新生成配对码」或「启动/重启服务」会生成新码。
 - 配对码、`agent.out`、`peers.txt` 都在 `/data/data/com.phonetoolbox.agent/files/`，不会写到日志。
 
 ## 构建 agent

@@ -147,8 +147,13 @@ bool RootAgentInstaller::run(const QString &serial, const QString &adbPath,
         return false;
 
     if (legacy) {
-        // legacy APK 没有界面；由 RootAgentManagerPanel 带 pair_code 广播启动。
-        emit logMessage(QStringLiteral("安装完成，准备自动配对…"));
+        // Open the on-device screen so the user can read the pair code there.
+        emit logMessage(QStringLiteral("安装完成，打开手机端配对界面…"));
+        runProcess({adbPath, QStringLiteral("-s"), serial, QStringLiteral("shell"),
+                    QStringLiteral("am"), QStringLiteral("start"),
+                    QStringLiteral("-n"),
+                    QStringLiteral("%1/.LegacyActivity").arg(package)},
+                   15000, &output, nullptr);
         return true;
     }
 

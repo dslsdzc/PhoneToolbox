@@ -4,19 +4,24 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.security.SecureRandom;
+import java.util.Locale;
 
 /**
  * Android 1.0-4.4 bootstrap for the static ARM phone_agent executable.
  *
- * The APK has no UI. It extracts assets/phone_agent into the app's files
- * directory, then tries to start it through su first and falls back to the
- * app uid. agent.out holds the PORT/PID/PUBKEY lines the desktop reads over
- * adb (su is normally available on these rooted legacy devices).
+ * The pair code is generated and displayed by LegacyActivity on the phone.
+ * It is never accepted from an adb broadcast and never read back by the
+ * desktop: an adb-only attacker must not be able to pair without seeing the
+ * device screen. The receiver only starts/stops the local agent.
  */
 public final class LegacyBootstrap extends BroadcastReceiver {
     private static final String ASSET_NAME = "phone_agent";
@@ -24,20 +29,29 @@ public final class LegacyBootstrap extends BroadcastReceiver {
     private static final String SCRIPT_NAME = "start-agent.sh";
     private static final String LOG_NAME = "agent.out";
     private static final String PAIR_CODE_NAME = "pair_code";
+    private static final String PAIR_USED_NAME = "pair_code_used";
     // Fixed device-side port: the desktop can adb-forward to it without
     // reading the app-private agent.out file (unavailable before run-as).
-    private static final int AGENT_PORT = 32145;
+    static final int AGENT_PORT = 32145;
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        start(context, intent == null ? null : intent.getStringExtra(PAIR_CODE_NAME));
+        // Deliberately ignore Intent extras: a pair code must come from the
+        // on-device Activity, not from adb.
+        start(context);
+    }
+
+    static final class PairCodeChoice {
+        final String code;
+        final boolean resetUsed;
+
+        PairCodeChoice(String code, boolean resetUsed) {
+            this.code = code;
+            this.resetUsed = resetUsed;
+        }
     }
 
     public static synchronized void start(Context context) {
-        start(context, null);
-    }
-
-    public static synchronized void start(Context context, String pairCode) {
         try {
             File base = context.getFilesDir();
             File binary = new File(base, BINARY_NAME);
@@ -47,94 +61,216 @@ public final class LegacyBootstrap extends BroadcastReceiver {
             if (!state.isDirectory()) {
                 state.mkdirs();
             }
-            // A desktop-supplied code always starts a new pairing round.
-            if (pairCode != null && pairCode.trim().length() > 0)
-                new File(state, "pair_code_used").delete();
-            // Persist the pair code before touching the running binary: an
-            // in-place overwrite fails with ETXTBSY on old yaffs kernels.
-            final String resolvedCode = resolvePairCode(context, pairCode);
+            final PairCodeChoice choice = resolvePairCode(context);
             try {
                 extract(context, binary);
             } catch (Throwable error) {
                 logError(context, error);
             }
             stopPreviousAgent(context);
-            writeScript(script, binary, state, log, resolvedCode);
+            writeScript(script, binary, state, log, choice);
             startScript(script);
         } catch (Throwable ignored) {
             logError(context, ignored);
         }
     }
 
+    static synchronized void stopAgent(Context context) {
+        stopPreviousAgent(context);
+    }
+
+    static boolean isAgentRunning(Context context) {
+        int pid = readAgentPid(context);
+        return pid > 0 && new File("/proc/" + pid).exists();
+    }
+
+    static int readAgentPort(Context context) {
+        String text = readText(new File(context.getFilesDir(), LOG_NAME));
+        if (text.length() == 0)
+            text = runShell("su -c "
+                    + shellQuote("cat " + shellQuote(
+                            new File(context.getFilesDir(), LOG_NAME).getAbsolutePath())));
+        String[] lines = text.split("\n");
+        for (int i = 0; i < lines.length; ++i) {
+            String line = lines[i].trim();
+            if (line.startsWith("PORT=")) {
+                try {
+                    return Integer.parseInt(line.substring(5).trim());
+                } catch (Throwable ignored) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    static String getOrCreatePairCode(Context context) {
+        File file = new File(context.getFilesDir(), PAIR_CODE_NAME);
+        String existing = readText(file);
+        if (isSixDigits(existing))
+            return existing;
+        String code = generatePairCode();
+        writeText(file, code);
+        return code;
+    }
+
+    static String regeneratePairCode(Context context) {
+        String code = generatePairCode();
+        writeText(new File(context.getFilesDir(), PAIR_CODE_NAME), code);
+        deleteUsedFlag(context);
+        return code;
+    }
+
+    static boolean isPairCodeUsed(Context context) {
+        File used = usedFlag(context);
+        if (used.exists())
+            return true;
+        String output = runShell("su -c "
+                + shellQuote("ls " + shellQuote(used.getAbsolutePath())));
+        return output.indexOf(used.getAbsolutePath()) >= 0;
+    }
+
+    static String readPeers(Context context) {
+        File peers = new File(new File(context.getFilesDir(), "state"), "peers.txt");
+        String text = readText(peers);
+        if (text.length() > 0)
+            return text;
+        return runShell("su -c "
+                + shellQuote("cat " + shellQuote(peers.getAbsolutePath())));
+    }
+
+    private static File usedFlag(Context context) {
+        return new File(new File(context.getFilesDir(), "state"), PAIR_USED_NAME);
+    }
+
+    private static void deleteUsedFlag(Context context) {
+        File used = usedFlag(context);
+        used.delete();
+        runShell("su -c " + shellQuote("rm -f " + shellQuote(used.getAbsolutePath())));
+    }
+
+    private static PairCodeChoice resolvePairCode(Context context) {
+        if (isPairCodeUsed(context)) {
+            // One-time code: rotate before starting a fresh agent instance.
+            deleteUsedFlag(context);
+            String code = generatePairCode();
+            writeText(new File(context.getFilesDir(), PAIR_CODE_NAME), code);
+            return new PairCodeChoice(code, true);
+        }
+        return new PairCodeChoice(getOrCreatePairCode(context), false);
+    }
+
+    private static String generatePairCode() {
+        final int value = new SecureRandom().nextInt(1000000);
+        return String.format(Locale.US, "%06d", Integer.valueOf(value));
+    }
+
+    private static boolean isSixDigits(String text) {
+        if (text == null)
+            return false;
+        String value = text.trim();
+        if (value.length() != 6)
+            return false;
+        for (int i = 0; i < value.length(); ++i) {
+            if (value.charAt(i) < '0' || value.charAt(i) > '9')
+                return false;
+        }
+        return true;
+    }
+
     private static void stopPreviousAgent(Context context) {
         try {
-            File log = new File(context.getFilesDir(), LOG_NAME);
-            java.io.BufferedReader reader = new java.io.BufferedReader(
-                    new java.io.FileReader(log));
-            int pid = -1;
+            int pid = readAgentPid(context);
+            if (pid <= 0)
+                return;
+            Runtime.getRuntime().exec(new String[] {
+                    "kill", String.valueOf(pid) });
+            // A root-owned agent needs the su path; harmless when su is
+            // missing (legacy devices without root).
             try {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.startsWith("PID=")) {
-                        pid = Integer.parseInt(line.substring(4).trim());
-                        break;
-                    }
-                }
-            } finally {
-                reader.close();
-            }
-            if (pid > 0) {
                 Runtime.getRuntime().exec(new String[] {
-                        "kill", String.valueOf(pid) });
-                // A root-owned agent needs the su path; harmless when su is
-                // missing (legacy devices without root).
-                try {
-                    Runtime.getRuntime().exec(new String[] {
-                            "su", "-c", "kill " + pid }).waitFor();
-                } catch (Throwable ignored) {
-                    // No su.
-                }
-                // Give the old process time to release the fixed port.
-                Thread.sleep(400);
+                        "su", "-c", "kill " + pid }).waitFor();
+            } catch (Throwable ignored) {
+                // No su.
             }
+            // Give the old process time to release the fixed port.
+            Thread.sleep(400);
         } catch (Throwable ignored) {
             // No previous agent or it already exited.
         }
     }
 
-    private static String resolvePairCode(Context context, String supplied) {
-        File file = new File(context.getFilesDir(), PAIR_CODE_NAME);
-        if (supplied != null) {
-            String trimmed = supplied.trim();
-            if (trimmed.length() > 0) {
+    private static int readAgentPid(Context context) {
+        String text = readText(new File(context.getFilesDir(), LOG_NAME));
+        if (text.length() == 0)
+            text = runShell("su -c "
+                    + shellQuote("cat " + shellQuote(
+                            new File(context.getFilesDir(), LOG_NAME).getAbsolutePath())));
+        String[] lines = text.split("\n");
+        for (int i = 0; i < lines.length; ++i) {
+            String line = lines[i].trim();
+            if (line.startsWith("PID=")) {
                 try {
-                    OutputStream out = new FileOutputStream(file);
-                    try {
-                        out.write(trimmed.getBytes("UTF-8"));
-                    } finally {
-                        out.close();
-                    }
+                    return Integer.parseInt(line.substring(4).trim());
                 } catch (Throwable ignored) {
-                    // Still use the code for this launch.
+                    return -1;
                 }
-                return trimmed;
             }
         }
+        return -1;
+    }
+
+    private static String readText(File file) {
         try {
-            InputStream in = new java.io.FileInputStream(file);
+            InputStream in = new FileInputStream(file);
             try {
-                byte[] buffer = new byte[64];
+                byte[] buffer = new byte[65536];
                 int read = in.read(buffer);
-                if (read > 0) {
-                    return new String(buffer, 0, read, "UTF-8").trim();
-                }
+                if (read <= 0)
+                    return "";
+                return new String(buffer, 0, read, "UTF-8").trim();
             } finally {
                 in.close();
             }
         } catch (Throwable ignored) {
-            // First run without a desktop-supplied code.
+            return "";
         }
-        return null;
+    }
+
+    private static void writeText(File file, String text) {
+        try {
+            OutputStream out = new FileOutputStream(file);
+            try {
+                out.write(text.getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+        } catch (Throwable ignored) {
+            // The UI still shows the in-memory code; retry next launch.
+        }
+    }
+
+    private static String runShell(String command) {
+        Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[] {
+                    "/system/bin/sh", "-c", command });
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                builder.append(line).append('\n');
+            }
+            reader.close();
+            process.waitFor();
+            return builder.toString();
+        } catch (Throwable ignored) {
+            return "";
+        } finally {
+            if (process != null)
+                process.destroy();
+        }
     }
 
     private static void logError(Context context, Throwable error) {
@@ -187,18 +323,21 @@ public final class LegacyBootstrap extends BroadcastReceiver {
     }
 
     private static void writeScript(File script, File binary, File state, File log,
-                                    String pairCode) throws IOException {
+                                    PairCodeChoice choice) throws IOException {
         String text = "#!/system/bin/sh\n"
                 + "BIN=" + shellQuote(binary.getAbsolutePath()) + "\n"
                 + "STATE=" + shellQuote(state.getAbsolutePath()) + "\n"
                 + "LOG=" + shellQuote(log.getAbsolutePath()) + "\n"
                 + "chmod 755 \"$BIN\" 2>/dev/null\n"
+                + (choice.resetUsed
+                        ? "rm -f \"$STATE/" + PAIR_USED_NAME + "\"\n"
+                        : "")
+                + ": > \"$LOG\"\n"
+                + "chmod 644 \"$LOG\" 2>/dev/null\n"
                 + "\"$BIN\" --port " + AGENT_PORT + " --state-dir \"$STATE\" "
                 + "--audit \"$STATE/audit.log\""
-                + (pairCode == null || pairCode.length() == 0
-                        ? ""
-                        : " --pair-code " + shellQuote(pairCode))
-                + " > \"$LOG\" 2>&1\n";
+                + " --pair-code " + shellQuote(choice.code)
+                + " >> \"$LOG\" 2>&1\n";
         OutputStream out = new FileOutputStream(script);
         try {
             out.write(text.getBytes("UTF-8"));

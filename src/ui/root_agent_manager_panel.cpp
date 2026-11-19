@@ -21,7 +21,6 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QSet>
 #include <QRegularExpression>
 #include <QSettings>
@@ -46,8 +45,9 @@ RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
     layout->addWidget(title);
 
     auto *hint = new QLabel(
-        QStringLiteral("每台设备独立配对/密钥/会话。Android 5.0+ 从 APK 界面输入配对码，"
-                       "Android 1.0–4.4 自动配对。\n"
+        QStringLiteral("每台设备独立配对/密钥/会话。Android 5.0+ 从 APK 界面输入配对码；"
+                       "Android 1.0–4.4 的配对码只显示在手机 App 屏幕上，桌面端必须手动输入，"
+                       "不会通过 adb 自动读取或广播下发。\n"
                        "注意：配对成功即授予完整 Root 权限：可执行任意命令、读写任意文件，"
                        "没有按应用或按操作的权限隔离。只与你信任的电脑配对。"),
         this);
@@ -146,20 +146,15 @@ RootAgentManagerPanel::RootAgentManagerPanel(QWidget *parent)
                 session.packageScanned = true;
 
                 const bool legacy = isLegacyDevice(serial);
-                session.state = legacy ? QStringLiteral("已安装，自动配对…")
+                session.state = legacy ? QStringLiteral("已安装，请在手机输入配对码")
                                        : QStringLiteral("已安装，等待配对");
 
                 if (legacy) {
-                    appendLog(QStringLiteral("已安装 legacy 代理 %1，自动启动并配对…")
-                                  .arg(packageId));
+                    appendLog(QStringLiteral("已安装 legacy 代理。请在手机打开 PhoneToolbox Agent，"
+                                             "输入屏幕上的配对码后点「配对并连接」。"));
+                    // Start the agent in the background, but do not invent or
+                    // read a pair code: it must be typed from the phone screen.
                     maybeLaunchAgent(serial, packageId);
-                    QTimer::singleShot(3500, this, [this, serial]() {
-                        if (!m_sessions.contains(serial))
-                            return;
-                        Session &s = m_sessions[serial];
-                        if (!s.connected && !s.connecting)
-                            pairAndConnect(serial);
-                    });
                 } else {
                     appendLog(QStringLiteral("已安装 %1。请在手机上查看配对码，输入后点「配对并连接」。")
                                   .arg(packageId));
@@ -360,10 +355,9 @@ void RootAgentManagerPanel::loadConfig(const QString &serial)
     };
 
     m_pairCodeEdit->clear();
-    const bool legacy = isLegacyDevice(serial);
-    m_pairCodeEdit->setReadOnly(legacy);
-    if (legacy)
-        m_pairCodeEdit->setText(legacyPairCode(serial));
+    m_pairCodeEdit->setReadOnly(false);
+    m_pairCodeEdit->setPlaceholderText(
+        QStringLiteral("手机 App 显示的 6 位配对码（手动输入）"));
     updateRow(serial);
 }
 
@@ -424,29 +418,6 @@ bool RootAgentManagerPanel::isLegacyDevice(const QString &serial)
 {
     const int sdk = deviceSdk(serial);
     return sdk > 0 && sdk < 21;
-}
-
-QString RootAgentManagerPanel::legacyPairCode(const QString &serial)
-{
-    QSettings settings;
-    const QString key = settingsKey(serial, QStringLiteral("pairCode"));
-    QString code = settings.value(key).toString();
-    if (code.isEmpty()) {
-        code = QString::number(QRandomGenerator::global()->bounded(1000000))
-                   .rightJustified(6, QLatin1Char('0'));
-        settings.setValue(key, code);
-    }
-    return code;
-}
-
-QString RootAgentManagerPanel::rotateLegacyPairCode(const QString &serial)
-{
-    QSettings settings;
-    const QString key = settingsKey(serial, QStringLiteral("pairCode"));
-    const QString code = QString::number(QRandomGenerator::global()->bounded(1000000))
-                             .rightJustified(6, QLatin1Char('0'));
-    settings.setValue(key, code);
-    return code;
 }
 
 bool RootAgentManagerPanel::queryProvider(const QString &serial,
@@ -658,15 +629,12 @@ void RootAgentManagerPanel::maybeLaunchAgent(const QString &serial,
         return;
 
     if (isLegacyDevice(serial)) {
-        const QString code = legacyPairCode(serial);
         QProcess start;
         start.start(adbPath, {QStringLiteral("-s"), serial,
                               QStringLiteral("shell"), QStringLiteral("am"),
                               QStringLiteral("broadcast"),
                               QStringLiteral("-a"),
-                              QString::fromLatin1(kLegacyStartAction),
-                              QStringLiteral("--es"),
-                              QStringLiteral("pair_code"), code});
+                              QString::fromLatin1(kLegacyStartAction)});
         if (!start.waitForFinished(5000)) {
             start.kill();
             appendLog(QStringLiteral("后台拉起 legacy 代理失败（超时）"), true);
@@ -827,22 +795,6 @@ RootAgentClient *RootAgentManagerPanel::clientFor(const QString &serial)
                 appendLog(QStringLiteral("配对成功：这台电脑已获得完整 Root 权限，正在建立 Noise 连接…"));
                 session.client->setIdentity(clientPrivate, agentPublic);
                 session.client->connectToAgent();
-
-                if (isLegacyDevice(serial)) {
-                    // Pair code is single-use on the device. Rotate the local
-                    // code and restart the legacy agent with the fresh one.
-                    const QString fresh = rotateLegacyPairCode(serial);
-                    if (m_currentSerial == serial)
-                        m_pairCodeEdit->setText(fresh);
-                    QTimer::singleShot(5000, this, [this, serial]() {
-                        if (!m_sessions.contains(serial))
-                            return;
-                        Session &s = m_sessions[serial];
-                        s.lastLaunchAttempt = 0;
-                        maybeLaunchAgent(serial,
-                                         QString::fromLatin1(kAgentPackage));
-                    });
-                }
             });
     connect(client, &RootAgentClient::execFinished, this,
             [this, serial](int exitCode, const QString &stdoutText,
@@ -964,15 +916,12 @@ void RootAgentManagerPanel::pairAndConnect(const QString &serial)
         return;
     }
 
-    const bool legacy = isLegacyDevice(serial);
-    QString code = legacy ? legacyPairCode(serial)
-                          : m_pairCodeEdit->text().trimmed();
+    const QString code = m_pairCodeEdit->text().trimmed();
     if (code.isEmpty()) {
-        appendLog(QStringLiteral("请输入 APK 显示的配对码"), true);
+        appendLog(QStringLiteral("请在手机打开 PhoneToolbox Agent，"
+                                 "输入界面显示的 6 位配对码"), true);
         return;
     }
-    if (legacy)
-        m_pairCodeEdit->setText(code);
 
     Session &session = m_sessions[serial];
     if (session.client) {
@@ -1031,8 +980,9 @@ void RootAgentManagerPanel::onInstallAgent()
             QStringLiteral("将安装 PhoneToolbox Agent（固定包名 com.phonetoolbox.agent）。\n\n"
                            "注意：配对成功即授予完整 Root 权限：可执行任意命令、读写任意文件，"
                            "没有按应用或按操作的权限隔离。\n\n"
-                           "Android 1.0–4.4 使用 legacy 静态代理，安装后自动启动并配对；"
-                           "Android 5.0+ 需要打开一次 APK 查看配对码。继续？"),
+                           "Android 1.0–4.4 安装后会打开手机端界面；配对码只显示在手机屏幕上，"
+                           "桌面端需要手动输入，不会通过 adb 自动读取。\n"
+                           "Android 5.0+ 也需要打开一次 APK 查看配对码。继续？"),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
         return;
 
