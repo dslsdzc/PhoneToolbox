@@ -139,6 +139,43 @@ static int audit_verify_chain(const char *path, const uint8_t initial[32],
     return 0;
 }
 
+static int write_anchor_file(const char *anchor_path, const uint8_t prev[32])
+{
+    char hex[65];
+    sodium_bin2hex(hex, sizeof(hex), prev, 32);
+    const int fd = open(anchor_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                        0600);
+    if (fd < 0)
+        return -1;
+    const int result = write_all(fd, hex, 64);
+    fsync(fd);
+    close(fd);
+    return result;
+}
+
+// Best effort: make the rename durable. Old Android filesystems may reject
+// directory fsync; the data file itself is still fsynced by write_anchor_file.
+static void fsync_parent(const char *path)
+{
+    char directory[4096];
+    const size_t length = strlen(path);
+    if (length + 1 > sizeof(directory))
+        return;
+    memcpy(directory, path, length + 1);
+    char *slash = strrchr(directory, '/');
+    if (!slash)
+        return;
+    if (slash == directory)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    const int fd = open(directory, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    fsync(fd);
+    close(fd);
+}
+
 static int read_anchor(const char *path, uint8_t anchor[32])
 {
     char anchor_path[4096];
@@ -156,22 +193,36 @@ static int read_anchor(const char *path, uint8_t anchor[32])
     return ok ? 0 : -1;
 }
 
-static int write_anchor(const char *path, const uint8_t prev[32])
+// Recovery for logs rotated by an older build that persisted the new anchor
+// before renaming audit.log. In that state the anchor equals the last entry
+// hash but verification from the anchor fails on the first line. Verify from
+// the chain's own first prev instead; a valid chain whose last hash equals the
+// anchor proves the file is intact.
+static int verify_after_rotation_crash(const char *path,
+                                       const uint8_t anchor[32],
+                                       uint8_t out_prev[32])
 {
-    char anchor_path[4096];
-    if (snprintf(anchor_path, sizeof(anchor_path), "%s.prev", path)
-        >= (int) sizeof(anchor_path))
+    FILE *file = fopen(path, "r");
+    if (!file)
         return -1;
-    char hex[65];
-    sodium_bin2hex(hex, sizeof(hex), prev, 32);
-    const int fd = open(anchor_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                        0600);
-    if (fd < 0)
+    char line[512];
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
         return -1;
-    const int result = write_all(fd, hex, 64);
-    fsync(fd);
-    close(fd);
-    return result;
+    }
+    fclose(file);
+
+    char first_prev_hex[65] = {0};
+    if (sscanf(line, "%64s", first_prev_hex) != 1
+        || strlen(first_prev_hex) != 64)
+        return -1;
+    uint8_t first_prev[32];
+    if (sodium_hex2bin(first_prev, sizeof(first_prev), first_prev_hex, 64,
+                       NULL, NULL, NULL) != 0)
+        return -1;
+    if (audit_verify_chain(path, first_prev, out_prev) != 0)
+        return -1;
+    return sodium_memcmp(out_prev, anchor, 32) == 0 ? 0 : -1;
 }
 
 int audit_open(audit_log *log, const char *path)
@@ -189,16 +240,34 @@ int audit_open(audit_log *log, const char *path)
     struct stat st;
     if (stat(path, &st) == 0 && st.st_size > (off_t) AUDIT_MAX_BYTES) {
         uint8_t last[32];
-        if (audit_verify_chain(path, initial, last) != 0)
+        int verified = audit_verify_chain(path, initial, last);
+        if (verified != 0 && anchor_state == 0)
+            verified = verify_after_rotation_crash(path, anchor, last);
+        if (verified != 0)
             return -1;
-        if (write_anchor(path, last) != 0)
-            return -1;
+
         char rotated[4096];
+        char anchor_path[4096];
+        char temporary[4096];
         if (snprintf(rotated, sizeof(rotated), "%s.1", path)
-            >= (int) sizeof(rotated))
+                >= (int) sizeof(rotated)
+            || snprintf(anchor_path, sizeof(anchor_path), "%s.prev", path)
+                >= (int) sizeof(anchor_path)
+            || snprintf(temporary, sizeof(temporary), "%s.prev.tmp", path)
+                >= (int) sizeof(temporary))
+            return -1;
+
+        // Prepare the new anchor first, but do not publish it until the log
+        // has been renamed. A crash between the two steps leaves the old
+        // anchor matching the still-intact audit.log.
+        if (write_anchor_file(temporary, last) != 0)
             return -1;
         if (rename(path, rotated) != 0)
             return -1;
+        fsync_parent(path);
+        if (rename(temporary, anchor_path) != 0)
+            return -1;
+        fsync_parent(path);
         memcpy(anchor, last, 32);
         initial = anchor;
     }

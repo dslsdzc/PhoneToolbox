@@ -40,6 +40,7 @@ static int legacy_accept4(int fd, struct sockaddr *addr, socklen_t *len, int fla
 
 typedef struct {
     int client_fd;
+    int auth_timeout_ms;
     agent_identity identity;
     audit_log *audit;
     char *state_dir;
@@ -59,6 +60,7 @@ static void *serve_client_job(void *argument)
     protocol_context context;
     memset(&context, 0, sizeof(context));
     context.client_fd = job->client_fd;
+    context.auth_timeout_ms = job->auth_timeout_ms;
     context.token = job->token;
     context.audit = job->audit;
     context.max_frame = job->max_frame;
@@ -188,6 +190,7 @@ int server_run(const server_config *config)
             continue;
         }
         job->client_fd = client_fd;
+        job->auth_timeout_ms = io_timeout_ms;
         memcpy(&job->identity, &identity, sizeof(job->identity));
         job->audit = audit_ptr;
         job->state_dir = strdup(config->state_dir);

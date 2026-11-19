@@ -34,6 +34,36 @@ try:
     fast = socket.create_connection(("127.0.0.1", port), timeout=2)
     fast.close()
 
+    # Trickle one byte per read-timeout window. Per-read SO_RCVTIMEO alone
+    # would keep this connection alive forever; the auth deadline must close
+    # it regardless of how many bytes arrived.
+    trickle = socket.create_connection(("127.0.0.1", port), timeout=2)
+    trickle.sendall(b"\x00\x01\x00\x00")  # plausible 65536-byte frame
+    started = time.monotonic()
+    closed = False
+    for _ in range(40):
+        try:
+            trickle.send(b"x")
+        except OSError:
+            closed = True
+            break
+        trickle.settimeout(0.05)
+        try:
+            if trickle.recv(1) == b"":
+                closed = True
+                break
+        except socket.timeout:
+            pass
+        time.sleep(0.05)
+    elapsed = time.monotonic() - started
+    trickle.close()
+    assert closed, "trickled auth frame never hit the absolute deadline"
+    assert elapsed < 2.0, "auth deadline took %.2fs" % elapsed
+
+    # Worker slot must be released after the deadline close.
+    fast = socket.create_connection(("127.0.0.1", port), timeout=2)
+    fast.close()
+
     print("test_connection_timeout: OK")
 finally:
     proc.terminate()

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CHECK(cond)                                                              \
@@ -40,6 +41,56 @@ static int token_at(char *line, int index, char *out, size_t out_size)
         token = strtok_r(NULL, " \n", &save);
     }
     return -1;
+}
+
+static int last_entry_hash(const char *path, char out[65])
+{
+    FILE *file = fopen(path, "r");
+    if (!file)
+        return 1;
+    char line[512];
+    char last[512] = {0};
+    while (fgets(line, sizeof(line), file)) {
+        snprintf(last, sizeof(last), "%s", line);
+    }
+    fclose(file);
+    if (last[0] == '\0')
+        return 1;
+    return token_at(last, 6, out, 65);
+}
+
+static int make_oversized_log(const char *path, char out_hash[65])
+{
+    audit_log log;
+    if (audit_open(&log, path) != 0)
+        return 1;
+    struct stat st;
+    int appends = 0;
+    do {
+        if (audit_append(&log, "peer", "exec", "aaaaaaaa", 0) != 0) {
+            audit_close(&log);
+            return 1;
+        }
+        ++appends;
+        if (stat(path, &st) != 0 || appends > 200000) {
+            audit_close(&log);
+            return 1;
+        }
+    } while (st.st_size <= (off_t)(8u * 1024u * 1024u));
+    audit_close(&log);
+    return last_entry_hash(path, out_hash);
+}
+
+static int verify_new_chain(const char *path, const char *expected_prev)
+{
+    char lines[8][512];
+    int count = 0;
+    if (read_lines(path, lines, &count) != 0 || count < 1)
+        return 1;
+    char prev_hex[65];
+    if (token_at(lines[0], 0, prev_hex, sizeof(prev_hex)) != 0)
+        return 1;
+    return strcmp(prev_hex, expected_prev) == 0 ? 0 : 1;
 }
 
 int main(void)
@@ -114,6 +165,69 @@ int main(void)
 
     unlink(path);
     rmdir(directory);
+
+    // Rotation must preserve the chain across files.
+    char rotation_dir[] = "/tmp/agent_audit_rot_XXXXXX";
+    CHECK(mkdtemp(rotation_dir) != NULL);
+    char rotation_path[512];
+    char rotated_path[512];
+    char anchor_path[512];
+    snprintf(rotation_path, sizeof(rotation_path), "%s/audit.log",
+             rotation_dir);
+    snprintf(rotated_path, sizeof(rotated_path), "%s/audit.log.1",
+             rotation_dir);
+    snprintf(anchor_path, sizeof(anchor_path), "%s/audit.log.prev",
+             rotation_dir);
+
+    char last_hash[65];
+    CHECK(make_oversized_log(rotation_path, last_hash) == 0);
+    CHECK(audit_open(&log, rotation_path) == 0);
+    CHECK(audit_append(&log, "peer4", "exec", "eeeeeeee", 0) == 0);
+    audit_close(&log);
+
+    CHECK(access(rotated_path, F_OK) == 0);
+    CHECK(access(anchor_path, F_OK) == 0);
+    CHECK(verify_new_chain(rotation_path, last_hash) == 0);
+    CHECK(audit_open(&log, rotation_path) == 0);
+    CHECK(audit_append(&log, "peer5", "pull", "ffffffff", 0) == 0);
+    audit_close(&log);
+
+    unlink(rotation_path);
+    unlink(rotated_path);
+    unlink(anchor_path);
+    rmdir(rotation_dir);
+
+    // Simulate a crash after an older build persisted the new anchor but
+    // before it renamed audit.log. The file is valid and must be rotated,
+    // not quarantined as corrupt.
+    char crash_dir[] = "/tmp/agent_audit_crash_XXXXXX";
+    CHECK(mkdtemp(crash_dir) != NULL);
+    char crash_path[512];
+    char crash_rotated[512];
+    char crash_anchor[512];
+    snprintf(crash_path, sizeof(crash_path), "%s/audit.log", crash_dir);
+    snprintf(crash_rotated, sizeof(crash_rotated), "%s/audit.log.1",
+             crash_dir);
+    snprintf(crash_anchor, sizeof(crash_anchor), "%s/audit.log.prev",
+             crash_dir);
+
+    CHECK(make_oversized_log(crash_path, last_hash) == 0);
+    FILE *ahead = fopen(crash_anchor, "w");
+    CHECK(ahead != NULL);
+    CHECK(fwrite(last_hash, 1, 64, ahead) == 64);
+    fclose(ahead);
+
+    CHECK(audit_open(&log, crash_path) == 0);
+    CHECK(audit_append(&log, "peer6", "exec", "11111111", 0) == 0);
+    audit_close(&log);
+    CHECK(access(crash_rotated, F_OK) == 0);
+    CHECK(audit_open(&log, crash_path) == 0);
+    audit_close(&log);
+
+    unlink(crash_path);
+    unlink(crash_rotated);
+    unlink(crash_anchor);
+    rmdir(crash_dir);
 
     printf("test_audit: OK\n");
     return 0;

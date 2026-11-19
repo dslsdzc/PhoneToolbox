@@ -26,6 +26,9 @@
 
 typedef struct {
     int client_fd;
+    // 认证/配对阶段的绝对总期限；<=0 时使用默认 10000ms。
+    // 与单次 socket 读超时分开，防止慢速逐字节发送长期占用连接。
+    int auth_timeout_ms;
     const char *token;      // 仅 --allow-plaintext 开发模式使用
     audit_log *audit;
     size_t max_frame;

@@ -30,6 +30,14 @@ final class AgentLauncher {
     // start a second instance.
     private static final AtomicBoolean STARTING = new AtomicBoolean(false);
 
+    // Process identity is tri-state on purpose: "cannot verify" must never be
+    // treated as "process is gone", otherwise a permission/proc failure turns
+    // into killing an unrelated PID or starting a duplicate agent.
+    private static final int PROC_GONE = 0;
+    private static final int PROC_OURS = 1;
+    private static final int PROC_NOT_OURS = 2;
+    private static final int PROC_UNKNOWN = 3;
+
     interface Listener {
         void onStarted(int port, int pid);
         void onExited(int exitCode, String lastLine);
@@ -89,20 +97,16 @@ final class AgentLauncher {
                 if (oldPid > 0) {
                     // Verify identity before killing: PID reuse otherwise turns
                     // a stale preference into a kill of an unrelated process.
-                    if (isOurAgent(oldPid, oldStart)) {
-                        try {
-                            Runtime.getRuntime().exec(
-                                    new String[]{"su", "-c", "kill " + oldPid}).waitFor();
-                        } catch (Exception ignored) {
-                        }
-                        for (int i = 0; i < 40
-                                && new File("/proc/" + oldPid).exists(); ++i) {
-                            try {
-                                Thread.sleep(50);
-                            } catch (InterruptedException ignored) {
-                            }
-                        }
-                        if (new File("/proc/" + oldPid).exists()) {
+                    int state = probeAgent(oldPid, oldStart);
+                    if (state == PROC_UNKNOWN) {
+                        if (listener != null)
+                            listener.onFailed("无法验证旧服务身份，拒绝启动");
+                        return;
+                    }
+                    if (state == PROC_OURS) {
+                        killAgent(oldPid);
+                        state = waitForAgentExit(oldPid, oldStart, 3000);
+                        if (state == PROC_OURS || state == PROC_UNKNOWN) {
                             if (listener != null)
                                 listener.onFailed("旧服务未退出，拒绝重复启动");
                             return;
@@ -154,7 +158,7 @@ final class AgentLauncher {
                         process.destroy();
                     } else if (line.startsWith("PID=")) {
                         final int pid = Integer.parseInt(line.substring(4));
-                        final long pidStart = readProcessStart(pid);
+                        final long pidStart = readProcessStartStable(pid);
                         prefs.edit().putInt(KEY_PID, pid)
                                 .putLong(KEY_PID_START, pidStart).apply();
                         Log.i("AgentLauncher", "agent started port=" + port
@@ -195,7 +199,7 @@ final class AgentLauncher {
 
         // A just-started launcher may not have written PID yet. Wait for it,
         // so restart cannot miss the process that is still starting.
-        for (int i = 0; i < 40 && pid <= 0 && STARTING.get(); ++i) {
+        for (int i = 0; i < 100 && pid <= 0 && STARTING.get(); ++i) {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException ignored) {
@@ -204,55 +208,41 @@ final class AgentLauncher {
             start = prefs.getLong(KEY_PID_START, -1);
         }
 
-        if (pid > 0 && !isOurAgent(pid, start)) {
-            // Stale PID record (process already gone or PID reused).
-            pid = -1;
+        if (pid <= 0) {
+            // If the launcher is still starting without publishing a PID we
+            // cannot prove that no agent exists. Refuse to report success.
+            return !STARTING.get();
         }
 
-        if (pid > 0) {
-            try {
-                Runtime.getRuntime().exec(new String[]{"kill", String.valueOf(pid)});
-            } catch (Exception ignored) {
-            }
-            try {
-                Runtime.getRuntime().exec(
-                        new String[]{"su", "-c", "kill " + pid}).waitFor();
-            } catch (Exception ignored) {
-            }
+        int state = probeAgent(pid, start);
+        if (state == PROC_UNKNOWN) {
+            // Do not clear the record: the process may still be alive and the
+            // next start would create a duplicate we cannot manage.
+            return false;
+        }
+        if (state == PROC_OURS) {
+            killAgent(pid);
+            state = waitForAgentExit(pid, start, 4000);
         }
 
-        // Wait for the launcher thread to finish reading EOF and for the
-        // process to disappear before clearing the recorded PID.
-        for (int i = 0; i < 80; ++i) {
-            if (!STARTING.get()
-                && (pid <= 0 || !new File("/proc/" + pid).exists()))
-                break;
-            if (pid <= 0 && STARTING.get()) {
-                pid = prefs.getInt(KEY_PID, -1);
-                start = prefs.getLong(KEY_PID_START, -1);
-                if (pid > 0 && isOurAgent(pid, start)) {
-                    try {
-                        Runtime.getRuntime().exec(
-                                new String[]{"su", "-c", "kill " + pid}).waitFor();
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
+        final boolean gone = state == PROC_GONE || state == PROC_NOT_OURS;
+        if (!gone)
+            return false;
+
+        // The launcher thread may still be draining EOF. A subsequent
+        // startIfNotRunning would be rejected while STARTING is set, so wait.
+        for (int i = 0; i < 40 && STARTING.get(); ++i) {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException ignored) {
             }
         }
+        if (STARTING.get())
+            return false;
 
-        boolean gone = !STARTING.get()
-                && (pid <= 0 || !new File("/proc/" + pid).exists());
-        if (gone && pid > 0)
-            gone = !isOurAgent(pid, start);
-        if (gone) {
-            prefs.edit().remove(KEY_PID).remove(KEY_PID_START)
-                    .remove(KEY_PORT).apply();
-        }
-        return gone;
+        prefs.edit().remove(KEY_PID).remove(KEY_PID_START)
+                .remove(KEY_PORT).apply();
+        return true;
     }
 
     // Explicit restart: stop and confirm the old process is gone before
@@ -293,9 +283,7 @@ final class AgentLauncher {
     }
 
     // /proc/<pid>/stat field 22 (1-based), after the command name in parens.
-    private static long readProcessStart(int pid) {
-        final String stat = runShell("su -c "
-                + "cat /proc/" + pid + "/stat");
+    private static long parseProcessStart(String stat) {
         final int close = stat.lastIndexOf(')');
         if (close < 0)
             return -1;
@@ -310,29 +298,92 @@ final class AgentLauncher {
         }
     }
 
-    private static boolean isOurAgent(int pid, long expectedStart) {
-        Process process = null;
+    private static long readProcessStart(int pid) {
+        return parseProcessStart(runShell("su -c "
+                + "cat /proc/" + pid + "/stat"));
+    }
+
+    // PID= is printed immediately after fork/exec; /proc may not be fully
+    // populated for a few milliseconds. Retry instead of persisting -1.
+    private static long readProcessStartStable(int pid) {
+        for (int i = 0; i < 5; ++i) {
+            final long start = readProcessStart(pid);
+            if (start > 0)
+                return start;
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        return -1;
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    // One su query returns cmdline + stat so the two cannot be read from
+    // different processes if the PID is reused mid-check.
+    private static int probeAgent(int pid, long expectedStart) {
+        if (pid <= 0)
+            return PROC_GONE;
+
+        final String script = "if [ -d /proc/" + pid + " ]; then "
+                + "if [ -r /proc/" + pid + "/cmdline ] && "
+                + "[ -r /proc/" + pid + "/stat ]; then "
+                + "echo __PTB_PRESENT__; "
+                + "cat /proc/" + pid + "/cmdline; echo; "
+                + "cat /proc/" + pid + "/stat; "
+                + "else echo __PTB_DENIED__; fi; "
+                + "else echo __PTB_GONE__; fi";
+        final String output = runShell("su -c " + shellQuote(script));
+
+        if (output.contains("__PTB_GONE__"))
+            return PROC_GONE;
+        if (output.contains("__PTB_DENIED__"))
+            return PROC_UNKNOWN;
+
+        final int marker = output.indexOf("__PTB_PRESENT__");
+        if (marker < 0)
+            return PROC_UNKNOWN; // su missing/denied: cannot verify.
+        final String rest = output.substring(marker + "__PTB_PRESENT__".length());
+        final int split = rest.indexOf('\n');
+        if (split < 0)
+            return PROC_UNKNOWN;
+
+        final String command = rest.substring(0, split).trim();
+        if (!command.contains("libservice.so"))
+            return PROC_NOT_OURS;
+        if (expectedStart <= 0)
+            return PROC_UNKNOWN; // No start time recorded: fail closed.
+        final long actualStart = parseProcessStart(rest.substring(split + 1));
+        if (actualStart <= 0)
+            return PROC_UNKNOWN;
+        return actualStart == expectedStart ? PROC_OURS : PROC_NOT_OURS;
+    }
+
+    private static int waitForAgentExit(int pid, long start, int timeoutMs) {
+        final long deadline = System.currentTimeMillis() + timeoutMs;
+        int state = probeAgent(pid, start);
+        while (state == PROC_OURS && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ignored) {
+            }
+            state = probeAgent(pid, start);
+        }
+        return state;
+    }
+
+    private static void killAgent(int pid) {
         try {
-            process = Runtime.getRuntime().exec(
-                    new String[]{"su", "-c", "cat /proc/" + pid + "/cmdline"});
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()));
-            char[] buffer = new char[512];
-            int got = reader.read(buffer);
-            if (got <= 0)
-                return false;
-            final String command = new String(buffer, 0, got);
-            if (!command.contains("libservice.so"))
-                return false;
-            if (expectedStart <= 0)
-                return true;
-            final long actualStart = readProcessStart(pid);
-            return actualStart <= 0 || actualStart == expectedStart;
+            Runtime.getRuntime().exec(new String[]{"kill", String.valueOf(pid)});
         } catch (Exception ignored) {
-            return false;
-        } finally {
-            if (process != null)
-                process.destroy();
+        }
+        try {
+            Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", "kill " + pid}).waitFor();
+        } catch (Exception ignored) {
         }
     }
 }

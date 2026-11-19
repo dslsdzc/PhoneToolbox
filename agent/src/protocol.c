@@ -370,7 +370,14 @@ static int handle_exec(const protocol_context *context, const cJSON *root, int i
     const int timeout_ms = json_int(root, "timeout_ms", 30000);
 
     const char **argv = NULL;
+#if defined(__ANDROID__)
+    // Android always has /system/bin/sh. /bin/sh is only a compatibility
+    // symlink on some releases and may be absent on newer system-as-root
+    // images, which would make every RootShell command fail.
+    const char *shell_argv[4] = {"/system/bin/sh", "-c", NULL, NULL};
+#else
     const char *shell_argv[4] = {"/bin/sh", "-c", NULL, NULL};
+#endif
     if (shell) {
         const char *command = json_string(root, "command");
         if (!command)
@@ -886,10 +893,17 @@ int protocol_serve_client(protocol_context *context)
     if (!context || context->client_fd < 0)
         return -1;
 
+    const int auth_timeout = context->auth_timeout_ms > 0
+        ? context->auth_timeout_ms : 10000;
+    const int64_t now = frame_monotonic_ms();
+    const int64_t auth_deadline = now > 0
+        ? now + (int64_t)auth_timeout : -1;
+
     uint8_t *payload = NULL;
     uint32_t length = 0;
-    if (frame_read(context->client_fd, &payload, &length,
-                   (uint32_t)context->max_frame) != 0)
+    if (frame_read_until(context->client_fd, &payload, &length,
+                         (uint32_t)context->max_frame,
+                         auth_deadline) != 0)
         return -1;
 
     if (payload[0] == FRAME_TYPE_NOISE_HANDSHAKE) {
@@ -904,8 +918,9 @@ int protocol_serve_client(protocol_context *context)
         while (pair_result == 0) {
             payload = NULL;
             length = 0;
-            if (frame_read(context->client_fd, &payload, &length,
-                           (uint32_t)context->max_frame) != 0)
+            if (frame_read_until(context->client_fd, &payload, &length,
+                                 (uint32_t)context->max_frame,
+                                 auth_deadline) != 0)
                 return -1;
             if (payload[0] != FRAME_TYPE_PAIR_CONTROL) {
                 free(payload);

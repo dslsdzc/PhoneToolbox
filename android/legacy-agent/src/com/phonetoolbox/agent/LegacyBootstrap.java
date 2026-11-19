@@ -32,6 +32,13 @@ public final class LegacyBootstrap {
     // reading the app-private agent.out file (unavailable before run-as).
     static final int AGENT_PORT = 32145;
 
+    // "Cannot verify" is distinct from "same PID belongs to another process":
+    // only the latter proves the recorded agent is gone.
+    private static final int PROC_GONE = 0;
+    private static final int PROC_OURS = 1;
+    private static final int PROC_NOT_OURS = 2;
+    private static final int PROC_UNKNOWN = 3;
+
     static final class PairCodeChoice {
         final String code;
         final boolean resetUsed;
@@ -77,7 +84,7 @@ public final class LegacyBootstrap {
 
     static boolean isAgentRunning(Context context) {
         int pid = readAgentPid(context);
-        return pid > 0 && isLegacyAgent(context, pid);
+        return pid > 0 && probeLegacyAgent(pid) == PROC_OURS;
     }
 
     static int readAgentPort(Context context) {
@@ -177,8 +184,17 @@ public final class LegacyBootstrap {
     private static boolean stopPreviousAgent(Context context) {
         try {
             int pid = readAgentPid(context);
-            if (pid <= 0 || !isLegacyAgent(context, pid))
+            if (pid <= 0)
                 return true;
+
+            int state = probeLegacyAgent(pid);
+            if (state == PROC_UNKNOWN) {
+                logError(context, new IOException("cannot verify previous agent"));
+                return false;
+            }
+            if (state == PROC_GONE || state == PROC_NOT_OURS)
+                return true;
+
             Runtime.getRuntime().exec(new String[] {
                     "kill", String.valueOf(pid) });
             // A root-owned agent needs the su path; harmless when su is
@@ -190,22 +206,47 @@ public final class LegacyBootstrap {
                 // No su.
             }
             // Wait until the verified process is actually gone.
-            for (int i = 0; i < 40 && isLegacyAgent(context, pid); ++i)
+            for (int i = 0; i < 40 && state == PROC_OURS; ++i) {
                 Thread.sleep(50);
-            return !isLegacyAgent(context, pid);
+                state = probeLegacyAgent(pid);
+            }
+            return state == PROC_GONE || state == PROC_NOT_OURS;
         } catch (Throwable ignored) {
-            return true;
+            logError(context, ignored);
+            return false;
         }
     }
 
-    private static boolean isLegacyAgent(Context context, int pid) {
+    // Direct /proc read first; fall back to one su query when the agent runs
+    // as another uid. Missing markers mean the kernel/su path could not tell
+    // us anything, so the caller must not treat the process as gone.
+    private static int probeLegacyAgent(int pid) {
+        if (pid <= 0)
+            return PROC_GONE;
+
         File cmdline = new File("/proc/" + pid + "/cmdline");
         String command = readText(cmdline);
-        if (command.length() == 0) {
-            command = runShell("su -c " + shellQuote(
-                    "cat " + shellQuote(cmdline.getAbsolutePath())));
-        }
-        return command.indexOf("phone_agent") >= 0;
+        if (command.length() > 0)
+            return command.indexOf("phone_agent") >= 0
+                    ? PROC_OURS : PROC_NOT_OURS;
+
+        String script = "if [ -d /proc/" + pid + " ]; then "
+                + "if [ -r /proc/" + pid + "/cmdline ]; then "
+                + "echo __PTB_PRESENT__; cat /proc/" + pid + "/cmdline; "
+                + "else echo __PTB_DENIED__; fi; "
+                + "else echo __PTB_GONE__; fi";
+        String output = runShell("su -c " + shellQuote(script));
+
+        if (output.indexOf("__PTB_GONE__") >= 0)
+            return PROC_GONE;
+        if (output.indexOf("__PTB_DENIED__") >= 0)
+            return PROC_UNKNOWN;
+        int marker = output.indexOf("__PTB_PRESENT__");
+        if (marker < 0)
+            return PROC_UNKNOWN;
+        command = output.substring(marker + "__PTB_PRESENT__".length());
+        return command.indexOf("phone_agent") >= 0
+                ? PROC_OURS : PROC_NOT_OURS;
     }
 
     private static int readAgentPid(Context context) {
