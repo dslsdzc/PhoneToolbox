@@ -42,7 +42,7 @@ public final class LegacyBootstrap {
         }
     }
 
-    public static synchronized void start(Context context) {
+    public static synchronized boolean start(Context context) {
         try {
             File base = context.getFilesDir();
             File binary = new File(base, BINARY_NAME);
@@ -52,27 +52,32 @@ public final class LegacyBootstrap {
             if (!state.isDirectory()) {
                 state.mkdirs();
             }
-            final PairCodeChoice choice = resolvePairCode(context);
             try {
                 extract(context, binary);
             } catch (Throwable error) {
                 logError(context, error);
             }
-            stopPreviousAgent(context);
+            if (!stopPreviousAgent(context)) {
+                logError(context, new IOException("previous agent did not exit"));
+                return false;
+            }
+            final PairCodeChoice choice = resolvePairCode(context);
             writeScript(script, binary, state, log, choice);
             startScript(script);
+            return true;
         } catch (Throwable ignored) {
             logError(context, ignored);
+            return false;
         }
     }
 
-    static synchronized void stopAgent(Context context) {
-        stopPreviousAgent(context);
+    static synchronized boolean stopAgent(Context context) {
+        return stopPreviousAgent(context);
     }
 
     static boolean isAgentRunning(Context context) {
         int pid = readAgentPid(context);
-        return pid > 0 && new File("/proc/" + pid).exists();
+        return pid > 0 && isLegacyAgent(context, pid);
     }
 
     static int readAgentPort(Context context) {
@@ -169,11 +174,11 @@ public final class LegacyBootstrap {
         return true;
     }
 
-    private static void stopPreviousAgent(Context context) {
+    private static boolean stopPreviousAgent(Context context) {
         try {
             int pid = readAgentPid(context);
-            if (pid <= 0)
-                return;
+            if (pid <= 0 || !isLegacyAgent(context, pid))
+                return true;
             Runtime.getRuntime().exec(new String[] {
                     "kill", String.valueOf(pid) });
             // A root-owned agent needs the su path; harmless when su is
@@ -184,11 +189,23 @@ public final class LegacyBootstrap {
             } catch (Throwable ignored) {
                 // No su.
             }
-            // Give the old process time to release the fixed port.
-            Thread.sleep(400);
+            // Wait until the verified process is actually gone.
+            for (int i = 0; i < 40 && isLegacyAgent(context, pid); ++i)
+                Thread.sleep(50);
+            return !isLegacyAgent(context, pid);
         } catch (Throwable ignored) {
-            // No previous agent or it already exited.
+            return true;
         }
+    }
+
+    private static boolean isLegacyAgent(Context context, int pid) {
+        File cmdline = new File("/proc/" + pid + "/cmdline");
+        String command = readText(cmdline);
+        if (command.length() == 0) {
+            command = runShell("su -c " + shellQuote(
+                    "cat " + shellQuote(cmdline.getAbsolutePath())));
+        }
+        return command.indexOf("phone_agent") >= 0;
     }
 
     private static int readAgentPid(Context context) {

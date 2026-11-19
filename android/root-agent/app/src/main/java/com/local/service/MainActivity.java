@@ -286,8 +286,9 @@ public class MainActivity extends Activity {
     private void stopAgent() {
         mStatus.setText("正在停止服务…");
         new Thread(() -> {
-            AgentLauncher.stop(this);
-            runOnUiThread(() -> mStatus.setText("已停止"));
+            final boolean stopped = AgentLauncher.stop(this);
+            runOnUiThread(() -> mStatus.setText(
+                    stopped ? "已停止" : "停止失败：服务未退出"));
         }).start();
     }
 }

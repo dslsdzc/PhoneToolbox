@@ -169,8 +169,9 @@ public final class LegacyActivity extends Activity {
             @Override
             public void run() {
                 LegacyBootstrap.regeneratePairCode(LegacyActivity.this);
-                LegacyBootstrap.start(LegacyActivity.this);
-                toast("已生成新的配对码");
+                final boolean started = LegacyBootstrap.start(LegacyActivity.this);
+                toast(started ? "已生成新的配对码"
+                              : "新码已生成，但旧服务未退出");
                 refreshAsync();
             }
         }, "legacy-agent-regenerate").start();
@@ -180,8 +181,8 @@ public final class LegacyActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                LegacyBootstrap.start(LegacyActivity.this);
-                toast("服务已启动");
+                final boolean started = LegacyBootstrap.start(LegacyActivity.this);
+                toast(started ? "服务已启动" : "启动失败：旧服务未退出");
                 refreshAsync();
             }
         }, "legacy-agent-restart").start();
@@ -191,8 +192,8 @@ public final class LegacyActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                LegacyBootstrap.stopAgent(LegacyActivity.this);
-                toast("服务已停止");
+                final boolean stopped = LegacyBootstrap.stopAgent(LegacyActivity.this);
+                toast(stopped ? "服务已停止" : "停止失败：旧进程未退出");
                 refreshAsync();
             }
         }, "legacy-agent-stop").start();
